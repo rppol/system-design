@@ -301,6 +301,16 @@ It generates a subclass of your class at runtime and overrides the non-final met
 
 You almost never call it yourself; Spring repackages it inside `spring-core` and picks it over JDK dynamic proxies when there is no interface to proxy. Understanding it matters because it explains proxy behaviour you will otherwise treat as a Spring bug.
 
+### Chaos Mesh
+**Short:** CNCF Kubernetes-native chaos platform: CRD-defined pod, network, IO and stress faults with a web UI and scheduled experiments.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/testing-and-mocking @1, platform-delivery/kubernetes-and-orchestration @2
+
+An experiment is a custom resource naming a fault type, a selector for the pods it applies to, and a duration or a schedule -- pod and container kill, network latency, loss and partition, IO delay and fault, CPU and memory stress, clock skew. Because it is a CRD, the experiment is reviewed and versioned like any other manifest, and the selector is what bounds the blast radius.
+
+What decides whether a run is useful is everything around it: a measurable steady state, a hypothesis the fault can actually falsify, and an automatic abort. Without observability good enough to state the steady state, an experiment only tells you that something broke.
+
 ### Chaos Monkey
 **Short:** Netflix tool that randomly kills production instances to prove failover and circuit breakers actually work.
 **Kind:** tech
@@ -330,16 +340,6 @@ It is the cheapest way to prove a timeout, retry, bulkhead or circuit breaker ac
 An experiment is a declarative document with a steady-state hypothesis, a method of actions and probes that injects the fault, and rollbacks that undo it. The probes are checked before and after, so a run either confirms the system tolerated the fault or fails with a deviation -- which is what makes it runnable as a job in CI rather than a manual game day. Drivers exist for Kubernetes, the major clouds, Prometheus and Gremlin.
 
 Reach for it when you want chaos experiments reviewed and versioned like tests. It is only as useful as your observability: without a metric that defines steady state, the hypothesis is a guess.
-
-### Chaos tools
-**Short:** Umbrella label for fault-injection tooling used to validate SLOs and resilience under induced failure.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1, observability/alerting-and-incident-response @3
-
-The category covers anything that deliberately injects failure to test a hypothesis about resilience, and it splits by layer: infrastructure kills such as Chaos Monkey or AWS Fault Injection Service, kernel-level network and resource faults from `tc netem`, `stress-ng` or ChaosBlade, Kubernetes-native experiments from LitmusChaos, in-process faults from a library like Chaos Monkey for Spring Boot, and orchestrators such as Chaos Toolkit that make an experiment a reviewable document.
-
-What makes any of them useful is the surrounding discipline: a measurable steady state, a hypothesis, the smallest blast radius that can falsify it, and an automatic abort. Without observability good enough to define steady state, a chaos run only tells you something broke, not whether the system behaved as designed.
 
 ### ChaosBlade
 **Short:** Open-source chaos engineering toolkit injecting network, CPU, memory, process and container faults to test resilience.
@@ -813,7 +813,7 @@ The wrapper is a small checked-in script plus `gradle-wrapper.properties` naming
 
 Commit all four wrapper files and upgrade with `./gradlew wrapper --gradle-version=X`, never by hand-editing the properties. The wrapper jar is executable code in your repository, so pin `distributionSha256Sum` and treat a wrapper change in a pull request as a security-relevant diff.
 
-### Grafana k6 Cloud
+### Grafana Cloud k6
 **Short:** Managed k6 service running large geo-distributed load tests with hosted results and trend comparison.
 **Kind:** tech
 **Lang:** *
@@ -2468,16 +2468,6 @@ Against a real broker you actually exercise consumer group rebalancing, offset c
 `terraform validate` only checks that the configuration is syntactically valid and internally consistent; it will happily accept an instance type that does not exist, an AMI from the wrong region, or an IAM policy document with an invalid shape. TFLint adds provider-aware rules for AWS, Azure and Google that catch those before `plan` reaches the API, plus generic rules for unused declarations, missing variable types, deprecated syntax, and naming conventions you configure.
 
 Run it in pre-commit and CI, with the relevant provider plugin enabled in `.tflint.hcl` — without a plugin you get only the generic rules. It is a linter, not a security scanner and not a policy engine: `tfsec` or Trivy covers misconfiguration, and OPA or Sentinel covers organisational policy on the plan.
-
-### tfsec
-**Short:** Static security scanner for Terraform HCL that flags misconfigured cloud resources before apply.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/static-analysis-and-linting @1, security/supply-chain-and-runtime-security @2, platform-delivery/infrastructure-as-code-and-config @2
-
-It parses HCL and evaluates the resource graph against a rule set of cloud misconfigurations — a public S3 bucket, an unencrypted volume, a security group open to `0.0.0.0/0`, a database without backups, logging disabled — without contacting a provider, so it runs in seconds on a pull request long before anything is applied. Findings carry a severity, a rule ID, and an explanation, and `#tfsec:ignore:` comments with an expiry keep accepted risks visible.
-
-One thing to know before adopting it: tfsec has been folded into Aqua's Trivy, which is where the scanning engine is now developed, so new work should target Trivy's IaC scanning. Static analysis of HCL also cannot see runtime state, so it complements rather than replaces a scan of the deployed account.
 
 ### TLA+, Coq
 **Short:** Formal methods tools: TLA+ model-checks a concurrent specification, Coq proves theorems interactively.

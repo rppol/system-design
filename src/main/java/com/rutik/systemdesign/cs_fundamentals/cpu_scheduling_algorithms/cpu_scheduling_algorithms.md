@@ -714,7 +714,7 @@ FIX: Use priority queue (health checks get higher priority) or
 | `taskset` | Pin process/thread to specific CPU cores | Reduces cache misses; used in latency-sensitive services |
 | `perf sched` | Profile scheduler behaviour (latency, wakeups) | `perf sched latency` shows scheduling delays |
 | `/proc/<pid>/sched` | Per-process scheduler stats (vruntime, nr_switches; `se.slice` and lag fields under EEVDF) | Read-only; live data |
-| `/sys/kernel/debug/sched/base_slice_ns` | EEVDF's base time slice (700 µs in current mainline) | Replaced `sched_latency_ns` / `sched_min_granularity_ns`, both removed in 6.6 |
+| EEVDF `base_slice_ns` | EEVDF's base time slice (700 µs in current mainline), exposed at `/sys/kernel/debug/sched/base_slice_ns` | Replaced `sched_latency_ns` / `sched_min_granularity_ns`, both removed in 6.6 |
 | cgroup v2 `cpu.weight` | Weighted CPU allocation between cgroups (1–10000, default 100) | v1 name is `cpu.shares`; Docker `--cpu-shares` |
 | cgroup v2 `cpu.max` | Hard CPU limit — `"<quota_us> <period_us>"` | v1 names are `cpu.cfs_quota_us`/`cpu.cfs_period_us`; Docker `--cpus=0.5`. Still called CFS bandwidth control |
 | `schedtool` | Inspect/set scheduling policy per thread | Linux; `schedtool -I <pid>` for idle scheduling |

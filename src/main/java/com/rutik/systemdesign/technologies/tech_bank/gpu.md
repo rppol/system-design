@@ -15,6 +15,16 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1
 
+### AdaptiveCpp
+**Short:** Independent community SYCL implementation targeting NVIDIA, AMD, Intel and CPUs from one compiler; formerly hipSYCL, then Open SYCL.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/gpu-portability-and-precision @1
+
+It offers several selectable compilation flows rather than one, including a generic flow that defers final code generation to run time, so a single binary can adapt to whatever accelerator it finds instead of being built ahead of time for a fixed target list. That is the practical difference from a vendor toolchain plus per-target plugins.
+
+Both older names still turn up in build scripts, distribution packages and papers, and all three refer to this one project. Being community-led, it can lag a vendor's own toolchain on the newest hardware features, so benchmark on every target rather than assuming portability is free.
+
 ### AMX
 **Short:** Intel Advanced Matrix Extensions: tile-based BF16 and INT8 matrix instructions on Sapphire Rapids and later Xeon.
 **Kind:** tech
@@ -65,25 +75,15 @@ The `apex.amp` mixed-precision layer, with its O0 through O3 opt levels, is depr
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1
 
-### Codeplay
-**Short:** Vendor of the oneAPI SYCL-for-CUDA and SYCL-for-HIP plugins, letting one SYCL source target NVIDIA and AMD GPUs.
+### CCCL
+**Short:** CUDA Core Compute Libraries: the single repository and package Thrust, CUB and libcu++ are now developed and versioned in.
 **Kind:** tech
 **Lang:** cpp
-**Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
+**Roles:** gpu/gpu-math-libraries @1, gpu/kernel-programming @3
 
-Codeplay builds the compiler plugins that give the oneAPI DPC++ toolchain backends beyond Intel's own hardware: install the NVIDIA plugin and `icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda` lowers SYCL kernels to PTX, or the AMD plugin lowers them to GCN, from unmodified single-source C++. The company is part of Intel and also maintains oneMKL and oneDNN interface layers that dispatch to cuBLAS or rocBLAS underneath.
+Thrust, CUB and libcu++ were three separately released projects solving one problem at three levels -- STL-like algorithms over device vectors, tuned warp/block/device primitives, and a CUDA-compatible subset of the C++ standard library. Merging their repositories means a version of one is a version of all three, which removes the class of build failure where an updated Thrust expected a CUB it did not get.
 
-This is the path when one SYCL codebase must run on Intel, NVIDIA and AMD accelerators instead of maintaining CUDA and HIP versions side by side. The catch is performance rather than correctness: a kernel tuned for one vendor's memory hierarchy and subgroup width rarely lands at native speed on another, so benchmark on every target before committing to the portability story.
-
-### community SYCL backends
-**Short:** SYCL-for-CUDA and SYCL-for-HIP plugins that let one SYCL source target NVIDIA and AMD GPUs, not just Intel.
-**Kind:** tech
-**Lang:** cpp
-**Roles:** gpu/gpu-portability-and-precision @1
-
-A SYCL implementation splits between a compiler front end and per-target backends, and these plugins supply the backends the vendor does not ship: the CUDA plugin lowers kernels through the NVPTX target to PTX, the HIP plugin to AMD GCN. Nothing in the SYCL source changes, the target list is a compiler flag, and ahead-of-time compilation for several targets produces one binary that picks a device at run time.
-
-They exist so a vendor-neutral codebase can keep a single kernel source across a mixed fleet. Expect a lag behind each vendor's own toolchain, since new hardware features and recent SYCL extensions land here last, and expect to leave performance on the table against hand-tuned CUDA or HIP. Where one vendor dominates the deployment, its native stack is still the faster answer.
+Nothing about how you use them changed: the headers keep their old paths (`thrust/`, `cub/`, `cuda/std/`) and still ship with the CUDA Toolkit. What changed is where they come from, so a project that pinned the three independently should pin CCCL instead.
 
 ### compute-sanitizer
 **Short:** CUDA Toolkit runtime checker whose memcheck, racecheck, synccheck and initcheck tools catch kernel OOB access and races.
@@ -243,16 +243,6 @@ It ran an application under device-side instrumentation and reported out-of-boun
 
 It has been removed from the CUDA Toolkit and its functionality moved wholesale into `compute-sanitizer`, which has better SASS-level attribution on current architectures. If a script or a runbook still invokes it, substitute `compute-sanitizer --tool memcheck`; nothing is lost in the move, and on recent GPU generations the old binary will not run at all.
 
-### cuda-memcheck/compute-sanitizer
-**Short:** CUDA memory checker that catches out-of-bounds accesses, misaligned pointers and race conditions in kernels.
-**Kind:** tech
-**Lang:** cpp
-**Roles:** gpu/gpu-profiling-and-debugging @1
-
-Both names refer to one facility: a runtime that instruments device code so an illegal access is reported at the instruction that made it, with the kernel name, the block and thread, the address and a host stack trace, instead of surfacing as a corrupted result or an unrelated crash much later. Four sub-tools split the work, covering out-of-bounds and misalignment, shared-memory races, barrier misuse, and uninitialized reads.
-
-Reach for it the moment a kernel's output depends on block size, GPU model or build flags. Build with `-lineinfo` for source attribution and run the smallest reproducing input, because instrumentation costs a large multiple of normal runtime. The older name is the retired binary; `compute-sanitizer` is what ships in current toolkits, and the sub-tool names carried over unchanged.
-
 ### cuda.laneid
 **Short:** Python-side lane-id intrinsic for GPU kernels, compiling to the same PTX as the CUDA C++ warp primitives.
 **Kind:** api
@@ -295,6 +285,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @3
 
+### cudaDeviceSetMemPool
+**Short:** Sets which memory pool a device's cudaMallocAsync calls draw from, so stream-ordered allocations can be shared or isolated.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @2
+
 ### cudaDeviceSynchronize
 **Short:** Blocks the host until all device work finishes and surfaces queued errors; kills concurrency vs per-stream sync.
 **Kind:** api
@@ -336,6 +332,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @3
+
+### cudaFreeAsync
+**Short:** Stream-ordered free that returns a block to its memory pool for reuse by the next allocation on that stream, with no device-wide sync.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @2
 
 ### cudaFreeHost
 **Short:** CUDA call that frees page-locked host memory previously obtained from cudaHostAlloc or cudaMallocHost.
@@ -391,6 +393,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1
 
+### cudaGraphConditionalHandleCreate
+**Short:** Creates a device-writable condition handle whose value drives an IF, WHILE or SWITCH conditional node inside a CUDA graph.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1
+
 ### cudaGraphCreate
 **Short:** CUDA API that builds a graph node by node so a repeated launch sequence replays with near-zero CPU overhead.
 **Kind:** api
@@ -433,6 +441,18 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, observability/profiling-and-performance @3
 
+### cudaGraphSetConditional
+**Short:** Sets a CUDA graph conditional handle from inside a kernel, deciding whether the conditional node's body graph runs, repeats or is selected.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1
+
+### cudaGraphUpload
+**Short:** Uploads an instantiated CUDA graph to the device ahead of launch, including the device-launchable graphs that are relaunched from device code.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1
+
 ### cudaHostAlloc
 **Short:** CUDA call allocating pinned host memory so transfers can be async and reach full PCIe/NVLink bandwidth.
 **Kind:** api
@@ -459,6 +479,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 
 ### cudaMalloc
 **Short:** The basic CUDA runtime call allocating linear device-resident global memory, freed with cudaFree.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @2
+
+### cudaMallocAsync
+**Short:** Stream-ordered CUDA device allocation out of a memory pool: ordered on a stream instead of synchronizing the whole device.
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @2
@@ -504,6 +530,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, gpu/multi-gpu-and-collectives @3
+
+### cudaMemPoolSetAttribute
+**Short:** Tunes a CUDA memory pool, notably the release threshold deciding how much freed memory the pool keeps instead of returning it to the driver.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1, runtime-systems/memory-processes-and-os @2
 
 ### cudaMemPrefetchAsync
 **Short:** CUDA call that migrates unified-memory pages to a device ahead of use, avoiding on-demand fault stalls.
@@ -555,6 +587,12 @@ Reach for it the moment a kernel's output depends on block size, GPU model or bu
 
 ### cudaStreamSynchronize
 **Short:** CUDA call that blocks the host until one stream's queued work finishes, surfacing any deferred kernel errors.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/kernel-programming @1
+
+### cudaStreamTailLaunch
+**Short:** CUDA dynamic-parallelism named stream whose grid runs only after the parent grid and all its descendants complete; under CDP2 it is how a parent observes child results.
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1
@@ -667,7 +705,7 @@ It targets exactly one pattern, 2:4 sparsity, meaning two zeros in every group o
 
 The workflow is prune to the 2:4 pattern, usually with a fine-tuning pass to recover accuracy, compress once, then call the library at inference. Reach for it when weights are already in that pattern and the GEMM is the bottleneck. Arbitrary unstructured sparsity gets nothing from it, and the realized speedup lands well below the ideal because only the matmul portion of a layer changes.
 
-### CUTE
+### CuTe
 **Short:** CUTLASS's C++ template layer of tensor and layout abstractions for building Hopper/Blackwell Tensor Core kernels.
 **Kind:** tech
 **Lang:** cpp
@@ -767,15 +805,15 @@ The kernel fuses the whole attention block, the query-key product, the scaling, 
 
 The backward pass makes the same bargain in the other direction, recomputing scores from saved statistics instead of storing the score matrix, trading arithmetic that is cheap here for bandwidth that is not. That is why it cuts activation memory during training as much as it improves speed, and why long-context training plans simply assume it is present rather than treating it as an optimization.
 
-### Global Load/Store Efficiency
-**Short:** Legacy CUDA profiler metric: requested bytes over transacted bytes, where 100% means perfectly coalesced access.
-**Kind:** concept
-**Lang:** *
-**Roles:** gpu/gpu-profiling-and-debugging @1
+### Gluon
+**Short:** Lower-level sibling language shipped inside the Triton repository, exposing tile layouts, shared memory and warp specialization explicitly.
+**Kind:** tech
+**Lang:** python
+**Roles:** gpu/kernel-programming @1
 
-The metric is the ratio of bytes the threads requested to bytes the memory system actually moved. A warp issues one instruction across 32 lanes and the hardware coalesces those addresses into 32-byte sector transactions; when consecutive lanes touch consecutive addresses the sectors are fully used and the ratio approaches one, while a strided or scattered pattern pulls a whole sector for each useful element and the ratio collapses.
+Triton's bargain is that the compiler picks the layouts: you write block-level tile code and it decides how a tile maps onto warps, lanes and shared memory. Gluon gives that decision back to the kernel while reusing the same compiler stack and the same Python surface, which is what puts CUTLASS-grade control within reach without moving to C++ templates.
 
-A low value is a data-layout problem, not a code-tuning problem: the fixes are converting an array of structures into a structure of arrays, transposing through shared memory, and padding rows so each warp's segment stays aligned. The name comes from the retired nvprof metric set; Nsight Compute reports the same idea as sectors per request and in its memory workload tables.
+It is an expert path, worth taking only once a profiler shows the layout Triton chose is the bottleneck -- typically a kernel chasing the newest tensor-core and warp-specialization features. For everything else, the automation being removed here is the reason to use Triton in the first place.
 
 ### GPUDirect RDMA
 **Short:** NVIDIA capability letting a NIC DMA straight into GPU memory, skipping host bounce buffers on inter-node traffic.
@@ -844,6 +882,16 @@ Reach for it when the hardware is Intel and one source should span CPU, integrat
 The SDK is not a driver. It packages the official headers, the C++ bindings and the ICD loader, the library your program links against, which at run time reads the vendor entries installed on the machine and forwards every call into whichever installable client drivers are present. That indirection is what lets a single binary enumerate an NVIDIA GPU, an AMD GPU, an Intel integrated GPU and a CPU runtime as platforms and choose among them.
 
 Reach for it when cross-vendor reach matters more than peak performance, particularly on hardware CUDA does not cover such as FPGAs, embedded GPUs and older silicon. The realities to plan for are that kernels are strings compiled at run time, that vendor support for newer OpenCL versions is uneven, and that vendor-specific tuning still decides speed even though the same source compiles everywhere.
+
+### Kokkos
+**Short:** C++ performance-portability library: one parallel_for and View source compiles to CUDA, HIP, SYCL, OpenMP or serial CPU.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/gpu-portability-and-precision @1
+
+You express a loop as `Kokkos::parallel_for` over an execution space and your arrays as `Kokkos::View`s whose memory layout is chosen by policy, then select the backend at build time. The layout switch is the part a hand port keeps getting wrong: the same array wants row-major on a CPU and column-major on a GPU for coalescing, and here that is a template parameter rather than a rewrite.
+
+It is heavily used in national-laboratory and HPC codebases, where a simulation has to outlive several generations of accelerator. The costs are a C++ template idiom the whole team has to learn and a ceiling set by the abstraction rather than by the hardware, so a kernel that dominates the runtime may still be worth writing natively.
 
 ### launch_bounds
 **Short:** CUDA per-kernel compiler hint capping registers for a target block size; preferred over a file-wide maxrregcount.
@@ -967,6 +1015,18 @@ These are MPI-launched benchmark binaries — `all_reduce_perf`, `all_gather_per
 
 Run it before you profile a slow distributed training job. In a few minutes it separates "the interconnect, topology or NCCL environment is misconfigured" from "the model code is the problem", which is otherwise an expensive thing to work out from training throughput alone. It is also the standard smoke test after any driver, firmware, topology or container-image change on a GPU cluster, precisely because a silent fallback to a slower transport looks exactly like a normal run.
 
+### ncclCommInitRankConfig
+**Short:** Initializes an NCCL communicator with an explicit ncclConfig_t, enabling non-blocking init, split-share and a chosen CGA cluster size.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1
+
+### ncclCommSplit
+**Short:** Carves a sub-communicator out of an existing NCCL communicator without a second rendezvous - the tensor-parallel and pipeline-parallel sub-group pattern.
+**Kind:** api
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1
+
 ### ncu-ui
 **Short:** Nsight Compute's GUI for exploring .ncu-rep kernel profiles; the same data the CLI collects, browsable per kernel.
 **Kind:** tech
@@ -1063,6 +1123,16 @@ You write the kernel as a Python function under `@cuda.jit`, index it with `cuda
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2
 
+### numba-cuda
+**Short:** NVIDIA-maintained package supplying Numba's CUDA target; installing numba alone no longer provides numba.cuda, so @cuda.jit needs it.
+**Kind:** tech
+**Lang:** python
+**Roles:** gpu/kernel-programming @1
+
+The CUDA target moved out of Numba core and is developed and shipped by NVIDIA as its own distribution, with a `[cu12]` or `[cu13]` extra that pulls the matching CUDA runtime wheels. Nothing about the source changes -- `from numba import cuda` and every decorator below it are identical -- so the whole consequence is a packaging one.
+
+The failure mode is a requirements file listing only `numba` and expecting `@cuda.jit` to work. A library whose CUDA target is load-bearing should depend on `numba-cuda` rather than on `numba`.
+
 ### numba.cuda device attributes
 **Short:** Numba CUDA device query exposing SM count, register file and shared-memory limits for launch heuristics in Python.
 **Kind:** api
@@ -1151,6 +1221,22 @@ It is a point-to-point serial link and a GPU carries many of them, aggregated so
 
 The consequence for system design is a bandwidth cliff at the node boundary: inside the node the links are fast, between nodes you have the network. That is why tensor parallelism, which exchanges activations at every layer, is kept within an NVLink domain while pipeline and data parallelism, which communicate far less often, are allowed to span nodes. Check what a machine actually has with `nvidia-smi topo -m`, since some SKUs ship fewer links or none.
 
+### NVLink SHARP
+**Short:** In-switch reduction on NVSwitch fabrics from NVLink 4 onward: the switch performs the arithmetic instead of the GPUs.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1
+
+A ring or tree AllReduce moves every byte across the fabric more than once, because each GPU has to both send its partial sum and receive someone else's. When the switch can reduce, the arithmetic happens as the data passes through it, so the collective costs closer to a single pass and the GPUs' own SMs are not spent on the reduction.
+
+It is a property of the machine rather than of your code: it needs an NVSwitch fabric of the right generation, and NCCL turns it on by itself when the topology supports it. On a node without that fabric the same collective silently falls back to ring or tree.
+
+### NVLS
+**Short:** NCCL's algorithm name for collectives that offload the reduction to NVLink SHARP; NCCL_ALGO=NVLS or NVLSTree pins it for benchmarking.
+**Kind:** api
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1
+
 ### nvrtc
 **Short:** NVIDIA's runtime CUDA C++ to PTX compiler library; backs JIT kernel paths in CuPy, Numba, PyCUDA and PyTorch.
 **Kind:** tech
@@ -1158,6 +1244,16 @@ The consequence for system design is a bandwidth cliff at the node boundary: ins
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2, inference/compiler-and-runtime-optimization @3
 
 NVRTC compiles a CUDA C++ source string to PTX inside your own process -- create a program, compile it, read back the PTX, then load and launch it through the driver API -- so kernels can be generated and specialised at run time with constants, types and loop bounds baked in, without shipping nvcc or writing temporary files. This is the machinery behind the JIT paths in the Python GPU stack: CuPy's `RawKernel` and `ElementwiseKernel`, PyCUDA's `SourceModule`, and the runtime-generated kernels in Numba and PyTorch all route through it. It is a library rather than a CLI, it does not handle the host-side compilation nvcc performs, and headers must be supplied as strings through its include mechanism rather than found on disk. Reach for it when kernel source is only known at run time; if the shapes are known at build time, offline nvcc compilation is simpler and costs nothing at startup.
+
+### NVSHMEM
+**Short:** NVIDIA's PGAS library for one-sided GPU-to-GPU put and get issued from inside a kernel, rather than as stream-ordered collectives.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1
+
+NCCL's unit of work is a collective launched on a stream, so the grid finishes its compute, the collective runs, and the next kernel starts. NVSHMEM instead gives the GPUs a symmetric address space and `put`/`get` operations callable from device code, so a kernel can ship a tile the moment it is produced and overlap the transfer with the compute still in flight.
+
+That fine-grained overlap is why it appears under tensor-parallel inference kernels, where a whole-collective boundary is too coarse to hide the latency. The price is that the synchronization becomes yours to get right, since there is no collective boundary doing it for you.
 
 ### NVSwitch
 **Short:** NVLink crossbar switch giving all-to-all GPU bandwidth (~900 GB/s per H100) inside a node.
@@ -1179,6 +1275,16 @@ You push and pop named ranges around regions of your own code, and the profiler 
 
 Add the ranges before you profile rather than after. Without them the hardest part of reading a large GPU trace is working out which phase of your program a given burst of kernels belongs to, and that is exactly the question the timeline cannot answer on its own.
 
+### oneAPI plugins for NVIDIA and AMD
+**Short:** Codeplay-built oneAPI DPC++ backends lowering SYCL to NVIDIA PTX or AMD GCN, so one SYCL source targets both.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
+
+These plugins give the oneAPI DPC++ toolchain backends beyond Intel's own hardware: install the NVIDIA plugin and `icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda` lowers SYCL kernels to PTX, or the AMD plugin lowers them to GCN, from unmodified single-source C++. They are built by Codeplay, which is part of Intel and also maintains the oneMKL and oneDNN interface layers that dispatch to cuBLAS or rocBLAS underneath.
+
+This is the path when one SYCL codebase must run on Intel, NVIDIA and AMD accelerators instead of maintaining CUDA and HIP versions side by side. The catch is performance rather than correctness: a kernel tuned for one vendor's memory hierarchy and subgroup width rarely lands at native speed on another, so benchmark on every target before committing to the portability story.
+
 ### OpenAI Triton
 **Short:** Python-embedded DSL for writing block-level GPU kernels without CUDA C++; also the torch.compile codegen backend.
 **Kind:** tech
@@ -1188,6 +1294,16 @@ Add the ranges before you profile rather than after. Without them the hardest pa
 You write a kernel as a Python function decorated `@triton.jit` that operates on blocks of elements — pointer arithmetic, `tl.load`/`tl.store` with masks, `tl.dot` for the matmul — and the compiler handles what CUDA C++ makes you do by hand: mapping work onto threads within a block, staging data through shared memory, and selecting the tensor-core instruction. You still choose block sizes and tiling, which is where the performance lives, and `triton.autotune` sweeps those configurations.
 
 Its most common role is not hand-written at all: `torch.compile`'s Inductor backend generates Triton for fused elementwise and reduction kernels. Write it yourself when a fusion the compiler will not find is the bottleneck — a custom attention variant, a fused normalization — and stay with cuBLAS or cuDNN for the standard shapes they already tune better than you will. Note the name collision with NVIDIA Triton, an unrelated model-serving product.
+
+### OpenMP target offload
+**Short:** Pragma-based GPU offload of existing loop nests, compiled by nvc++, clang, icpx or amdclang: the lowest-effort port and usually the lowest ceiling.
+**Kind:** spec
+**Lang:** cpp
+**Roles:** gpu/gpu-portability-and-precision @1
+
+You annotate a loop nest that already exists -- `#pragma omp target teams distribute parallel for` -- and a supporting compiler generates the device code and the data movement. There is no kernel to write, no launch configuration to choose and no second source file, which is why it is the cheapest way to get an existing CPU code onto an accelerator at all.
+
+It is also generally the slowest result, because the compiler is inferring a parallel decomposition and a data-locality plan you never stated. Expect to add explicit `map` clauses to stop redundant host-device copies, and expect a hand-written CUDA or HIP kernel to win wherever the memory access pattern is the whole problem.
 
 ### Pallas
 **Short:** JAX's block-level Python kernel DSL for writing fused custom kernels targeting both GPU and TPU.
@@ -1255,7 +1371,37 @@ HIP is the portability layer: an API deliberately shaped like CUDA's, so the all
 
 PyTorch and JAX have ROCm builds and vLLM runs on it, so mainstream training and inference work without source changes. What still bites is coverage at the edges: a hand-written CUDA kernel, a dependency pinned to a CUDA-only library, or a very new model implementation may have no equivalent yet. Check the supported-hardware list carefully, since support is per architecture target and consumer cards are often outside it.
 
-### Sectors per Request
+### ROCm Compute Profiler
+**Short:** AMD's per-kernel profiler for ROCm, the closest analogue of Nsight Compute; its CLI is rocprof-compute and it was named Omniperf before.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/gpu-profiling-and-debugging @1
+
+It collects hardware counters per kernel and presents them as a roofline plus memory, cache and compute-unit panels, so it answers the Nsight Compute question: is this kernel bound by bandwidth, by occupancy, or by the arithmetic itself.
+
+The rename from Omniperf is recent enough that the old name still dominates search results and older write-ups; both refer to the same tool. Pair it with the systems profiler, which answers the different question of what happened between the kernels.
+
+### ROCm Systems Profiler
+**Short:** AMD's whole-application tracer for ROCm, the closest analogue of Nsight Systems; formerly named Omnitrace.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/gpu-profiling-and-debugging @1
+
+It traces the run rather than one kernel -- host threads, HIP API calls, kernel dispatches and data transfers on a single timeline -- which is what exposes the gaps a per-kernel profiler cannot see: a serialized copy, a host bottleneck between launches, a stream that never overlaps anything.
+
+It was called Omnitrace before the rename, and that name is still what most existing documentation and tutorials use.
+
+### rocprofv3
+**Short:** AMD's current kernel-tracing and hardware-counter CLI for ROCm; rocprof, rocprofv2 and ROCTracer are retired.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/gpu-profiling-and-debugging @1
+
+It is the command-line front end to ROCprofiler-SDK, collecting kernel traces, HIP and HSA API traces, and hardware counters. Output lands in a SQLite database that `rocpd` converts to CSV, a Perfetto trace or OTF2, rather than the flat CSV the older tools emitted -- so a script written against `rocprof` needs the conversion step added, not merely the binary renamed.
+
+Treat a document that still invokes the older names as stale on that basis: those binaries no longer ship.
+
+### Sectors/Req
 **Short:** Nsight Compute metric: 32-byte sectors fetched per warp memory instruction; 4 is ideal, higher means waste.
 **Kind:** api
 **Lang:** *

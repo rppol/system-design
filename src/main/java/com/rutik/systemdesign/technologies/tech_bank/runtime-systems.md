@@ -391,14 +391,14 @@ Reach for it as the first screen on a host you have a terminal into and a vague 
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
 
-### cgroups cpu.cfs_quota_us
-**Short:** Linux cgroup knob setting a hard CPU ceiling per scheduling period; what Docker --cpus writes underneath.
+### cgroup v2 cpu.max
+**Short:** cgroup v2 knob taking "<quota> <period>" for a hard CPU ceiling; the v1 spelling was cpu.cfs_quota_us, and Docker --cpus writes it.
 **Kind:** api
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
 
-### cgroups cpu.shares
-**Short:** Linux cgroup knob setting a group's relative CPU weight under contention; behind Docker's --cpu-shares.
+### cgroup v2 cpu.weight
+**Short:** cgroup v2 knob (1-10000, default 100) setting a group's relative CPU share under contention; the v1 spelling was cpu.shares.
 **Kind:** api
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
@@ -778,6 +778,12 @@ Reach for it where a collection is genuinely shared and must not change, such as
 The library ships the full cross-product of primitive containers, from `IntList` to `IntIntHashMap`, storing values directly in primitive arrays with open addressing rather than as boxed objects behind references. The saving compounds: a boxed `Integer` is about sixteen bytes on a 64-bit JVM and a hash entry node roughly thirty-two more. The values also sit contiguously, so iteration reads cache lines instead of chasing pointers.
 
 Reach for it for large collections of numbers, such as identifier sets, counters, adjacency lists and feature indexes, where boxing dominates both the heap and the time. The costs are that these types do not implement the `java.util` interfaces, so values must be converted at any boundary expecting a `List` or `Map`, and that it is another dependency. fastutil and HPPC fill the same niche.
+
+### EEVDF base_slice_ns
+**Short:** Linux EEVDF's base time slice, 700 microseconds in current mainline, exposed at /sys/kernel/debug/sched/base_slice_ns and scaled per thread by weight.
+**Kind:** api
+**Lang:** *
+**Roles:** runtime-systems/memory-processes-and-os @1
 
 ### enum.Enum
 **Short:** Python enumeration base class whose EnumMeta metaclass and _EnumDict enforce unique, singleton named members.
@@ -2449,8 +2455,8 @@ In machine-learning work it is usually the statistics and sparse pieces that get
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
-### scipy.spatial.distance
-**Short:** SciPy module of pairwise distance metrics (cdist/pdist: euclidean, cosine, hamming, edit-like) over vectors.
+### scipy.spatial.distance.hamming
+**Short:** SciPy's Hamming distance over two equal-length sequences; it is not edit distance and cannot handle inserts or deletes.
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1

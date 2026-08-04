@@ -484,7 +484,7 @@ kubectl rollout undo deployment/payments      # service restored in ~30s
 | Slack / Microsoft Teams | War room / incident channel + bots |
 | Atlassian Statuspage | External status communication |
 | Jira / Linear | Track postmortem action items |
-| Confluence / runbooks-as-code in Git | Diagnosis/mitigation guides linked from alerts |
+| Confluence | Diagnosis/mitigation guides linked from alerts; keep them as runbooks-as-code in Git when they have to version with the service |
 | PagerDuty Post-Incident Reviews | Postmortem authoring + learning analytics |
 | Alertmanager | Feeds alerts into the on-call/escalation flow (see [visualization_and_alerting](../visualization_and_alerting/visualization_and_alerting.md)) |
 

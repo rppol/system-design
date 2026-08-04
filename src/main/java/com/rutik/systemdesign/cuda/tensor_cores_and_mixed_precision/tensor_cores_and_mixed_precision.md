@@ -888,7 +888,7 @@ Additional pitfalls:
 | CUTLASS | Templated C++ GEMM/convolution library | Custom epilogue fusion at near-cuBLAS performance; what cuBLAS is built on internally |
 | cuBLAS / cuBLASLt | Dense linear algebra library | The default path for `torch.matmul`/`nn.Linear`; automatic Tensor Core routing |
 | cuDNN | Deep-learning primitives (conv, pooling, normalization) | Automatic Tensor Core routing for convolutions under the same dimension/precision rules |
-| PyTorch AMP (`torch.autocast` + `torch.amp.GradScaler("cuda")`) | Training-loop mixed precision | The standard training recipe since 2019; per-op precision allowlist |
+| PyTorch AMP | Training-loop mixed precision via `torch.autocast` + `torch.amp.GradScaler("cuda")` | The standard training recipe since 2019; per-op precision allowlist |
 | NVIDIA Transformer Engine | Automated FP8 scaling for transformer layers | Hopper/Blackwell; used inside Megatron-LM/NeMo for trillion-parameter training |
 | TensorRT-LLM | FP8/INT8 quantized inference engine | Calibration-based quantization for production LLM serving |
 | Nsight Compute | Kernel profiler | The `sm__pipe_tensor_op_hmma_cycles_active` (and FP8/INT8 equivalents) metric directly answers "did Tensor Cores engage" |

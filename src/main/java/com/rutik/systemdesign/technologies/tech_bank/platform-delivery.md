@@ -65,15 +65,15 @@ There is no agent and no server: the control node connects over SSH or WinRM, co
 
 Reach for it for ad hoc fleet operations, configuring machines that already exist, and orchestrating multi-step procedures across hosts in order. It is push-based, so very large fleets need `forks` tuning, and it does not continuously enforce state the way Puppet's or Chef's agents do. For immutable infrastructure, baking an image with Packer beats converging a running one.
 
-### Ansible AWX
-**Short:** Web UI and API over Ansible adding job scheduling, inventories, credential storage, RBAC and run history.
+### Ansible Automation Platform
+**Short:** Red Hat's supported Ansible product; its automation controller adds job templates, RBAC, credential storage and audit.
 **Kind:** tech
 **Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @3
+**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @2, security/authorization-and-policy @3
 
-AWX is the upstream open-source project behind Red Hat's automation controller. It stores inventories, playbook projects synced from Git, and credentials encrypted at rest, and its central object is the job template: a playbook plus an inventory plus credentials plus extra variables, launchable from the UI, from a REST call, or on a schedule. Every run is recorded with full per-host output, and RBAC lets someone use a credential without ever seeing it.
+The component that runs playbooks is the automation controller, sold as Ansible Tower before it was folded into the platform, with AWX as its upstream project. Beyond running playbooks it is the governance layer: credentials are stored encrypted and attached to a job template so an operator can run a play against production without ever seeing the key, surveys turn variables into a form, workflow templates chain job templates with success and failure branches and approval nodes, and every run is recorded per host with its full output.
 
-Reach for it when playbooks are run by people who did not write them, or when production secrets must not sit on laptops. It is a real service to operate, with a database, a task queue and a Kubernetes-based deployment through its operator, so a small team running playbooks from a reviewed CI job gains little from adding it.
+Reach for it when automation is delegated, whether to a support team running a runbook they did not write or an application team given a self-service action, and when who ran what against which hosts must be auditable. It is a substantial service to operate or a subscription to buy, and it constrains playbooks to its project and inventory model. A small team already running playbooks from a reviewed CI pipeline gets much of the same control for far less.
 
 ### ApplicationSets
 **Short:** Argo CD controller and CRD that templates one Application definition across many clusters, environments or repo paths.
@@ -269,6 +269,16 @@ Parameters live in a hierarchical path namespace such as `/app/prod/db/host`, wh
 
 Reach for it for application configuration and for secrets whose lifecycle you are willing to manage yourself. What Secrets Manager adds is built-in rotation with managed rotation functions and cross-region replication, so a database credential that must rotate belongs there while endpoints, feature toggles and AMI ids belong here. Default throughput is modest, so cache reads rather than calling it on every request.
 
+### AWS Predictive Scaling
+**Short:** EC2 Auto Scaling mode that forecasts load from history and provisions capacity ahead of the predicted rise, instead of reacting after it.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1, observability/alerting-and-incident-response @3
+
+It learns from historical load, forecasts ahead and schedules capacity in advance, which is the thing a reactive policy structurally cannot do: dynamic scaling only adds instances after the metric has already moved, so a fast morning ramp is served by an under-provisioned fleet for as long as boot takes. The two are meant to run together, the forecast setting the floor and reactive rules handling whatever it missed.
+
+It suits a load with a repeating daily or weekly shape and a boot time long enough to matter. It has nothing to offer a launch, a sale or any other step change the history never contained, so run it in forecast-only mode first and compare the prediction against what actually happened before letting it act.
+
 ### AWS SAM
 **Short:** Serverless Application Model: shorthand CloudFormation plus a CLI for building, testing and deploying Lambda apps.
 **Kind:** tech
@@ -318,6 +328,16 @@ The consequence to plan for is address exhaustion: pods consume subnet addresses
 The tool is a structured questionnaire in the console: you define a workload, then answer a fixed set of questions per pillar covering operational excellence, security, reliability, performance efficiency, cost optimization and sustainability, each offering best-practice choices. Whatever you do not select becomes a risk item, high or medium, linked to the guidance behind it, and the whole review is saved as a milestone so a later pass shows what moved. Lenses swap in a question set for a domain such as serverless, SaaS or machine learning.
 
 Its value is that it forces a conversation across pillars nobody would otherwise schedule, and that the output is a tracked remediation list rather than a document. It is self-assessed and point-in-time, so it detects nothing automatically and reflects only how honestly it was filled in; Trusted Advisor, Config and Security Hub are the automated checks that belong beside it.
+
+### AWX
+**Short:** Web UI and API over Ansible adding job scheduling, inventories, credential storage, RBAC and run history.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @3
+
+AWX is the upstream open-source project behind Red Hat's automation controller. It stores inventories, playbook projects synced from Git, and credentials encrypted at rest, and its central object is the job template: a playbook plus an inventory plus credentials plus extra variables, launchable from the UI, from a REST call, or on a schedule. Every run is recorded with full per-host output, and RBAC lets someone use a credential without ever seeing it.
+
+Reach for it when playbooks are run by people who did not write them, or when production secrets must not sit on laptops. It is a real service to operate, with a database, a task queue and a Kubernetes-based deployment through its operator, so a small team running playbooks from a reviewed CI job gains little from adding it.
 
 ### az CLIs
 **Short:** The Azure command-line interface for creating, inspecting and scripting cloud resources from a shell.
@@ -499,6 +519,16 @@ Cilium attaches eBPF programs to kernel hooks on each node, so forwarding, load 
 
 Reach for it when policy must be identity-aware or protocol-aware, when iptables rule volume has become a scaling problem, or when you want mesh features without a sidecar per pod. The price is a recent kernel and a genuinely deep system to debug when something misbehaves; Calico is the simpler choice if plain NetworkPolicy is all you need.
 
+### Cinc
+**Short:** Licence-free community rebuild of Chef: the same Ruby cookbooks and agent/pull converge model, distributed without the trademarked branding.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/infrastructure-as-code-and-config @1
+
+Chef's source stayed open while its official builds moved behind commercial terms, and Cinc compiles that source into binaries anyone may redistribute and run, under a name the trademark policy permits. Cookbooks, resources and the converge model are Chef's, so existing cookbooks apply unchanged.
+
+Reach for it when an existing Chef estate has to keep working without a subscription. Whether to start there is a separate question: the procedural-cookbook model has lost ground to Ansible's playbooks and to immutable images built once and redeployed.
+
 ### CircleCI
 **Short:** Hosted CI/CD service running build, test and deploy pipelines defined in a YAML config inside the repository.
 **Kind:** tech
@@ -518,16 +548,6 @@ Reach for it when you want a hosted CI with strong parallelism and non-Linux sup
 client-go is the Go client the Kubernetes components themselves use. Beneath the typed clientsets sits the machinery that makes controllers viable: a reflector performs one list then a watch and feeds a delta queue, an informer maintains an in-memory cache of the objects it watches so reads never hit the API server, and a lister reads from that cache. Handlers do not act directly, they push a namespace and name key onto a rate-limited workqueue that a worker drains, which deduplicates repeated events and gives retries with backoff.
 
 Reach for it directly when writing something low-level or when a framework's abstractions are in the way; for an ordinary operator, controller-runtime wraps exactly this machinery and removes hundreds of lines of wiring. Two invariants hold either way: never mutate an object obtained from a lister, because it is the shared cache, and watches can be dropped and resynced, so reconcile from observed state rather than assuming an event arrives exactly once.
-
-### Cloud Functions
-**Short:** Google Cloud's function-as-a-service: run event-driven or HTTP-triggered code with no server to manage.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1
-
-You deploy a single function with a trigger, either an HTTP endpoint or an event source such as a Pub/Sub message or an object written to a bucket, and the platform builds the container, routes invocations to it, adds instances as concurrency rises and removes them when traffic stops. Billing follows invocations and the memory-seconds consumed, so an idle service costs nothing. Newer generations run on the same serverless container infrastructure as Cloud Run, which is why the two converged in configuration and limits.
-
-Reach for it for event-driven glue: reacting to a storage event, handling a webhook, running a small scheduled job. What pushes work off it is a cold start budget you cannot meet, a request duration or a memory ceiling you exceed, or a service with steady high traffic, where a long-running container is both cheaper and more predictable.
 
 ### Cloud Native Buildpacks
 **Short:** Standard for turning source into an OCI image without a Dockerfile: detect, build and rebase reproducible layers.
@@ -549,6 +569,16 @@ You give Cloud Run a container image that listens on the port named in the `PORT
 
 Reach for it for HTTP services, webhooks and event consumers where you want a container without a cluster, with jobs covering run-to-completion work. Cold starts are the standing cost, mitigated by a minimum instance count at the price of scale-to-zero, and CPU is throttled outside a request unless you keep it always allocated, which is what breaks background threads people assumed were still running.
 
+### Cloud Run functions
+**Short:** Google Cloud's function-as-a-service, now a deployment mode of Cloud Run: event- or HTTP-triggered code with no server.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1
+
+You deploy a single function with a trigger, either an HTTP endpoint or an event source such as a Pub/Sub message or an object written to a bucket, and the platform builds the container, routes invocations to it, adds instances as concurrency rises and removes them when traffic stops. Billing follows invocations and the memory-seconds consumed, so an idle service costs nothing. The product was renamed from Cloud Functions once it moved onto the same serverless container infrastructure as Cloud Run, which is why the two converged in configuration and limits.
+
+Reach for it for event-driven glue: reacting to a storage event, handling a webhook, running a small scheduled job. What pushes work off it is a cold start budget you cannot meet, a request duration or a memory ceiling you exceed, or a service with steady high traffic, where a long-running container is both cheaper and more predictable.
+
 ### cloud-init
 **Short:** First-boot instance bootstrap: applies user-data to configure users, packages, disks and network on cloud VMs.
 **Kind:** tech
@@ -558,26 +588,6 @@ Reach for it for HTTP services, webhooks and event consumers where you want a co
 cloud-init runs on the first boot of a cloud VM, reads instance metadata from the provider's metadata service, and applies the user-data supplied at launch. That user-data is usually a `#cloud-config` YAML document with modules for creating users and injecting SSH keys, writing files, installing packages, formatting and mounting disks, and setting hostname and networking, or it can simply be a shell script. Stages run in a defined order, output lands in `/var/log/cloud-init-output.log`, and state under `/var/lib/cloud` is what stops per-instance modules re-running on reboot.
 
 Reach for it for the minimum that makes a fresh instance reachable and identifiable, keys, hostname and an agent, and let a baked image or configuration management do the rest. Long user-data scripts are a poor place to build a machine: they run once, slow every boot, fail where only a log on the box can see it, and user-data has a size limit. Packer plus an immutable image is the alternative.
-
-### Cloudability
-**Short:** Third-party FinOps platform for multi-cloud cost allocation, rightsizing recommendations and IaC cost estimates.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1, platform-delivery/infrastructure-as-code-and-config @3
-
-Cloudability ingests billing data from AWS, Azure and Google Cloud and normalizes it into one model so multi-cloud spend can be compared and allocated. Its differentiator is business mapping rather than raw tags: rules attribute untagged and shared costs such as support charges, data transfer and a shared cluster to teams and products, which is what makes a chargeback number defensible. It also tracks reservation and commitment coverage and recommends purchases and rightsizing.
-
-Reach for it in an organization with several clouds and a finance function whose allocation has to survive scrutiny. The costs are a commercial contract usually priced against spend, an integration effort, and allocation rules that need an owner or they drift. On a single cloud, that provider's native cost tooling plus an enforced tagging policy usually answers the same questions; Kubernetes-level allocation is better served by OpenCost or Kubecost.
-
-### CloudHealth
-**Short:** Third-party FinOps platform for multi-cloud cost visibility, allocation, and pre-deploy IaC cost estimates.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1
-
-CloudHealth ingests billing and usage data from multiple clouds and organizes it into perspectives, its own grouping construct that assigns every resource to a business dimension such as team, product or environment from tags, account membership and rules. Because a perspective also covers resources that are untagged or shared, the allocation adds up to the whole bill rather than the tagged subset, and the same model drives budgets, reports and policy-based alerts.
-
-Reach for it when cost reporting must satisfy finance across more than one cloud and native tools cannot express the organizational structure. It is a commercial platform with an onboarding project attached, and its numbers are only as good as the perspectives someone maintains. For a single-cloud estate, the provider's own cost explorer plus enforced tagging costs nothing and answers the same questions.
 
 ### CloudNativePG
 **Short:** Kubernetes operator that runs PostgreSQL clusters with declarative failover, backups and rolling upgrades.
@@ -795,16 +805,6 @@ Swarm mode is built into the Docker engine: `docker swarm init` turns a daemon i
 
 Reach for it when a small team needs multi-host container scheduling with almost no learning curve and the whole system is already Compose files. Be clear-eyed about momentum: development is minimal, the ecosystem has largely moved on, and managed offerings and tooling target Kubernetes. Anything expected to grow or to outlive the team that built it is safer on Kubernetes or a managed container service.
 
-### docker-slim
-**Short:** Watches a container at runtime and rebuilds a minified image of only what was used, shrinking attack surface.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/container-and-image @1, security/supply-chain-and-runtime-security @3
-
-The build command starts the original image, exercises it through its own probes, an HTTP probe, or a command you supply, and records with kernel-level tracing exactly which files the process actually touched. It then constructs a new image containing only those files, frequently an order of magnitude smaller, and can emit seccomp and AppArmor profiles derived from the syscalls it observed. The project is now developed as SlimToolkit.
-
-Reach for it when you cannot rebuild an image properly, such as a vendor image or a legacy application whose dependencies nobody can enumerate. The risk is inherent in the method: anything exercised only on a code path the probe never hit is deleted, so a rarely used feature fails in production with a missing-file error long after the build. Test the slimmed image against a real suite, and prefer a multi-stage build onto a distroless base whenever you control the Dockerfile.
-
 ### EC2
 **Short:** AWS elastic compute: virtual machines, instance families, auto scaling groups and spot capacity.
 **Kind:** tech
@@ -922,6 +922,16 @@ This keeps Git as the single source of truth while removing the manual tag bump 
 A Machine is a Firecracker microVM created directly through an API from an OCI image, with a chosen CPU, memory and region and an explicit lifecycle you drive: start, stop, destroy. A stopped machine can be woken by an incoming request in well under a second because its state is suspended rather than rebuilt, and billing follows running time, so an idle stopped machine costs only its volume. Machines are placed in named regions close to users and each gets a private address on a WireGuard mesh.
 
 Reach for it when you want per-tenant or per-session compute, such as a sandbox for an agent, a preview environment or a stateful session, that you can create and destroy programmatically without a scheduler. The tradeoff is that you are the scheduler: nothing places, heals or scales machines unless you write it or move up to the higher-level app abstraction, and a machine stays pinned to the region and volume it was created with.
+
+### FOCUS
+**Short:** FinOps Open Cost and Usage Specification: one schema that normalizes AWS, Azure, GCP and SaaS billing exports into a single table.
+**Kind:** spec
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1
+
+Every provider invented its own billing export, with its own column names, granularity and way of expressing a discount, which is why multi-cloud cost reporting has always begun with a bespoke normalization layer. FOCUS fixes the columns and their meanings -- billing period, account, service, charge category, the billed and the amortized cost -- so one query reads every provider's export.
+
+It is published by the FinOps Foundation, and providers emit it alongside their native format. The value appears once there is more than one bill to reconcile; on a single cloud, that provider's own export already answers the question.
 
 ### Gateway API
 **Short:** Kubernetes successor to Ingress: role-oriented CRDs for L7 routing, TLS termination and traffic splitting.
@@ -1043,6 +1053,16 @@ Harbor is a registry you run yourself, storing OCI images and other OCI artifact
 
 That replication is what makes it practical in air-gapped or multi-region setups — mirror upstream images inward so builds do not depend on a public registry's availability or rate limits, and push outward to a regional registry so nodes pull locally. Reach for it when images must stay inside your network, or when a managed registry's policy controls are not enough.
 
+### HCP Terraform
+**Short:** HashiCorp's managed Terraform service: remote locked state, PR-driven plan/apply runs and policy gates.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @2, security/authorization-and-policy @3
+
+HCP Terraform, named Terraform Cloud until 2023, supplies the pieces a team-scale workflow needs beyond the CLI: remote state with locking and versioned history, remote runs executed on its workers so credentials live there instead of on laptops, and a VCS integration that plans on every pull request and posts the result for review before a gated apply. Workspaces map to state instances with their own variables, run triggers chain one workspace's apply to another's plan, and Sentinel or OPA policies plus cost estimation gate an apply before it executes.
+
+Reach for it when more than a couple of people apply Terraform and you want the state, the credentials and the audit trail off individual machines. The alternatives are an object-store backend with locking plus your own CI, or Atlantis for the pull-request workflow self-hosted, both cheaper and more work. Paid tiers price per managed resource, which is the number to model before adopting it across a large estate.
+
 ### Helm
 **Short:** Kubernetes package manager: templated, versioned chart releases of manifests with values-driven overrides.
 **Kind:** tech
@@ -1079,6 +1099,16 @@ Humanitec is a platform orchestrator. Developers write a workload specification,
 
 Reach for it when a platform team wants a contract with developers instead of a folder of copied Helm values per environment, and wants environment-specific decisions and credentials to stay on their side of that line. It is a commercial product with an adoption cost, and it inserts another abstraction between an engineer and the manifests they end up debugging. Assembling the same pattern from Crossplane, Kustomize and Argo CD is the alternative teams weigh it against.
 
+### IBM Cloudability
+**Short:** Third-party FinOps platform for multi-cloud cost allocation, rightsizing recommendations and IaC cost estimates.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1, platform-delivery/infrastructure-as-code-and-config @3
+
+IBM Cloudability ingests billing data from AWS, Azure and Google Cloud and normalizes it into one model so multi-cloud spend can be compared and allocated. Its differentiator is business mapping rather than raw tags: rules attribute untagged and shared costs such as support charges, data transfer and a shared cluster to teams and products, which is what makes a chargeback number defensible. It also tracks reservation and commitment coverage and recommends purchases and rightsizing.
+
+Reach for it in an organization with several clouds and a finance function whose allocation has to survive scrutiny. The costs are a commercial contract usually priced against spend, an integration effort, and allocation rules that need an owner or they drift. On a single cloud, that provider's native cost tooling plus an enforced tagging policy usually answers the same questions; Kubernetes-level allocation is better served by OpenCost or Kubecost.
+
 ### Infracost
 **Short:** Estimates the monthly cost delta of a Terraform change and posts it as a comment on the pull request.
 **Kind:** tech
@@ -1086,12 +1116,6 @@ Reach for it when a platform team wants a contract with developers instead of a 
 **Roles:** platform-delivery/cloud-platform-and-cost @1, platform-delivery/infrastructure-as-code-and-config @2, platform-delivery/ci-cd-and-release @3
 
 It parses a Terraform plan, matches the resources against cloud price lists, and prints the monthly cost of the change -- previous total, new total, and the diff -- for every resource whose price it can determine. In CI it posts that breakdown as a pull-request comment, so cost review happens where the change is reviewed rather than on a bill six weeks later, and a policy can fail the build when the diff exceeds a threshold. The honest limitation is usage-based pricing: data transfer, S3 requests and Lambda invocations have no cost until you declare expected usage in a usage file, so an estimate is a floor for anything not billed purely by the hour. Reach for it the moment infrastructure changes are made by people who never see the bill.
-
-### ingress
-**Short:** The Kubernetes object declaring external HTTP routing, TLS and canary traffic weights for a controller to implement.
-**Kind:** api
-**Lang:** *
-**Roles:** platform-delivery/kubernetes-and-orchestration @1, traffic-edge/proxy-and-load-balancer @2, traffic-edge/api-gateway @3
 
 ### Jenkins
 **Short:** Self-hosted, plugin-extensible CI/CD server running declarative or scripted pipelines on dynamic agents.
@@ -1110,16 +1134,6 @@ A pipeline is code, a `Jenkinsfile` in the repository written declaratively or a
 k9s renders the cluster as a live terminal UI: a resource view refreshes continuously, a colon command jumps to any resource kind, a slash filters, and single keys perform the common operations of logs, describe, edit, port-forward, shell into a container, delete and scale. It reads your kubeconfig and honours context switching, and RBAC constrains it exactly as it constrains `kubectl`, since it is making the same API calls. Plugins bind arbitrary commands to keys, and skins and aliases are configurable.
 
 Reach for it for interactive investigation, where its advantage over `kubectl` is that state updates in front of you instead of requiring another command, whether watching a rollout, following a pod through its restarts, or comparing containers' logs. Keep it out of automation and out of production change management, because it puts destructive actions one keystroke away in whichever context happens to be current; scripts and reviewed manifests should still do the writing.
-
-### Kaniko
-**Short:** Builds OCI images inside a cluster without a Docker daemon or privileged access, with layer caching for CI.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/container-and-image @1, platform-delivery/ci-cd-and-release @2
-
-Kaniko builds an image from a Dockerfile inside an ordinary unprivileged container. It extracts the base image into its own filesystem, executes each instruction in userspace, and snapshots the changed files as a layer, so there is no Docker daemon, no privileged pod, and no host docker socket mounted into a build job. Removing that socket mount is the security point: anything that can talk to the node's daemon effectively has root on the node, and CI runs untrusted-ish code by definition.
-
-Because there is no daemon there is also no local layer cache between runs, so enable caching to a registry repository or builds get slower, not faster. It is one of several daemonless builders — BuildKit in rootless mode and Buildah solve the same problem with different tradeoffs — so check which one your platform already supports before adopting it.
 
 ### Karpenter
 **Short:** Kubernetes node autoscaler that provisions just-in-time, right-sized, Spot-aware instances for pending pods.
@@ -1445,15 +1459,15 @@ The Apache Airflow community chart deploys the whole stack as one release: sched
 
 Reach for it rather than assembling the components yourself, because the chart encodes the version compatibility between them and runs the database migration job on upgrade. What needs your attention is what it cannot decide: a Fernet key and webserver secret that must stay stable across upgrades or existing connections become unreadable, log persistence, and resource requests for the scheduler, which is the component that fails first under load.
 
-### OLM
-**Short:** Operator Lifecycle Manager - installs, upgrades and resolves dependencies between Kubernetes operators.
+### OLM v1
+**Short:** Operator Lifecycle Manager v1: installs and upgrades Kubernetes operators declaratively through the ClusterExtension API.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/ci-cd-and-release @3
 
-OLM manages operators as installable packages. A catalog source points at an index image of available operators, a subscription declares that a namespace wants one from a channel, and OLM resolves a ClusterServiceVersion, the manifest describing an operator's deployment, its RBAC, the CRDs it owns and those it requires, then installs the dependencies and the operator itself. An operator group scopes which namespaces it watches, and upgrades follow the channel automatically or wait for manual approval.
+The v1 API is deliberately small. A `ClusterCatalog` object, served by catalogd, publishes the bundles a cluster may install from; a `ClusterExtension` names one of them with a version range and the ServiceAccount whose permissions the install and every later upgrade run under; operator-controller reconciles that into the operator's own manifests. Because the ServiceAccount is yours, the permissions an extension gets are the ones you granted it rather than whatever its bundle asked for.
 
-Reach for it when a cluster runs many third-party operators and you want their versions, dependencies and permissions managed rather than a folder of applied YAML. It is standard on OpenShift and optional elsewhere, which is the practical catch, because it adds concepts and a resolution step whose failures are hard to read while many projects ship a Helm chart that installs the operator in one command. A cluster with three operators does not need it.
+Reach for it when a cluster runs third-party operators and you want their versions and permissions declared alongside everything else rather than a folder of applied YAML. It is the upstream project and also ships in OpenShift. A cluster with three operators whose vendors publish Helm charts does not need it.
 
 ### OpenCost
 **Short:** CNCF project allocating cloud spend to Kubernetes namespaces, workloads and labels from usage metrics.
@@ -1464,6 +1478,16 @@ Reach for it when a cluster runs many third-party operators and you want their v
 OpenCost computes the cost of a Kubernetes workload from two inputs: what each node costs, taken from the cloud provider's pricing API or a custom price sheet, and what each pod consumed of it, from Prometheus metrics on requests and usage over time. It allocates node cost across pods, adds persistent volumes, load balancers and network transfer where those can be attributed, and exposes the result by namespace, controller, label or any aggregation through an API and a Prometheus metric.
 
 Reach for it because a cloud bill stops at the node and nothing in a provider's cost explorer knows that one namespace is responsible for most of a cluster. It needs Prometheus and a working pricing source, it produces estimates rather than invoice-accurate figures, and how idle and shared capacity is attributed is a policy choice you make. It is the CNCF specification and reference implementation behind Kubecost, whose commercial product adds retention, multi-cluster views and a supported UI.
+
+### OpenFeature
+**Short:** CNCF specification and SDKs for a vendor-neutral feature-flag evaluation API, so the flag backend can be swapped behind one provider interface.
+**Kind:** spec
+**Lang:** *
+**Roles:** platform-delivery/ci-cd-and-release @1
+
+Application code calls a standard evaluation API against a context, and a provider implementation binds that call to whichever flag backend is in use. Hooks wrap the evaluation for logging, metrics and validation, so that telemetry is written once rather than reimplemented against each vendor's SDK.
+
+The point is the seam, not the feature set: a flag SDK reaches into every service, which is exactly what makes changing vendors expensive later. Adopt it when that lock-in is the concern, and note that it supplies no flag backend of its own -- you still choose and run one.
 
 ### OpenMeter
 **Short:** Usage metering and billing service aggregating events such as LLM token consumption into per-customer billable units.
@@ -1484,6 +1508,16 @@ Reach for it when a product bills or limits on consumption rather than seats, wh
 It speaks the same configuration language, uses the same provider and module ecosystem and reads the same state format, so moving an existing codebase is close to swapping which binary the pipeline calls. It exists because Terraform's licence moved to a source-available one; the fork is developed under the Linux Foundation and stays open source, and it has since added features of its own, state encryption among them.
 
 Reach for it when the licence matters, which it does if you embed the tool in a product or an internal platform you offer to others, or when one of the fork's own features is the deciding factor. Either way, pick one and standardize: running both against the same state is the way to get a surprise.
+
+### OpenVox
+**Short:** Freely redistributable community build of Puppet: the same DSL, agent and pull-based catalog model, packaged by the community.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/infrastructure-as-code-and-config @1
+
+OpenVox packages the open-source Puppet code as builds the community publishes itself, which is the response to Puppet's public development and package distribution moving behind its vendor's terms. Manifests, modules and the compile-a-catalog-then-converge model are Puppet's, so existing code and Forge modules still apply.
+
+Reach for it to keep a Puppet estate on packages that are not tied to one vendor's release decisions. Everything that makes Puppet a large commitment -- a server to run, a DSL and a module ecosystem to learn -- is unchanged by the switch.
 
 ### Operator SDK
 **Short:** Scaffolds and builds Kubernetes operators in Go, Ansible or Helm, including CRDs and the controller loop.
@@ -1617,7 +1651,7 @@ Reach for it when hyperscaler GPU pricing or availability is the blocker, which 
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/container-and-image @2
 
-### SaltStack
+### Salt
 **Short:** Configuration-management system with a high-fan-out push/pull model over YAML plus Jinja state files.
 **Kind:** tech
 **Lang:** *
@@ -1687,6 +1721,16 @@ You describe a job in YAML, naming the resources it needs as a GPU type and coun
 
 Reach for it when accelerator availability rather than price alone is the binding constraint, because taking a GPU in whichever region has one is often the difference between training this week and next. Two honest caveats: recovery only works if your training loop checkpoints to object storage frequently, and multi-cloud means multi-cloud egress plus several sets of credentials and quotas to keep in order.
 
+### SlimToolkit
+**Short:** Watches a container at runtime and rebuilds a minified image of only what was used, shrinking attack surface.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/container-and-image @1, security/supply-chain-and-runtime-security @3
+
+The build command starts the original image, exercises it through its own probes, an HTTP probe, or a command you supply, and records with kernel-level tracing exactly which files the process actually touched. It then constructs a new image containing only those files, frequently an order of magnitude smaller, and can emit seccomp and AppArmor profiles derived from the syscalls it observed. The project was renamed from docker-slim and its CLI is now `slim`.
+
+Reach for it when you cannot rebuild an image properly, such as a vendor image or a legacy application whose dependencies nobody can enumerate. The risk is inherent in the method: anything exercised only on a code path the probe never hit is deleted, so a rarely used feature fails in production with a missing-file error long after the build. Test the slimmed image against a real suite, and prefer a multi-stage build onto a distroless base whenever you control the Dockerfile.
+
 ### SnapStart
 **Short:** AWS Lambda feature snapshotting an initialized environment and restoring it, removing cold-start init.
 **Kind:** tech
@@ -1747,6 +1791,16 @@ Strimzi runs Kafka on Kubernetes through custom resources. A `Kafka` resource de
 
 Reach for it when Kafka must run inside your own cluster for data residency, cost or platform consistency, and you want topic and user management to be declarative. What it does not remove is Kafka expertise, since partition sizing, retention, storage class performance, rack awareness and rolling restarts remain yours, and a broker rolled at the wrong moment is an availability incident. A managed Kafka removes that operational surface at a price.
 
+### Tanzu CloudHealth
+**Short:** Third-party FinOps platform for multi-cloud cost visibility, allocation, and pre-deploy IaC cost estimates.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1
+
+Tanzu CloudHealth ingests billing and usage data from multiple clouds and organizes it into perspectives, its own grouping construct that assigns every resource to a business dimension such as team, product or environment from tags, account membership and rules. Because a perspective also covers resources that are untagged or shared, the allocation adds up to the whole bill rather than the tagged subset, and the same model drives budgets, reports and policy-based alerts.
+
+Reach for it when cost reporting must satisfy finance across more than one cloud and native tools cannot express the organizational structure. It is a commercial platform with an onboarding project attached, and its numbers are only as good as the perspectives someone maintains. For a single-cloud estate, the provider's own cost explorer plus enforced tagging costs nothing and answers the same questions.
+
 ### Tekton
 **Short:** Kubernetes-native CI/CD: pipelines and reusable Tasks modeled as CRDs, each step running in its own pod.
 **Kind:** tech
@@ -1766,16 +1820,6 @@ It suits platform teams standardising delivery on Kubernetes, especially alongsi
 The commands split by what they touch. `init` downloads providers and modules and configures the backend, writing the lock file; `validate` and `fmt` never touch state; `plan` refreshes state against the real world and produces a diff you can save as a file; and `apply` executes it. Around those sit the state operations: `state list`, `state mv` for a refactor that would otherwise destroy and recreate a resource, `import` to bring an existing resource under management, and `apply -replace` for a forced rebuild. Workspaces give one configuration several independent states.
 
 Two habits separate calm operations from incidents. Save the plan and apply that artifact, so what was reviewed is exactly what runs, and read it for replacements rather than counting creates. And treat `-target` as a debugging escape hatch rather than a workflow, because it applies part of the graph and leaves state diverged from the configuration in a way the next full plan has to reconcile.
-
-### Terraform Cloud
-**Short:** HashiCorp's managed Terraform backend: remote locked state, PR-driven plan/apply runs and policy gates.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @2, security/authorization-and-policy @3
-
-Now branded HCP Terraform, it supplies the pieces a team-scale workflow needs beyond the CLI: remote state with locking and versioned history, remote runs executed on its workers so credentials live there instead of on laptops, and a VCS integration that plans on every pull request and posts the result for review before a gated apply. Workspaces map to state instances with their own variables, run triggers chain one workspace's apply to another's plan, and Sentinel or OPA policies plus cost estimation gate an apply before it executes.
-
-Reach for it when more than a couple of people apply Terraform and you want the state, the credentials and the audit trail off individual machines. The alternatives are an object-store backend with locking plus your own CI, or Atlantis for the pull-request workflow self-hosted, both cheaper and more work. Paid tiers price per managed resource, which is the number to model before adopting it across a large estate.
 
 ### terraform fmt
 **Short:** Terraform subcommand that rewrites configuration files into the canonical HCL style, usually run as a CI gate.
@@ -1824,16 +1868,6 @@ Reach for it once you have dozens of environment-by-component state files and th
 Test Kitchen runs a matrix of platforms against a configuration-management codebase. Its config file names drivers that create the instance, whether Vagrant, Docker or a cloud instance, a provisioner that applies the code with Chef, Ansible or Puppet, and a verifier, usually InSpec, that asserts the resulting machine state: this package installed, this service enabled and listening, this file with these permissions. The test command runs the whole create, converge, verify and destroy cycle for every platform in the matrix, and converging twice is how idempotence is checked, since the second run should report no changes.
 
 Reach for it when cookbooks or roles run on several distributions and a regression would otherwise be found in production. The costs are wall-clock time, since real machines boot per platform per run, and maintaining the matrix as distributions come and go. Its relevance tracks that of mutable-machine configuration management generally; on immutable infrastructure the equivalent check is building an image with Packer and testing that artifact.
-
-### Tower
-**Short:** Ansible Tower/AWX: the web UI, scheduler, credential vault and RBAC layer that runs Ansible playbooks at scale.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @2, security/authorization-and-policy @3
-
-Tower was the commercial product built on the Ansible engine and is now the automation controller inside Red Hat's automation platform, with AWX as its upstream project. Beyond running playbooks it is the governance layer: credentials are stored encrypted and attached to a job template so an operator can run a play against production without ever seeing the key, surveys turn variables into a form, workflow templates chain job templates with success and failure branches and approval nodes, and every run is recorded per host with its full output.
-
-Reach for it when automation is delegated, whether to a support team running a runbook they did not write or an application team given a self-service action, and when who ran what against which hosts must be auditable. It is a substantial service to operate or a subscription to buy, and it constrains playbooks to its project and inventory model. A small team already running playbooks from a reviewed CI pipeline gets much of the same control for far less.
 
 ### Transit Gateway
 **Short:** AWS hub-and-spoke router connecting many VPCs, VPNs and Direct Connect links without a mesh of peering connections.

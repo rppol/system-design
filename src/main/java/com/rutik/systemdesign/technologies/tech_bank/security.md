@@ -347,13 +347,13 @@ You install issuers describing where certificates come from, whether an ACME pro
 
 Reach for it in any cluster that terminates TLS, including internal traffic where a private CA issues short-lived certificates. The trap when setting it up is looping on failed issuance against the production ACME endpoint and hitting its rate limits, which locks you out for a week; develop against the staging endpoint and switch over once issuance succeeds. DNS challenges are the route for wildcard certificates and for hosts not reachable from the internet.
 
-### checkov
+### Checkov
 **Short:** Static security scanner for Terraform, CloudFormation and Kubernetes manifests with Python-authored policy rules.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/infrastructure-as-code-and-config @2, security/authorization-and-policy @2, devtools/static-analysis-and-linting @2
 
-checkov scans infrastructure as code — Terraform source and plan output, CloudFormation, Kubernetes manifests, Helm charts, Dockerfiles, ARM templates — against a large built-in policy set and reports each failure with file, line and a description. The findings are the ones that keep causing incidents: a bucket readable by anyone, an unencrypted volume or snapshot, a security group open to the whole internet, logging or versioning left off.
+Checkov scans infrastructure as code -- Terraform source and plan output, CloudFormation, Kubernetes manifests, Helm charts, Dockerfiles, ARM templates -- against a large built-in policy set and reports each failure with file, line and a description. The findings are the ones that keep causing incidents: a bucket readable by anyone, an unencrypted volume or snapshot, a security group open to the whole internet, logging or versioning left off.
 
 The value is where it runs: in the pull request, so the misconfiguration is discussed before apply rather than found in a quarterly audit. Custom policies are written in Python or YAML when your organisation's rules go beyond the defaults. When you must accept a finding, suppress that specific check inline with a comment so the exception is visible and reviewable, rather than dropping the rule for the whole repository.
 
@@ -1091,6 +1091,12 @@ You give it a hostname and it fetches the site, then scores the response against
 
 Use it as a fast external check after a deployment and as a way to make header work legible to people who do not read configuration files. Understand what the grade is: a measurement of declared browser-side defences on one URL, not a penetration test, since an application with perfect headers can still have broken authorization or an injectable query. The CSP portion in particular rewards a strict policy, which is an engineering project rather than a header you paste.
 
+### MutatingAdmissionPolicy
+**Short:** Kubernetes in-tree admission policy that patches an object with CEL-authored mutations, replacing a mutating admission webhook.
+**Kind:** api
+**Lang:** *
+**Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @2
+
 ### MySQL Audit Plugin
 **Short:** MySQL Enterprise plugin writing a tamper-evident audit log of connections and statements for compliance review.
 **Kind:** tech
@@ -1187,6 +1193,16 @@ The framework organises AI risk work into four functions, with govern as the cro
 
 Reach for it when you need a common vocabulary and structure for AI governance that regulators, auditors and customers already recognise, and as scaffolding for an internal policy you would otherwise invent from scratch. Its weakness is the flip side of its strength, since it will not tell you which evaluation to run or what threshold is acceptable, so the measure function is where the real engineering sits and where a mapped framework can quietly become paperwork.
 
+### Notation
+**Short:** Notary Project CLI that signs and verifies OCI artifacts against an x.509 PKI trust model, storing the signatures in the registry.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/container-and-image @3
+
+Signatures are pushed to the same registry as the image and associated with it there, and verification is driven by a trust policy naming the identities to trust and the certificate chains that must validate. That is the difference from the keyless model: the root of trust is a certificate authority you already operate, not an OIDC identity recorded in a transparency log.
+
+Reach for it where an existing PKI hierarchy is mandated -- a regulated environment, or an organisation whose CA is the thing auditors accept. Where no such requirement exists, keyless signing removes exactly the key and certificate management this model requires you to do.
+
 ### OAuth 2.1
 **Short:** Consolidated OAuth framework: PKCE required, implicit and password grants dropped; the auth basis for remote MCP.
 **Kind:** spec
@@ -1264,6 +1280,16 @@ Reach for it when authorization rules should be versioned, unit-tested and revie
 This is a hosted classifier endpoint: send text, or text and images with the omni model, and it returns a flag and a score per category — harassment, hate, self-harm, sexual content, violence and their sub-categories. It is free to call with an API key, which makes it the cheapest possible first filter to place in front of user input and behind model output.
 
 Two limits shape how you use it. The category set is fixed and safety-oriented, so your product's own policy — competitor mentions, unlicensed advice, personal data leaking into a response — still needs a classifier you build. And any threshold you tune against the raw scores is tied to the current model version, so treat a model upgrade as a reason to re-validate the cutoffs against a labelled set rather than assuming the numbers carry over.
+
+### OpenBao
+**Short:** Linux Foundation fork of HashiCorp Vault under MPL 2.0: an API-compatible drop-in for secrets storage, dynamic credentials and PKI.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1
+
+It was forked from Vault at the point HashiCorp moved to the Business Source Licence, so the secret engines, auth methods, policy language and HTTP API are the ones already in use -- an existing client, Terraform provider or agent generally points at it unchanged.
+
+The reason to take it is licensing and governance rather than capability: an open-source licence and a foundation's release process instead of a single vendor's. The reason to hesitate is that the two are diverging as each adds features, so weigh how much of your usage depends on what Vault shipped after the fork point.
 
 ### OpenFHE
 **Short:** Open-source fully homomorphic encryption library (BFV, BGV, CKKS) for computing directly on encrypted data.
@@ -1942,6 +1968,12 @@ Reach for it when a repository has years of history and the question is which le
 **Kind:** spec
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, llm-apps/tool-use-and-mcp @2
+
+### ValidatingAdmissionPolicy
+**Short:** Kubernetes in-tree admission policy that accepts or rejects an object using CEL expressions, with no webhook server to run or keep available.
+**Kind:** api
+**Lang:** *
+**Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @2
 
 ### Vault
 **Short:** HashiCorp's secrets store for credentials, signing keys and PKI, with dynamic leases and audited access.

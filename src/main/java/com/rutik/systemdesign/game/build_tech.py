@@ -747,6 +747,16 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     "typing.protocol [3.8]": "typing.protocol",
     "weakref module": "weakref",
     "xgboost 2.0+": "xgboost",
+    # --- 2026-08-04 post-audit renames ---------------------------------------------
+    # The devops/cuda/cs_fundamentals factual audit renamed tools in ~40 §11 rows. Most
+    # were fixed by renaming the bank record, which keeps the authored description. These
+    # three are the cases where the OLD written form still exists somewhere in the repo,
+    # so the merge needs an alias as well -- and note the survivor is aliased where its
+    # own key would otherwise not be reached ("rootless buildkit" is what every remaining
+    # citation says, so the label below forces the product name back).
+    "rootless buildkit": "buildkit",
+    "helm 4": "helm",                     # sibling of the existing "helm 3" entry
+    "grafana cloud k6": "k6 cloud",       # backend/ still writes the old "Grafana k6 Cloud"
 }
 # The reverse problem: ONE name, two unrelated products. tech_key merges by name, so a
 # homonym silently fuses them and the entry describes neither. Disambiguated by the section
@@ -821,7 +831,7 @@ TECH_LABELS = {
     "hugging face": "Hugging Face",
     "huggingface trainer": "Hugging Face Trainer",
     "junit 5": "JUnit 5",
-    "k6 cloud": "Grafana k6 Cloud",
+    "k6 cloud": "Grafana Cloud k6",
     "lm-eval-harness": "LM-Eval Harness",
     "mcp": "mcp",
     "micrometer tracing": "Micrometer Tracing",
@@ -947,6 +957,9 @@ TECH_LABELS = {
     "typing.protocol": "typing.Protocol",
     "weakref": "weakref",
     "xgboost": "XGBoost",
+    # 2026-08-04: the audit left "rootless BuildKit" as the ONLY written form, so the
+    # vote would elect a mode of the product rather than the product.
+    "buildkit": "BuildKit",
 }
 TECH_LABELS.update({v.lower(): v for m in TECH_HOMONYMS.values() for v in m.values()})
 

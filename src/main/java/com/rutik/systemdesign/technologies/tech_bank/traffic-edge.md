@@ -381,14 +381,6 @@ HAProxy is an event-driven proxy whose config splits into `frontend`, `backend` 
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, traffic-edge/proxy-and-load-balancer @2
 
-### ingress-nginx
-**Short:** Kubernetes Ingress controller built on NGINX for L7 routing, TLS termination and host/path rules.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, platform-delivery/kubernetes-and-orchestration @3
-
-The controller watches Ingress resources and renders them into an NGINX configuration it reloads in place, so a host or path rule becomes a real proxy rule and a Service's endpoints become upstreams -- it proxies to pod IPs directly rather than through the Service's cluster IP. It terminates TLS from certificates held in secrets, usually issued by cert-manager, and exposes NGINX behaviour through annotations: rewrites, timeouts, body-size limits, rate limits, session affinity, and canary routing by header or percentage. Two things bite in practice: annotations are per-Ingress and there are a great many of them, and a large number of Ingress objects means frequent configuration reloads. It is the community controller maintained under the Kubernetes project; new routing capability is increasingly landing in Gateway API implementations rather than in Ingress, so a new cluster should at least evaluate those.
-
 ### Istio
 **Short:** Kubernetes service mesh: sidecar traffic routing, canary weighting, retries/circuit breaking, mTLS, all config-driven.
 **Kind:** tech

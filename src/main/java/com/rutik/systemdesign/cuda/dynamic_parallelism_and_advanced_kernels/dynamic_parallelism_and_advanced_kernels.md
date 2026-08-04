@@ -926,7 +926,7 @@ __global__ void producerConsumerFixed(float* data, float* out) {
 | `kernel<<<grid, block, shmem, stream>>>()` (device-side) | Child kernel launch from within a `__global__` function — CUDA Dynamic Parallelism |
 | `nvcc -rdc=true` + `libcudadevrt` | Required compile/link flags for any translation unit issuing device-side launches |
 | `cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, n)` | Resize the device runtime's launch pool, which holds 2048 pending launches by default; overflowing it returns `cudaErrorLaunchPendingCountExceeded` |
-| `kernel<<<g, b, 0, cudaStreamTailLaunch>>>()` | Under CDP2, the only way a parent's own work can observe what its children wrote — the tail-launched grid runs after the parent grid and all its descendants complete |
+| `cudaStreamTailLaunch` | Under CDP2, the only way a parent's own work can observe what its children wrote — launch into it as `kernel<<<g, b, 0, cudaStreamTailLaunch>>>()` and the tail-launched grid runs after the parent grid and all its descendants complete |
 | `kernel<<<g, b, 0, cudaStreamFireAndForget>>>()` | Launch a child the parent will never read back from; it still gates the parent grid's completion, but skips the tail-launch ordering machinery |
 | `-DCUDA_FORCE_CDP1_IF_SUPPORTED` | Compiles the legacy CDP1 interface on devices below compute capability 9.0; CDP1 is slated for removal, so this is a porting stopgap, not a target |
 | `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | Computes exactly how many blocks of a given kernel fit resident per SM — the persistent-kernel sizing input |

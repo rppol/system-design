@@ -874,7 +874,7 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
 | `nvcc --ptxas-options=-v` | Compile-time register/shared-mem/spill report per kernel | Fastest feedback loop — no launch required |
 | `__launch_bounds__(maxThreads, minBlocksPerSM)` | Per-kernel compiler hint constraining register usage | Preferred over file-wide flags |
 | `-maxrregcount=N` (nvcc flag) | File-wide register cap | Blunt instrument; can starve sibling kernels |
-| `cuobjdump --dump-resource-usage <binary>` (short form `-res-usage`) | Post-hoc register/shared-mem usage inspection of a compiled cubin | Useful when you only have the binary, not the source |
+| `cuobjdump` | Post-hoc register/shared-mem usage inspection of a compiled cubin, via `--dump-resource-usage` (short form `-res-usage`) | Useful when you only have the binary, not the source |
 | Nsight Compute — "Occupancy" section | Theoretical vs. Achieved occupancy, binding limiter, warp-state stall reasons | The authoritative source for what a kernel actually achieved and which resource bound it — see [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) |
 | `pycuda.tools.OccupancyRecord` | Python-side occupancy arithmetic from a compiled `Function`'s `num_regs`/`shared_size_bytes` | Takes a `pycuda.tools.DeviceData`, not a `Device`; its `DeviceData` hardcodes 64 warps/SM and 8 blocks/SM, so cross-check the result on any part with a different ceiling |
 | `numba.cuda` device attributes (`WARP_SIZE`, `MAX_THREADS_PER_BLOCK`, `MULTIPROCESSOR_COUNT`) | Device query for launch-config heuristics from Python | Kernels still compile through the same nvcc/ptxas pipeline underneath |

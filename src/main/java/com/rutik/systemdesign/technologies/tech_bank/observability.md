@@ -175,12 +175,6 @@ Configuration is a set of named modules in the exporter's own YAML giving protoc
 
 That makes it the natural source of an availability SLI and of a paging alert, since `probe_success == 0` needs no interpretation. Keep the target list in service discovery rather than hand-written, run exporters in more than one location so a network partition does not read as an outage, and remember every probe is real traffic hitting a real endpoint on a schedule you chose.
 
-### Blameless
-**Short:** SRE platform for incident response and blameless postmortem authoring with learning analytics across incidents.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
 ### bpftrace
 **Short:** eBPF tracing language and CLI for ad-hoc, low-overhead kernel and application probes in production.
 **Kind:** tech
@@ -221,16 +215,6 @@ It reads the kernel's cgroup accounting and container runtime metadata directly,
 
 Those two series carry most Kubernetes capacity work, with throttling visible as `container_cpu_cfs_throttled_seconds_total` against the CPU limit and OOM risk as working set against the memory limit. It reports consumption only, so what the object was supposed to look like comes from kube-state-metrics and the useful alerts join both. Running a standalone cAdvisor per node is redundant when the kubelet already exposes the same data.
 
-### Call stack profiler
-**Short:** Profiler view of the live call stack, used to spot deep recursion and runaway frame allocation.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/profiling-and-performance @1
-
-The idea is to sample or snapshot the stack of every thread rather than to measure elapsed time: the frame list itself reveals depth, recursion, and whether the same chain appears in every sample. Walking a live stack shows what the program is doing at this instant, which is how a thread spinning in a loop and a thread parked on a lock are told apart when both look equally stuck from outside.
-
-It answers where the program is, not what anything cost, and stack depth is the specific symptom it exposes: unbounded recursion approaching an overflow, or a deeply nested chain allocating a frame per level. Reach for it when a process hangs or dies with a stack overflow. For attributing CPU time across a window, a sampling profiler's aggregated flame graph answers a different question entirely.
-
 ### callgrind
 **Short:** Valgrind tool that simulates caches and records a call graph for instruction-level profiling.
 **Kind:** tech
@@ -240,16 +224,6 @@ It answers where the program is, not what anything cost, and stack depth is the 
 It runs the program on Valgrind's synthetic CPU, counting every instruction executed and recording the full call graph with inclusive and exclusive cost per function and per source line, with a cache simulator modelling first-level and last-level hits and misses on top. Because the numbers are counted rather than sampled, two runs over the same input produce identical output and a difference of a few percent is real signal.
 
 That determinism is exactly why you use it, since comparing two implementations without benchmark noise is otherwise hard. The price is roughly a fiftyfold slowdown and a simulated rather than real memory hierarchy, so it will not tell you what your actual processor does with prefetching and out-of-order execution. Read the output in KCachegrind, and confirm the wall-clock win on real hardware with `perf`.
-
-### Capacity/forecast tools
-**Short:** Umbrella entry for demand-forecasting tooling used in capacity planning against SLO headroom.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1, platform-delivery/cloud-platform-and-cost @2
-
-The category covers anything that projects a resource series forward: Prometheus's own `predict_linear` over a disk-usage metric, a spreadsheet model of request growth against measured per-instance throughput, a cloud provider's usage forecaster, or a time-series forecasting library fed from the metrics store. The inputs are always historical utilisation plus a known limit, and the output is the date on which the two intersect.
-
-Reach for it to turn capacity into an alert with lead time — disk full in four days, pool exhausted at next quarter's growth — rather than a page at the moment it happens. Forecasts assume the recent pattern continues, so they miss launches, seasonality and step changes, and the number is a planning prompt rather than a promise. Pair it with explicit headroom targets and load testing that establishes the real ceiling.
 
 ### Cassandra Exporter
 **Short:** Sidecar that scrapes Cassandra JMX metrics and exposes them in Prometheus format.
@@ -296,6 +270,16 @@ Reach for them when the workload is single-cloud and running a log store yoursel
 It records control-plane API calls — who, from which address, with which credentials, against which resource, and whether the call was denied — as JSON events delivered to an S3 bucket and optionally to CloudWatch Logs and EventBridge. Management events are recorded by default with ninety days of console history, while data events covering object-level access and function invocations are opt-in because their volume is far higher.
 
 Reach for it whenever the question is what changed and who changed it, since an incident's root cause is often a console action nobody mentioned and compliance regimes require the trail regardless. Deliver to a locked bucket in a separate account with log file validation enabled, because stopping the trail is an attacker's first move. It is not application logging and it is not real time, so expect minutes of delay.
+
+### Confluence
+**Short:** Atlassian's team wiki, and the usual home for the runbooks and diagnosis guides an alert links to.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/alerting-and-incident-response @1, devtools/version-control-and-workbench @3
+
+In the incident path its job is narrow: hold the page an alert links to, addressably, so the on-call opens one URL and finds what this alert means, what to check first, which dashboard and query to open, and the mitigation with its blast radius. Search, page hierarchy and permissions are what make it the default over a folder of documents.
+
+The cost is drift. A runbook describing a system two rewrites ago is worse than none, and a wiki has no build that fails when it goes stale -- which is the argument for keeping whatever must track the code as runbooks-as-code in Git beside the alert rule, and leaving here the material that is genuinely prose.
 
 ### Cortex
 **Short:** Horizontally scalable, multi-tenant long-term storage behind Prometheus remote-write.
@@ -457,6 +441,12 @@ Both IDEs run the statement with plan collection enabled and render the result a
 
 Reach for it while you are already iterating on the query in the editor, since the loop of edit, re-plan and compare costs a keystroke. Two cautions: `ANALYZE` executes the statement, so running it against an `UPDATE` or `DELETE` changes data unless wrapped in a transaction you roll back, and the IDE's session settings may differ from the application's. For sharing or archiving a plan, depesz or pev2 render it better.
 
+### faulthandler
+**Short:** CPython stdlib module that dumps the Python traceback of every thread on a fatal error such as a segfault or a stack overflow.
+**Kind:** api
+**Lang:** python
+**Roles:** observability/profiling-and-performance @1, runtime-systems/runtime-internals-and-types @3
+
 ### Filebeat
 **Short:** Lightweight Elastic log shipper that tails files and forwards lines to Logstash/Elasticsearch.
 **Kind:** tech
@@ -521,6 +511,26 @@ Alloy is a distribution of the OpenTelemetry Collector with Grafana's own compon
 
 It is Grafana's convergence point, superseding Promtail and the earlier agent modes, so a new deployment collecting more than one signal should start here rather than running three agents per node. Reach for it when one collector beats several. If you have no Grafana-specific needs, the upstream OpenTelemetry Collector is the more neutral choice and the thing you would migrate to anyway.
 
+### Grafana Cloud
+**Short:** Grafana Labs' managed observability platform: hosted Mimir, Loki, Tempo and Pyroscope behind Grafana, ingesting OTLP and Prometheus remote-write.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/logging @2
+
+It is the same open-source stack run as a service: metrics in Mimir, logs in Loki, traces in Tempo, profiles in Pyroscope, queried from one Grafana with the same PromQL, LogQL and TraceQL you would write self-hosted. Ingest is OTLP or Prometheus remote-write, so the instrumentation stays portable in both directions.
+
+The reason to take it is that operating four stateful stores at scale is real work and probably not your product. The number to model before committing is ingest volume, because pricing follows series, log bytes and span bytes -- the same dimensions a self-hosted deployment pays for in storage and toil instead.
+
+### Grafana IRM
+**Short:** Grafana's incident response and management: on-call schedules, escalation chains and paging wired to Grafana Alerting.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/alerting-and-incident-response @1
+
+The model is schedules plus escalation chains: rotations (with overrides and time zones) determine who is on call, routes match an incoming alert to a chain, and each step of the chain notifies someone and waits -- if nobody acknowledges within the configured window it escalates to the next step and eventually to a backup. Alerts arrive from Grafana Alerting, Prometheus Alertmanager or a generic webhook, and notification goes out over push, SMS, phone call or chat. IRM is the successor that combines the former Grafana OnCall and Grafana Incident products into one.
+
+Reach for it to keep paging, the incident channel and the retrospective in the same stack as your dashboards and alert rules rather than running a separate SaaS for it. As with any paging tool, the configuration that matters is the escalation timeout and the routing: an alert with no owning chain reaches nobody, and a chain with no final backup step ends in silence at 3am.
+
 ### Grafana Loki
 **Short:** Log store that indexes only labels, never log text, keeping compressed chunks in object storage and querying them with LogQL.
 **Kind:** tech
@@ -540,16 +550,6 @@ Reach for it when log volume makes a full-text engine expensive and most of your
 Mimir accepts Prometheus `remote_write` and stores the series in object storage, splitting the work across components — distributors, ingesters, store gateways, queriers, compactors — so ingest and query scale independently and retention stops being limited by a single Prometheus server's disk. A query frontend splits large queries by time, caches results and shards them across queriers, which is what keeps a year-long range query answerable.
 
 It is natively multi-tenant: every series carries a tenant id with its own limits and its own query isolation, so one team cannot exhaust another's capacity. Reach for it when many Prometheus instances need one global view and long retention. A single team with one Prometheus and short retention needs none of this and should not pay the operational cost.
-
-### Grafana OnCall
-**Short:** Open-source on-call scheduling, escalation and paging tool integrated with Grafana alerting.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-The model is schedules plus escalation chains: rotations (with overrides and time zones) determine who is on call, routes match an incoming alert to a chain, and each step of the chain notifies someone and waits — if nobody acknowledges within the configured window it escalates to the next step and eventually to a backup. Alerts arrive from Grafana Alerting, Prometheus Alertmanager or a generic webhook, and notification goes out over push, SMS, phone call or chat.
-
-Reach for it to keep paging in the same stack as your dashboards and alert rules rather than running a separate SaaS for it. As with any paging tool, the configuration that matters is the escalation timeout and the routing: an alert with no owning chain reaches nobody, and a chain with no final backup step ends in silence at 3am.
 
 ### Grafana Tempo
 **Short:** Object-storage-backed distributed trace store with TraceQL and cheap long retention; ingests OTLP.
@@ -642,16 +642,6 @@ BubbleUp is the workflow that follows: select the slow or failing region of a he
 Cilium already processes every packet in eBPF programs in the kernel, and Hubble exposes what those programs see: per-flow records with source and destination pod, namespace, service, port, verdict and, for a drop, the specific reason such as policy denial, missing route or connection tracking state. Because identity is Cilium's own pod identity rather than an address, a flow stays interpretable after the pod is rescheduled.
 
 Reach for it when a connection fails in a cluster running network policy, because the answer is usually a policy that denied it and Hubble states that outright instead of leaving you to infer it from a timeout. A CLI, a service-map UI and a Prometheus exporter all read the same data. It requires Cilium as the CNI, and full flow export at high traffic costs CPU and storage, so scope it.
-
-### Incident
-**Short:** On-call and incident management tooling: paging schedules, incident channels, timelines and postmortems.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-The category covers the tooling that carries an outage from detection to write-up: a paging service holding schedules and escalation, a way to declare an incident that opens a channel and assigns a commander and a scribe, an automatically recorded timeline, a customer-facing status page, and a retrospective with tracked action items. Products differ mainly in which of those they own outright and which they integrate.
-
-Reach for it once more than one person is on call, because the failure without it is not a missing tool but a missing role: nobody knows who is coordinating, and the timeline gets reconstructed from memory a week later. The cost is process overhead, which only repays itself if declaring an incident is cheap. No product supplies the part that matters, which is blameless review and finishing the action items.
 
 ### incident.io
 **Short:** SaaS incident management: declare an incident, assign roles, run comms and drive the retrospective from chat.
@@ -791,12 +781,6 @@ It is the quick look, not the analysis: sampling is coarse and there is no alloc
 **Lang:** java
 **Roles:** observability/profiling-and-performance @1, runtime-systems/concurrency-and-async @2
 
-### Jeli
-**Short:** Incident-analysis platform for authoring postmortems and mining review data for recurring contributing factors.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
 ### JFR
 **Short:** Java Flight Recorder: low-overhead, production-safe JVM event recording built into the JDK since 11.
 **Kind:** tech
@@ -822,6 +806,16 @@ Reach for it when a JVM is slow or leaking and you need evidence instead of a gu
 Its role in an operations workflow is narrow and specific: the retrospective produces action items, and each becomes an issue with an owner, a priority and a due date in the team's ordinary backlog, so remediation competes for planning attention alongside feature work instead of living in a document nobody reopens. Incident tooling generally creates these issues automatically and links them back to the incident record.
 
 Reach for it because incident processes fail at follow-through far more often than at response, and a tracker with a review cadence is the only durable fix. Label incident-derived items so completion rate stays measurable, since otherwise they disappear into a large backlog. Any tracker the team already uses does this job equally well, and Linear is the common alternative; reviewing the list matters more than the product.
+
+### Jira Service Management Operations
+**Short:** Atlassian's on-call and alerting surface inside Jira Service Management: schedules, routing, escalation and acknowledgement.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/alerting-and-incident-response @1
+
+It takes an alert and figures out who should actually be woken. You define schedules and rotations per team, then escalation policies -- page the primary, and if nobody acknowledges within five minutes page the secondary, then the manager -- and it delivers through push, SMS and phone calls until someone acknowledges or the policy runs out. Routing and deduplication rules collapse a flapping check into one alert instead of ten pages. This is where Atlassian moved Opsgenie's capabilities, so an Opsgenie configuration is the thing being migrated rather than a separate product to evaluate.
+
+Reach for it, or an equivalent paging service, as soon as on-call involves more than one person and an email filter. Two things decide whether it works: alerts must carry enough context to act on, and every page must be actionable, because a rotation that learns to ignore the phone is worse than no paging at all.
 
 ### JITWatch
 **Short:** GUI that reads HotSpot compilation logs to show what the JIT compiled, inlined, or deoptimized and why.
@@ -960,16 +954,6 @@ Reach for either when a dashboard of request counts cannot answer why one answer
 Every chain, agent step, retriever call, and raw model call becomes a nested run carrying its inputs, outputs, token counts, latency, and cost, so debugging an agent that went wrong is reading the actual step tree instead of guessing from the final answer. Setting the tracing environment variable is enough for LangChain and LangGraph; anything else instruments through the SDK or a decorator.
 
 Around the traces sit the parts that make it an eval platform: datasets curated from real production traces, offline evaluation runs using heuristics or an LLM judge, annotation queues for human review, and prompt versioning. Reach for it when agent behaviour is the thing you cannot see. It is a hosted service by default, so if traces will contain user content, check where that data lands before you switch it on.
-
-### Lightstep
-**Short:** Managed OTLP-compatible distributed tracing and APM backend, now ServiceNow Cloud Observability.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/tracing-apm-and-llm-observability @1
-
-Its distinguishing design was to analyse every span rather than a sampled subset: collector processes near the application hold recent traces while the backend computes latency histograms and error rates from the full stream, retaining the exemplar traces that explain the tail. Change intelligence works from that data, comparing a regression window against a baseline and naming the service, operation or attribute whose behaviour actually changed.
-
-It ingests OTLP and its team drove much of OpenTelemetry itself, so instrumentation written for it stays portable, which matters because the product now ships as ServiceNow Cloud Observability and its direction follows that platform. Reach for it if the surrounding ServiceNow tooling is what you run; otherwise Honeycomb covers the high-cardinality analysis case and Grafana Tempo the self-hosted trace store.
 
 ### LIKWID
 **Short:** HPC command-line suite reading hardware performance counters for bandwidth, cache and NUMA behaviour.
@@ -1495,16 +1479,6 @@ Reach for it as the first piece of tracing on a FastAPI service, and pair it wit
 
 `opentelemetry-api` is what libraries import; this package is the implementation an application installs and configures, giving you a `TracerProvider` with samplers, span processors (batched in production) and OTLP exporters aimed at a collector or a backend. Because the wire format is OTLP and context propagates as a W3C `traceparent` header, a trace crosses service and language boundaries and the backend stays swappable without touching instrumentation. In practice you rarely construct spans by hand, since the auto-instrumentation packages cover FastAPI, requests, SQLAlchemy and the rest, and manual spans are for your own business logic. Choose the sampler deliberately: recording every request is fine at low volume and ruinous at high.
 
-### OpsGenie
-**Short:** Atlassian on-call scheduling and escalation service that turns alerts into pages and tracks acknowledgement.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-OpsGenie takes an alert and figures out who should actually be woken. You define schedules and rotations per team, then escalation policies — page the primary, and if nobody acknowledges within five minutes page the secondary, then the manager — and it delivers through push, SMS and phone calls until someone acknowledges or the policy runs out. Routing and deduplication rules collapse a flapping check into one alert instead of ten pages.
-
-Reach for it, or an equivalent paging service, as soon as on-call involves more than one person and an email filter. Two things decide whether it works: alerts must carry enough context to act on, and every page must be actionable, because a rotation that learns to ignore the phone is worse than no paging at all.
-
 ### OTLP
 **Short:** OpenTelemetry's vendor-neutral wire protocol over gRPC or HTTP carrying traces, metrics and logs.
 **Kind:** spec
@@ -1540,6 +1514,16 @@ Enable it in development and test, and add a stack-trace formatter so each state
 Monitoring systems send events to a service; an escalation policy decides who gets paged, and who gets paged next when nobody acknowledges; schedules with rotations and overrides define who is on call right now; and notification rules pick push, SMS, or a phone call per person. Deduplication and event rules collapse a flapping alert into one incident rather than a hundred pages, and each incident carries a timeline, responders, and the notes a postmortem is written from.
 
 Reach for it when an alert has to reliably wake a specific human and escalate if it does not. The value is mostly the discipline it forces: page only on symptoms that need action now, route everything else to a ticket or dashboard, and treat page volume itself as a metric — an on-call rotation that is woken for things nobody acts on stops reacting to the one that matters.
+
+### PagerDuty Post-Incident Reviews
+**Short:** PagerDuty's postmortem workflow: assemble the timeline from the incident's own data, write the review, and track the actions out of it.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/alerting-and-incident-response @1
+
+The argument for writing the review inside the paging tool is that the raw material is already there -- when the alert fired, when it was acknowledged, who was paged, what was said in the incident channel -- so the timeline is assembled rather than reconstructed from memory a week later. Reviews are templated, and the follow-up actions become tracked items instead of bullet points in a document nobody reopens.
+
+None of that supplies the part that decides whether a review was worth holding: a blameless framing, and someone accountable for finishing the actions. What the tooling buys is a cheap write-up, which is what stops teams skipping it after the third incident of the month.
 
 ### PagerDuty/Opsgenie
 **Short:** On-call and incident-response platforms: alert routing, escalation policies, schedules and incident timelines.
@@ -1725,6 +1709,12 @@ Kubernetes defines aggregated metrics APIs, and this implements the custom and e
 
 Reach for it when CPU is the wrong scaling signal, which it usually is for a queue consumer or a latency-sensitive service that should scale on queue depth or requests per pod instead. The rules mapping is the fiddly part and silently produces no metric when the label joins are wrong. KEDA is the more common choice now for event-driven scaling and can use Prometheus as a scaler directly.
 
+### Prometheus Agent mode
+**Short:** Prometheus run mode that only scrapes and remote-writes: no local TSDB, no rules and no queries, for edge and forwarding tiers.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1
+
 ### Prometheus alerting rules
 **Short:** PromQL expressions with a for-duration that fire alerts to Alertmanager when a condition holds long enough.
 **Kind:** api
@@ -1907,6 +1897,16 @@ It walks the keyspace with `SCAN`, samples keys by pattern, and for each pattern
 
 Reach for it when memory is high and the server's own summary only confirms the total, because the answer is usually one pattern with no expiry, or a hash grown large enough to leave its memory-efficient encoding. Scanning a large instance takes time and adds load and the numbers are sampled estimates, so run it against a replica. `MEMORY USAGE` answers for one key and the big-keys scan is the cheap first look.
 
+### Remote-Write 2.0
+**Short:** Prometheus remote-write protocol version 2, carrying metadata, exemplars, created timestamps and native histograms, with interned label strings.
+**Kind:** spec
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1
+
+Version 1 shipped samples and labels and nothing else, so metadata, exemplars and native histograms had to travel some other way or not at all. Version 2 puts them in the same message and interns the label strings into a symbol table, which shrinks the payload on the wire even though it carries strictly more.
+
+Sender and receiver negotiate the version per connection, so a 2.0 sender talking to a 1.0 receiver falls back instead of failing. That is what makes it safe to enable on the sending side before every receiver in the path has been upgraded.
+
 ### Rootly
 **Short:** Incident management platform automating declaration, roles, comms, timelines and retrospectives from chat.
 **Kind:** tech
@@ -1916,16 +1916,6 @@ Reach for it when memory is high and the server's own summary only confirms the 
 Declaring an incident from chat triggers a configured workflow: the channel and call bridge are created, roles assigned, a ticket and status-page update opened, the timeline populated automatically from events and pinned messages, and the retrospective generated from that timeline with action items pushed into the tracker. Services, teams and ownership come from a catalogue, so an incident attaches to the right owners without anyone choosing them.
 
 Reach for it when incident response must be repeatable across teams and you want the paperwork to happen without a human remembering it at three in the morning. The value is the recorded timeline and the follow-through rather than the declaration itself. Like everything in this category it detects nothing, competes closely with incident.io and FireHydrant on workflow ergonomics, and fails if declaring an incident feels expensive.
-
-### Runbook tooling
-**Short:** The category of tools holding diagnosis and mitigation guides, linked from each alert so the on-call has a first step.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-A runbook is the document an alert links to: what this alert means, what to check first, which dashboard and which query, the known causes, the mitigation and its blast radius, and who to escalate to. The tooling is whatever holds it addressably, whether a wiki, markdown in the repository beside the alert rule, or an executable runbook whose diagnostic steps are scripted and runnable from the incident channel.
-
-It matters because alerts fire at three in the morning to somebody who did not write the service, and an alert with no runbook link is a page that begins with reading source code. The cost is maintenance, since a runbook describing a system two rewrites ago is worse than none, which is the argument for keeping it next to the code and revising it after every incident that used it.
 
 ### SDK
 **Short:** The OpenTelemetry API/SDK split: libraries depend only on the stable API while the SDK and exporters stay swappable.
