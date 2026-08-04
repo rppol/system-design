@@ -8,7 +8,7 @@
 
 ## Intuition
 
-A single region — even a multi-AZ deployment — shares correlated failure domains: one control plane, one regional DNS resolver, one Aurora cluster, one set of regional service APIs (KMS, STS, S3 endpoints). AWS us-east-1 has had region-scoped control-plane outages (Dec 2021, Dec 2020, Feb 2017 S3) that took down resources across *every* AZ simultaneously. Multi-AZ buys you 99.99%; surviving a full region requires a second region that can serve production traffic.
+A single region — even a multi-AZ deployment — shares correlated failure domains: one control plane, one regional DNS resolver, one Aurora cluster, one set of regional service APIs (KMS, STS, S3 endpoints). AWS us-east-1 has had region-scoped control-plane outages (Oct 2025 DynamoDB DNS, Dec 2021, Dec 2020, Feb 2017 S3) that took down resources across *every* AZ simultaneously. Multi-AZ buys you 99.99%; surviving a full region requires a second region that can serve production traffic.
 
 **Mental model — three numbers govern everything:**
 
@@ -83,8 +83,7 @@ DynamoDB Global Tables: idempotency keys + sessions ≈ 8,000 writes/s × 400 by
 Inter-region data transfer ≈ **$0.02/GB** (us-east-1 → us-west-2).
 
 ```
-Aurora:   60 MB/s avg → 60 × 86,400 = 5.18 GB/s... no:
-          60 MB/s × 86,400 s/day = 5,184,000 MB/day = 5,184 GB/day = 5.18 TB/day
+Aurora:   60 MB/s × 86,400 s/day = 5,184,000 MB/day = 5,184 GB/day = 5.18 TB/day
           5,184 GB/day × $0.02 = $103.68/day → ~$3,110/month
 DynamoDB: 3.2 MB/s × 86,400 = 276,480 MB = 270 GB/day × $0.02 = $5.4/day → ~$162/mo
 S3 CRR:   ~330 GB/day × $0.02 = $6.6/day → ~$198/mo (+ replication request charges)
@@ -94,16 +93,18 @@ Cross-region replication transfer ≈ **$3,470/month**. Modest relative to the s
 
 ### Standby Capacity Cost (the real money)
 
-| Strategy | Standby footprint | Relative monthly compute cost |
+| Strategy | Standby footprint | Relative monthly **app-tier** compute cost |
 |----------|-------------------|-------------------------------|
 | Active-active | Full prod in *both* regions (each sized for 100% so either survives alone) | **~2.0x** |
 | Warm standby | Secondary at ~30% capacity, scales up on failover | ~1.3x |
 | Pilot light | Secondary: data replicating, app tier scaled to ~0, infra defined | ~1.1x |
 | Backup/restore | Snapshots only, rebuild from IaC | ~1.0x |
 
+These multipliers cover the **stateless app tier only** — the tier you can genuinely scale down. The database secondary cannot be scaled down the same way (it must be promotion-ready at the writer's instance class), and cross-region transfer is a new line item that has no single-region equivalent. The all-in premium is therefore higher than the app-tier multiplier suggests; §10 works it out end to end.
+
 For RTO < 5 min and RPO < 1s on a payments workload, **active-active or warm-standby** are the only viable tiers — pilot-light's ASG cold-start + DB-promotion blows the 5-minute budget. We choose **active-active reads + single-region writes (active-passive at the write layer)** — explained in §5.
 
-If full prod is ~$180K/month in one region, the standby region adds ~$150K/month (slightly less; both regions amortize shared data-transfer). DR is a **~$1.8M/year insurance premium** — the conversation with leadership is whether a 4-hour outage costs more than that. For a $50M/day payments business, a single 4-hour outage at peak ≈ **$8.3M of un-processed volume** + SLA penalties + reputational/regulatory cost. The premium pays for itself the first time it is used.
+The worked example in §10 prices the primary compute + database stack at ~$12K/month; the warm-standby secondary plus cross-region replication adds ~$9.7K–$11K/month on top of it, a **~$116K–$132K/year insurance premium**. The conversation with leadership is whether a region outage costs more than that. For a $50M/day payments business, a single 4-hour outage ≈ **$8.3M of un-processed volume** ($50M ÷ 24 h × 4 h) + SLA penalties + reputational/regulatory cost. The premium pays for itself the first time it is used.
 
 ### Failover Time Budget (must sum to < 5 min)
 
@@ -177,7 +178,7 @@ Route 53 steers healthy traffic to the primary and keeps the secondary standing 
 | Route 53 | Global DNS, health-check-driven failover | Anycast, 100% SLA; the steering layer |
 | ALB/NLB per region | L7/L4 ingress | Regional; health-checked by R53 |
 | EKS payments-svc | Stateless app tier | Active-active for reads; warm in secondary |
-| Aurora Global DB | Transactional ledger, 1 writer + replicated secondary | Managed cross-region failover ≈ 1 min |
+| Aurora Global DB | Transactional ledger, 1 writer + replicated secondary | Planned switchover (RPO 0) or managed unplanned failover ≈ 1 min |
 | DynamoDB Global Tables | Idempotency keys, sessions (multi-active) | Last-writer-wins; no promotion needed |
 | S3 + CRR | Receipts, KYC, settlement files | Async object replication |
 | Failover Controller | Orchestrates promotion + DNS flip + fencing | Lives outside both data regions |
@@ -193,7 +194,7 @@ Route 53 steers healthy traffic to the primary and keeps the secondary standing 
 ### Data Flow (failover)
 
 1. Route 53 health check on the primary ALB fails 3x → Route 53 stops returning us-east-1.
-2. The failover controller detects primary unhealthy, acquires the writer lock via a conditional DynamoDB write, triggers **Aurora Global DB managed failover** (us-west-2 secondary promoted to writer), and flips the Route 53 failover record to us-west-2.
+2. The failover controller detects primary unhealthy, acquires the writer lock via a conditional DynamoDB write, triggers an **Aurora Global DB managed failover** (`failover-global-cluster --allow-data-loss`, us-west-2 secondary promoted to writer), and flips the Route 53 failover record to us-west-2.
 3. Secondary app tier sees it now holds the lock → begins accepting writes against the newly-promoted local writer.
 4. Clients re-resolve DNS (TTL 10s) and reconnect to us-west-2.
 
@@ -203,7 +204,15 @@ Route 53 steers healthy traffic to the primary and keeps the secondary standing 
 
 ### 4.1 Data Replication Tier — Aurora Global DB + DynamoDB Global Tables
 
-Aurora Global Database replicates at the **storage layer** (the redo log), not via logical replication. This gives typical cross-region lag < 1s and decouples replication from the database engine's CPU. A "managed failover" promotes the secondary to a full standalone cluster with RPO 0 for committed transactions; an "unplanned/manual failover" (detach-and-promote) is used when the primary region is *unreachable* and accepts the small RPO of in-flight redo not yet shipped.
+Aurora Global Database replicates at the **storage layer** (the redo log), not via logical replication. This gives typical cross-region lag < 1s and decouples replication from the database engine's CPU. There are three ways to move write authority, and they are not interchangeable:
+
+| Operation | CLI | Requires | RPO |
+|-----------|-----|----------|-----|
+| **Switchover** (planned) | `switchover-global-cluster` | *All* clusters in the global database reachable — Aurora stops writes, drains outstanding redo, promotes the target, demotes the old primary | **0** |
+| **Managed failover** (unplanned) | `failover-global-cluster --allow-data-loss` | Primary impaired; the global cluster stays intact and the old primary rejoins as a secondary when it recovers | ~replication lag (seconds) |
+| **Detach-and-promote** (manual fallback) | `remove-from-global-cluster` then promote | Nothing — always available, but it destroys the global cluster and you rebuild it afterwards | ~replication lag (seconds) |
+
+We use switchover for drills and failback, managed failover for a real region loss, and keep detach-and-promote only as the break-glass path.
 
 ```mermaid
 flowchart LR
@@ -236,7 +245,7 @@ flowchart LR
     class SR frozen
 ```
 
-An unplanned (manual) failover promotes the secondary's readers directly, accepting whatever redo had not yet replicated; a managed failover instead drains in-flight redo first for RPO 0.
+An unplanned managed failover promotes the secondary directly, accepting whatever redo had not yet replicated; a switchover instead drains in-flight redo first for RPO 0.
 
 **Terraform — Aurora Global Database:**
 
@@ -244,7 +253,7 @@ An unplanned (manual) failover promotes the secondary's readers directly, accept
 resource "aws_rds_global_cluster" "payments" {
   global_cluster_identifier = "payments-global"
   engine                    = "aurora-postgresql"
-  engine_version            = "15.4"
+  engine_version            = "17.7"
   database_name             = "ledger"
   storage_encrypted         = true
   deletion_protection       = true
@@ -255,7 +264,7 @@ resource "aws_rds_cluster" "primary" {
   provider                  = aws.use1
   cluster_identifier        = "payments-use1"
   engine                    = "aurora-postgresql"
-  engine_version            = "15.4"
+  engine_version            = "17.7"
   global_cluster_identifier = aws_rds_global_cluster.payments.id
   master_username           = "app"
   manage_master_user_password = true
@@ -279,7 +288,7 @@ resource "aws_rds_cluster" "secondary" {
   provider                  = aws.usw2
   cluster_identifier        = "payments-usw2"
   engine                    = "aurora-postgresql"
-  engine_version            = "15.4"
+  engine_version            = "17.7"
   global_cluster_identifier = aws_rds_global_cluster.payments.id
   db_subnet_group_name      = aws_db_subnet_group.usw2.name
   vpc_security_group_ids    = [aws_security_group.aurora_usw2.id]
@@ -478,7 +487,7 @@ stateDiagram-v2
     class Verify train
 ```
 
-Only the Fence to Promote transition is destructive; Decision 3 in §5 gates it behind a 90-second auto-promote-or-on-call-confirmation window so a transient partition can't trigger an unnecessary failover.
+Only the Fence to Promote transition is destructive; Decision 3 in §5 gates it behind a 45-second auto-promote-or-on-call-confirmation window so a transient partition can't trigger an unnecessary failover. That 45s is exactly the Detection (30s) + Orchestration (15s) slice of the §2 budget — the gate has to live *inside* the budget, not on top of it.
 
 **Go — the split-brain fence (single-writer guarantee):**
 
@@ -633,13 +642,13 @@ For the Kubernetes-side hardening of the warm standby tier (pod-disruption budge
 
 - **Alternatives:** synchronous cross-region commit (e.g., a stretched quorum).
 - **Rationale:** Synchronous cross-region commit adds the full 60–70 ms RTT to *every* write — at 20K writes/s that destroys throughput and tail latency, and a network blip stalls all commits. Async storage replication keeps p99 lag < 1s, which meets RPO < 1s.
-- **Consequences:** A hard region loss can lose up to ~1s of in-flight redo (the RPO we accepted). For the rare case where RPO must be truly 0, only a managed (graceful) failover gives it; an unplanned failover accepts the lag-bounded loss.
+- **Consequences:** A hard region loss can lose up to ~1s of in-flight redo (the RPO we accepted). For the rare case where RPO must be truly 0, only a graceful switchover gives it, and only while both regions are still reachable; an unplanned failover accepts the lag-bounded loss.
 
 ### Decision 3 — Automated failover with a human-confirmed promotion gate
 
 - **Alternatives:** fully automatic promotion; fully manual.
-- **Rationale:** Fully automatic risks promoting on a false positive (a transient network partition) and causing an unnecessary failover + the failback cost. Fully manual blows the 5-min RTO waiting for a human to wake up. We automate detection, fencing, DNS, and *read* failover instantly, and gate only the **destructive writer-promotion** behind either (a) auto-promote after 90s of sustained failure, or (b) a one-click on-call confirmation — whichever fires first. The fence guarantees correctness either way.
-- **Consequences:** Slightly higher RTO in the human-gate path; near-zero risk of an avoidable split-brain.
+- **Rationale:** Fully automatic risks promoting on a false positive (a transient network partition) and causing an unnecessary failover + the failback cost. Fully manual blows the 5-min RTO waiting for a human to wake up. We automate detection, fencing, DNS, and *read* failover instantly, and gate only the **destructive writer-promotion** behind either (a) auto-promote at 45s of sustained failure, or (b) a one-click on-call confirmation — whichever fires first. The fence guarantees correctness either way, and the 45s ceiling is the Detection + Orchestration slice of the §2 budget, so the gate consumes no slack.
+- **Consequences:** Up to 45s of deliberate delay before the irreversible step (the human path can only make it *faster*, never slower); near-zero risk of an avoidable split-brain. Note that 45s is also the point at which the fence's 30s lease-staleness condition is comfortably satisfied — the two thresholds are deliberately compatible.
 
 ### Decision 4 — DNS-based failover, with Global Accelerator as an evolution path
 
@@ -695,9 +704,9 @@ Our build is **warm-standby app + active-active reads + active-passive single-wr
 
 **Stripe — cell-based, multi-region with strict idempotency.** Stripe's API is built around idempotency keys (exactly our DynamoDB pattern) so that retries across a failover never double-charge. Their infrastructure isolates failure domains into cells and replicates state such that a zonal/regional event degrades rather than drops payment processing. The idempotency-key-as-first-class-citizen design is what makes safe client retries during a cutover possible — without it, a region failover causes duplicate charges.
 
-**Shopify — pods and regional resiliency for Black Friday scale.** Shopify shards merchants into "pods" (self-contained units of MySQL + app) and can move a pod's traffic between regions. During BFCM they process ~$11B+ and rely on the ability to drain a region/datacenter. Their published work on database resiliency emphasizes load-shedding and the ability to fail a pod over without taking down unrelated merchants — DR at the *shard* granularity rather than all-or-nothing.
+**Shopify — pods and regional resiliency for Black Friday scale.** Shopify shards merchants into "pods" (self-contained units of MySQL + app) and can move a pod's traffic between regions. During BFCM 2025 they processed **$14.6B** of GMV across the weekend, peaking at $5.1M/minute, and rely on the ability to drain a region/datacenter. Their published work on database resiliency emphasizes load-shedding and the ability to fail a pod over without taking down unrelated merchants — DR at the *shard* granularity rather than all-or-nothing.
 
-**AWS's own services (DynamoDB Global Tables, Aurora Global DB).** AWS dogfoods cross-region replication primitives we use. The Dec 2021 us-east-1 outage (a network device congestion event in the internal network) is the canonical reason payments shops keep a second region: customers with *only* us-east-1 were down for hours; those with active secondaries failed over.
+**AWS's own services (DynamoDB Global Tables, Aurora Global DB).** AWS dogfoods cross-region replication primitives we use. The **October 20, 2025 us-east-1 outage** is the current canonical reason payments shops keep a second region: a latent race condition in DynamoDB's automated DNS management left the regional DynamoDB endpoint unresolvable, and the dependency cascade (EC2 launches, NLB, Lambda, ECS, and 100+ other services) ran from 11:48 PM PDT Oct 19 to 2:20 PM PDT Oct 20. Customers pinned to us-east-1 were down for most of a business day; those with an exercised secondary failed over.
 
 **A tier-1 bank (anonymized) — synchronous metro + async geo.** Large banks commonly run **synchronous replication within a metro** (two datacenters < 100 km, RTT < 2 ms, RPO 0) and **asynchronous replication to a geo-distant DR site** (RPO seconds). This two-tier model — sync for the common datacenter loss, async for the rare regional disaster — is how regulated finance squares RPO-0 ambitions with the physics of cross-continent latency.
 
@@ -710,7 +719,7 @@ Our build is **warm-standby app + active-active reads + active-passive single-wr
 | Replication model | Storage-layer redo, async | Multi-active, async (LWW) | Multi-region, tunable consistency | Synchronous (TrueTime), strong global | Streaming/logical, async |
 | Typical cross-region lag | < 1s | ~1s | ms–s (consistency-dependent) | strongly consistent (no "lag") | seconds–minutes |
 | Writer model | Single writer + promotable secondary | Multi-writer (LWW) | Multi-region writes | Single logical writer, global txns | Single primary + replicas |
-| Failover | Managed (~1 min) / unplanned | Automatic (no promotion) | Automatic | Automatic (managed) | Manual / Patroni / pg_auto_failover |
+| Failover | Switchover (RPO 0) or managed failover (~1 min) | Automatic (no promotion) | Automatic | Automatic (managed) | Manual / Patroni / pg_auto_failover |
 | RPO on region loss | ~lag (sub-second) | ~lag | tunable | 0 | lag (often larger) |
 | Operational burden | Low (managed) | Lowest (managed) | Low (managed) | Low (managed) | **High** (you own failover) |
 | Best for | Financial ledger (our pick) | Idempotency/session KV | Globally-distributed apps | Strong-global SQL | Full control / cost / portability |
@@ -771,12 +780,15 @@ The leading indicator of RPO risk is replication lag; the leading indicator of R
 groups:
   - name: dr_replication
     rules:
-      - alert: AuroraGlobalReplicaLagHigh
-        expr: aws_rds_aurora_global_db_replication_lag_milliseconds > 800
+      - alert: AuroraGlobalRPOLagHigh
+        # CloudWatch AuroraGlobalDBRPOLag — the recovery-point lag in ms, i.e. exactly
+        # how much committed data an unplanned failover would lose right now.
+        # AuroraGlobalDBReplicationLag is the sibling metric; RPOLag is the one to page on.
+        expr: aws_rds_aurora_global_db_rpo_lag_maximum > 800
         for: 30s
         labels: { severity: page, team: payments-sre }
         annotations:
-          summary: "Aurora global replication lag {{ $value }}ms (RPO budget 1000ms)"
+          summary: "Aurora global RPO lag {{ $value }}ms (RPO budget 1000ms)"
       - alert: DynamoGlobalTableReplLagHigh
         expr: aws_dynamodb_replication_latency_milliseconds:p99 > 1000
         for: 1m
@@ -794,7 +806,7 @@ OTel spans tag every write with `region`, `writer_generation` (the fencing token
 **Runbook 1 — Region Failover (primary us-east-1 unhealthy).**
 Symptom: Route 53 primary health check failing 3x; `payments-svc` 5xx spiking in us-east-1.
 Diagnosis: confirm it is *regional* (multiple AZs/services affected), not a single bad deploy — check AWS Health Dashboard + multi-service error correlation.
-Mitigation: controller auto-fences and promotes us-west-2; on-call confirms the writer-promotion gate within 90s if not auto-fired. Verify `active_write_region=usw2` in SSM.
+Mitigation: controller auto-fences and promotes us-west-2 — the gate auto-fires at 45s of sustained failure, and on-call can confirm sooner to skip the wait. Verify `active_write_region=usw2` in SSM.
 Resolution: confirm writes succeeding in us-west-2, replication-lag metric resets, customer error rate recovers. Open a postmortem; do **not** fail back until the primary region is fully healthy.
 
 **Runbook 2 — Split-Brain Suspected (both regions claim writer).**
@@ -804,7 +816,7 @@ Mitigation: immediately revoke the stale generation — the DB rejects writes ca
 Resolution: reconcile any writes that slipped through using the fencing-token timeline; the token ordering tells you which writes are authoritative. Root-cause the dual-promotion (usually a VM pause + an over-eager auto-promote).
 
 **Runbook 3 — Replication Lag Spike (RPO at risk).**
-Symptom: `AuroraGlobalReplicaLagHigh` firing, lag climbing toward / past 1s.
+Symptom: `AuroraGlobalRPOLagHigh` firing, `AuroraGlobalDBRPOLag` climbing toward / past 1s.
 Diagnosis: check for a write burst (batch settlement), cross-region network degradation, or undersized secondary readers (replication apply is CPU-bound on the secondary).
 Mitigation: throttle/queue non-critical writes; scale up secondary reader instance class; if lag is unbounded, declare RPO-at-risk and consider draining writes until it recovers.
 Resolution: lag back under 800ms; if the spike was capacity, right-size the secondary readers to match the writer (they must be promotion-ready, never undersized).
@@ -812,8 +824,8 @@ Resolution: lag back under 800ms; if the spike was capacity, right-size the seco
 **Runbook 4 — Failback to Primary (after us-east-1 recovers).**
 Symptom: primary region healthy again; running on secondary.
 Diagnosis: confirm the original primary has fully recovered, rejoined the global cluster as a *secondary*, and replication has caught up (lag ≈ 0).
-Mitigation: schedule a *graceful, managed* failback during low traffic — never an emergency failback. Re-fence: `acquireWriteAuthority(from=usw2, to=use1)`.
-Resolution: promote us-east-1 back to writer via managed failover (RPO 0), flip Route 53 + SSM, verify, then scale us-west-2 back to warm-standby footprint. Document the round-trip RTO.
+Mitigation: schedule a *graceful switchover* during low traffic — never an emergency failback. Re-fence: `acquireWriteAuthority(from=usw2, to=use1)`.
+Resolution: promote us-east-1 back to writer with `switchover-global-cluster` (RPO 0 — it needs both regions healthy, which is exactly the failback precondition), flip Route 53 + SSM, verify, then scale us-west-2 back to warm-standby footprint. Document the round-trip RTO.
 
 ---
 
@@ -823,7 +835,7 @@ Resolution: promote us-east-1 back to writer via managed failover (RPO 0), flip 
 
 **2. 1-hour DNS TTL turned a 90-second failover into a 55-minute outage.** A SaaS provider's Aurora failed over in 90s, but their A-record TTL was 3600s with aggressive client-side resolver caching. Roughly 40% of traffic kept hitting the dead region for ~55 minutes. Estimated impact: **~$420K** in failed transactions over the window. Fix: ALIAS records + 10s TTL + Route 53 health-check failover (our §4.2 FIX).
 
-**3. AWS us-east-1 Dec 2021 — single-region shops down for hours.** The Dec 7, 2021 us-east-1 networking event impaired the internal network and the API control plane region-wide. Companies with us-east-1-only deployments saw multi-hour outages; the cost across the industry ran into the **tens of millions**. The teams that failed over cleanly were the ones who had *practiced* it — paper DR plans largely failed because untested automation broke on first real use. (See cross-region network-path considerations in [`cross_cutting/multi_cluster_networking.md`](cross_cutting/multi_cluster_networking.md).)
+**3. AWS us-east-1 Oct 2025 — single-region shops down for most of a day.** A latent race condition in DynamoDB's automated DNS management emptied the DNS record for the regional DynamoDB endpoint at 11:48 PM PDT on Oct 19, 2025. DynamoDB itself recovered by 2:40 AM, but the dependency cascade did not: EC2 instance launches, then Network Load Balancer health checks (5:30 AM–2:09 PM), then everything sitting on top of them — Lambda, ECS, Connect, and 100+ services — with full recovery only at 2:20 PM PDT on Oct 20. Companies with us-east-1-only deployments were down across the whole window; one insurance-industry estimate put insured losses alone at up to **$581M**. The teams that failed over cleanly were the ones who had *practiced* it — paper DR plans largely failed because untested automation broke on first real use. (See cross-region network-path considerations in [`cross_cutting/multi_cluster_networking.md`](cross_cutting/multi_cluster_networking.md).)
 
 **4. Split-brain double-charged customers for a week of reconciliation.** A payments startup with naive active-active (no fencing token) had a network partition where both regions briefly accepted writes. ~**11,000 transactions** were duplicated; customers were double-charged. Reconciliation + refunds + a regulatory inquiry consumed an engineering team for **~2 weeks** and cost real trust. Lesson: single-writer + fencing tokens are non-negotiable for money.
 
@@ -865,9 +877,9 @@ Primary fleet: payments-svc on **24 × m6i.2xlarge** (8 vCPU/32 GB) EKS nodes, A
 | Aurora instances | 3 × db.r6g.4xlarge (~$1,750/mo ea) ≈ **$5,250/mo** | 2 × db.r6g.4xlarge (promotion-ready) ≈ **$3,500/mo** | Secondary readers sized = writer |
 | Aurora storage + I/O | shared global storage | replicated | metered once + replication |
 | Cross-region transfer | — | ~**$3,470/mo** (from §2) | Aurora + DynamoDB + S3 CRR |
-| DynamoDB Global Table | on-demand | replica writes (2× WCU billed) | idempotency/sessions |
+| DynamoDB Global Table | on-demand | billed as replicated write request units (rWRU) in each replica region | idempotency/sessions |
 
-Rough monthly DR overhead of the *secondary* + replication ≈ **$2,240 + $3,500 + $3,470 + warm-pool/DDB ≈ $9,700–$11,000/mo** on top of a ~$12K/mo primary stack — i.e. the DR premium is **~0.8–0.9x** the primary for warm-standby (vs ~2x for full active-active). Annualized ≈ **$120K–$132K/year**, against a single-4-hour-peak-outage exposure of **~$8.3M**. The insurance ratio is ~60:1 in favor of paying for DR.
+Rough monthly DR overhead of the *secondary* + replication ≈ **$2,240 + $3,500 + $3,470 + warm-pool/DDB ≈ $9,700–$11,000/mo** on top of a ~$12K/mo primary stack ($6,720 app + $5,250 Aurora) — i.e. the all-in DR premium is **~0.8–0.9x** the primary for warm-standby (vs ~1.0x premium, 2.0x total, for full active-active). Note this is *higher* than the ~1.3x app-tier multiplier in §2, and the two are not in conflict: the app tier really does run at 0.33x ($2,240 / $6,720), but the Aurora secondary has to sit at the writer's instance class to stay promotion-ready (0.67x) and cross-region transfer is a line item with no single-region equivalent. Annualized ≈ **$116K–$132K/year**, against a 4-hour-outage exposure of **~$8.3M**. The insurance ratio is ~65:1 in favor of paying for DR.
 
 Sizing rule of thumb: the secondary's Aurora readers must equal the primary writer's instance class (so promotion doesn't degrade), and the warm app tier must be able to reach 100% within the warmup portion of the RTO budget (90s here) — which means pre-pulled images and an EC2 warm pool, not a cold ASG. Kubernetes-side specifics in [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
 
@@ -888,7 +900,7 @@ Two layers: a single-writer lock (strongly-consistent conditional write naming t
 ~30s health-check detection (3 failures × 10s), ~15s orchestration/fencing, ~10s DNS TTL + ~30s resolver propagation, ~60s Aurora managed writer promotion, ~90s warm-standby app warmup, ~30s client reconnect/backoff — ~4m25s with ~35s slack. The biggest levers are making reads active-active (so only the writer is on the critical path), keeping the standby warm (so warmup is 90s not 5 min), and short DNS TTL with ALIAS records. If we needed sub-3-min, we'd move to Global Accelerator to remove DNS from the path.
 
 **Q5: Why async replication instead of synchronous for RPO < 1s?**
-Synchronous cross-region commit adds the full ~60–70 ms RTT to every write; at 20K writes/s that destroys throughput and tail latency, and any network blip stalls all commits — it trades availability for RPO 0. Async storage-layer replication (Aurora Global DB) keeps p99 lag under 1s, which *meets* RPO < 1s without the latency tax. We accept losing up to ~1s of in-flight redo on a hard, unplanned region loss; for a planned/managed failover we get RPO 0 anyway. Synchronous only makes sense within a metro (RTT < 2ms), which is the bank two-tier pattern.
+Synchronous cross-region commit adds the full ~60–70 ms RTT to every write; at 20K writes/s that destroys throughput and tail latency, and any network blip stalls all commits — it trades availability for RPO 0. Async storage-layer replication (Aurora Global DB) keeps p99 lag under 1s, which *meets* RPO < 1s without the latency tax. We accept losing up to ~1s of in-flight redo on a hard, unplanned region loss (`failover-global-cluster --allow-data-loss`); for a planned switchover we get RPO 0 anyway. Synchronous only makes sense within a metro (RTT < 2ms), which is the bank two-tier pattern.
 
 **Q6: How does DNS failover actually work, and what are its limits?**
 Route 53 runs health checks (HTTPS GET /healthz, 10s interval, 3-failure threshold) from multiple vantage points; on failure it stops returning the unhealthy region's ALIAS record and serves the secondary per the failover routing policy. Limits: client/resolver DNS caching can ignore your TTL, so a long tail of traffic sticks to the dead region for minutes; ALIAS records (resolved by Route 53, not cached as a raw IP) and a 10s TTL minimize this. To remove DNS from the RTO entirely you use anycast / Global Accelerator, which re-steers at the network edge in seconds regardless of client caching.
@@ -903,10 +915,10 @@ Replicate everything out-of-band the app needs to function: secrets (Secrets Man
 Plot your business's RTO/RPO requirement against cost tolerance. Backup/restore (~1.0x cost, hours RTO) for non-critical; pilot light (~1.1x, 10–30 min) for important-but-tolerant; warm standby (~1.3x, 1–10 min) for critical; active-active (~2x+, seconds) for the highest tier. For payments at RTO < 5 min / RPO < 1s, pilot light's cold start disqualifies it, so warm standby is the floor. The decision is fundamentally: does a region-outage cost more than the standby premium? For a $50M/day business, yes — overwhelmingly.
 
 **Q10: Why automate failover but gate the writer promotion behind confirmation?**
-Detection, fencing, DNS, and read failover are safe to fully automate — they're reversible and have no correctness risk. Writer promotion is destructive and irreversible-ish (it changes who owns the money ledger), and a false positive (transient partition) would cause an unnecessary failover plus a costly failback. So we auto-promote after 90s of sustained, multi-signal failure *or* on one-click on-call confirmation, whichever fires first, with the fencing token guaranteeing correctness either way. This balances "don't wait for a human" against "don't promote on a network blip."
+Detection, fencing, DNS, and read failover are safe to fully automate — they're reversible and have no correctness risk. Writer promotion is destructive and irreversible-ish (it changes who owns the money ledger), and a false positive (transient partition) would cause an unnecessary failover plus a costly failback. So we auto-promote at 45s of sustained, multi-signal failure *or* on one-click on-call confirmation, whichever fires first, with the fencing token guaranteeing correctness either way — and 45s is the detection + orchestration slice of the RTO budget, so the gate does not eat into it. This balances "don't wait for a human" against "don't promote on a network blip."
 
 **Q11: How do you do a safe failback after the primary recovers?**
-Failback is a scheduled, graceful operation, never an emergency reflex. First confirm the original primary has fully recovered and rejoined the global cluster as a secondary with replication caught up (lag ≈ 0). Then, during low traffic, re-fence write authority (from=secondary, to=primary), perform a *managed* failover (RPO 0), flip Route 53 + the SSM active-region flag, verify writes succeed, and only then scale the other region back to warm-standby footprint. The classic mistake is failing back at peak before replication caught up, causing a second outage.
+Failback is a scheduled, graceful operation, never an emergency reflex. First confirm the original primary has fully recovered and rejoined the global cluster as a secondary with replication caught up (lag ≈ 0). Then, during low traffic, re-fence write authority (from=secondary, to=primary), perform a *switchover* (`switchover-global-cluster`, RPO 0 — it requires every cluster in the global database to be reachable, which failback satisfies by definition), flip Route 53 + the SSM active-region flag, verify writes succeed, and only then scale the other region back to warm-standby footprint. The classic mistake is failing back at peak before replication caught up, causing a second outage.
 
 **Q12: How do you monitor whether your DR is actually healthy day-to-day?**
-The two leading indicators are replication lag (RPO risk) and health-check stability (RTO/false-failover risk). Alert on Aurora global replica lag > 800ms (before it breaches the 1s RPO) and on DynamoDB replication latency; alert on health-check flapping (which signals false-failover risk). Tag every write with region and fencing-generation in OTel so a failover's blast radius is queryable, and keep metric cardinality bounded (no per-customer labels). And the ultimate health check is the monthly game-day that measures real RTO/RPO — green dashboards without a tested failover are a false sense of security.
+The two leading indicators are replication lag (RPO risk) and health-check stability (RTO/false-failover risk). Alert on `AuroraGlobalDBRPOLag` > 800ms (before it breaches the 1s RPO) and on DynamoDB replication latency; alert on health-check flapping (which signals false-failover risk). Tag every write with region and fencing-generation in OTel so a failover's blast radius is queryable, and keep metric cardinality bounded (no per-customer labels). And the ultimate health check is the monthly game-day that measures real RTO/RPO — green dashboards without a tested failover are a false sense of security.

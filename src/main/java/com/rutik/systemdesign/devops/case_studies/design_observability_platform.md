@@ -17,11 +17,11 @@ This platform exists because at 2000 engineers and ~4000 microservices, no singl
 ### Functional Requirements
 
 - **Metrics ingestion**: accept Prometheus `remote_write` and OTLP metrics from ~4000 services across ~50 Kubernetes clusters. Support PromQL queries, recording rules, and alerting rules.
-- **Log ingestion**: accept structured (JSON) and unstructured logs via OTLP, Fluent Bit, and Promtail/Loki push API. Support LogQL queries with label filtering and line-pattern matching.
+- **Log ingestion**: accept structured (JSON) and unstructured logs via OTLP, Fluent Bit, and the Grafana Alloy / Loki push API. Support LogQL queries with label filtering and line-pattern matching.
 - **Trace ingestion**: accept OTLP/gRPC and OTLP/HTTP spans. Support trace-by-ID lookup, service-graph generation, and trace search by attributes (latency, status, service).
 - **Correlation**: a single click from a metric spike to the logs of that pod to the exemplar trace that caused the latency (exemplars link metrics → traces; `trace_id` in logs links logs → traces).
 - **Multi-tenancy**: hard isolation per team/tenant — separate ingestion limits, query quotas, retention, and RBAC. ~120 tenants.
-- **Dashboards & alerting**: Grafana for visualization; Alertmanager for routing, deduplication, silencing, and on-call paging (PagerDuty/Opsgenie).
+- **Dashboards & alerting**: Grafana for visualization; Alertmanager for routing, deduplication, silencing, and on-call paging (PagerDuty).
 - **Self-service**: teams onboard via GitOps — a tenant manifest sets limits, retention, and alert routes without platform-team intervention.
 
 ### Non-Functional Requirements
@@ -29,13 +29,13 @@ This platform exists because at 2000 engineers and ~4000 microservices, no singl
 | Dimension | Target |
 |-----------|--------|
 | Active metric series | 10M active series steady-state, burst to 15M |
-| Metric ingest rate | 5M samples/sec sustained |
-| Log volume | 20 TB/day raw (replicated 3x in object store) |
+| Metric ingest rate | ~670K samples/sec sustained (10M series ÷ a 15s scrape interval), ~1M/sec at the 15M burst |
+| Log volume | 20 TB/day raw (RF=3 across ingesters; chunks deduplicate to ~1 copy in object storage) |
 | Trace volume | 2M spans/sec pre-sampling; ~100K spans/sec stored (5% effective) |
 | Query latency | p99 < 2s for dashboard PromQL (1h range, ~20 series); p99 < 5s for LogQL grep over 1h |
 | Ingest availability | 99.9% (cannot lose telemetry during a partial AZ outage) |
 | Query availability | 99.5% (read path may degrade before write path) |
-| Metric retention | 15 days raw at full resolution; **13 months** downsampled (5m) for SLO/capacity |
+| Metric retention | 15 days raw at full resolution; **13 months** of recording-rule aggregates for SLO/capacity (Mimir has no downsampling — see §5.1) |
 | Log retention | 30 days hot-queryable; 90 days cold in object store |
 | Trace retention | 7 days |
 | Ingest-to-queryable lag | < 30s for metrics, < 60s for logs/traces |
@@ -54,50 +54,56 @@ See [`../observability_metrics_prometheus/observability_metrics_prometheus.md`](
 
 ## 2. Scale Estimation
 
-All numbers derived from the §1 targets. The point of this section is that the *metrics RAM* and *log object-storage* lines dominate the bill.
+All numbers derived from the §1 targets. The point of this section is that the *metrics ingester fleet* and the *log object-storage* line dominate the bill.
 
 ### Metrics: memory and ingest
 
-A Prometheus/Mimir/Thanos head series costs roughly **2 KB of RAM** (sample buffer + label set + index references; ~3.5 KB under heavy churn).
+Sizing comes straight from Grafana's published Mimir capacity ratios: an ingester needs **1 core and 2.5 GB per 300,000 in-memory series**, and Grafana recommends capping an ingester at **1.5M series**. (The often-quoted "2 KB per head series" is the bare label-set + sample-buffer cost in Prometheus; Mimir's real footprint is ~4x that once the WAL, mmapped head chunks, out-of-order buffers and Go GC headroom are counted, which is why you size from the published ratio and not from the label set.)
 
 ```
 Active series:            10,000,000
-RAM per series:           2 KB
-Head RAM (1 replica):     10M × 2 KB           = 20 GB
 Replication factor:       3  (Mimir RF=3)
-Total head RAM:           20 GB × 3            = 60 GB across ingesters
+Series held in memory:    10M × 3                    = 30M
+Ingester RAM (aggregate): 30M / 300K × 2.5 GB        = 250 GB
+Ingester CPU (aggregate): 30M / 300K × 1 core        = 100 cores
 ```
 
-But you never run ingesters at 100%. Target 60% headroom for churn/compaction:
+At Grafana's 1.5M-series-per-ingester ceiling:
 
 ```
-Provisioned ingester RAM: 60 GB / 0.6           = ~100 GB
-Per ingester (16 vCPU/64 GB, ~1.5M series safe): 
-  ingesters needed = (10M × RF3) / 1.5M series  = 20 ingesters
+ingesters needed        = 30M / 1.5M                 = 20 ingesters
+Per ingester at the cap = 12.5 GB, 5 cores
+Instance: r6i.2xlarge (8 vCPU / 64 GiB)
+  -> CPU is the binding constraint: 100 cores needed / 160 provisioned = ~62%
+  -> RAM sits ~5x over the steady-state need, which is the headroom that
+     absorbs churn, compaction spikes and GC without an OOM
 ```
 
 Ingest byte rate (compressed TSDB, ~1.3 bytes/sample on disk; in-flight remote_write ~3.5 bytes/sample wire):
 
 ```
-Samples/sec:              5,000,000
+Samples/sec:              10M series / 15s scrape     = ~670,000 samples/s
 Wire bytes/sample:        ~3.5 B (Snappy-compressed protobuf)
-Ingest wire throughput:   5M × 3.5 B            = 17.5 MB/s × RF3 = ~52 MB/s
-On-disk compressed:       5M × 1.3 B × 86400    = ~561 GB/day raw blocks (pre-RF, pre-dedup)
+Ingest wire throughput:   670K × 3.5 B                = 2.3 MB/s × RF3 = ~7 MB/s
+On-disk compressed:       670K × 1.3 B × 86400        = ~75 GB/day raw blocks (post-dedup)
 ```
+
+The samples/sec figure is *not* a free parameter — it is `active_series ÷ scrape_interval`. Quoting a sample rate that does not divide out of the series count is the most common self-inconsistency in an observability capacity plan.
 
 ### Metrics: long-term object storage (13 months)
 
-After compaction + 5m downsampling for the 13-month SLO tier, the long-term footprint shrinks dramatically because downsampling drops raw resolution:
+**Mimir does not implement Thanos-style downsampling** — the compactor merges, deduplicates replicas, and applies per-tenant retention, and that is all. Grafana's own guidance for shrinking the long-term tier is recording rules plus retention limits, so the 13-month SLO tier here is a small set of pre-aggregated series written to a separate long-term tenant whose `compactor_blocks_retention_period` is 13 months, while the raw high-cardinality tenant keeps 15 days.
 
 ```
-Raw 15-day tier (compacted):   ~561 GB/day × 15  = ~8.4 TB
-5m downsampled 13-month tier:  raw/30 (12 datapoints/hr vs 360)
-                               ~561 GB/day / 30 × 395 days ≈ 7.4 TB
-Total metric object storage:   ~16 TB
-S3 Standard cost:              16 TB × $0.023/GB  = ~$377/month
+Raw 15-day tier (compacted):   ~75 GB/day × 15        = ~1.1 TB
+13-month SLO tier: ~5,000 recording-rule series at 1m resolution
+                   5,000 × 1,440 samples/day × 1.3 B  = ~9 MB/day
+                   ~9 MB/day × 395 days               = ~3.6 GB
+Total metric object storage:   ~1.1 TB
+S3 Standard cost:              1,100 GB × $0.023/GB   = ~$26/month
 ```
 
-Object storage for metrics is cheap. The expensive resource is **ingester RAM** (the 20× r6i instances), not storage.
+Object storage for metrics is almost free at this scale. The expensive resource is the **ingester fleet** (the 20× r6i instances), sized by in-memory series — not storage.
 
 ### Logs: the dominant storage line
 
@@ -114,7 +120,7 @@ S3 cost (60 TB Standard + 120 TB IA):
    ≈ $2,880/month
 ```
 
-Logs are ~8x the storage cost of metrics. Index is tiny because Loki indexes only labels, not log lines (~1-2% of chunk size → ~2-4 GB/day index in object store).
+Logs are two orders of magnitude more expensive to store than metrics ($2,880 vs $26). Index is tiny because Loki indexes only labels, not log lines (~1-2% of chunk size → ~2-4 GB/day index in object store).
 
 ### Traces: sampling is everything
 
@@ -133,16 +139,16 @@ S3 cost:                  18 TB × $0.023          = ~$414/month
 
 | Resource | Monthly |
 |----------|---------|
-| Metric object storage (16 TB) | ~$377 |
+| Metric object storage (1.1 TB) | ~$26 |
 | Log object storage (180 TB tiered) | ~$2,880 |
 | Trace object storage (18 TB) | ~$414 |
 | 20 metric ingesters (r6i.2xlarge ~$0.50/hr) | ~$7,300 |
 | Loki ingesters/distributors (~12 × m6i.2xlarge) | ~$3,300 |
 | OTel collector fleet (~30 c6i.xlarge gateways) | ~$3,700 |
 | Queriers + store-gateways (~25 mixed) | ~$5,500 |
-| **Total order-of-magnitude** | **~$24K/month** |
+| **Total order-of-magnitude** | **~$23K/month** |
 
-The lesson: **compute (ingesters + collectors + queriers) is ~85% of the bill, object storage ~15%.** Cardinality control reduces ingester count, which is where the savings are. See [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
+The lesson: **compute (ingesters + collectors + queriers) is ~86% of the bill ($19.8K), object storage ~14% ($3.3K) — and log chunks are 87% of that storage.** Cardinality control reduces ingester count, which is where the savings are. See [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
 
 ---
 
@@ -196,7 +202,7 @@ flowchart TD
     lq --> grafana
     tq --> grafana
 
-    grafana -->|"exemplars + trace_id<br/>deep-links pillars"| am("Alertmanager<br/>HA gossip cluster")
+    grafana -->|"firing alerts<br/>(exemplars + trace_id<br/>deep-link the pillars)"| am("Alertmanager<br/>HA gossip cluster")
     am -->|"dedup / silence / route"| page(["PagerDuty / Slack"])
 
     class svc io
@@ -219,7 +225,7 @@ flowchart TD
 | OTel collector (gateway) | Trace-ID-consistent routing + tail sampling | Stateful (in-flight trace assembly window) |
 | Mimir distributor | Validate, dedup, hash-ring shard, replicate RF=3 | Stateless |
 | Mimir ingester | TSDB head, 2h block build, WAL | Stateful (replicated) |
-| Mimir compactor | Compact blocks, deduplicate, downsample to 5m | Stateless (singleton per tenant shard) |
+| Mimir compactor | Compact blocks, deduplicate the RF=3 replicas, apply per-tenant retention (no downsampling — Mimir has none) | Stateless (singleton per tenant shard) |
 | Mimir store-gateway | Serve blocks from S3 with index-header cache | Stateful (cache) |
 | Loki distributor/ingester/compactor | Same shape for logs; chunk = compressed log stream | Stateful ingesters |
 | Tempo distributor/ingester/compactor | Trace span storage; block per tenant | Stateful ingesters |
@@ -234,7 +240,7 @@ flowchart TD
 3. The gateway runs **tail sampling** (decide *after* the trace completes), then fans out: metrics → Mimir, logs → Loki, traces → Tempo.
 4. Each backend **distributor** validates, applies per-tenant limits, hashes onto a ring, and replicates RF=3 to **ingesters**.
 5. Ingesters build in-memory structures (TSDB head / log chunks / trace blocks), persist a WAL, and **flush to S3** every ~2h (metrics) or on chunk-full (logs).
-6. **Compactors** merge, deduplicate replicas, and downsample.
+6. **Compactors** merge blocks, deduplicate the RF=3 replicas, and enforce per-tenant retention.
 7. Reads go through a **query-frontend** (split, cache, queue) to **queriers** + **store-gateways** that fetch recent data from ingesters and historical from S3.
 8. **Grafana** unifies all three; exemplars embed `trace_id` in metric scrapes so a latency spike deep-links to the trace and its logs.
 
@@ -318,8 +324,8 @@ processors:
     spike_limit_percentage: 25
   tail_sampling:
     decision_wait: 30s          # buffer window: wait for the whole trace
-    num_traces: 200000          # in-flight trace cap (bounded memory)
-    expected_new_traces_per_sec: 50000
+    num_traces: 200000          # in-flight trace cap per gateway (bounded memory)
+    expected_new_traces_per_sec: 5000   # ~100K traces/s spread over ~30 gateways
     policies:
       - name: keep-errors
         type: status_code
@@ -355,10 +361,10 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    rw(["remote_write<br/>5M samples/s<br/>Snappy proto"]) --> dist("distributor<br/>validate + limits")
+    rw(["remote_write<br/>670K samples/s<br/>Snappy proto"]) --> dist("distributor<br/>validate + limits")
     dist -->|"hash(tenant+labels)<br/>ring shard RF=3"| ing("ingester × 20<br/>TSDB head + WAL fsync")
     ing -->|"flush block<br/>every 2h"| s3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>blocks", pos: "b", h: 44 }
-    s3 -->|"read"| comp(("compactor<br/>merge / dedup /<br/>downsample"))
+    s3 -->|"read"| comp(("compactor<br/>merge / dedup /<br/>retention"))
     comp -->|"write back"| s3
     s3 --> sg("store-gateway<br/>index-header cache")
     sg --> q(["query"])
@@ -371,7 +377,7 @@ flowchart LR
     class q io
 ```
 
-*Distributors hash `tenant+labels` onto the ring and replicate RF=3 to ingesters; the compactor merges, deduplicates, and downsamples blocks already sitting in S3 before store-gateways serve queries.*
+*Distributors hash `tenant+labels` onto the ring and replicate RF=3 to ingesters; the compactor merges and deduplicates blocks already sitting in S3 before store-gateways serve queries.*
 
 **The cardinality bomb (BROKEN):** A team adds a label `user_id` to an HTTP histogram. Each unique user creates a new series per bucket. With 2M users × 12 buckets = 24M *new* series from one metric. The ingesters' head RAM blows past the limit and they OOM-kill in a loop, taking the whole metrics write path down.
 
@@ -413,7 +419,7 @@ topk(10,
 sum by (reason, tenant) (rate(cortex_discarded_samples_total[5m]))
 ```
 
-The compactor then runs **5m downsampling** on blocks older than the raw window so the 13-month SLO tier is ~30x smaller than raw. Recording rules pre-aggregate SLO numerators/denominators so the 13-month queries hit pre-computed series, not raw histograms — see [`cross_cutting/slo_error_budget_math.md`](cross_cutting/slo_error_budget_math.md).
+Because Mimir has no downsampling, the 13-month SLO tier cannot be built by thinning old blocks — it is built by **recording rules** that pre-aggregate SLO numerators/denominators into a few thousand low-cardinality series, remote-written to a long-term tenant with a 13-month `compactor_blocks_retention_period`. The 13-month queries then hit pre-computed series, not raw histograms — see [`cross_cutting/slo_error_budget_math.md`](cross_cutting/slo_error_budget_math.md).
 
 ### 4.3 Loki: label index vs log content
 
@@ -446,14 +452,14 @@ flowchart LR
 
 Loki's trick: **it indexes only labels, never log content.** A query is `{labels} |= "pattern"` — the label matcher narrows to a few chunks via the index, then a brute-force grep runs over those decompressed chunks. This makes ingest cheap (no full-text index) but means a query with *no* label filter must scan everything.
 
-**BROKEN LogQL — no label filter, scans all tenants' chunks for the time range:**
+**BROKEN LogQL — a matcher that excludes nothing, so every stream in the window is scanned:**
 
 ```logql
-# WRONG: forces a full scan over every stream in the window
-{} |= "OutOfMemoryError"
+# WRONG: matches every stream that has a namespace label at all
+{namespace=~".+"} |= "OutOfMemoryError"
 ```
 
-On 2 TB/day of chunks this can read hundreds of GB and time out at the query-frontend's 5s limit.
+Note that a literally empty selector — `{} |= "OutOfMemoryError"` — is *rejected by the parser*, not merely slow: LogQL requires at least one matcher that is not empty-compatible, which is also why `{namespace=~".*"}` is refused while `{namespace=~".+"}` is accepted. The dangerous query is therefore the one that parses fine and matches everything. On 2 TB/day of chunks this reads hundreds of GB and times out at the query-frontend's 5s limit.
 
 **FIX — always pin labels first, filter lines second:**
 
@@ -477,6 +483,9 @@ limits_config:
   reject_old_samples:           true
   reject_old_samples_max_age:   168h
   retention_period:             720h     # 30 days hot
+  # Query-side discipline: reject the everything-matches query at the frontend
+  required_labels:              [namespace, app]
+  required_number_labels:       2
 ```
 
 A common Loki incident: a team sets `level` from a free-text field, and a malformed log injects `level="<full stack trace>"`, creating a new stream per log line — a stream-cardinality bomb identical in shape to the metric one. The `max_global_streams_per_user` cap contains it.
@@ -517,7 +526,7 @@ Tempo stores traces by `trace_id` with a minimal index (block-level bloom filter
 ```
 # TraceQL: find slow checkout traces with a DB error span
 { resource.service.name = "checkout" && duration > 500ms }
-  && { span.db.system = "postgresql" && status = error }
+  && { span.db.system.name = "postgresql" && status = error }
 ```
 
 The **metrics-generator** turns the span stream into RED (Rate/Errors/Duration) metrics and service-graph edges, written back into Mimir — so you get service dashboards *for free* from traces, and a metric exemplar links straight back to the source trace. Closing the loop: metric exemplar → `trace_id` → Tempo trace → `trace_id` in log line → Loki logs. That is the three-pillar correlation the platform exists to deliver.
@@ -532,8 +541,8 @@ For hardening these stateful ingesters (PodDisruptionBudgets, anti-affinity, gra
 
 **Decision:** Grafana Mimir as the metrics backend.
 **Alternatives:** Thanos (sidecar + store-gateway federation), Cortex (Mimir's ancestor), VictoriaMetrics.
-**Rationale:** Mimir forked from Cortex and is optimized for horizontal scale — it has demonstrated 1B+ active series in a single cluster, has a built-in compactor with downsampling, a shuffle-sharding tenant isolation model, and a single binary that runs all microservices. Thanos is simpler to bolt onto existing Prometheus servers (sidecar uploads blocks) but federation queries fan out to every store-gateway and get slow at our scale. Cortex still exists but Mimir is its faster successor.
-**Consequences:** We give up the "just add a sidecar to existing Prometheus" simplicity of Thanos; instead apps `remote_write` to Mimir. We gain shuffle sharding (a noisy tenant only touches a subset of ingesters) and a single operational model.
+**Rationale:** Mimir is Grafana Labs' AGPLv3 fork of Cortex, optimized for horizontal scale — it has demonstrated 1B+ active series in a single cluster, a split-and-merge compactor, a shuffle-sharding tenant isolation model, and a single binary that runs all microservices. Thanos is simpler to bolt onto existing Prometheus servers (sidecar uploads blocks) but federation queries fan out to every store-gateway and get slow at our scale. Cortex is **not** a dead ancestor: it is still an actively maintained CNCF project under Apache 2.0, and for some organizations the licence alone decides it — Mimir's AGPLv3 is a non-starter wherever the legal team bans copyleft in the serving path.
+**Consequences:** Three things we give up. (1) The "just add a sidecar to existing Prometheus" simplicity of Thanos; instead apps `remote_write` to Mimir. (2) **Downsampling** — Thanos downsamples old blocks to 5m and 1h, and Mimir has no equivalent; Grafana's guidance is recording rules plus retention limits, which is the 13-month tier described in §2. (3) A permissive licence. What we gain is shuffle sharding (a noisy tenant only touches a subset of ingesters) and a single operational model.
 
 ### 5.2 Loki vs Elasticsearch for logs
 
@@ -546,7 +555,7 @@ For hardening these stateful ingesters (PodDisruptionBudgets, anti-affinity, gra
 
 **Decision:** Tail sampling at the gateway (100% errors + slow, 3% baseline).
 **Alternatives:** Head/probabilistic sampling in the SDK, no sampling (store 100%).
-**Rationale:** Covered in §4.1 — head sampling discards error traces blindly; storing 100% at 2M spans/sec is ~52 TB/day, ~$24K/month just for trace storage. Tail sampling keeps the useful 5% for ~$414/month.
+**Rationale:** Covered in §4.1 — head sampling discards error traces blindly; storing 100% at 2M spans/sec is ~52 TB/day, which at our 7-day retention is 363 TB and ~$8.3K/month in S3 alone, 20x the ~$414/month the sampled stream costs. The storage line is the *small* half of that bill: a 20x span rate also multiplies the Tempo ingester and compactor fleet, which is where the real money goes.
 **Consequences:** Gateways become stateful (must buffer a trace until `decision_wait`), require trace-ID-consistent routing (the `loadbalancing` exporter), and add ~30s ingest latency for traces. We accept that trace latency for the guarantee that no error trace is lost.
 
 ### 5.4 Push (remote_write/OTLP) vs Pull (Prometheus scrape) at the edge
@@ -574,7 +583,7 @@ For hardening these stateful ingesters (PodDisruptionBudgets, anti-affinity, gra
 
 | Decision | Chosen | Rejected | Key reason |
 |----------|--------|----------|-----------|
-| Metrics backend | Mimir | Thanos / Cortex | Horizontal scale to 1B series, shuffle sharding |
+| Metrics backend | Mimir | Thanos / Cortex | Horizontal scale to 1B series, shuffle sharding (accepting AGPLv3 and no downsampling) |
 | Logs backend | Loki | Elasticsearch | 8-10x cheaper at 20 TB/day (label-only index) |
 | Trace sampling | Tail | Head / none | Keeps 100% of error traces |
 | Edge collection | Pull→Push | Central pull | Clean multi-cluster topology |
@@ -591,11 +600,11 @@ Grafana Labs publicly demonstrated Mimir handling **1 billion active series** in
 
 ### Cloudflare — from OpenTSDB to a Prometheus/Thanos-style stack
 
-Cloudflare runs metrics across 300+ edge data centers. They publicly documented running large Prometheus deployments with long-term storage, ingesting **tens of millions of samples/sec**, and built tooling (`pint`, their PromQL linter) to catch broken recording/alerting rules in CI before deploy — exactly the recording-rule eval gate in §8a. Their edge model is pull-at-the-PoP, aggregate centrally.
+Cloudflare runs metrics across an edge network spanning 330+ cities. They publicly documented running large Prometheus deployments with long-term storage, ingesting **tens of millions of samples/sec**, and built tooling (`pint`, their PromQL linter) to catch broken recording/alerting rules in CI before deploy — exactly the recording-rule eval gate in §8a. Their edge model is pull-at-the-PoP, aggregate centrally.
 
 ### Uber — M3 (M3DB) for tens of billions of series
 
-Uber built **M3** (open-sourced M3DB + M3 Coordinator + M3 Query) because at their scale (tens of millions of metrics/sec, **10+ billion** time series) off-the-shelf Prometheus storage could not keep up. M3 introduced aggressive **downsampling tiers** (e.g., 10s for 2 days, 1m for 30 days, 1h for years) and a custom compressed time-series database. The downsampling-tier idea directly informs our 15-day-raw / 13-month-5m split.
+Uber built **M3** (open-sourced M3DB + M3 Coordinator + M3 Query) because at their scale (tens of millions of metrics/sec, **10+ billion** time series) off-the-shelf Prometheus storage could not keep up. M3 introduced aggressive **downsampling tiers** (e.g., 10s for 2 days, 1m for 30 days, 1h for years) and a custom compressed time-series database. M3 does this natively; Mimir does not, so we reach the same end — a cheap long-horizon tier — with recording rules and a separate long-retention tenant instead of block downsampling. The tiering *idea* is what carries over, not the mechanism.
 
 ### Netflix — Atlas
 
@@ -611,14 +620,14 @@ Datadog publicly discusses ingesting **trillions of points/day** with a Kafka-fr
 
 | Tool | Model | Strength | Weakness | Best for |
 |------|-------|----------|----------|----------|
-| Prometheus + Thanos | Sidecar uploads TSDB blocks; store-gateway federation | Drop-in for existing Prometheus; simple mental model | Fan-out queries slow at very high scale; weaker tenant isolation | Mid-scale, many existing Prometheis to unify |
-| Grafana Mimir | Cortex-fork microservices; remote_write in | 1B+ series, shuffle sharding, built-in downsampling | Heavier to operate; remote_write only | Large multi-tenant orgs (our choice) |
-| Cortex | Mimir's predecessor | Mature, battle-tested | Superseded by Mimir's performance | Legacy Cortex installs |
+| Prometheus + Thanos | Sidecar uploads TSDB blocks; store-gateway federation | Drop-in for existing Prometheus; simple mental model; **5m/1h block downsampling** (Mimir has none); Apache 2.0 | Fan-out queries slow at very high scale; weaker tenant isolation | Mid-scale, many existing Prometheis to unify |
+| Grafana Mimir | Cortex fork, microservices; remote_write in | 1B+ series, shuffle sharding, split-and-merge compactor | Heavier to operate; remote_write only; **no downsampling**; AGPLv3 | Large multi-tenant orgs (our choice) |
+| Cortex | The project Mimir forked from; still active in the CNCF | Mature, battle-tested, **Apache 2.0** | Smaller contributor base than Mimir post-fork | Orgs that cannot take an AGPLv3 dependency |
 | VictoriaMetrics | Single-binary or cluster TSDB | Very memory-efficient, fast ingest, MetricsQL | Smaller ecosystem, non-Prometheus query dialect extensions | Cost-sensitive teams wanting low RAM/series |
 | Datadog | SaaS, agent-based | Turnkey, integrated APM/logs/metrics | Cardinality-based billing gets expensive fast | Teams that want zero ops, accept cost |
 | Grafana Cloud | Managed Mimir/Loki/Tempo | Same stack, fully managed | Vendor egress + per-series pricing | Teams wanting the OSS stack without running it |
 
-For logs: Loki (chosen) vs OpenSearch (full-text, costlier) vs ClickHouse (SQL analytics on logs, rising in popularity). For traces: Tempo (chosen, object-store native) vs Jaeger (mature, but Cassandra/ES backend is heavier) vs Grafana Cloud Traces.
+For logs: Loki (chosen) vs OpenSearch (full-text, costlier) vs ClickHouse (SQL analytics on logs, rising in popularity). For traces: Tempo (chosen, object-store native) vs Jaeger v2 (now built on the OpenTelemetry Collector and OTLP-native, but its Cassandra/Elasticsearch/ClickHouse backends are heavier to run than object storage) vs Grafana Cloud Traces.
 
 ---
 
@@ -694,13 +703,16 @@ Golden signals to alarm on for the platform itself:
 ```promql
 # Write path: are we dropping samples?
 sum(rate(cortex_discarded_samples_total[5m])) by (reason) > 0
-# Ingester saturation (the OOM predictor)
-max(cortex_ingester_memory_series) / on() group_left
-  max(cortex_ingester_memory_series_limit) > 0.85
+# Ingester saturation (the OOM predictor) — Mimir exposes the configured
+# instance limit as a labelled gauge, not as a *_limit metric
+max by (pod) (cortex_ingester_memory_series)
+  / max by (pod) (cortex_ingester_instance_limits{limit="max_series"}) > 0.80
 # Read path: query-frontend queue building up
 sum(cortex_query_frontend_queue_length) > 100
-# Ingest-to-queryable lag
-histogram_quantile(0.99, rate(cortex_distributor_latest_seen_sample_timestamp_seconds[5m]))
+# Ingest-to-queryable lag. The metric is a GAUGE holding the unix timestamp of the
+# latest sample seen per tenant, so the lag is time() minus it — a histogram_quantile
+# over it is meaningless and will silently return nonsense.
+max by (user) (time() - cortex_distributor_latest_seen_sample_timestamp_seconds) > 30
 ```
 
 Detailed cardinality dashboards and per-metric cost attribution: [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
@@ -773,7 +785,7 @@ xychart-beta
 
 **2. Head sampling discarded every error trace.** A team used SDK probabilistic sampling at 5%. During a payment outage, the on-call searched Tempo for the failing trace and found **zero** error traces — all dropped. MTTR ballooned to ~90 minutes because they debugged from logs alone. Switching to gateway tail sampling (100% errors) cut subsequent similar-incident MTTR to ~15 minutes.
 
-**3. The unbounded LogQL scan that DDoS'd Loki.** An engineer ran `{} |= "error"` over 24h in Grafana Explore. The querier tried to decompress ~2 TB of chunks, exhausted the query-frontend worker pool, and **every other team's log queries 504'd for ~25 minutes**. Fix: enforce a mandatory label matcher (Loki `require_at_least_one_label_matcher`) and a `max_query_length` of 720h with split-by-interval.
+**3. The unbounded LogQL scan that DDoS'd Loki.** An engineer ran `{namespace=~".+"} |= "error"` over 24h in Grafana Explore — a query that passes LogQL's non-empty-matcher check while still selecting every stream. The querier tried to decompress ~2 TB of chunks, exhausted the query-frontend worker pool, and **every other team's log queries 504'd for ~25 minutes**. Fix: `required_labels: [namespace, app]` plus `required_number_labels: 2` so a single catch-all matcher is rejected, and a `max_query_length` of 720h with split-by-interval.
 
 **4. Stream-cardinality bomb from a free-text label.** A service set the Loki label `route` to the raw URL path including IDs (`/order/8a3f.../item/...`). Every request created a new stream; Loki ingester memory spiked and flush latency exceeded the chunk timeout, **dropping ~40 GB of logs** during a 12-minute window. Fix: `max_global_streams_per_user=10000` and moving high-cardinality fields out of labels into the log body.
 
@@ -788,15 +800,20 @@ xychart-beta
 ### Scaling formulas
 
 ```
-# Metric ingesters
-ingesters = ceil( (active_series × RF) / series_per_ingester )
-   series_per_ingester ≈ 1.5M  (16 vCPU / 64 GB, leaving churn headroom)
+# Metric ingesters (Grafana's published Mimir ratios)
+samples_per_sec = active_series / scrape_interval        # not a free parameter
+ingester_ram    = (active_series × RF) / 300,000 × 2.5 GB
+ingester_cores  = (active_series × RF) / 300,000 × 1 core
+ingesters       = ceil( (active_series × RF) / series_per_ingester )
+   series_per_ingester ≈ 1.5M  (Grafana's recommended per-ingester ceiling)
 
-# Metric long-term storage (object store)
-raw_bytes/day      = samples_per_sec × bytes_per_sample_disk × 86400
-storage_raw        = raw_bytes/day × raw_retention_days
-storage_downsample = (raw_bytes/day / downsample_ratio) × long_retention_days
-metric_storage     = storage_raw + storage_downsample
+# Metric long-term storage (object store). Mimir has NO downsampling, so the
+# long tier is recording-rule output, sized from series count and not from raw.
+raw_bytes/day  = samples_per_sec × bytes_per_sample_disk × 86400
+storage_raw    = raw_bytes/day × raw_retention_days
+storage_long   = rule_series × (86400 / rule_interval) × bytes_per_sample_disk
+                 × long_retention_days
+metric_storage = storage_raw + storage_long
 
 # Log storage
 log_storage = (raw_TB_per_day / compression_ratio) × retention_days
@@ -804,21 +821,24 @@ log_storage = (raw_TB_per_day / compression_ratio) × retention_days
 # Trace storage
 trace_storage = span_rate × keep_rate × bytes_per_span × 86400 × retention_days
 
-# Collector gateways (trace tail sampling is the memory bottleneck)
-gateway_mem_needed = num_traces_inflight × avg_spans_per_trace × bytes_per_span
-gateways = ceil( gateway_mem_needed / mem_per_gateway )
+# Collector gateways (trace tail sampling is the memory bottleneck).
+# The pool must hold every trace that is inside the decision window at once.
+traces_inflight = (span_rate / spans_per_trace) × decision_wait
+gateways        = ceil( traces_inflight / num_traces_per_gateway )
 ```
 
 ### Worked example (our targets)
 
 **Metric ingesters:**
 ```
-ingesters = ceil( (10,000,000 × 3) / 1,500,000 ) = ceil(20) = 20 ingesters
-Instance: r6i.2xlarge (8 vCPU, 64 GB)  -> use 16 vCPU class r6i.4xlarge for headroom
+ingesters = ceil( (10,000,000 × 3) / 1,500,000 ) = 20 ingesters
+Aggregate need: 30M / 300K × 2.5 GB = 250 GB RAM, and × 1 core = 100 cores
+Instance: r6i.2xlarge (8 vCPU / 64 GiB) -> 160 cores, 1,280 GiB provisioned
+   CPU utilisation ~62% (the binding constraint); RAM ~5x headroom for churn
 Cost: 20 × r6i.2xlarge @ ~$0.504/hr × 730 = ~$7,358/month
 ```
 
-**Metric storage (from §2):** ~16 TB → ~$377/month S3.
+**Metric storage (from §2):** ~1.1 TB raw + ~3.6 GB of 13-month recording-rule output → ~$26/month S3.
 
 **Log storage:**
 ```
@@ -831,13 +851,19 @@ Loki ingesters: 20 TB/day / ~1.7 TB-per-ingester-day = ~12 ingesters
 
 **Trace gateways (tail-sampling memory):**
 ```
-gateway_mem = 200,000 inflight × 20 spans/trace × 300 B = ~1.2 GB per gateway window
-With 2M spans/sec / (50K traces/sec capacity per gateway) -> ~40 gateways for throughput
-Use c6i.xlarge (8 GB): ~30 gateways @ ~$0.17/hr × 730 = ~$3,723/month
-trace_storage = 2M × 0.05 × 300 B × 86400 × 7 = ~18 TB -> ~$414/month
+trace rate      = 2M spans/s / 20 spans/trace          = 100,000 traces/s
+traces_inflight = 100,000 traces/s × 30s decision_wait = 3,000,000 traces
+bytes buffered  = 3M × 20 spans × 300 B                = ~18 GB across the pool
+per gateway     = num_traces 200,000 × 20 × 300 B      = ~1.2 GB
+gateways (mem)  = 3,000,000 / 200,000                  = 15 minimum
+Round to 30 c6i.xlarge (4 vCPU / 8 GiB) for CPU headroom, AZ spread and the
+loss of a gateway mid-window: 30 @ ~$0.17/hr × 730     = ~$3,723/month
+trace_storage   = 2M × 0.05 × 300 B × 86400 × 7        = ~18 TB -> ~$414/month
 ```
 
-**Total infra (compute-dominated):** ~$24K/month as summarized in §2. To grow from 10M → 20M series, ingesters scale **linearly to 40** (the formula is linear in active series), and the single biggest lever to *avoid* that doubling is killing high-cardinality labels — see [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md). Object storage grows sub-linearly because downsampling and compression dampen it.
+Note the units trap in that first line: the pool is sized in *traces*, and dividing a span rate by a per-gateway *trace* rate is the kind of dimensional slip that silently produces a plausible-looking gateway count.
+
+**Total infra (compute-dominated):** ~$23K/month as summarized in §2. To grow from 10M → 20M series, ingesters scale **linearly to 40** (the formula is linear in active series), and the single biggest lever to *avoid* that doubling is killing high-cardinality labels — see [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md). Metric object storage stays negligible because the long tier is recording-rule output whose size depends on rule count, not on raw series; log storage, by contrast, scales straight with log volume and is the line to watch.
 
 ---
 
@@ -859,10 +885,10 @@ Three layers: (1) hard per-tenant limits at the distributor (series, ingestion r
 Loki indexes only labels (~1-2% overhead) and greps compressed chunks on demand; Elasticsearch builds a full-text inverted index that can equal or exceed the raw data size, plus replicas and JVM heap pressure — at 20 TB/day that index cost is prohibitive. Our query pattern is "filter by service+level, grep a string in 1h," which Loki serves cheaply. The tradeoff: every LogQL query must carry a label matcher or it scans everything, so we enforce label discipline. Elasticsearch wins only if you need arbitrary full-text analytics with no label structure.
 
 **Q6. Walk through what happens on `remote_write` from a service to a queryable metric.**
-The service's local agent scrapes targets and `remote_write`s Snappy-compressed protobuf to a Mimir distributor. The distributor validates, applies tenant limits, hashes (tenant + labels) onto the ring, and replicates RF=3 to ingesters. Ingesters append to the in-memory TSDB head + WAL (fsync for durability). Every ~2h the head flushes a block to S3; the compactor later merges, deduplicates the 3 replicas, and downsamples to 5m for the long-term tier. Reads hit the query-frontend (split + cache + queue) → queriers, which merge recent data from ingesters with historical blocks from store-gateways.
+The service's local agent scrapes targets and `remote_write`s Snappy-compressed protobuf to a Mimir distributor. The distributor validates, applies tenant limits, hashes (tenant + labels) onto the ring, and replicates RF=3 to ingesters. Ingesters append to the in-memory TSDB head + WAL (fsync for durability). Every ~2h the head flushes a block to S3; the compactor later merges the blocks, deduplicates the 3 replicas, and applies the tenant's retention. Reads hit the query-frontend (split + cache + queue) → queriers, which merge recent data from ingesters with historical blocks from store-gateways.
 
 **Q7. How do you keep 13-month SLO queries fast and cheap?**
-Two mechanisms: downsampling and recording rules. The compactor downsamples old blocks to 5m resolution, shrinking the long-term tier ~30x. Recording rules pre-aggregate the SLO numerator (good events) and denominator (total events) into dedicated series at ingest time, so a 13-month error-budget query reads a handful of pre-computed series instead of re-evaluating histograms over a year of raw data. Burn-rate alerting then runs over those recording-rule series — detailed in `cross_cutting/slo_error_budget_math.md`.
+Recording rules plus per-tenant retention — and specifically *not* downsampling, because Mimir does not have it (that is a Thanos feature, and the assumption that Mimir inherited it is a common interview mistake). Recording rules pre-aggregate the SLO numerator (good events) and denominator (total events) into a few thousand low-cardinality series, which are remote-written to a separate long-term tenant whose `compactor_blocks_retention_period` is 13 months while the raw tenant keeps 15 days. A 13-month error-budget query then reads a handful of pre-computed series instead of re-evaluating histograms over a year of raw data, and the long tier costs single-digit gigabytes. Burn-rate alerting runs over those same recording-rule series — detailed in `cross_cutting/slo_error_budget_math.md`.
 
 **Q8. Why pull at the edge but push to the center?**
 Pull-at-the-node keeps service discovery local and gives free liveness detection (a missed scrape = target down). But central pull across 50 clusters and NAT/firewall boundaries doesn't scale and is a networking nightmare. So each cluster runs an agent that pulls locally then `remote_write`/OTLP-pushes to the central platform — push is the only model that cleanly crosses cluster and region boundaries. Federation was rejected because it's lossy and can't do long retention.

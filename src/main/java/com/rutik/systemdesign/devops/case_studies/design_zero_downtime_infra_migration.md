@@ -52,7 +52,7 @@ flowchart LR
 ### Functional Requirements
 
 - **FR1 — Strangler cutover per service**: Each of 4000 services can be cut over from source (on-prem data center) to target (AWS EKS + Aurora) independently, in dependency order, without a global flag day.
-- **FR2 — Online data migration**: Migrate 200TB across heterogeneous stores (PostgreSQL 9.6 → Aurora PostgreSQL 15, self-managed MySQL → Aurora MySQL, MongoDB → DocumentDB, on-prem object store → S3) with the source remaining the system of record until cutover.
+- **FR2 — Online data migration**: Migrate 200TB across heterogeneous stores (PostgreSQL 9.6 → Aurora PostgreSQL 17, self-managed MySQL → Aurora MySQL, MongoDB → DocumentDB, on-prem object store → S3) with the source remaining the system of record until cutover. The source versions are deliberately ancient — that is *why* there is a migration — but every target is a currently-supported major.
 - **FR3 — Dual-write / dual-read**: During a service's transition window, writes land in both estates and reads can be served from either, with shadow reads validating the target.
 - **FR4 — Weighted traffic shift**: Route a configurable percentage of production traffic to the target per service (1/5/25/50/100), adjustable in seconds.
 - **FR5 — Continuous reconciliation**: Compare source and target row counts, checksums, and sampled records continuously; surface divergence as a blocking signal.
@@ -95,18 +95,24 @@ Throughput at 10 Gbps ≈ 1,250 MB/s (optimistic, full pipe)
 Time = 209,715,200 / 1,250 = 167,772 s ≈ 46.6 hours
 ```
 
-At a realistic **70% link utilization** (875 MB/s): **~66.5 hours ≈ 2.8 days** of continuous transfer for a single stream. With 8 parallel streams (sharded by table/key range) over a 100 Gbps Direct Connect aggregate: **~6 hours** for the wire transfer, but the bottleneck shifts to *target write throughput* (Aurora ingest, S3 PUT limits).
+At a realistic **70% link utilization** (875 MB/s): **~66.5 hours ≈ 2.8 days** of continuous transfer for a single stream. With 8 parallel streams (sharded by table/key range) over a 100 Gbps Direct Connect aggregate at the same 70%: **~6.6 hours** for the wire transfer, but the bottleneck then shifts to *target write throughput* (Aurora ingest, index rebuild, S3 PUT limits) — call it **~24 hours end to end**.
 
-**Snowball comparison**: AWS Snowball Edge holds ~80 TB usable; 200TB ≈ 3 devices. Round trip (order → ship → load → return → import) is **5–7 days**, but it consumes **zero** of your production WAN bandwidth — critical when the Direct Connect link is also carrying CDC and dual-write traffic. Decision rule:
+**Why not an offline appliance?** Historically this is where you would reach for AWS Snowball: ship the bulk physically and spend zero production WAN. That option is gone. AWS retired the Snowball Edge Storage Optimized 80 TB device in November 2024, closed the remaining 210 TB device to new customers on 7 November 2025, and ends support for all Snowball devices on 31 December 2026 — a six-month migration starting today cannot be built on it. The property Snowball provided, though, is the one that actually matters, and it is obtainable another way: **keep the bulk copy off the circuit that is carrying CDC and dual-write.**
+
+**Decision: a second, temporary Direct Connect dedicated to bulk.** Provision a separate 100 Gbps dedicated connection on its own virtual interface, used only for the backfill, and drive it with DataSync for objects and DMS full-load for the relational stores. The production 10 Gbps circuit is never touched by bulk traffic, so CDC and dual-write keep their headroom. The lead time for provisioning a new dedicated connection and cross-connect (weeks) replaces the appliance's shipping round trip, and it is lead time you spend *before* the migration window rather than inside it.
 
 ```
-If (data_TB / link_Gbps) gives a transfer time exceeding the time to
-physically ship Snowball, OR the WAN is needed for live replication,
-prefer Snowball for the historical bulk and DMS/Debezium CDC for the delta.
+If the bulk copy over the PRODUCTION link would contend with live
+replication, do not share the link. Move the bulk onto a separate
+path and let DMS/Debezium CDC chase the delta over the production one.
 
-200TB over a shared 10Gbps link = ~2.8 days AND we need the link for CDC
-=> Snowball for bulk, CDC for delta.  (Chosen.)
+200TB over the shared 10Gbps production link = ~2.8 days of full
+contention AND we need that link for CDC
+=> dedicated 100 Gbps DX for bulk (~6.6 h wire, ~24 h with target
+   ingest), production link reserved for CDC + dual-write.  (Chosen.)
 ```
+
+The size of the **snapshot-to-CDC gap** is the number this decision is really buying down, and §2's catch-up math below shows why: every hour between the backfill snapshot and CDC reaching steady state is an hour of WAL the target has to replay *on top of* live traffic.
 
 ### Change Rate During Migration (CDC volume)
 
@@ -117,21 +123,23 @@ CDC throughput  = 120,000 * 1.5 KB = 180 MB/s = 1.44 Gbps
 Daily WAL/binlog volume = 180 MB/s * 86,400 s ≈ 15.2 TB/day
 ```
 
-So CDC alone consumes ~1.44 Gbps continuously. The Direct Connect link must reserve headroom: with a 10 Gbps link, dedicate ~3 Gbps to CDC (peak + burst), leaving ~7 Gbps for dual-write and app traffic. If the Snowball-import window is 6 days, CDC must buffer/replay **~91 TB** of WAL to catch up from the snapshot point — feasible only if the target ingests faster than the source produces (it must, to converge).
+So CDC alone consumes ~1.44 Gbps continuously. The production Direct Connect link must reserve headroom: with a 10 Gbps link, dedicate ~3 Gbps to CDC (peak + burst), leaving ~7 Gbps for dual-write and app traffic. Over the ~24-hour backfill window, CDC must buffer and later replay **~15.6 TB** of WAL to catch up from the snapshot point — and the *source* must retain that WAL for the replication slot the whole time, which is a disk-space commitment on the system of record, not a free one (see §9 war story 3 for what happens when it is not planned).
 
 ### CDC Lag Math (convergence)
 
 For CDC to *catch up* after backfill, target apply rate must exceed source produce rate:
 
 ```
-Backlog at backfill snapshot = 6 days of WAL = 91 TB
+Backlog at backfill snapshot = 24 h of WAL = 180 MB/s × 86,400 s = 15.6 TB
 If target applies at 250 MB/s and source produces at 180 MB/s,
 net drain = 70 MB/s.
-Catch-up time = 91 TB / 70 MB/s = 91,000,000 MB / 70 MB/s
-             ≈ 1,300,000 s ≈ 15 days.
+Catch-up time = 15,600,000 MB / 70 MB/s
+             ≈ 223,000 s ≈ 2.6 days.
 ```
 
-15 days to converge per large store is too long. Mitigation: take the backfill snapshot **closer to cutover** (Snowball in parallel with CDC from snapshot LSN), and shard CDC by table so apply parallelism raises the drain rate to ~600 MB/s → catch-up in **~3.6 days**.
+2.6 days of lag hanging over every store is still too long to hold a cutover open. Mitigation: shard CDC by table so apply parallelism raises the apply rate to ~600 MB/s, giving a net drain of 420 MB/s → catch-up in **15,600,000 / 420 ≈ 37,100 s ≈ 10 hours**.
+
+The counterfactual is the whole argument for collapsing the gap. Had the backfill taken 6 days — the round trip an offline shipping appliance would have imposed — the backlog would be 91 TB, and even at the unsharded 70 MB/s drain that is 1,300,000 s ≈ **15 days** to converge. Backlog scales linearly with the snapshot-to-CDC gap, so shortening the copy is worth far more than speeding up the apply path.
 
 ### Dual-Write Overhead
 
@@ -146,12 +154,12 @@ Per service, shift in steps **1% → 5% → 25% → 50% → 100%**, each baked f
 ```mermaid
 xychart-beta
     title "Parallel-Estate Cost (multiples of baseline)"
-    x-axis ["Source", "Target", "CDC infra", "Snowball", "Peak (worst case)", "Phased avg"]
+    x-axis ["Source", "Target", "CDC infra", "Bulk DX (one-off)", "Peak (worst case)", "Phased avg"]
     y-axis "Cost (x baseline)" 0 --> 2.2
     bar [1.00, 0.95, 0.10, 0.05, 2.05, 1.55]
 ```
 
-Four cost components — source (1.00x), target (0.95x), CDC infra (0.10x), one-time Snowball (0.05x) — sum to a 2.05x worst-case peak if both estates ran at full parallel footprint; phasing the cutover so only the in-flight fraction dual-runs brings the six-month average down to 1.55x.
+Three *recurring* components — source (1.00x), target (0.95x), CDC infra (0.10x) — sum to the 2.05x worst-case peak if both estates ran at full parallel footprint. The temporary bulk-transfer Direct Connect (0.05x) sits outside that run-rate: it is a one-off charged for the weeks the backfill needs, not a standing cost, which is why the peak bar is 2.05 and not 2.10. Phasing the cutover so only the in-flight fraction dual-runs brings the six-month average down to 1.55x.
 
 Target the **≤ 1.6×** NFR by never running 100% of both estates hot simultaneously — decommission source per service immediately after its bake period.
 
@@ -185,7 +193,7 @@ flowchart TD
     end
 
     srcApp -->|"dual-write proxy"| tgtApp
-    srcDb -.->|"CDC + Snowball<br/>(bulk)"| tgtDb
+    srcDb -.->|"CDC (prod DX) +<br/>bulk (dedicated DX)"| tgtDb
 
     srcDb --> recon["Reconciliation and Validation<br/>count, checksum, sample, shadow-read"]
     tgtDb --> recon
@@ -211,15 +219,15 @@ flowchart TD
 | **GSLB / Route53 weighted** | Coarse cross-estate traffic split (per service, per region). |
 | **Mesh (Consul ↔ Istio)** | Fine-grained per-request routing & shadow mirroring during overlap. |
 | **Dual-write proxy / sidecar** | Intercepts writes, fans out to source + target with idempotency keys. |
-| **DMS / Debezium CDC** | Streams every source mutation to the target, post-backfill. |
-| **Snowball** | One-time bulk historical copy (200TB) off the production WAN. |
+| **DMS / Debezium CDC** | Streams every source mutation to the target, post-backfill, over the production circuit. |
+| **Dedicated bulk DX + DataSync / DMS full-load** | One-time 200TB historical copy on a separate 100 Gbps circuit, so it never contends with CDC. |
 | **Reconciliation service** | Continuous count/checksum/sample/shadow-read comparison. |
 | **Migration control plane** | Flag store + shift orchestrator + rollback engine + gates. |
 | **Observability** | Federated Prometheus + OTel + replication-lag exporter. |
 
 ### Data Flow Across Both Estates
 
-1. **Backfill**: Snapshot source at LSN `L0`, ship 200TB via Snowball, import into target. Record `L0`.
+1. **Backfill**: Create the logical replication slot first (it pins `L0` and starts WAL retention), then copy 200TB over the dedicated bulk DX and import into the target. Record `L0`.
 2. **CDC catch-up**: Debezium/DMS streams all mutations from `L0` forward into the target; lag drains toward zero.
 3. **Dual-write enable**: For a service, the write proxy begins writing to *both* source and target (source authoritative).
 4. **Shadow read**: Reads execute against source (served) and target (compared, discarded) — divergence logged.
@@ -269,7 +277,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    src("Source PG<br/>heap + WAL, LSN advancing") -->|"1. snapshot @ L0"| snow["Snowball<br/>(bulk)"]
+    src("Source PG<br/>heap + WAL, LSN advancing") -->|"1. slot created @ L0,<br/>then bulk copy"| snow["Dedicated bulk DX<br/>DataSync / DMS full-load"]
     snow --> tgt("Target Aurora PG")
 
     src -->|"2. WAL stream<br/>from L0"| deb["Debezium<br/>logical decode (slot)"]
@@ -284,7 +292,17 @@ flowchart LR
 
 Replication lag is measured as `now() - source_commit_ts(last applied)` per slot and exported to the control plane so it can gate the traffic shift on lag (see the Go exporter below).
 
-Debezium PostgreSQL connector config (logical replication slot, snapshot already done by Snowball so we start from the recorded LSN):
+The ordering here is the part people get wrong. **Create the replication slot before the bulk copy**, not after: the slot is what pins `L0` and forces PostgreSQL to retain WAL from that point, so any mutation during the 24-hour copy is still on disk when the connector starts streaming.
+
+```sql
+-- Step 0, BEFORE any bulk copy. The returned lsn IS L0, and from this
+-- moment the server retains WAL for this slot.
+SELECT * FROM pg_create_logical_replication_slot('mig_orders_slot', 'pgoutput');
+--  slot_name        | lsn
+--  mig_orders_slot  | 2A/3F8B1240
+```
+
+Debezium PostgreSQL connector config (the slot already exists and already holds `L0`, and the bulk copy has already moved the historical rows, so the connector must not snapshot):
 
 ```json
 {
@@ -296,8 +314,7 @@ Debezium PostgreSQL connector config (logical replication slot, snapshot already
     "plugin.name": "pgoutput",
     "slot.name": "mig_orders_slot",
     "publication.autocreate.mode": "filtered",
-    "snapshot.mode": "never",
-    "snapshot.lsn": "2A/3F8B1240",
+    "snapshot.mode": "no_data",
     "heartbeat.interval.ms": "5000",
     "topic.prefix": "mig.orders",
     "table.include.list": "public.orders,public.order_items",
@@ -307,15 +324,29 @@ Debezium PostgreSQL connector config (logical replication slot, snapshot already
 }
 ```
 
-`snapshot.mode: never` plus an explicit `snapshot.lsn` is the critical pairing: Snowball already moved the historical data as of `L0`, so the connector must **resume from `L0`** rather than re-snapshotting 200TB over the WAN. The 5s heartbeat advances the slot even on idle tables, preventing WAL bloat (a classic incident — see §9).
+`snapshot.mode: no_data` captures table schemas but emits no READ events for existing rows, then streams from wherever the slot is — which is `L0`. (`never` is the older spelling of the same behaviour and is deprecated; use `no_data`.) There is **no** connector property that takes an arbitrary starting LSN — the slot is the only thing that carries that position, which is exactly why it has to be created first. Getting this wrong means the connector re-snapshots 200TB over the WAN (§9 war story 4).
+
+The 5s heartbeat advances the slot even on idle tables, preventing WAL bloat (a classic incident — see §9).
 
 **Lag exporter** (Prometheus), so the control plane can gate on it:
 
 ```go
-// cdc_lag_exporter.go — emits replication lag per table/slot.
-func recordLag(reg *prometheus.GaugeVec, slot string, srcTs, appliedTs time.Time) {
-    lagSeconds := srcTs.Sub(appliedTs).Seconds()
-    reg.WithLabelValues(slot).Set(lagSeconds)
+// cdc_lag_exporter.go — emits replication lag per slot.
+//
+// srcTs  = source commit timestamp of the record just applied
+// appliedTs = wall clock at apply (i.e. ~now())
+// Lag is therefore appliedTs - srcTs. Subtracting in the other direction
+// yields a negative number and an alert that can never fire.
+//
+// Two instruments, deliberately: the gauge is the current value dashboards
+// and the shift gate read; the histogram is what makes a p99 computable,
+// and the p99 is what the NFR is written against.
+func recordLag(cur *prometheus.GaugeVec, dist *prometheus.HistogramVec,
+    slot string, srcTs, appliedTs time.Time) {
+
+    lagSeconds := appliedTs.Sub(srcTs).Seconds()
+    cur.WithLabelValues(slot).Set(lagSeconds)      // cdc_lag_seconds
+    dist.WithLabelValues(slot).Observe(lagSeconds) // cdc_lag_seconds_bucket
     // Control plane gate: refuse traffic shift if any slot lag > 30s.
 }
 ```
@@ -456,18 +487,20 @@ Each increment is a gated state: the shift advances to the next percentage only 
 #### BROKEN — flip DNS with a 1h TTL and no health-gated rollback
 
 ```hcl
-# BROKEN: a single weighted -> 100% flip on a record with TTL 3600.
+# BROKEN: a single flip straight to 100% on a record with TTL 3600.
 # If the target is unhealthy, resolvers cache the bad answer for up to
 # an hour. There is no automatic rollback. RTO becomes ~60 minutes,
 # blowing the <10min NFR and causing a full outage for cached clients.
 resource "aws_route53_record" "api_broken" {
   zone_id = var.zone_id
   name    = "api.example.com"
-  type    = "A"
+  type    = "CNAME"
   ttl     = 3600                      # <-- 1 hour cache, fatal
   records = [aws_lb.target.dns_name]  # <-- instant 100%, no weighting
 }
 ```
+
+(The record type matters even in the broken example: an ALB's `dns_name` is a hostname, so it goes in a `CNAME` or an `alias` block — putting it in a `type = "A"` record's `records` list is rejected by Route 53 before you ever get to learn the TTL lesson.)
 
 #### FIX — low-TTL weighted records + health checks + automated rollback
 
@@ -483,10 +516,14 @@ resource "aws_route53_health_check" "target" {
   request_interval  = 10                # detect in ~20s
 }
 
+# CNAME + explicit ttl, not an ALIAS: an ALIAS record has no settable TTL
+# (Route 53 serves it at the ALB's own 60s) and 60s is six times our
+# rollback budget per DNS hop. We give up ALIAS's zone-apex support and
+# free health evaluation to buy a 30s cache.
 resource "aws_route53_record" "api_source" {
   zone_id        = var.zone_id
   name           = "api.example.com"
-  type           = "A"
+  type           = "CNAME"
   ttl            = 30                    # 30s cache => fast rollback
   set_identifier = "source"
   weighted_routing_policy { weight = var.weight_source } # e.g. 95
@@ -496,7 +533,7 @@ resource "aws_route53_record" "api_source" {
 resource "aws_route53_record" "api_target" {
   zone_id         = var.zone_id
   name            = "api.example.com"
-  type            = "A"
+  type            = "CNAME"
   ttl             = 30
   set_identifier  = "target"
   weighted_routing_policy { weight = var.weight_target } # e.g. 5
@@ -508,7 +545,7 @@ resource "aws_route53_record" "api_target" {
 For finer-grained, instantaneous control (no DNS cache at all), the mesh does request-level weighting. Istio `VirtualService` shifting reads to the target:
 
 ```yaml
-apiVersion: networking.istio.io/v1beta1
+apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
   name: orders-shift
@@ -641,12 +678,12 @@ Reverse CDC (target → source) during the bake window is what makes rollback *l
 - **Rationale**: Sync doubles tail latency and couples user success to target health; async via outbox keeps p99 add < 5ms and makes target failure recoverable, not user-facing.
 - **Consequences**: Brief target lag behind source (sub-second) — acceptable because source is authoritative until cutover.
 
-### Decision 6 — Snowball bulk vs WAN-only transfer
+### Decision 6 — Dedicated bulk circuit vs sharing the production WAN
 
-- **Chosen**: Snowball for the 200TB historical bulk; WAN reserved for CDC + dual-write.
-- **Alternatives**: Stream all 200TB over Direct Connect.
-- **Rationale**: 2.8 days of WAN at full pipe would starve CDC; Snowball offloads bulk physically.
-- **Consequences**: 5–7 day shipping latency; snapshot LSN must be recorded for CDC resume.
+- **Chosen**: A separate, temporary 100 Gbps Direct Connect for the 200TB historical bulk; the production circuit reserved for CDC + dual-write.
+- **Alternatives**: Stream all 200TB over the existing production Direct Connect. (An offline appliance would once have been the obvious third option; AWS Snow is closed to new customers and reaches end of support on 31 December 2026, so it is not available for this project.)
+- **Rationale**: 200TB over the production link is ~2.8 days at a realistic 70% utilisation — 1.9 days even at a theoretical full pipe — and for all of it CDC and dual-write would be starved. A separate circuit removes the contention entirely and, at 100 Gbps, cuts the wire time to ~6.6 hours.
+- **Consequences**: Weeks of provisioning lead time for the connection and cross-connect, spent before the migration window opens rather than inside it; and the replication slot must be created before the copy starts so CDC resumes from `L0`.
 
 ### Decision 7 — RPO 0 via reverse CDC vs accept small data loss
 
@@ -666,12 +703,12 @@ Reverse CDC (target → source) during the bake window is what makes rollback *l
 | Feasible at 4000 svc / 200TB | Yes | No |
 | User-visible downtime | 0 | Hard to guarantee 0 |
 
-| Sync mechanism | CDC | Dual-write | Snowball bulk |
+| Sync mechanism | CDC | Dual-write | Bulk copy (dedicated DX) |
 |---|---|---|---|
 | App change required | No | Yes (proxy) | No |
 | Captures out-of-band writes | Yes | No | N/A (snapshot) |
 | Makes target instantly authoritative | No | Yes | No |
-| WAN cost | Continuous (~1.44 Gbps) | Per-write | Zero (physical) |
+| Production-WAN cost | Continuous (~1.44 Gbps) | Per-write | Zero (separate circuit) |
 | Best for | Backlog convergence | Final transition window | 200TB historical |
 
 ---
@@ -707,9 +744,10 @@ Segment migrated core pipeline stores while ingesting **hundreds of thousands of
 | Tool | Sources | Snapshot + CDC | Strengths | Weaknesses |
 |---|---|---|---|---|
 | **AWS DMS** | RDBMS, Mongo, S3 | Yes (full-load + CDC) | Managed, multi-engine, heterogeneous PG→Aurora | Limited DDL handling; large-object quirks; task tuning needed |
-| **Debezium** | PG, MySQL, Mongo, etc. | Yes (snapshot/never) | Open, Kafka-native, fine control (LSN resume) | You operate Kafka + Connect; ops-heavy |
+| **Debezium** | PG, MySQL, Mongo, etc. | Yes (`initial` / `no_data`) | Open, Kafka-native, resumes from a pre-created slot at a known LSN | You operate Kafka + Connect; ops-heavy |
 | **Native logical replication** | Same-engine (PG→PG) | CDC (no snapshot copy) | Lowest overhead, exact fidelity | Same-engine only; no transform; version constraints |
-| **Snowball / DataSync** | Bulk files/objects | Bulk only | Offloads WAN for 200TB; fast for cold data | No live delta; shipping latency (Snowball) |
+| **DataSync over a dedicated DX** | Bulk files/objects | Bulk only | Keeps 200TB off the production circuit; parallel, restartable | Needs a second circuit provisioned in advance; no live delta |
+| **AWS Snow Family** | Bulk, offline | Bulk only | Historically the zero-WAN option | **Not available** — closed to new customers Nov 2025, support ends 31 Dec 2026 |
 
 ### Traffic Shifting
 
@@ -719,7 +757,7 @@ Segment migrated core pipeline stores while ingesting **hundreds of thousands of
 | **Istio / Consul mesh** | Per request | < 1s (config push) | < 1s | Yes (mirror) | Needs cross-estate mesh; surgical |
 | **ALB weighted target groups** | Per LB | Seconds | Seconds | No (echo) | Cloud-side only; can't span on-prem cleanly |
 
-Decision: **DMS** for heterogeneous engine changes (PG 9.6 → Aurora 15) where managed convenience wins; **Debezium** where we need LSN-precise resume after Snowball and Kafka fan-out to many consumers; **mesh** for the surgical shift, **Route53** as the coarse safety net.
+Decision: **DMS** for heterogeneous engine changes (PG 9.6 → Aurora PostgreSQL 17) where managed convenience wins; **Debezium** where we need LSN-precise resume from a pre-created slot after the bulk copy, plus Kafka fan-out to many consumers; **mesh** for the surgical shift, **Route53** as the coarse safety net.
 
 ---
 
@@ -750,8 +788,11 @@ Federate Prometheus across source and target; emit one consistent metric set per
 groups:
   - name: migration
     rules:
+      # Fed by the HistogramVec in the §4.1 exporter, not the gauge -- a
+      # gauge has no _bucket series and histogram_quantile over it returns
+      # nothing at all, silently.
       - record: migration:cdc_lag_seconds:p99
-        expr: histogram_quantile(0.99, sum by (slot, le) (rate(cdc_lag_bucket[5m])))
+        expr: histogram_quantile(0.99, sum by (slot, le) (rate(cdc_lag_seconds_bucket[5m])))
       - record: migration:error_rate:by_estate
         expr: sum by (estate, service) (rate(http_requests_total{code=~"5.."}[5m]))
                / sum by (estate, service) (rate(http_requests_total[5m]))
@@ -759,9 +800,13 @@ groups:
         expr: migration:cdc_lag_seconds:p99 > 30
         for: 2m
         labels: { severity: page }
+      # ignoring(estate) is load-bearing. Both sides carry estate={target,source},
+      # so the default all-labels vector matching finds NO pairs and the alert
+      # can never fire. Matching on service alone is the whole point.
       - alert: TargetErrorRegression
         expr: migration:error_rate:by_estate{estate="target"}
-               > migration:error_rate:by_estate{estate="source"} + 0.001
+               > ignoring(estate)
+                 (migration:error_rate:by_estate{estate="source"} + 0.001)
         for: 5m
         labels: { severity: page }
 ```
@@ -829,7 +874,7 @@ Beware metric cardinality: labeling by `service` (4000 values) × `estate` (2) �
 
 3. **Replication slot WAL explosion** (SaaS, PostgreSQL). A Debezium slot on a low-traffic table stopped advancing because the connector paused during a deploy; with no heartbeat, the source retained WAL until the **disk hit 100%**, taking the *source* primary read-only for **23 minutes**. Impact: write outage on the system of record during a migration meant to have zero downtime. Fix: `heartbeat.interval.ms: 5000` + disk-usage alerting on `pg_replication_slots` retained bytes.
 
-4. **Snowball snapshot LSN mismatch** (logistics). The bulk Snowball import used a snapshot taken at LSN `L0`, but the CDC connector was (mis)configured to `snapshot.mode: initial`, so it **re-snapshotted 200TB over the WAN**, saturating Direct Connect for 2.6 days and starving dual-write — adding **+340ms p99** to live traffic. Fix: `snapshot.mode: never` with explicit `snapshot.lsn` (§4.1).
+4. **Bulk copy done, then the connector snapshotted it all again** (logistics). The bulk import was taken at LSN `L0`, but the CDC connector was left on the default `snapshot.mode: initial`, so it **re-snapshotted 200TB over the production WAN**, saturating Direct Connect for 2.6 days and starving dual-write — adding **+340ms p99** to live traffic. Fix: create the replication slot *before* the bulk copy so it pins `L0`, then run the connector with `snapshot.mode: no_data` (§4.1). There is no property that hands the connector a starting LSN directly — reaching for one is the wrong mental model, and the slot is the only thing that carries the position.
 
 5. **Cross-estate connectivity gap at 25% shift** (media). At the 25% increment, target pods began failing to reach a *source-resident* dependency the team forgot wasn't migrated, because cross-estate routes weren't established for that subnet. Error rate jumped **6%** for 9 minutes before auto-rollback. Impact: ~**$90K** ad revenue. Fix: pre-flight cross-estate reachability checks per [multi_cluster_networking](./cross_cutting/multi_cluster_networking.md); validate *every* downstream dependency before shifting.
 
@@ -844,9 +889,13 @@ Beware metric cardinality: labeling by `service` (4000 values) × `estate` (2) �
 ```
 backfill_time = data_size / effective_throughput
 
-Snowball path:    200 TB / (3 devices, parallel load ~250 MB/s each)
-                  ≈ load 200TB at 750 MB/s ≈ 74 hours load + 5-7 days ship
-WAN path (avoid): 200 TB / 875 MB/s (70% of 10Gbps) ≈ 66 hours continuous
+Dedicated-DX path (chosen):
+    200 TB / 8,750 MB/s (70% of a separate 100 Gbps DX) ≈ 6.6 h on the wire
+    + target ingest and index rebuild                   ≈ 24 h end to end
+    and ZERO bytes on the production circuit
+Shared production link (avoid):
+    200 TB / 875 MB/s (70% of the production 10 Gbps)   ≈ 66 h continuous,
+    every hour of which starves CDC and dual-write
 ```
 
 ### CDC catch-up formula
@@ -855,9 +904,14 @@ WAN path (avoid): 200 TB / 875 MB/s (70% of 10Gbps) ≈ 66 hours continuous
 catch_up_time = backlog / (apply_rate - produce_rate)
 
 backlog at snapshot = produce_rate * snapshot_to_cdc_gap
-                    = 180 MB/s * 6 days = 91 TB
+                    = 180 MB/s * 24 h = 15.6 TB
 With sharded apply at 600 MB/s, produce 180 MB/s:
-catch_up = 91 TB / (600 - 180) MB/s = 91,000,000 / 420 ≈ 216,667 s ≈ 2.5 days
+catch_up = 15.6 TB / (600 - 180) MB/s = 15,600,000 / 420 ≈ 37,100 s ≈ 10.3 h
+
+Note the shape: backlog is LINEAR in the snapshot-to-CDC gap, so an hour
+saved on the copy is worth more than an hour saved on the apply path.
+A 6-day gap would put the backlog at 91 TB and catch-up at ~2.5 days
+sharded, ~15 days unsharded.
 ```
 
 ### Parallel-estate cost formula
@@ -878,19 +932,23 @@ Target Aurora PostgreSQL for the orders cluster, sized for 120k writes/s aggrega
 | Aurora storage + I/O | ~40 TB + I/O | — | ~$5,800 |
 | DMS replication | `dms.c5.4xlarge` ×3 (sharded) | 3 | ~$3,200 |
 | EKS for apply/proxy | `m6i.2xlarge` ×12 | 12 | ~$3,000 |
-| Data transfer (CDC, cross-estate) | ~15 TB/day × 30 × $0.02/GB | — | ~$9,000 |
-| **Target subtotal (orders)** | | | **~$27,300/mo** |
+| Data transfer (CDC, cross-estate) | orders is 30k of the estate's 120k writes/s, so 25% of 15.2 TB/day = 3.8 TB/day × 30 × $0.02/GB | — | ~$2,280 |
+| **Target subtotal (orders)** | | | **~$20,580/mo** |
 | Source on-prem (orders, amortized) | | | **~$22,000/mo** |
-| **Overlap total (orders, during transition)** | | | **~$49,300/mo (~2.05× source)** |
+| **Overlap total (orders, during transition)** | | | **~$42,580/mo (~1.94× source)** |
 
-Across the whole estate the **peak** parallel cost is ~2.05× source, but because the phased plan only dual-runs the *in-flight* fraction (and decommissions source per service immediately after bake), the **6-month average is ~1.55×**, inside the ≤ 1.6× NFR. Cross-estate transfer cost ($9K/mo for orders alone, ~15 TB/day CDC) is the largest variable line item — minimizing the dual-write window per service is the biggest cost lever. Target-cluster hardening (PDBs, anti-affinity, HPA, resource limits) before any traffic shift follows [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
+The transfer line is where this table is easiest to get wrong. The 15.2 TB/day figure from §2 is the **whole estate's** CDC volume at 120k writes/s; charging all of it to the orders cluster — which is ~30k/s, a quarter of the writes — inflates the line from $2,280 to $9,000 and pushes the overlap ratio from 1.94× to 2.24×, i.e. straight past the 2.05× peak the cost model predicts. Whenever a worked example takes an estate-wide rate and applies it to one component, check the share.
+
+Read the other way, the corrected numbers validate the model: the orders target subtotal is $20,580 against a $22,000 source, or **0.94×** — almost exactly the 0.95× target multiple assumed in §2's cost breakdown.
+
+Across the whole estate the **peak** parallel cost is ~2.05× source, but because the phased plan only dual-runs the *in-flight* fraction (and decommissions source per service immediately after bake), the **6-month average is ~1.55×**, inside the ≤ 1.6× NFR. Cross-estate CDC transfer (~$2.3K/mo for orders, ~$9K/mo estate-wide at 15.2 TB/day) is the largest variable line item — minimizing the dual-write window per service is the biggest cost lever. Target-cluster hardening (PDBs, anti-affinity, HPA, resource limits) before any traffic shift follows [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
 
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: How do you guarantee zero user-visible downtime when the database itself must move?**
-You never have a "down" moment because the source remains the system of record until the instant of cutover, and the cutover is a *weighted shift*, not a flip. Backfill (Snowball) + CDC keep the target hot and converged; dual-write bridges the final transition window so both estates are current; then traffic shifts in 1/5/25/50/100 increments with the source still serving the rest. The user always hits a healthy estate; the switch is invisible because at no point is any portion of traffic pointed at an unready target.
+You never have a "down" moment because the source remains the system of record until the instant of cutover, and the cutover is a *weighted shift*, not a flip. Bulk backfill over a dedicated circuit + CDC keep the target hot and converged; dual-write bridges the final transition window so both estates are current; then traffic shifts in 1/5/25/50/100 increments with the source still serving the rest. The user always hits a healthy estate; the switch is invisible because at no point is any portion of traffic pointed at an unready target.
 
 **Q: Why CDC *and* dual-write — isn't one enough?**
 They solve different time horizons. CDC converges the *historical and ongoing* delta non-invasively (no app change, captures out-of-band writes), but it has lag and can't make the target instantly authoritative. Dual-write makes the *active transition window* seamless by writing both estates synchronously-enough that a flip loses nothing. Use CDC for the long backlog, dual-write only for the short final window per service to bound its risk and cost.
@@ -907,8 +965,8 @@ Reconciliation. Replication is mechanical; *proving the two estates agree* is wh
 **Q: How do you prevent dual-write from corrupting data?**
 Idempotency plus versioned conflict resolution. Every write carries a deterministic idempotency key, the target apply is an `ON CONFLICT DO UPDATE ... WHERE write_id < EXCLUDED.write_id` upsert (so replays and out-of-order applies are harmless and never regress newer data), and target writes go through a durable outbox so a failure is reconcilable, never silently swallowed. The broken version that swallowed target errors produced 0.8% divergence and an 11-day repair — see §4.2 and §9.
 
-**Q: Why Snowball instead of just streaming 200TB over Direct Connect?**
-WAN contention. Streaming 200TB at 70% of a 10 Gbps link takes ~2.8 days of *full* pipe, during which CDC and dual-write would be starved, adding hundreds of ms to live latency. Snowball moves the cold historical bulk physically (zero production bandwidth) and you reserve the WAN for the live delta. The trade is 5–7 days of shipping latency and the discipline of recording the snapshot LSN so CDC resumes from exactly the right point.
+**Q: Why not just stream the 200TB over your existing Direct Connect?**
+Contention. Streaming 200TB at a realistic 70% of a 10 Gbps link takes ~2.8 days during which CDC and dual-write are starved, adding hundreds of ms to live latency — the §9 incident that did exactly this cost +340ms p99 for 2.6 days. The fix is to put the bulk on a *different* path: a temporary dedicated 100 Gbps Direct Connect, driven by DataSync and DMS full-load, cuts the wire time to ~6.6 hours and puts zero bytes on the production circuit. An offline appliance used to be the classic answer here, but AWS Snow is closed to new customers and out of support at the end of 2026, so it is not on the table. The trade is weeks of circuit provisioning lead time — spent before the window opens — plus the discipline of creating the replication slot first so CDC resumes from exactly the right LSN.
 
 **Q: How do you bound the blast radius of a bad cutover?**
 Two levers: increment size and per-service scope. Each shift moves at most 1% of a single service's traffic before a soak-and-gate check, and services migrate independently rather than in a flag day. So a bad target affects at most 1% of one service for the soak duration, and auto-rollback (mesh weight → 0 in < 1s) drains it. The whole estate is never exposed at once — that's the strangler-fig discipline.
@@ -923,7 +981,7 @@ Parity = 100% (count + checksum + sample + zero shadow diffs over the soak windo
 Label the long-lived metrics by `service` × `estate` only, and keep high-cardinality dimensions (`chunk`, per-row ids) out of Prometheus entirely — they live in reconciliation job logs. `service` (4000) × `estate` (2) is ~8,000 series per metric, which is fine; adding `chunk` (1000s) would multiply that into the millions and melt the TSDB. The cardinality discipline and federation approach follow [`cross_cutting/prometheus_cardinality_and_scale.md`](./cross_cutting/prometheus_cardinality_and_scale.md).
 
 **Q: How do you control the cost of running two estates for six months?**
-Minimize the *overlap window per service*. Peak dual-running is ~2.05× source, but because you only dual-run the in-flight fraction and decommission source immediately after each service's bake, the 6-month average lands ~1.55×. The biggest single lever is the cross-estate CDC transfer bill (~$9K/mo for one cluster at 15 TB/day), so keep the dual-write window short and tear down replication the moment parity is proven and bake completes.
+Minimize the *overlap window per service*. Peak dual-running is ~2.05× source, but because you only dual-run the in-flight fraction and decommission source immediately after each service's bake, the 6-month average lands ~1.55×. The biggest single lever is the cross-estate CDC transfer bill (~$9K/mo estate-wide at 15.2 TB/day, ~$2.3K of it the orders cluster), so keep the dual-write window short and tear down replication the moment parity is proven and bake completes.
 
 **Q: When would you accept a big-bang cutover instead?**
 Only for small, low-traffic, non-critical estates where a short maintenance window is acceptable and the data fits a single copy faster than the rollback risk of a long overlap. For anything resembling 4000 services + 200TB with a 24/7 product, big-bang is infeasible: there is no global freeze window, blast radius is the entire estate, and rollback means a multi-hour full restore. The cost of phased overlap buys you per-service, sub-10-minute reversibility — a price worth paying for a live business.

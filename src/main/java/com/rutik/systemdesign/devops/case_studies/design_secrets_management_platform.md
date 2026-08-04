@@ -46,7 +46,7 @@ This builds on [`../secrets_management/secrets_management.md`](../secrets_manage
 - **FR1 — Dynamic database credentials.** Issue per-request, per-service database users (Postgres, MySQL, MongoDB, Redis) with bounded TTL. The platform creates the user, sets grants, returns credentials, and revokes on lease expiry.
 - **FR2 — PKI / certificate issuance.** Act as an intermediate CA. Issue X.509 leaf certs for mTLS between services with short TTL (24h–72h), auto-renewed before expiry.
 - **FR3 — Encryption-as-a-service (transit).** Encrypt/decrypt/sign/HMAC payloads without the app ever holding the key material. Support key rotation and rewrapping of historical ciphertext.
-- **FR4 — Pluggable auth methods.** Authenticate workloads via Kubernetes ServiceAccount JWT, generic OIDC, AWS IRSA, and short-lived AppRole for legacy/CI. No static auth tokens for apps.
+- **FR4 — Pluggable auth methods.** Authenticate workloads via Kubernetes ServiceAccount JWT, generic OIDC, an AWS IAM identity (obtained through IRSA or EKS Pod Identity), and short-lived AppRole for legacy/CI. No static auth tokens for apps.
 - **FR5 — Static-secret sync (KV).** Hold KV secrets (third-party API keys that cannot be made dynamic) and sync them into clusters via the External Secrets Operator (ESO), refreshed on an interval.
 - **FR6 — Rotation.** Automatic rotation of root/static credentials (DB root, cloud keys) on a schedule, and lease-driven rotation of dynamic creds.
 - **FR7 — Full audit.** Every read, lease grant, revoke, login, and policy change is logged with request hash, identity, path, and timestamp — tamper-evident, append-only.
@@ -70,7 +70,7 @@ This builds on [`../secrets_management/secrets_management.md`](../secrets_manage
 ### Out of Scope
 
 - Secret *consumption* correctness inside apps (app bugs that log secrets — covered by linting/CI).
-- Human password vaults / SالسO for employees (1Password / Okta domain).
+- Human password vaults / employee SSO (1Password / Okta domain).
 - HSM-backed root-of-trust hardware procurement (we use cloud KMS as the unseal root).
 - Code-signing key custody (separate sigstore/cosign pipeline, see [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md)).
 
@@ -97,9 +97,11 @@ That is the dominant scaling pressure. Each lease is a row in storage (~300 byte
 9,000,000 leases × 300 B ≈ 2.7 GB resident in storage backend
 ```
 
-Lease expiration is a background sweep. At steady state, expiry rate ≈ issuance rate = 2,500/s of revocations — each revocation issues a `DROP USER`/`REVOKE` to the target DB. **The downstream databases, not Vault, are the real bottleneck.** (See §9 lease-storm war story.)
+Lease expiration is a background sweep. At steady state, expiry rate ≈ issuance rate = 2,500/s of revocations — each revocation issues a `DROP USER`/`REVOKE` to the target DB. **The downstream databases, not Vault, are the real bottleneck**, and by a wide margin: role DDL writes the shared `pg_authid` catalog and invalidates catalog caches cluster-wide, so a PostgreSQL cluster tolerates *tens* of role creations per second, not thousands. The §9 lease-storm war story is the calibration point — ~67 CREATE ROLE/s put one cluster at 80% CPU on DDL alone. Treat 2,500/s as a **peak** (a fleet-wide rollout re-authenticating at once), not a steady state; the §4.1 renew-in-place pattern is what keeps the steady-state rate down to pod-churn levels, and §10 sizes the shard count against the peak.
 
-**Mitigation already baked in:** push transit + KV (cacheable, no lease) to the front; reserve dynamic creds for things that genuinely need them. If we naively put every service on 1-min TTL dynamic creds, active leases would be 60× lower per-lease but issuance rate 60× higher → 150k DROP USER/sec, which no database survives. TTL choice is a capacity decision, not a security knob alone.
+**Mitigation already baked in:** push transit + KV (cacheable, no lease) to the front; reserve dynamic creds for things that genuinely need them.
+
+Note carefully what shortening the TTL does and does not do. If we put every service on a 1-minute TTL, the active-lease count is **unchanged** — issuance rises to 150k/s and 150,000 × 60 s is still 9,000,000 leases — because `issuance_rate × TTL` holds the product constant when the same population of clients each holds one lease. What changes is the *issuance and revocation rate*: 150k CREATE/DROP USER per second, which no database survives. Shortening the TTL does not shrink your lease table; it multiplies your DDL rate. TTL choice is a capacity decision, not a security knob alone.
 
 ### Storage backend (Raft)
 
@@ -368,7 +370,7 @@ Problems: one password shared by 14 services (unbounded blast radius), in git hi
 
 ```yaml
 # externalsecret-payments-db.yaml -- references a path, holds no secret value
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: payments-db
@@ -449,28 +451,31 @@ volumes:
 ```
 
 ```bash
-# configure vault kubernetes auth to use the cluster's OIDC issuer (no static
-# reviewer token stored in vault -> uses vault's own SA TokenReview)
+# configure vault kubernetes auth. Leave token_reviewer_jwt unset so Vault
+# reviews incoming JWTs with its OWN ServiceAccount token, which the kubelet
+# rotates -- there is then no long-lived reviewer credential stored in Vault.
 vault write auth/kubernetes/config \
     kubernetes_host="https://$KUBE_API:443" \
-    disable_iss_validation=false
+    disable_local_ca_jwt=false
 
 vault write auth/kubernetes/role/payments \
     bound_service_account_names=payments \
     bound_service_account_namespaces=payments \
     audience=vault \
-    policies=payments-db,payments-transit \
-    ttl=1h
+    token_policies=payments-db,payments-transit \
+    token_ttl=1h
 ```
 
-IRSA path for EKS workloads that should authenticate as an AWS identity:
+The `token_policies` / `token_ttl` spelling is deliberate: the bare `policies` and `ttl` parameters are legacy aliases kept for compatibility, and mixing the two spellings on one role is a reliable way to produce a token whose TTL is not what the manifest appears to say.
+
+AWS path for EKS workloads that should authenticate as an AWS identity. This works with either pod-to-role mechanism — **IRSA** (the OIDC-federated original) or **EKS Pod Identity** (AWS's newer association API, and its current recommendation for new clusters) — because Vault only ever sees the resulting signed STS identity, not how the pod obtained it:
 
 ```bash
 vault write auth/aws/role/batch \
     auth_type=iam \
     bound_iam_principal_arn="arn:aws:iam::123456789012:role/batch-job" \
-    policies=batch-kv \
-    ttl=1h
+    token_policies=batch-kv \
+    token_ttl=1h
 ```
 
 #### BROKEN → FIX (the root-token anti-pattern)
@@ -526,7 +531,7 @@ flowchart LR
 ESO's reconcile loop polls Vault kv-v2 on the configured refreshInterval and writes decoded values into a native k8s Secret — the pod sees an ordinary Secret and rotation is transparent to it.
 
 ```yaml
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: vault-backend
@@ -544,7 +549,7 @@ spec:
             name: external-secrets
             namespace: external-secrets
 ---
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: stripe-api-key
@@ -562,7 +567,7 @@ spec:
         property: secret_key
 ```
 
-**Operational note:** ESO polls. With 3,000 ExternalSecrets at `refreshInterval: 1h`, that is ~0.83 reads/sec average — negligible. But a naive `refreshInterval: 10s` across 3,000 secrets = 300 reads/sec of pure polling overhead, and if all reconcile loops align you get thundering-herd spikes. Jitter the intervals and prefer event-driven (`PushSecret` / webhook) for high-churn paths.
+**Operational note:** ESO polls. With 3,000 ExternalSecrets at `refreshInterval: 1h`, that is ~0.83 reads/sec average — negligible. But a naive `refreshInterval: 10s` across 3,000 secrets = 300 reads/sec of pure polling overhead, and if all reconcile loops align you get thundering-herd spikes. Jitter the intervals, and for secrets that only change when someone changes them, set `refreshPolicy: OnChange` (sync only when the ExternalSecret's spec/metadata changes or a force-sync annotation is applied) or `refreshPolicy: CreatedOnce` — both remove the object from the polling loop entirely, which `refreshInterval` alone cannot do.
 
 ---
 
@@ -641,9 +646,10 @@ The transit pattern means a database breach yields only ciphertext: the attacker
 ### D1 — Vault (self-hosted) vs AWS Secrets Manager vs cloud KMS
 
 **Decision:** Self-hosted HashiCorp Vault as the org-wide control plane; cloud KMS only as the unseal root.
-**Alternatives:** AWS Secrets Manager (managed), pure cloud KMS + per-cloud secret stores.
+**Alternatives:** AWS Secrets Manager (managed), pure cloud KMS + per-cloud secret stores, **OpenBao**.
 **Rationale:** We are multi-cloud / multi-cluster and need *dynamic* DB creds + transit + PKI under one policy model. AWS Secrets Manager has no dynamic DB engine of Vault's breadth, no transit, and locks us to AWS. Cloud KMS is key management, not secret lifecycle.
-**Consequences:** We own Vault HA, upgrades, and unseal — real operational cost. We accept it for capability and portability.
+**The licence is part of this decision, not a footnote.** Vault has been under the **BUSL 1.1** source-available licence since August 2023, and HashiCorp is an IBM product line since the acquisition closed in early 2025. **OpenBao** is the Linux Foundation fork of Vault's last MPL-2.0 release, MPL-2.0 licensed under neutral governance, and it is API-compatible for the engines used here (`database/`, `transit/`, `pki/`, `kv-v2`, the k8s and AWS auth methods). We stay on Vault for the Enterprise-only features this design leans on — DR replication and performance secondaries (D7) — which OpenBao does not match; an organization that does not need those, or whose legal team rejects BUSL, should read every Vault reference in this document as an OpenBao reference and lose nothing.
+**Consequences:** We own Vault HA, upgrades, and unseal — real operational cost — plus a source-available licence and single-vendor governance. We accept both for capability and breadth.
 
 ### D2 — Dynamic vs static secrets
 
@@ -656,7 +662,7 @@ The transit pattern means a database breach yields only ciphertext: the attacker
 
 **Decision:** ESO for KV→native-Secret sync; Vault Agent for dynamic creds that need in-place renewal; CSI driver avoided as default.
 **Alternatives:** Vault Agent sidecar everywhere; CSI Secrets Store Provider.
-**Rationale:** ESO gives a native `Secret` the whole ecosystem understands, central reconcile, GitOps-friendly. Agent is better when you need lease renewal without a k8s Secret (e.g., short-TTL DB creds in-memory). CSI couples secret lifetime to pod lifetime and complicates rotation.
+**Rationale:** ESO gives a native `Secret` the whole ecosystem understands, central reconcile, GitOps-friendly. Agent is better when you need lease renewal without a k8s Secret (e.g., short-TTL DB creds in-memory). CSI couples secret lifetime to pod lifetime, and its rotation reconciler ships **disabled** — you must run the driver with `--enable-secret-rotation` or mounts never refresh, which is a silent failure rather than an error.
 **Consequences:** ESO materializes secrets as k8s Secrets (etcd) — must enable etcd encryption-at-rest and tight RBAC; see [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
 
 ### D4 — Raft (integrated storage) vs Consul storage backend
@@ -669,7 +675,7 @@ The transit pattern means a database breach yields only ciphertext: the attacker
 ### D5 — Auto-unseal (cloud KMS) vs Shamir key shares
 
 **Decision:** Auto-unseal via cloud KMS.
-**Alternatives:** Shamir 5-of-3 manual unseal.
+**Alternatives:** Shamir manual unseal (the default init is 5 key shares with a threshold of 3).
 **Rationale:** At 99.99% and frequent pod restarts/autoscaling, a human key-shard ceremony on every restart is incompatible with availability. KMS auto-unseal restarts unattended.
 **Consequences:** KMS becomes a hard dependency for unseal; if the KMS key is deleted, Vault is permanently sealed. Protect the KMS key with deletion protection + cross-region replica.
 
@@ -705,15 +711,17 @@ The TTL choice trades leak window against database churn: 5 minutes tightens the
 
 ### Comparison table
 
-| Dimension | Vault (self-host) | AWS Secrets Mgr | GCP Secret Mgr | Azure Key Vault | KMS only |
-|-----------|-------------------|-----------------|----------------|-----------------|----------|
-| Dynamic DB creds | Yes (broad) | Limited (rotation lambda) | No | No | No |
-| Transit (EaaS) | Yes | No | No | Partial (keys) | Encrypt only |
-| PKI / CA | Yes | ACM PCA (separate) | CAS (separate) | Partial | No |
-| Multi-cloud | Yes | No | No | No | No |
-| Ops burden | High | None | None | None | Low |
-| Audit granularity | Per-request | CloudTrail | Cloud Audit | Azure Monitor | CloudTrail |
-| Cost model | Compute + license | Per-secret/mo | Per-version | Per-op | Per-op |
+| Dimension | Vault (self-host) | OpenBao | AWS Secrets Mgr | GCP Secret Mgr | Azure Key Vault | KMS only |
+|-----------|-------------------|---------|-----------------|----------------|-----------------|----------|
+| Dynamic DB creds | Yes (broad) | Yes (same engines) | Limited (rotation lambda) | No | No | No |
+| Transit (EaaS) | Yes | Yes | No | No | Partial (keys) | Encrypt only |
+| PKI / CA | Yes | Yes | AWS Private CA (separate) | CAS (separate) | Partial | No |
+| DR replication / perf secondaries | Enterprise | Not matched | n/a (managed) | n/a | n/a | n/a |
+| Licence | BUSL 1.1 (IBM) | MPL 2.0 (Linux Foundation) | Proprietary | Proprietary | Proprietary | Proprietary |
+| Multi-cloud | Yes | Yes | No | No | No | No |
+| Ops burden | High | High | None | None | None | Low |
+| Audit granularity | Per-request | Per-request | CloudTrail | Cloud Audit | Azure Monitor | CloudTrail |
+| Cost model | Compute + Enterprise licence | Compute only | Per-secret/mo | Per-version | Per-op | Per-op |
 
 ---
 
@@ -737,14 +745,15 @@ Common thread: every one of these organizations treats "static long-lived secret
 
 | Tool | Type | Dynamic creds | Transit/EaaS | Sync to k8s | Multi-cloud | Best for |
 |------|------|---------------|--------------|-------------|-------------|----------|
-| HashiCorp Vault | Self-hosted control plane | Yes (DB/cloud/PKI) | Yes | via ESO/Agent/CSI | Yes | Org-wide dynamic secrets, EaaS, PKI |
+| HashiCorp Vault (BUSL 1.1) | Self-hosted control plane | Yes (DB/cloud/PKI) | Yes | via ESO/Agent/CSI | Yes | Org-wide dynamic secrets, EaaS, PKI |
+| OpenBao (MPL 2.0, Linux Foundation) | Self-hosted control plane, Vault fork | Yes (same engines) | Yes | via ESO/Agent/CSI | Yes | The same, where a source-available licence is unacceptable |
 | AWS Secrets Manager | Managed | Rotation-lambda only | No | via ESO | No (AWS) | AWS-only static secrets + rotation |
 | GCP Secret Manager | Managed | No | No | via ESO | No (GCP) | GCP-only versioned static secrets |
 | Azure Key Vault | Managed | No | Keys/HSM | via ESO/CSI | No (Azure) | Azure static secrets + HSM keys |
 | External Secrets Operator | Sync controller | Passthrough (Vault gen) | No | Yes (native) | Yes (any backend) | Backend → native k8s Secret |
 | SOPS / sealed-secrets | Encrypt-in-git | No | No | Yes (decrypt in cluster) | Yes | GitOps secrets without a live backend |
 
-Guidance: use **Vault** as the source of truth for dynamic creds + transit + PKI; **ESO** to surface KV into clusters; **cloud secret managers** only where a managed single-cloud store is simpler and dynamic creds aren't needed; **SOPS/sealed-secrets** for small GitOps setups with no central server. CSI driver where you need pod-lifecycle-bound mounting; otherwise ESO.
+Guidance: use **Vault** (or **OpenBao**, if BUSL is a blocker and you do not need Enterprise DR replication) as the source of truth for dynamic creds + transit + PKI; **ESO** to surface KV into clusters; **cloud secret managers** only where a managed single-cloud store is simpler and dynamic creds aren't needed; **SOPS/sealed-secrets** for small GitOps setups with no central server. CSI driver where you need pod-lifecycle-bound mounting — remembering that its rotation reconciler is opt-in and off by default; otherwise ESO.
 
 ---
 
@@ -774,8 +783,11 @@ vault_secret_lease_creation          # issuance rate -> downstream DB load
 ```promql
 # alert: Vault sealed
 max(vault_core_unsealed) < 1
-# alert: lease growth abnormal (storm)
-rate(vault_expire_num_leases[5m]) > 1000
+# alert: lease growth abnormal (storm). vault_expire_num_leases is a GAUGE, so
+# rate() is wrong here -- rate() assumes a monotonic counter and swallows every
+# decrease as a reset, which is exactly the signal you are trying to see.
+# deriv() fits a least-squares line and gives leases-per-second of growth.
+deriv(vault_expire_num_leases[5m]) > 1000
 # alert: audit device failing (requests will start failing closed)
 increase(vault_audit_log_request_failure[1m]) > 0
 ```
@@ -820,7 +832,7 @@ Resolution: confirm revocation in audit; if it was a static KV third-party key, 
 
 4. **Auto-unseal KMS key over-locked.** An overzealous "least privilege" cleanup removed `kms:Decrypt` from the Vault unseal role. The running cluster was fine — until a routine node replacement restarted a pod that could not unseal, then a deploy rolled the rest. Result: a fully sealed cluster, RTO ~22 min while IAM was restored. Lesson: the unseal KMS grant is load-bearing; protect it with change review and deletion protection.
 
-5. **CSI-mounted secret never rotates.** A team used the CSI Secrets Store driver and assumed rotation was automatic; secrets are mounted at pod start and, without rotation polling enabled, stayed stale for the pod's whole 30-day lifetime. A rotated upstream key meant half the fleet was using a dead credential after rotation. Impact: intermittent auth failures across ~120 pods until pods were force-recycled. Lesson: rotation semantics differ per delivery mechanism (ESO polls; CSI needs explicit rotation config; Agent renews leases).
+5. **CSI-mounted secret never rotates.** A team used the CSI Secrets Store driver and assumed rotation was automatic. It is not: the driver's rotation reconciler is **opt-in and off by default** (`--enable-secret-rotation`, with `--rotation-poll-interval`), so secrets were mounted at pod start and stayed stale for the pod's whole 30-day lifetime. A rotated upstream key meant half the fleet was using a dead credential after rotation. Impact: intermittent auth failures across ~120 pods until pods were force-recycled. Lesson: rotation semantics differ per delivery mechanism (ESO polls; CSI needs explicit rotation config; Agent renews leases).
 
 6. **Over-broad policy = lateral movement.** A wildcard policy `path "secret/*" { capabilities = ["read"] }` handed to one service let a compromised pod read *every* team's KV. Tie this to supply-chain hardening — a compromised base image with that policy is catastrophic; see [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md). Fix: namespace/path-scoped policies, negative integration tests in the §8 eval gate. Estimated exposure: ~2,000 secrets readable by a single service for the months the wildcard existed.
 
@@ -847,26 +859,36 @@ Targets: 50k reads/sec peak, 2,500 dynamic issuances/sec, 1h TTL, 8 regions.
 
 ```
 active_leases     = 2,500 × 3,600 = 9,000,000
-db_drop_rate      ≈ 2,500 /s  -> shard across 10 DB clusters = 250 DROP/s each (sustainable)
+db_drop_rate      ≈ 2,500 /s at PEAK. Role DDL is catalog-heavy: §9 shows ~67
+                    CREATE ROLE/s taking a PostgreSQL cluster to 80% CPU, so
+                    budget ~50/s per cluster, not 250/s. Two levers, used together:
+                      - shard the target fleet (50 clusters at 50/s absorbs the peak)
+                      - keep STEADY-STATE issuance far below peak with renew-in-place
+                        (§4.1), so 2,500/s is only touched during a fleet rollout,
+                        which the rollout itself should batch rather than stampede
 audit_volume      = 50,000 × 1.2 KB = 60 MB/s = 5.0 TB/day raw (~640 GB/day @8:1)
 raft_working_set  ≈ 9.0M×300 + 200k×600 + 80MB + 200MB ≈ 3.1 GB  (fits r6i.2xlarge RAM)
 vault_active_caps = 50,000 / 12,000 ≈ 4.2 -> 5 active-capable replicas
 ```
 
+The 250 DROP/s-per-cluster figure that a first pass produces is the trap here: it is arithmetically fine (2,500 ÷ 10) and contradicted by this document's own incident data. Any "therefore N shards" line has to be checked against a measured per-shard ceiling, not against a round number of shards.
+
 **Topology & cost (AWS, us-east-1 primary + 3 read regions):**
 
 | Item | Spec | Qty | $/mo est. |
 |------|------|-----|-----------|
-| Primary Vault voters | `r6i.2xlarge` (8 vCPU/64 GB) | 5 | ~$1,520 |
-| Perf-secondary nodes (3 regions ×3) | `r6i.xlarge` | 9 | ~$1,370 |
-| DR secondary cluster | `r6i.xlarge` | 3 | ~$455 |
-| EBS gp3 (snapshots + raft) | 200 GB ×17 | — | ~$340 |
+| Primary Vault voters | `r6i.2xlarge` (8 vCPU/64 GB) @ $0.504/hr | 5 | ~$1,840 |
+| Perf-secondary nodes (3 regions ×3) | `r6i.xlarge` @ $0.252/hr | 9 | ~$1,656 |
+| DR secondary cluster | `r6i.xlarge` @ $0.252/hr | 3 | ~$552 |
+| EBS gp3 (snapshots + raft) | 200 GB ×17 @ $0.08/GB-mo | — | ~$272 |
 | KMS unseal key + requests | 1 key, low volume | — | ~$5 |
 | Audit storage (S3, 1yr, compressed) | ~230 TB | — | ~$5,300 |
 | Cross-region replication egress | ~est. | — | ~$900 |
-| **Total** | | | **~$10,400/mo** |
+| **Total** | | | **~$10,500/mo** |
 
-Compare to AWS Secrets Manager naive cost: 20,000 secrets × $0.40/secret/mo = $8,000/mo *plus* $0.05 per 10k API calls → 50k/s = 4.32B calls/day → wildly more on API charges alone. Vault's compute model wins decisively at this read volume; the value is dynamic creds + transit, not just price.
+All instance lines are us-east-1 on-demand list at 730 hr/month; a Savings Plan or RI would take the compute lines down materially but is deliberately not assumed here. Note that the audit-log line alone is half the bill — this is a platform whose dominant cost is *proving what happened*, not doing it.
+
+Compare to AWS Secrets Manager at this volume: 20,000 secrets × $0.40/secret/mo = $8,000/mo *plus* $0.05 per 10k API calls. At 50k/s that is 4.32B calls/day, or 432,000 × $0.05 = **$21,600/day ≈ $648K/month in API charges alone** — 60x the whole Vault bill, before you notice that Secrets Manager cannot mint dynamic database users or do transit at all. Vault's compute model wins decisively at this read volume; the value is dynamic creds + transit, not just price.
 
 For node hardening, etcd-encryption (ESO materializes k8s Secrets), PodSecurity, and seccomp on Vault pods, follow [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
 
@@ -890,7 +912,7 @@ Vault encrypts its master key with a cloud KMS key; on start it calls KMS to unw
 If Vault cannot write an audit record, it refuses the request — because a successful operation with no audit trail is worse than a failed one in a security system. Operationally you run at least two audit devices (e.g., a local file device plus a socket device to your SIEM); Vault succeeds if any enabled device writes, so a SIEM outage degrades to file-only rather than blocking. The anti-pattern is disabling auditing to "restore service" during an incident — that creates a blind window exactly when you most need attribution.
 
 **Q6. ESO vs Vault Agent sidecar vs CSI driver — when each?**
-ESO when you want a native Kubernetes Secret the whole ecosystem consumes, with central reconcile and GitOps workflow — ideal for KV. Vault Agent when you need lease *renewal* in place (short-TTL dynamic DB creds held in memory, renewed at 2/3 TTL) without materializing a k8s Secret. CSI Secrets Store when you want secrets mounted as files tied to pod lifecycle — but beware rotation must be explicitly configured, or mounted secrets go stale for the pod's lifetime (§9 war story 5). Most orgs use ESO for static + Agent for dynamic, and avoid CSI as a default.
+ESO when you want a native Kubernetes Secret the whole ecosystem consumes, with central reconcile and GitOps workflow — ideal for KV. Vault Agent when you need lease *renewal* in place (short-TTL dynamic DB creds held in memory, renewed at 2/3 TTL) without materializing a k8s Secret. CSI Secrets Store when you want secrets mounted as files tied to pod lifecycle — but beware that its rotation reconciler is opt-in and off by default (`--enable-secret-rotation`), so an unconfigured install leaves mounted secrets stale for the pod's whole lifetime (§9 war story 5). Most orgs use ESO for static + Agent for dynamic, and avoid CSI as a default.
 
 **Q7. How does transit (encryption-as-a-service) change the breach calculus?**
 The application sends plaintext and receives versioned ciphertext (`vault:v3:...`); the key never leaves Vault and the app physically cannot exfiltrate key material. A full database breach then yields only ciphertext — useless without authenticating to Vault, which is audited and revocable. Key rotation produces a new version while old ciphertext still decrypts, and a rewrap operation migrates old ciphertext to the new key without ever exposing plaintext. It moves the trust boundary from "every app that touches data" to "Vault plus its audit log."
