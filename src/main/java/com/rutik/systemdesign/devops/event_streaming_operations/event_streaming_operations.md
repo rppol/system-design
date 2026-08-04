@@ -12,7 +12,7 @@ A streaming platform team runs Kafka so that dozens of producer and consumer tea
 
 The operational surface area:
 
-- **Cluster topology** — brokers, the controller (KRaft has replaced ZooKeeper as of Kafka 3.5+; ZooKeeper removed in 4.0), replication factor, `min.insync.replicas`, rack awareness across AZs.
+- **Cluster topology** — brokers, the controller (KRaft has replaced ZooKeeper: production-ready since Kafka 3.3, ZooKeeper mode deprecated in 3.5, and removed outright in 4.0), replication factor, `min.insync.replicas`, rack awareness across AZs.
 - **Capacity** — partition count (the unit of parallelism *and* of open file handles), disk per broker, retention, throughput per partition.
 - **Consumer health** — consumer-group **lag** (the single most important streaming metric), rebalance frequency, partition assignment.
 - **Operations** — rolling upgrades without downtime, partition reassignment/rebalancing with throttling, scaling brokers, tiered storage to offload cold segments to S3.
@@ -58,8 +58,8 @@ The operational surface area:
 
 | Mode | Metadata store | Status |
 |------|---------------|--------|
-| ZooKeeper | External ZK ensemble | Deprecated; removed in Kafka 4.0 |
-| KRaft | Internal Raft quorum of controllers | Default since 3.5+; scales to millions of partitions, faster failover |
+| ZooKeeper | External ZK ensemble | Removed in Kafka 4.0 — only relevant as a migration source |
+| KRaft | Internal Raft quorum of controllers | The only mode from 4.0 (production-ready since 3.3); scales to millions of partitions, faster failover |
 
 **Rebalance protocols:**
 
@@ -208,41 +208,82 @@ LAG = `log-end-offset − committed-offset`, summed across all partitions; flat 
 
 ### 6.1 A durable Strimzi Kafka cluster (KRaft, rack-aware)
 
+Roles live in `KafkaNodePool` resources — one pool of KRaft controllers, one of brokers — and the `Kafka` resource carries only cluster-wide settings:
+
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: controller
+  labels: { strimzi.io/cluster: prod }
+spec:
+  replicas: 3                  # KRaft quorum, one controller per AZ
+  roles: [controller]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 100Gi
+        class: gp3
+        kraftMetadata: shared  # this volume holds the KRaft metadata log
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: broker
+  labels: { strimzi.io/cluster: prod }
+spec:
+  replicas: 3
+  roles: [broker]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 2Ti
+        class: gp3
+  resources:
+    requests: { memory: 32Gi, cpu: "4" }
+    limits:   { memory: 32Gi, cpu: "8" }
+  jvmOptions:
+    "-Xms": "8g"     # heap small; leave the rest of RAM for the page cache (Kafka's real cache)
+    "-Xmx": "8g"
+---
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: prod
 spec:
   kafka:
-    replicas: 3
+    version: 4.3.0
+    metadataVersion: 4.3-IV0     # KRaft feature level; bumped after a binary upgrade
+    listeners:
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
     config:
       default.replication.factor: 3
       min.insync.replicas: 2          # with acks=all -> survive 1 broker, still writable
       offsets.topic.replication.factor: 3
       transaction.state.log.min.isr: 2
-      # spread replicas one-per-AZ:
+      # let consumers fetch from the closest in-sync replica instead of always the leader:
       replica.selector.class: org.apache.kafka.common.replica.RackAwareReplicaSelector
     rack:
-      topologyKey: topology.kubernetes.io/zone   # Strimzi sets broker.rack from the node's AZ
-    storage:
-      type: persistent-claim
-      size: 2Ti
-      class: gp3
-    resources:
-      requests: { memory: 32Gi, cpu: "4" }
-      limits:   { memory: 32Gi, cpu: "8" }
-    jvmOptions:
-      "-Xms": "8g"     # heap small; leave the rest of RAM for the page cache (Kafka's real cache)
-      "-Xmx": "8g"
-  # KRaft controllers (no ZooKeeper):
-  # (Strimzi uses KafkaNodePool CRDs for controller/broker roles in recent versions)
+      topologyKey: topology.kubernetes.io/zone   # Strimzi sets broker.rack from the node's AZ,
+                                                 # which is what spreads replicas one-per-AZ
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
 ```
+
+The `rack` block is what actually spreads replicas across AZs, by giving every broker a `broker.rack` matching its node's zone. `RackAwareReplicaSelector` is a separate, complementary setting: it lets a consumer read from a same-AZ follower instead of the cross-AZ leader, which cuts inter-AZ data-transfer cost but has nothing to do with where replicas are placed. Conflating the two is a common way to end up with three replicas in one zone and a cheaper bill for a cluster that cannot survive an AZ loss.
 
 A topic declared as a CRD (so it's GitOps-managed, not `kafka-topics.sh`):
 
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: orders
@@ -445,7 +486,7 @@ kafka-consumer-groups.sh --bootstrap-server prod-kafka:9092 \
 Strimzi integrates **Cruise Control** to rebalance partitions across brokers safely. You request a rebalance via a CRD; it computes a plan and executes it under a throttle:
 
 ```yaml
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaRebalance
 metadata:
   name: rebalance-after-scaleout
@@ -496,6 +537,17 @@ The unthrottled row is the pitfall: replication is a bulk sequential copy that w
 ### 6.5 Rolling upgrades without downtime
 
 Strimzi performs rolling restarts respecting **PodDisruptionBudgets** and waiting for ISR to fully recover between brokers — it restarts one broker, waits until all its partitions are back in-sync, then proceeds. Doing this by hand and restarting two brokers of an RF=3/`min.insync.replicas=2` topic at once would drop ISR below 2 and block writes.
+
+A version upgrade is two independent steps, deliberately separated. First the binaries roll broker by broker while the cluster keeps operating at its current KRaft **metadata version**; only once that is stable do you raise the feature level, which is a dynamic change and needs no further restart:
+
+```bash
+kafka-features.sh --bootstrap-server prod-kafka:9092 describe
+kafka-features.sh --bootstrap-server prod-kafka:9092 upgrade --metadata 4.3
+# In Strimzi this is declarative: bump spec.kafka.version, let the roll finish,
+# then bump spec.kafka.metadataVersion in a second commit.
+```
+
+Keeping them apart is what preserves the rollback: new binaries at an old metadata version can be rolled back, a raised metadata version cannot be lowered.
 
 ---
 
@@ -583,7 +635,7 @@ The broken config silently loses acknowledged messages on leader failure — the
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| Strimzi | Kafka operator | CRDs: `Kafka`, `KafkaTopic`, `KafkaUser`, `KafkaRebalance`; rolling ops, KRaft |
+| Strimzi | Kafka operator | CRDs: `Kafka`, `KafkaNodePool`, `KafkaTopic`, `KafkaUser`, `KafkaRebalance`; rolling ops; KRaft-only, node pools required |
 | Cruise Control | Rebalancing | Goal-based partition rebalancing, broker add/remove, anomaly detection |
 | Kafka Lag Exporter / Burrow | Lag monitoring | Per-group lag → Prometheus; Burrow adds lag-trend evaluation |
 | Cluster Operator + Kafka Exporter | Metrics | JMX → Prometheus → Grafana dashboards |
@@ -600,7 +652,7 @@ The broken config silently loses acknowledged messages on leader failure — the
 | Managed Kafka | MSK / MSK Serverless | Managed Service for Kafka | Event Hubs (Kafka API) |
 | Native streaming | Kinesis Data Streams | Pub/Sub | Event Hubs |
 | Tiered storage | MSK Tiered Storage | (Kafka KIP-405) | Event Hubs Capture |
-| Stream processing | Kinesis Data Analytics / Flink | Dataflow | Stream Analytics |
+| Stream processing | Amazon Managed Service for Apache Flink | Dataflow | Stream Analytics |
 
 ---
 
@@ -628,7 +680,7 @@ A new broker starts empty — it holds no partitions until you reassign some to 
 Because Kafka's read performance comes from the **OS page cache**, not the JVM heap — recently written segments stay in page cache and are served to consumers without disk I/O. If you set the heap to most of the machine's RAM (say `-Xmx24g` on 32GB), you starve the page cache, force disk reads, and tank throughput, while also creating long GC pauses. The standard guidance is a modest heap (~6–8 GB) and leaving the bulk of RAM to the page cache. This is counterintuitive to people who tune other JVM apps by maximizing heap.
 
 **Q: KRaft vs ZooKeeper — what changed and why does it matter operationally?**
-KRaft replaces the external ZooKeeper ensemble with an internal Raft-based controller quorum that stores cluster metadata in a Kafka log itself. Operationally it means one fewer distributed system to run, secure, and upgrade; faster controller failover and metadata propagation; and a much higher partition ceiling (millions cluster-wide) because metadata is no longer bottlenecked on ZK. KRaft is the default since Kafka 3.5+, and ZooKeeper support was **removed in Kafka 4.0**, so all new clusters should be KRaft. The migration path for existing ZK clusters is a documented, staged process — but greenfield is always KRaft now.
+KRaft replaces the external ZooKeeper ensemble with an internal Raft-based controller quorum that stores cluster metadata in a Kafka log itself. Operationally it means one fewer distributed system to run, secure, and upgrade; faster controller failover and metadata propagation; and a much higher partition ceiling (millions cluster-wide) because metadata is no longer bottlenecked on ZK. KRaft has been production-ready since Kafka 3.3 and is the **only** mode from Kafka 4.0, where ZooKeeper support was removed outright. The migration path for a pre-4.0 ZK cluster is a documented, staged process that has to happen before you can upgrade to 4.0 at all — but greenfield is always KRaft now.
 
 **Q: How does tiered storage change capacity planning?**
 Tiered storage (KIP-405; MSK Tiered Storage) lets brokers keep only recent ("hot") segments on local EBS/NVMe and offload older segments to object storage (S3). This decouples retention from broker disk: you can keep months of data cheaply in S3 while broker disks stay small (hours of hot data). Capacity planning splits into hot disk sizing (`avg_ingest × hot_window × RF`) and cold object-storage cost (cheap per GB). The tradeoff is that reads of cold data are slower (fetched from S3) — fine for replay/backfill, not for latency-critical consumers. It's the standard way to offer long retention without a fleet of huge, expensive broker disks.
@@ -637,7 +689,7 @@ Tiered storage (KIP-405; MSK Tiered Storage) lets brokers keep only recent ("hot
 Simultaneous spike across all partitions points to a group-wide event, not a single slow partition. Most likely: (1) a rebalance — a deploy or a crashed consumer triggered a stop-the-world reassignment that paused everyone; (2) a downstream dependency the consumers all write to (a database, an API) slowed or went down, so processing stalled uniformly; (3) a poison message or code bug causing all consumers to retry/block. I'd check rebalance metrics and consumer logs first (was there a deploy?), then downstream health. A single-partition lag spike, by contrast, suggests a hot key or one stuck consumer. The diagnostic split — all partitions vs one — immediately narrows the cause.
 
 **Q: How do you do a zero-downtime Kafka version upgrade?**
-Roll the brokers one at a time, waiting for full ISR recovery between each, so the cluster never drops below `min.insync.replicas`. Strimzi automates this respecting PodDisruptionBudgets and ISR — it restarts a broker, waits until all its partitions are back in-sync, then moves to the next. You also stage the `inter.broker.protocol.version` and `log.message.format.version`: upgrade binaries first while keeping the old protocol version, confirm stability, then bump the protocol version in a second roll. The cardinal sin is restarting two brokers of an RF=3/min-ISR=2 topic simultaneously — that drops ISR below the minimum and blocks writes. The whole point of the slow, one-at-a-time roll is preserving the ISR invariant.
+Roll the brokers one at a time, waiting for full ISR recovery between each, so the cluster never drops below `min.insync.replicas`. Strimzi automates this respecting PodDisruptionBudgets and ISR — it restarts a broker, waits until all its partitions are back in-sync, then moves to the next. The upgrade is staged in two phases: roll the binaries first while the cluster keeps running at its existing **metadata version** (the KRaft feature level), confirm stability, and only then raise `metadata.version` — a dynamic feature-flag bump applied with `kafka-features.sh upgrade` that needs no second restart. Staging it that way is what keeps a rollback possible, because the metadata bump is one-way. The cardinal sin is restarting two brokers of an RF=3/min-ISR=2 topic simultaneously — that drops ISR below the minimum and blocks writes. The whole point of the slow, one-at-a-time roll is preserving the ISR invariant.
 
 **Q: When would you choose MSK/Confluent Cloud over self-managed Strimzi Kafka?**
 Choose managed (MSK, MSK Serverless, Confluent Cloud) when the operational burden of running stateful Kafka — capacity planning, upgrades, rebalancing, broker repair, on-call — outweighs the cost premium and you'd rather your team build on top of streaming than operate it. Managed is especially compelling for smaller teams, spiky/unknown load (MSK Serverless auto-scales), or when you want bundled Schema Registry/connectors (Confluent). Choose self-managed Strimzi when you need fine-grained tuning control, are already deep in Kubernetes and want GitOps-managed topics as CRDs, want to avoid per-GB managed pricing at very high volume, or have data-residency/network constraints. It's the classic build-vs-buy: managed trades money and control for less ops.

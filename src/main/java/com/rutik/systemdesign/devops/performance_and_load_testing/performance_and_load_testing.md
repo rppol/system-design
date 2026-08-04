@@ -65,16 +65,16 @@ The non-obvious hard parts are (1) **the load generator is usually the bottlenec
 
 | Model | k6 executor | Locust | Latency validity |
 |-------|-------------|--------|------------------|
-| Closed (VU-based) | `ramping-vus`, `constant-vus` | default | Hides tail under saturation (coordinated omission) |
-| Open (arrival-rate) | `constant-arrival-rate`, `ramping-arrival-rate` | `--constant-rate` shapes | Correct — measures true tail latency |
+| Closed (VU-based) | `ramping-vus`, `constant-vus` | default (`wait_time` between tasks) | Hides tail under saturation (coordinated omission) |
+| Open (arrival-rate) | `constant-arrival-rate`, `ramping-arrival-rate` | `constant_throughput` wait time, or a custom `LoadTestShape` | Correct — measures true tail latency |
 
 **Tool comparison:**
 
 | Tool | Language | Engine | Distributed | Best for |
 |------|----------|--------|-------------|----------|
-| k6 | JS scripts | Go | k6-operator on K8s / k6 Cloud | CI gates, low footprint, modern DX |
+| k6 | JS scripts | Go | k6-operator on K8s / Grafana Cloud k6 | CI gates, low footprint, modern DX |
 | Locust | Python | Python (gevent) | Built-in master/worker | Python shops, complex logic, live UI |
-| Gatling | Scala DSL | JVM/Akka | Gatling Enterprise | High throughput per node, JVM stacks |
+| Gatling | Java, Kotlin, or Scala DSL | JVM (Netty) | Gatling Enterprise | High throughput per node, JVM stacks |
 | JMeter | XML/GUI | JVM | Distributed mode | Legacy, broad protocol support |
 | Vegeta | CLI/Go | Go | Manual fan-out | Simple constant-rate HTTP |
 
@@ -328,10 +328,11 @@ perf-test:
     - uses: actions/checkout@v4
     - name: Deploy to ephemeral env
       run: ./deploy-preview.sh
+    - uses: grafana/setup-k6-action@v1
     - name: Run k6 load test
-      uses: grafana/k6-action@v0.3
+      uses: grafana/run-k6-action@v1
       with:
-        filename: load-test.js
+        path: load-test.js
       # Non-zero exit (threshold breach) fails this step -> PR cannot merge.
     - name: Compare to baseline
       run: ./compare-baseline.sh results.json baseline.json --max-p95-regression 10%
@@ -341,7 +342,7 @@ perf-test:
 
 ## 7. Real-World Examples
 
-- **Grafana Labs** builds and dogfoods k6; their guidance on the open vs closed model and coordinated omission is the canonical reference, and k6 Cloud runs distributed tests for large customers.
+- **Grafana Labs** builds and dogfoods k6; their guidance on the open vs closed model and coordinated omission is the canonical reference, and Grafana Cloud k6 runs distributed tests for large customers.
 - **Netflix** runs continuous performance testing and chaos/load in production-like conditions; they pioneered "squeeze testing" — steadily increasing traffic to a single instance/cluster to find its breaking point and set autoscaling limits.
 - **Shopify** publicly load-tests for Black Friday/Cyber Monday at enormous scale, running game-day simulations of peak flash-sale traffic months ahead to validate capacity and autoscaling.
 - **Locust** is widely used (originated at ESN/used at companies like Battlelog/DICE); its Python-native model makes it popular where test logic is complex.
@@ -486,12 +487,12 @@ The average of the percentiles says 345 ms and the SLO looks met; the number a r
 |------|----------|-------|
 | k6 | Load testing | Go engine, JS scripts, thresholds-as-gates, Prometheus output, k6-operator |
 | Locust | Load testing | Python, gevent, master/worker distributed, live web UI |
-| Gatling | Load testing | Scala DSL, high per-node throughput, JVM stacks |
+| Gatling | Load testing | Java/Kotlin/Scala DSL, high per-node throughput, JVM stacks |
 | JMeter | Load testing | Java, GUI, broad protocols; legacy but ubiquitous |
 | Vegeta | Load testing | Go CLI, constant-rate HTTP, scriptable |
 | k6-operator | Distributed runs | Splits a k6 test across N runner pods on K8s |
 | Prometheus + Grafana | Result/system metrics | Correlate generated load with SUT saturation/latency |
-| Grafana k6 Cloud | Managed load | Large distributed runs, geo-distributed generators |
+| Grafana Cloud k6 | Managed load | Large distributed runs, geo-distributed generators |
 | Argo Rollouts / Flagger | Perf-gated delivery | Use load-test metrics as canary analysis gates |
 
 **Cloud-native load test infra:**
@@ -522,7 +523,7 @@ First suspect the **load generator**, not the service. A single runner box hits 
 The open model (constant arrival rate) is the default for latency truth because it mimics real users who keep arriving regardless of how slow you are. But the closed model (fixed virtual users) is correct when you're modeling a system with genuinely *fixed concurrency* — e.g., a fixed pool of backend worker threads, a batch job with a set number of parallel workers, or a client with a hard connection-pool cap. In those cases the real world *does* throttle itself to N in-flight, and a closed model with N VUs accurately represents it. The mistake is using closed-model to measure user-facing API latency under saturation, where it produces coordinated omission.
 
 **Q: How do you derive autoscaling targets from a load test?**
-Run a **capacity test**: pin replicas to 1 (disable the HPA), step the arrival rate up, and record p99 and error rate at each step. Find the "knee" — the load just before p99 breaks the SLO; that's your max sustainable RPS per replica. Then set the HPA target so a replica runs at ~60–70% of that ceiling, leaving headroom for the scale-up lag (an HPA takes ~15s to sync plus pod start time). For peak capacity, divide peak RPS by the per-replica sustainable rate and add headroom: 11,000 RPS ÷ 550/replica ≈ 20 replicas, provision ~25. This turns autoscaling from a guess into a measured number, and feeds directly into cost models.
+Run a **capacity test**: pin replicas to 1 (disable the HPA), step the arrival rate up, and record p99 and error rate at each step. Find the "knee" — the load just before p99 breaks the SLO; that's your max sustainable RPS per replica. Then set the HPA target so a replica runs at ~60–70% of that ceiling, leaving headroom for the scale-up lag (an HPA takes ~15s to sync plus pod start time). For peak capacity, divide peak RPS by the *target* rate rather than the raw ceiling: at a 70% target, 550 RPS/replica becomes 385, so 11,000 ÷ 385 ≈ 29 replicas — where 11,000 ÷ 550 = 20 is the absolute floor with zero headroom. This turns autoscaling from a guess into a measured number, and feeds directly into cost models.
 
 **Q: How do you wire a performance test into CI as a gate?**
 Define **thresholds** in the test (k6: `http_req_duration: ['p(95)<300']`, `http_req_failed: ['rate<0.001']`) so the tool exits non-zero when an SLO is breached, which fails the pipeline step. The flow: PR opens → deploy to an ephemeral/preview environment → run the load test against it → thresholds pass/fail the build → optionally compare against a stored baseline and fail on regression beyond a percentage (e.g., p95 worse by >10%). The key principle is that a test that doesn't gate is just a dashboard — to prevent regressions it must be able to *block the merge*. You keep the gate test short (a few minutes, focused) and run longer soak/stress tests on a schedule rather than per-PR.

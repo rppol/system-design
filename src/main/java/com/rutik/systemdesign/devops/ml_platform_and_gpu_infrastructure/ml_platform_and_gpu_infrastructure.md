@@ -8,7 +8,7 @@ Running GPUs on Kubernetes for training and inference: the NVIDIA GPU Operator, 
 
 ## 1. Concept Overview
 
-An **ML platform** is the internal product that lets data scientists and ML engineers train, tune, and serve models without each team reinventing GPU provisioning, scheduling, and observability. **GPU infrastructure** is its hardest substrate: GPUs are expensive (an 8×A100 `p4d.24xlarge` lists at ~$32.77/hour on-demand, ~$98k/month if left running), scarce (regional capacity is frequently exhausted), and awkward for Kubernetes because the scheduler models them as opaque, integer-countable **extended resources** rather than divisible CPU/memory.
+An **ML platform** is the internal product that lets data scientists and ML engineers train, tune, and serve models without each team reinventing GPU provisioning, scheduling, and observability. **GPU infrastructure** is its hardest substrate: GPUs are expensive (an 8×A100-80GB `p4de.24xlarge` lists at ~$27.45/hour on-demand, ~$20k/month if left running), scarce (regional capacity is frequently exhausted), and awkward for Kubernetes because the scheduler models them as opaque, integer-countable **extended resources** rather than divisible CPU/memory.
 
 The platform must solve four problems the default Kubernetes install does not:
 
@@ -17,7 +17,7 @@ The platform must solve four problems the default Kubernetes install does not:
 3. **Sharing one GPU across workloads** — a single inference request may use 5% of an A100. Native K8s gives a Pod the *whole* card. **MIG** (hardware partitioning) and **time-slicing** (oversubscription) reclaim that waste.
 4. **Elastic, cost-aware capacity** — GPU nodes should appear when a training job is queued and disappear when idle. **Karpenter** (or Cluster Autoscaler) provisions GPU instance types on demand, preferring Spot for fault-tolerant training.
 
-On top of that substrate sit the workload orchestrators — **Kubeflow** (pipelines, training operators, KServe for serving), **Ray** (distributed Python: Ray Train, Ray Serve, Ray Tune), and **Volcano** / **Kueue** (batch gang-scheduling) — which translate "train this model on 16 GPUs" into Pods the scheduler can place.
+On top of that substrate sit the workload orchestrators — **Kubeflow** (Pipelines, Trainer, Katib), **KServe** for serving, **Ray** (distributed Python: Ray Train, Ray Serve, Ray Tune), and **Volcano** / **Kueue** (batch gang-scheduling) — which translate "train this model on 16 GPUs" into Pods the scheduler can place.
 
 ---
 
@@ -51,7 +51,7 @@ On top of that substrate sit the workload orchestrators — **Kubeflow** (pipeli
 | Strategy | Isolation | Granularity | Hardware needed | Best for |
 |----------|-----------|-------------|-----------------|----------|
 | **Exclusive (1 Pod = 1 GPU)** | Full | 1 whole GPU | Any | Training, heavy single-tenant inference |
-| **MIG (Multi-Instance GPU)** | Hardware (memory + compute fault isolation) | Fixed slices (e.g., 1g.10gb, 2g.20gb, 3g.40gb on A100) | A100/H100/A30 only | Multi-tenant inference needing isolation |
+| **MIG (Multi-Instance GPU)** | Hardware (memory + compute fault isolation) | Fixed slices (e.g., 1g.10gb, 2g.20gb, 3g.40gb on an A100 80GB) | Data-center cards only: A100, A30, H100, H200, B200/GB200 | Multi-tenant inference needing isolation |
 | **Time-slicing** | None (shared context, no memory isolation) | N logical replicas per GPU | Any | Dev/test, bursty low-utilization inference, notebooks |
 | **MPS (Multi-Process Service)** | Weak (shared memory, spatial SM partitioning) | Process-level | Any (Volta+) | Trusted co-located inference processes |
 
@@ -60,7 +60,7 @@ On top of that substrate sit the workload orchestrators — **Kubeflow** (pipeli
 | Layer | Tool | Role |
 |-------|------|------|
 | Batch / gang scheduling | Volcano, Kueue | All-or-nothing placement, queues, fair-share quotas |
-| Training operators | Kubeflow Training Operator (PyTorchJob, TFJob), Ray Train | Launch + coordinate distributed worker Pods |
+| Training operators | Kubeflow Trainer (`TrainJob`), Ray Train | Launch + coordinate distributed worker Pods |
 | Pipelines | Kubeflow Pipelines, Argo Workflows | DAG of preprocessing → train → eval → register |
 | Serving | KServe, Ray Serve, NVIDIA Triton | Autoscaling model endpoints, scale-to-zero |
 | Hyperparameter tuning | Katib, Ray Tune | Parallel trial orchestration |
@@ -92,9 +92,9 @@ flowchart TD
 
     control(["ML Platform Control<br/>Kubeflow / Ray / Argo<br/>Kueue quotas + Volcano gang-sched"])
     api{"Kubernetes API + Scheduler<br/>requests: nvidia.com/gpu: 1<br/>(or mig-1g.10gb, etc.)"}
-    karpenter("Karpenter<br/>NodePool: gpu · g5/p4d/p5<br/>taint: nvidia")
+    karpenter("Karpenter<br/>NodePool: gpu · g6e/p4de/p5<br/>taint: nvidia")
 
-    subgraph gpunode ["GPU Node (p4d.24xlarge)"]
+    subgraph gpunode ["GPU Node (p4de.24xlarge)"]
         operator("NVIDIA GPU Operator<br/>driver + container-toolkit")
         devplugin("device-plugin<br/>advertises nvidia.com/gpu")
         dcgm("DCGM exporter<br/>(metrics)")
@@ -106,7 +106,7 @@ flowchart TD
     prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
     grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
 
-    control -->|"creates PyTorchJob /<br/>RayJob / InferenceService"| api
+    control -->|"creates TrainJob /<br/>RayJob / InferenceService"| api
     api -.->|"scale-up:<br/>no GPU node fits"| karpenter
     api -->|"Pod bound<br/>to node"| hw
     karpenter -->|"provisions EC2<br/>Spot or On-Demand"| operator
@@ -164,7 +164,7 @@ spec:
       effect: NoSchedule
   containers:
     - name: trainer
-      image: nvcr.io/nvidia/pytorch:24.05-py3
+      image: nvcr.io/nvidia/pytorch:26.06-py3
       resources:
         limits:
           nvidia.com/gpu: 2      # whole cards; no fractions natively
@@ -177,7 +177,7 @@ Hand-building a GPU node means: install the matching kernel driver, the NVIDIA c
 ```bash
 helm install gpu-operator nvidia/gpu-operator \
   -n gpu-operator --create-namespace \
-  --set driver.version=550.54.15 \
+  --set driver.version=580.173.02 \
   --set mig.strategy=mixed \
   --set toolkit.enabled=true \
   --set dcgmExporter.enabled=true
@@ -187,7 +187,7 @@ Sequencing matters: the operator uses init containers and node labels (`nvidia.c
 
 ### 6.3 Enabling MIG (hardware partitioning)
 
-MIG is configured per node via a label the GPU Operator's MIG manager watches. On an A100, `all-1g.10gb` slices each of 8 GPUs into 7 instances → 56 schedulable MIG devices per node:
+MIG is configured per node via a label the GPU Operator's MIG manager watches. On an A100 80GB, `all-1g.10gb` slices each of 8 GPUs into 7 instances → 56 schedulable MIG devices per node:
 
 ```bash
 kubectl label node ip-10-0-1-42 \
@@ -218,7 +218,7 @@ The word doing the work is *fixed*. Unlike time-slicing, a MIG slice is a hardwa
 
 | Symbol | What it is |
 |--------|------------|
-| `gpusPerNode` | `8` on the p4d node above — what the device plugin advertised pre-MIG |
+| `gpusPerNode` | `8` on the p4de node above — what the device plugin advertised pre-MIG |
 | `slicesPerGpu` | `7` for the `all-1g.10gb` profile on an A100. Profile-dependent, not tunable freely |
 | `1g.10gb` | The profile name literally encodes the shape: 1 GPC of compute, 10 GB of memory |
 | `cardMemory` | `80 GB` on an A100-SXM4-80GB |
@@ -320,7 +320,7 @@ spec:
           values: ["spot"]            # ~70% cheaper; needs checkpointing
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["p4d.24xlarge", "p5.48xlarge", "g5.48xlarge"]
+          values: ["p4de.24xlarge", "p5.48xlarge", "g6e.48xlarge"]
       nodeClassRef:
         name: gpu-nodeclass
   disruption:
@@ -332,33 +332,33 @@ spec:
 
 ### 6.6 Gang scheduling a distributed PyTorch job
 
-A 4-worker `PyTorchJob` with NCCL all-reduce must start all workers together. Kueue + the Kubeflow training operator give all-or-nothing admission:
+A 4-node `TrainJob` with NCCL all-reduce must start all nodes together. Kueue + the Kubeflow Trainer controller give all-or-nothing admission. One `TrainJob` CRD covers every framework — PyTorch, JAX, DeepSpeed, MPI, XGBoost — with the framework chosen by the runtime it references, rather than a separate CRD per framework:
 
 ```yaml
-apiVersion: kubeflow.org/v1
-kind: PyTorchJob
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
 metadata:
   name: bert-pretrain
   labels:
     kueue.x-k8s.io/queue-name: gpu-team-a
 spec:
-  pytorchReplicaSpecs:
-    Master:
-      replicas: 1
-      template: { spec: { containers: [{ name: pytorch, image: bert:latest,
-        resources: { limits: { nvidia.com/gpu: 8 } } }] } }
-    Worker:
-      replicas: 3
-      template: { spec: { containers: [{ name: pytorch, image: bert:latest,
-        resources: { limits: { nvidia.com/gpu: 8 } } }] } }
+  runtimeRef:
+    name: torch-distributed       # ClusterTrainingRuntime picks the framework
+  trainer:
+    image: bert:latest
+    numNodes: 4                   # 4 training nodes, rank 0 included
+    numProcPerNode: 8             # one process per GPU
+    resourcesPerNode:
+      limits:
+        nvidia.com/gpu: 8
 # 32 GPUs total; Kueue admits the job only when all 32 are available, then releases together.
 ```
 
 #### Where "32 GPUs total" comes from, and why partial is worse than none
 
 ```
-jobGpuDemand = (masterReplicas + workerReplicas) x gpusPerReplica
-             = (1 + 3) x 8
+jobGpuDemand = numNodes x gpusPerNode
+             = 4 x 8
              = 32
 
   admit  when  availableGpus >= jobGpuDemand      (all-or-nothing)
@@ -367,13 +367,13 @@ jobGpuDemand = (masterReplicas + workerReplicas) x gpusPerReplica
 
 **Put simply.** "A distributed training job is one indivisible request for 32 GPUs, not 4 independent requests for 8 — so the scheduler must answer yes to all of it or no to all of it."
 
-The master counts. It is `replicas: 1` and it holds 8 GPUs exactly like every worker, so the naive "3 workers x 8" undercount is off by a quarter. NCCL all-reduce needs every rank present, and the master is rank 0.
+Rank 0 counts. `numNodes: 4` means four full GPU consumers, not three workers plus a coordinator, so the naive "3 workers x 8" undercount is off by a quarter. NCCL all-reduce needs every rank present, and rank 0 is one of them.
 
 | Symbol | What it is |
 |--------|------------|
-| `masterReplicas` | `1` — rank 0, and a full GPU consumer, not a coordinator-only Pod |
-| `workerReplicas` | `3` |
-| `gpusPerReplica` | `nvidia.com/gpu: 8` — one whole p4d node's worth per Pod |
+| `numNodes` | `4` — every one of them a full GPU consumer, rank 0 included |
+| `numProcPerNode` | `8` — one training process per GPU on the node |
+| `gpusPerNode` | `nvidia.com/gpu: 8` in `resourcesPerNode` — one whole p4de node's worth per Pod |
 | `jobGpuDemand` | `32`, the number Kueue must satisfy atomically |
 | gang admission | Kueue holds the job in the queue rather than placing any Pod |
 
@@ -387,7 +387,7 @@ The master counts. It is `replicas: 1` and it holds 8 GPUs exactly like every wo
   4th Pod                Pending forever                 job queued, whole
   other jobs           BLOCKED (24 GPUs held hostage)    can use all 24 GPUs
 
-  Waste under the default scheduler: 24 GPUs x $3.27/hr = $78.48/hr producing nothing.
+  Waste under the default scheduler: 24 GPUs x $3.43/hr = $82.32/hr producing nothing.
 ```
 
 This is the counterintuitive part worth saying out loud: placing 3 of 4 Pods is *strictly worse* than placing zero. Zero placements leave 24 GPUs available for other teams; three placements consume 24 GPUs, produce no training progress, and block everyone — a textbook resource deadlock that resolves only when a human kills the job. Gang admission trades queue latency for the guarantee that allocated always means working.
@@ -404,7 +404,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    job(["4-worker PyTorchJob<br/>needs 4 GPUs at once"])
+    job(["4-node TrainJob<br/>needs 4 GPUs at once"])
 
     subgraph default_sched ["Default scheduler (places Pods one at a time)"]
         d1{"3 of 4 Pods<br/>placed"}
@@ -493,7 +493,7 @@ quadrantChart
 **Do NOT reach for this complexity when:**
 - You have one or two GPUs and one team — a single tainted node and `nvidia.com/gpu: 1` requests is enough; MIG/Kueue/Volcano are overkill.
 - Latency-critical serving with strict SLAs — do **not** time-slice; the lack of isolation makes p99 unpredictable. Use exclusive or MIG.
-- Tiny intermittent inference — a serverless GPU offering (AWS SageMaker Serverless, Modal, Replicate) may be cheaper than running a cluster.
+- Tiny intermittent inference — a serverless GPU offering (Cloud Run GPU, Azure Container Apps GPU, Modal, Replicate) or SageMaker Asynchronous Inference, which scales a GPU endpoint to zero between bursts, may be cheaper than running a cluster. Note that SageMaker *Serverless* Inference is CPU-only, so it is not the AWS answer here.
 - You can't checkpoint — don't put training on Spot; an interruption wastes the whole run.
 
 ---
@@ -517,7 +517,7 @@ resources:
   limits:
     nvidia.com/mig-1g.10gb: 1
 ```
-The broken version cost 12 × $3.27/hr ≈ $39/hr; the fix runs the same 12 replicas on 2 cards ≈ $6.50/hr — a $32/hr (~$23k/month) waste eliminated by matching slice size to model size.
+The broken version cost 12 × $3.43/hr ≈ $41/hr; the fix runs the same 12 replicas on 2 cards ≈ $6.90/hr — a $34/hr (~$25k/month) waste eliminated by matching slice size to model size.
 
 **Pitfall 2: Karpenter consolidates a node mid-training.** Default consolidation can disrupt a node it deems underutilized — killing a 6-hour training job at hour 5. Fix: `consolidationPolicy: WhenEmpty` on the training NodePool, plus a `karpenter.sh/do-not-disrupt: "true"` annotation on long jobs.
 
@@ -538,24 +538,24 @@ The broken version cost 12 × $3.27/hr ≈ $39/hr; the fix runs the same 12 repl
 | NVIDIA GPU Operator | Node provisioning | Installs driver, toolkit, device plugin, DCGM, MIG manager via `ClusterPolicy` |
 | NVIDIA device plugin | Resource advertisement | Exposes `nvidia.com/gpu`; supports time-slicing replicas and MIG strategies |
 | DCGM + DCGM exporter | GPU metrics | `DCGM_FI_DEV_GPU_UTIL`, `_FB_USED`, `_GPU_TEMP`, ECC errors → Prometheus |
-| Karpenter | Node autoscaling | Just-in-time GPU instances, Spot-aware, instance-type flexible (AWS-native; Azure beta) |
+| Karpenter | Node autoscaling | Just-in-time GPU instances, Spot-aware, instance-type flexible (AWS-native; on AKS as the Node Auto Provisioning addon) |
 | Cluster Autoscaler | Node autoscaling | Per-ASG GPU node groups; the cross-cloud alternative to Karpenter |
-| Kueue | Job queueing | Quotas, fair-share, gang admission; CNCF, integrates with training operators |
+| Kueue | Job queueing | Quotas, fair-share, gang admission; integrates with Kubeflow Trainer, RayJob, and plain Jobs |
 | Volcano | Batch scheduler | Gang scheduling, fair-share, GPU topology awareness |
-| Kubeflow | ML platform | Pipelines, Training Operator (PyTorchJob/TFJob), Katib, KServe |
+| Kubeflow | ML platform | Pipelines, Trainer (`TrainJob`), Katib |
 | Ray / KubeRay | Distributed compute | Ray Train/Serve/Tune/Data; elastic Ray clusters on K8s |
 | NVIDIA Triton | Inference server | Multi-model, dynamic batching, max GPU throughput |
-| KServe | Model serving | CRD-based, scale-to-zero, canary; standard on Kubeflow |
+| KServe | Model serving | CRD-based, scale-to-zero, canary; a standalone CNCF project, no longer a Kubeflow component |
 
 **AWS ↔ GCP ↔ Azure GPU mapping:**
 
 | Capability | AWS | GCP | Azure |
 |-----------|-----|-----|-------|
-| GPU instances | p4d/p5 (A100/H100), g5 (A10G) | a2/a3 (A100/H100), g2 (L4) | NDv5 (H100), NC A100 v4 |
+| GPU instances | p4de (A100 80GB), p5/p5en (H100/H200), p6-b200 (B200), g6e (L40S) | a2 (A100), a3 (H100/H200), a4 (B200), g2 (L4) | ND H100 v5, ND GB200 v6 |
 | Managed K8s GPU | EKS + GPU Operator | GKE (GPU node pools, time-sharing built-in) | AKS GPU node pools |
 | Managed training | SageMaker Training | Vertex AI Training | Azure ML |
-| Node autoscaler | Karpenter / CAS | GKE Autopilot / node auto-provisioning | Cluster Autoscaler |
-| Serverless GPU | SageMaker Serverless | Cloud Run GPU | Azure Container Apps GPU |
+| Node autoscaler | Karpenter / CAS | GKE Autopilot / node auto-provisioning | AKS Node Auto Provisioning (Karpenter) |
+| Serverless GPU | SageMaker Asynchronous Inference (scales to zero) | Cloud Run GPU | Azure Container Apps GPU |
 
 ---
 
@@ -595,7 +595,7 @@ At thousands of nodes, etcd write throughput, API-server request latency, kube-s
 NVLink is NVIDIA's high-bandwidth GPU-to-GPU interconnect — ~600 GB/s on A100 vs ~64 GB/s over PCIe Gen4. For multi-GPU jobs doing frequent all-reduce (data-parallel training), GPUs connected by NVLink exchange gradients ~10× faster than over PCIe or across nodes via the network. So a topology-unaware scheduler that scatters a 4-GPU Pod across PCIe-only or cross-node placements can bottleneck on interconnect. Topology-aware scheduling (Volcano, or the device plugin's topology hints) packs co-dependent GPUs onto the same NVLink domain. For single-GPU inference, topology is irrelevant.
 
 **Q: How do KServe and Triton differ for serving?**
-KServe is a Kubernetes-native serving layer: an `InferenceService` CRD that gives you autoscaling (including scale-to-zero via Knative), canary rollout, and a standard predict/explain interface across frameworks — it's the platform-standardization choice. Triton is NVIDIA's inference *server*: it runs inside a serving Pod and maximizes GPU throughput via dynamic batching, concurrent model execution, and multi-framework backends (TensorRT, ONNX, PyTorch). They compose — you often run Triton *as* the model server inside a KServe InferenceService, getting KServe's K8s lifecycle plus Triton's raw GPU efficiency. Choose KServe alone for simple Python models, add Triton when you need to saturate the GPU with batching and multi-model packing.
+KServe is a Kubernetes-native serving layer: an `InferenceService` CRD that gives you autoscaling (including scale-to-zero via Knative in its Serverless deployment mode), canary rollout, and a standard predict/explain interface across frameworks — it's the platform-standardization choice, and it is a standalone CNCF project rather than a Kubeflow subcomponent. Triton is NVIDIA's inference *server*: it runs inside a serving Pod and maximizes GPU throughput via dynamic batching, concurrent model execution, and multi-framework backends (TensorRT, ONNX, PyTorch). They compose — you often run Triton *as* the model server inside a KServe InferenceService, getting KServe's K8s lifecycle plus Triton's raw GPU efficiency. Choose KServe alone for simple Python models, add Triton when you need to saturate the GPU with batching and multi-model packing.
 
 **Q: What does scale-to-zero mean for GPU serving and what's the catch?**
 Scale-to-zero (via KServe/Knative) removes all replicas of an idle model endpoint so you stop paying for the GPU when there's no traffic — essential when you serve hundreds of rarely-used models. The catch is **cold start**: the first request after scale-down must wait for a Pod to schedule, a GPU node to possibly be provisioned by Karpenter (minutes), the driver to load, and the multi-GB model weights to download and load into VRAM — easily tens of seconds to minutes. Mitigations: keep a warm pool of GPU nodes, pre-stage images and weights on the node (or a fast FSx/EFS cache), and use a minReplicas=1 for latency-critical models while letting the long tail scale to zero. It's a cost-vs-cold-start tradeoff decided per model.
@@ -604,7 +604,7 @@ Scale-to-zero (via KServe/Knative) removes all replicas of an idle model endpoin
 DCGM exports health signals: ECC double-bit errors (`DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`), XID errors, throttling (`DCGM_FI_DEV_CLOCK_THROTTLE_REASONS`), and temperature. A rising uncorrectable ECC count or repeated XID 79 (GPU has fallen off the bus) means the card is degrading. The response: cordon the node, drain GPU Pods (rescheduled elsewhere by the operator/controllers), label it for the GPU Operator's health checks to keep it out of rotation, and replace the instance. NVIDIA's GPU feature discovery + the operator's validation can auto-taint unhealthy GPUs. The principle is the same as any SRE practice — detect via metrics, fence the bad resource, reschedule, replace — but the blast radius is bigger because each card is so expensive.
 
 **Q: MPS vs MIG — when would you use Multi-Process Service instead of MIG?**
-MPS (Multi-Process Service) lets multiple processes share a single GPU context with spatial SM partitioning, so co-located processes run concurrently rather than time-multiplexed — useful when you control all the tenants (e.g., several inference workers from the *same* trusted service) and want better throughput than time-slicing without MIG's fixed slice sizes. The catch is weak isolation: MPS processes share memory and a fault in one can affect others, so it's only safe for trusted, co-operative workloads. MIG, by contrast, gives hardware-enforced memory and fault isolation suitable for untrusted multi-tenancy, but only on A100/H100/A30 and only in fixed partition sizes. Rule of thumb: MIG for cross-tenant isolation on supported hardware; MPS for trusted same-service concurrency on any Volta+ GPU; time-slicing for the loosest dev/bursty case.
+MPS (Multi-Process Service) lets multiple processes share a single GPU context with spatial SM partitioning, so co-located processes run concurrently rather than time-multiplexed — useful when you control all the tenants (e.g., several inference workers from the *same* trusted service) and want better throughput than time-slicing without MIG's fixed slice sizes. The catch is weak isolation: MPS processes share memory and a fault in one can affect others, so it's only safe for trusted, co-operative workloads. MIG, by contrast, gives hardware-enforced memory and fault isolation suitable for untrusted multi-tenancy, but only on data-center cards that support it (A100, A30, H100, H200, and Blackwell B200/GB200) and only in fixed partition sizes. Rule of thumb: MIG for cross-tenant isolation on supported hardware; MPS for trusted same-service concurrency on any Volta+ GPU; time-slicing for the loosest dev/bursty case.
 
 **Q: How do you observe an ML platform's GPU fleet, and which metric do you put on the exec dashboard?**
 The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-busy percentage averaged across the fleet — because it's the direct measure of dollar efficiency, and it's the number that exposes the allocation-vs-utilization gap finance cares about. Below it: framebuffer memory used (`DCGM_FI_DEV_FB_USED`) to spot over- or under-sized slices, ECC/XID error counts and throttle reasons for health, power draw and temperature, and per-team GPU-hours allocated vs utilized for chargeback. You feed DCGM into Prometheus/Thanos and build per-team Grafana dashboards, but watch cardinality: per-MIG-slice metrics across hundreds of GPUs can explode series counts and OOM Prometheus (use recording rules and drop high-cardinality labels). Allocation goes on the capacity dashboard; *utilization* goes on the exec one, because that's the metric a platform's success is judged by.
@@ -628,7 +628,7 @@ The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-
 
 ## 14. Case Study
 
-**Scenario:** A fintech ML org runs 14 fraud/risk models for online inference plus nightly retraining. They're on EKS with a single static pool of 24 A100 GPUs (3× p4d.24xlarge). GPU bill is ~$70k/month, finance is alarmed, and DCGM shows fleet utilization at 19%. Serving and training share the pool; a nightly retraining job sometimes starves daytime inference, causing latency spikes.
+**Scenario:** A fintech ML org runs 14 fraud/risk models for online inference plus nightly retraining. They're on EKS with a single static pool of 24 A100 80GB GPUs (3× p4de.24xlarge). GPU bill is ~$60k/month, finance is alarmed, and DCGM shows fleet utilization at 19%. Serving and training share the pool; a nightly retraining job sometimes starves daytime inference, causing latency spikes.
 
 **Diagnosis:** Two problems. (1) Each of the 14 inference models checks out a whole A100 while using 4–9 GB and <12% SMs — massive over-allocation. (2) Training and serving on one pool means contention and no ability to price them separately.
 
@@ -637,7 +637,7 @@ BEFORE (broken):                          AFTER (fixed):
 24 A100, one pool, 19% util               serving pool: MIG-sliced + Karpenter On-Demand
 14 models -> 14 whole GPUs                training pool: Karpenter Spot + checkpointing
 training contends with serving            Kueue quotas; scale-to-zero for cold models
-$70k/mo                                    ~$26k/mo
+$60k/mo                                    ~$26k/mo
 ```
 
 **Fix step 1 — MIG-slice the serving GPUs:**
@@ -708,22 +708,22 @@ The division by two is what makes the case for frequent checkpoints. Interruptio
 | `maxWorkLost` | Worst case — an interruption one instant before the next save |
 | `expectedWorkLost` | Average case, half the interval |
 | `gpuCount` | `8` for this run |
-| `pricePerGpuHour` | `$3.27` per A100, the same rate used in Pitfall 1 |
+| `pricePerGpuHour` | `$3.43` per A100 80GB, the same rate used in Pitfall 1 |
 
 **Walk one example.** The actual incident (`1h58m` lost on an 8-GPU run) versus the same interruption after the fix:
 
 ```
   checkpoint every    max lost    expected lost    8-GPU rate      cost of the observed event
-      2 h              120 min       60 min       $26.16/hr    1.9667h x $26.16 = $51.45
-      6 min              6 min        3 min       $26.16/hr    0.1000h x $26.16 =  $2.62
+      2 h              120 min       60 min       $27.45/hr    1.9667h x $27.45 = $53.98
+      6 min              6 min        3 min       $27.45/hr    0.1000h x $27.45 =  $2.75
 
-  Repeated nightly for a month:   $51.45 x 30 = $1,543   vs   $2.62 x 30 = $79
+  Repeated nightly for a month:   $53.98 x 30 = $1,619   vs   $2.75 x 30 = $82
   Interval cut 120 -> 6 min = 20x less work at risk per interruption.
 ```
 
-Fifty dollars a night sounds trivial against a `$70k` monthly bill, which is exactly why it survived until it caused a 2 a.m. page — the real cost was the schedule slip and the on-call burn, not the `$1,543`. The lesson generalizes: on Spot, pick the checkpoint interval from `expectedWorkLost x gpuCount x price` against your interruption rate, not from a feeling about how often writing to S3 is "too often."
+Fifty-odd dollars a night sounds trivial against a `$60k` monthly bill, which is exactly why it survived until it caused a 2 a.m. page — the real cost was the schedule slip and the on-call burn, not the `$1,619`. The lesson generalizes: on Spot, pick the checkpoint interval from `expectedWorkLost x gpuCount x price` against your interruption rate, not from a feeling about how often writing to S3 is "too often."
 
-**Result:** Serving collapsed from 14 whole GPUs to ~2 GPUs' worth of MIG slices; training moved to Spot with frequent checkpoints; rarely-used models scale to zero overnight. GPU bill dropped from ~$70k to ~$26k/month (a 63% cut), DCGM serving utilization rose to ~64%, and daytime inference latency stabilized because training can no longer steal its GPUs.
+**Result:** Serving collapsed from 14 whole GPUs to ~2 GPUs' worth of MIG slices; training moved to Spot with frequent checkpoints; rarely-used models scale to zero overnight. GPU bill dropped from ~$60k to ~$26k/month (a 57% cut), DCGM serving utilization rose to ~64%, and daytime inference latency stabilized because training can no longer steal its GPUs.
 
 **Discussion questions:**
 1. They considered time-slicing instead of MIG for serving. Why is MIG the right call for fraud models, and when would time-slicing have been acceptable?

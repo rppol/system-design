@@ -10,9 +10,9 @@ Platform engineering is the discipline of building and operating an **Internal D
 
 The IDP sits between developers and the underlying infrastructure. Instead of every team writing bespoke Terraform, Helm charts, CI pipelines, and IAM policies, the platform team encodes the organization's best practices into **golden paths** (also called paved roads): opinionated, supported, low-friction routes to production. A developer creates a new service through a portal in minutes — getting a repo, CI/CD, observability, an environment, and security baked in — rather than spending two weeks wiring it by hand and getting half of it wrong.
 
-The reference open-source backbone is **Backstage** (created at Spotify, donated to the CNCF): a software catalog that inventories every service/API/resource, a **scaffolder** that generates new components from templates, **TechDocs** for docs-as-code, and a plugin ecosystem for CI/CD, Kubernetes, cost, and security views. On the provisioning side, **Crossplane** offers a Kubernetes-native control-plane alternative to Terraform: developers submit a `Claim` for a database or bucket, and the platform's `Composition` reconciles the real cloud resources continuously.
+The reference open-source backbone is **Backstage** (created at Spotify, donated to the CNCF): a software catalog that inventories every service/API/resource, a **scaffolder** that generates new components from templates, **TechDocs** for docs-as-code, and a plugin ecosystem for CI/CD, Kubernetes, cost, and security views. On the provisioning side, **Crossplane** offers a Kubernetes-native control-plane alternative to Terraform: developers create a namespaced **composite resource (XR)** for a database or bucket, and the platform's `Composition` reconciles the real cloud resources continuously.
 
-Platform success is measured with **DORA metrics** (deployment frequency, lead time for changes, change failure rate, time to restore) and organized via **Team Topologies** (stream-aligned, platform, enabling, and complicated-subsystem teams). This module cross-references [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md) (the delivery mechanism behind golden paths) and [`../infrastructure_as_code_terraform/README.md`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (the alternative provisioning model to Crossplane).
+Platform success is measured with **DORA metrics** (deployment frequency, change lead time, change fail rate, failed deployment recovery time) and organized via **Team Topologies** (stream-aligned, platform, enabling, and complicated-subsystem teams). This module cross-references [`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md) (the delivery mechanism behind golden paths) and [`infrastructure_as_code_terraform`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (the alternative provisioning model to Crossplane).
 
 ---
 
@@ -40,7 +40,7 @@ Platform success is measured with **DORA metrics** (deployment frequency, lead t
 
 5. **Thinnest viable platform (TVP)**. Start with the smallest abstraction that helps — sometimes a wiki page and a Terraform module — and grow only where demand proves it out. Do not build a giant portal nobody asked for.
 
-6. **Measure with DORA**. Deployment frequency, lead time, change failure rate, and MTTR are the outcome metrics that tell you whether the platform is actually accelerating delivery.
+6. **Measure with DORA**. Deployment frequency, change lead time, change fail rate, and failed deployment recovery time are the outcome metrics that tell you whether the platform is actually accelerating delivery.
 
 7. **Encode policy, do not gatekeep**. Security and compliance are baked into the golden path (signed images, scanned dependencies, least-privilege IAM) so doing the right thing requires no extra developer effort.
 
@@ -55,9 +55,9 @@ Platform success is measured with **DORA metrics** (deployment frequency, lead t
 - **Plugins**: Kubernetes, CI/CD, cost, PagerDuty, security scorecards surfaced per-service.
 
 **Control-plane provisioning (Crossplane)** — Instead of imperative `terraform apply` in a pipeline, Crossplane runs *inside* Kubernetes and continuously reconciles cloud resources:
-- **Providers**: install CRDs for AWS/GCP/Azure resources (e.g., `RDSInstance`, `Bucket`).
+- **Providers**: install CRDs for AWS/GCP/Azure resources (e.g., `Instance`, `Bucket`).
 - **Compositions**: platform-authored bundles mapping a high-level abstraction to many concrete resources.
-- **Composite Resource Definitions (XRDs)** define the developer-facing API; a developer submits a **Claim** (`PostgreSQLInstance`) and Crossplane provisions the RDS instance, subnet group, parameter group, and secret.
+- **Composite Resource Definitions (XRDs)** define the developer-facing API and its `scope`; with the default `scope: Namespaced` a developer creates a **composite resource (XR)** such as `PostgreSQLInstance` in their own namespace, and Crossplane provisions the RDS instance, subnet group, parameter group, and secret. Namespacing the XR is what puts ordinary Kubernetes RBAC in charge of who may ask for what, and it is why there is no longer a separate cluster-scoped-XR-plus-namespaced-Claim pair to keep in sync.
 
 **Golden paths vs paved roads** — Same idea, slightly different emphasis: a *golden path* is the recommended end-to-end journey ("create a Java microservice"); a *paved road* is the supported, hardened toolchain that path runs on. Off-road is allowed but unsupported.
 
@@ -96,7 +96,7 @@ flowchart TD
         direction LR
         K8s@{ icon: "logos:kubernetes", form: "square", label: "Kubernetes", pos: "b", h: 44 }
         GitRepo(["Git repo"]) --> ArgoCD["Argo CD / Flux"] --> K8s
-        Claim(["Claim"]) --> Crossplane["Crossplane<br/>Composition"] --> CloudRes["Cloud resources"]
+        Claim(["Namespaced XR"]) --> Crossplane["Crossplane<br/>Composition"] --> CloudRes["Cloud resources"]
     end
 
     GoldenPath --> Infra
@@ -208,10 +208,24 @@ spec:
         catalogInfoPath: /catalog-info.yaml
 ```
 
-**Crossplane self-service database** — the platform defines a `Composition`; the developer submits only a tiny `Claim`:
+**Crossplane self-service database** — the platform defines an `XRD` plus a `Composition`; the developer creates only a tiny namespaced XR:
 
 ```yaml
-# Developer-facing Claim (everything else is hidden by the Composition)
+# Platform-authored API: the XRD that defines the developer-facing kind
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: postgresqlinstances.platform.acme.io
+spec:
+  scope: Namespaced          # XR lives in the team's namespace; RBAC governs it
+  group: platform.acme.io
+  names:
+    kind: PostgreSQLInstance
+    plural: postgresqlinstances
+```
+
+```yaml
+# Developer-facing XR (everything else is hidden by the Composition)
 apiVersion: platform.acme.io/v1alpha1
 kind: PostgreSQLInstance
 metadata:
@@ -221,11 +235,12 @@ spec:
   parameters:
     storageGB: 100
     size: medium          # platform maps medium -> db.r6g.large
-  compositionSelector:
-    matchLabels: { provider: aws, tier: prod }
+  crossplane:             # all Crossplane machinery sits under spec.crossplane
+    compositionSelector:
+      matchLabels: { provider: aws, tier: prod }
 ```
 
-Crossplane's controller continuously reconciles this Claim into an RDS instance, subnet group, and a Kubernetes `Secret` with the connection string — and *re-reconciles* if anyone drifts the resource manually, unlike a one-shot `terraform apply`.
+Crossplane's controller continuously reconciles this XR into an RDS instance, subnet group, and a Kubernetes `Secret` with the connection string in the same namespace — and *re-reconciles* if anyone drifts the resource manually, unlike a one-shot `terraform apply`. Keeping the platform's own fields under `spec.crossplane` is deliberate: everything above it is the API you designed for developers, everything inside it is machinery they can ignore.
 
 The mechanic that makes this "self-healing" instead of one-shot is a continuous control loop, not a single pass:
 
@@ -239,7 +254,7 @@ stateDiagram-v2
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    [*] --> Claimed: developer submits<br/>PostgreSQLInstance Claim
+    [*] --> Claimed: developer creates<br/>PostgreSQLInstance XR
     Claimed --> Reconciling: controller wakes
     Reconciling --> Converged: RDS + subnet group<br/>+ Secret created
     Converged --> Drifted: resource edited<br/>outside Crossplane
@@ -254,7 +269,7 @@ stateDiagram-v2
 
 Terraform has no `Drifted --> Reconciling` edge of its own: drift sits uncorrected until the next pipeline run manually re-applies it, whereas Crossplane's controller loop keeps closing that loop on its own.
 
-A typical golden path end-to-end: developer fills the scaffolder form → repo created with CI/CD + Helm + observability wired → Argo CD syncs it to the cluster ([`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md)) → service appears in the catalog with docs, ownership, and dashboards. Elapsed time: minutes, versus days of manual setup.
+A typical golden path end-to-end: developer fills the scaffolder form → repo created with CI/CD + Helm + observability wired → Argo CD syncs it to the cluster ([`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md)) → service appears in the catalog with docs, ownership, and dashboards. Elapsed time: minutes, versus days of manual setup.
 
 ---
 
@@ -284,7 +299,7 @@ A typical golden path end-to-end: developer fills the scaffolder form → repo c
 |---|---|---|
 | Reconciliation | one-shot `apply` per run | continuous, self-healing |
 | Drift correction | only on next run | automatic |
-| Interface | HCL + CI | Kubernetes CRDs / Claims |
+| Interface | HCL + CI | Kubernetes CRDs / namespaced XRs |
 | Learning curve | familiar to most | requires K8s fluency |
 | Best for | broad existing adoption | K8s-native self-service |
 
@@ -294,7 +309,7 @@ A typical golden path end-to-end: developer fills the scaffolder form → repo c
 
 **Build an IDP when**: you have enough teams and services (roughly 5+ teams or dozens of services) that inconsistency and the DevOps-as-ticket-queue bottleneck are measurably slowing delivery, and you can fund a dedicated platform team. The signal is product engineers spending days on undifferentiated setup or duplicating each other's pipelines.
 
-**Use Backstage when** you want a customizable, open, catalog-centric portal and have the engineering capacity to run and extend it. **Use a commercial IDP (Humanitec, Port, Cortex)** when you want faster time-to-value and have a small platform team. **Use Crossplane** when your org is Kubernetes-native and you want self-healing, claim-based provisioning rather than pipeline-driven Terraform.
+**Use Backstage when** you want a customizable, open, catalog-centric portal and have the engineering capacity to run and extend it. **Use a commercial IDP (Humanitec, Port, Cortex)** when you want faster time-to-value and have a small platform team. **Use Crossplane** when your org is Kubernetes-native and you want self-healing, CRD-based provisioning rather than pipeline-driven Terraform.
 
 **Do NOT** build a heavyweight portal for a 2-team startup — a Terraform module library and a README *is* your thinnest viable platform; building Backstage there is gold-plating. **Do NOT** build a platform no one asked for: if you cannot name the developer pain it removes, you are building a project, not a product. **Do NOT** make the golden path a golden cage — if teams cannot escape it for legitimate edge cases, they will route around the whole platform and adoption collapses.
 
@@ -317,7 +332,7 @@ flowchart TD
     Named -- "yes" --> Tool{"Which tool fits?"}
     Tool -- "open, customizable,<br/>eng capacity to run it" --> Backstage(["Backstage"])
     Tool -- "fast time-to-value,<br/>small platform team" --> Commercial(["Commercial IDP<br/>(Humanitec / Port / Cortex)"])
-    Tool -- "K8s-native,<br/>self-healing claims" --> Crossplane(["Crossplane"])
+    Tool -- "K8s-native,<br/>self-healing XRs" --> Crossplane(["Crossplane"])
 
     class Start,Named,Tool mathOp
     class TVP train
@@ -337,7 +352,7 @@ The gate is adoption pain, not preference: skip straight to the thinnest viable 
 
 3. **No ownership in the catalog**. A catalog where half the services have `owner: unknown` is useless during an incident.
 
-4. **Vanity metrics**. Counting "templates created" instead of measuring DORA outcomes (deployment frequency, lead time, change failure rate, MTTR).
+4. **Vanity metrics**. Counting "templates created" instead of measuring DORA outcomes (deployment frequency, change lead time, change fail rate, failed deployment recovery time).
 
 Broken scaffolder template — no input validation, so a developer can inject an invalid repo name and an unowned service, polluting the catalog and breaking downstream automation:
 
@@ -368,7 +383,7 @@ spec:
         owner:
           type: string
           ui:field: OwnerPicker            # only real catalog groups selectable
-          ui:options: { allowedKinds: [Group] }
+          ui:options: { catalogFilter: [{ kind: Group }] }
 ```
 
 5. **Treating the platform as done**. Platforms rot without continuous investment; abandon the roadmap and adoption decays as the toolchain ages.
@@ -382,7 +397,7 @@ spec:
 | Backstage | Developer portal | OSS, plugin-based | Catalog + scaffolder + TechDocs | CNCF incubating; needs a team to run |
 | Port | Developer portal | Commercial SaaS | Fast setup, low-code | No-code catalog/blueprints |
 | Humanitec | Platform orchestrator | Commercial | Dynamic env config, score | Pairs with Score spec |
-| Crossplane | Control-plane IaC | OSS, K8s-native | Continuous reconcile, Claims | Alternative to Terraform |
+| Crossplane | Control-plane IaC | OSS, K8s-native | Continuous reconcile, namespaced XRs | Alternative to Terraform |
 | Argo CD | GitOps delivery | OSS | Declarative sync, drift detect | Golden-path deploy engine |
 | Backstage + Kubernetes plugin | Observability surface | OSS | Per-service pod/deploy view | Ties catalog to runtime |
 
@@ -405,16 +420,16 @@ A golden path is the opinionated, fully-supported, easiest route to production t
 The Software Catalog is a graph of components, APIs, systems, and resources described by `catalog-info.yaml` files for ownership and discoverability; the Scaffolder generates new services from parameterized templates (the golden path made executable); TechDocs renders docs-as-code from each repo; and Plugins surface CI/CD, Kubernetes, cost, and security views per service. Together they form a single pane of glass for the developer. Spotify built it to cut onboarding from weeks to hours.
 
 **Q: How does Crossplane differ from Terraform for provisioning?**
-Crossplane runs as a control plane inside Kubernetes and continuously reconciles cloud resources from declarative Claims/CRDs, self-healing drift automatically, whereas Terraform is a one-shot `apply` per pipeline run that only corrects drift on the next execution. Crossplane exposes a Kubernetes-native API so developers submit a small Claim and the platform's Composition hides the complexity. Choose Crossplane when you are K8s-native and want continuous reconciliation; choose Terraform for broad existing adoption and a familiar workflow.
+Crossplane runs as a control plane inside Kubernetes and continuously reconciles cloud resources from declarative CRDs, self-healing drift automatically, whereas Terraform is a one-shot `apply` per pipeline run that only corrects drift on the next execution. Crossplane exposes a Kubernetes-native API so developers create a small namespaced composite resource in their own namespace — governed by ordinary Kubernetes RBAC — while the platform's Composition hides the complexity. Choose Crossplane when you are K8s-native and want continuous reconciliation; choose Terraform for broad existing adoption and a familiar workflow.
 
 **Q: What are the four DORA metrics and what do they measure?**
-Deployment frequency (how often you ship), lead time for changes (commit to production), change failure rate (percentage of deploys causing a failure), and time to restore service (MTTR). The first two measure velocity, the last two measure stability — elite performers achieve both simultaneously, deploying multiple times per day with lead time under an hour and change failure rate under 15%. They are the outcome metrics that tell you whether a platform is actually accelerating safe delivery.
+Deployment frequency (how often you ship), change lead time (commit to production), change fail rate (percentage of deploys causing a failure), and failed deployment recovery time (how long it takes to restore service after a bad deploy). The first two measure throughput, the last two measure instability, and the point of tracking all four is that the strongest teams move fast and stay stable at the same time rather than trading one for the other. There is a fifth key now, deployment rework rate, and DORA has stopped ranking teams into Elite/High/Medium/Low tiers in favour of describing team archetypes that combine delivery performance with human factors like burnout and friction. Quote the metrics as outcomes and compare a team against its own trend, not against a published threshold.
 
 **Q: Explain Team Topologies and how it relates to platform engineering.**
 Team Topologies defines four team types — stream-aligned (own a product slice end-to-end), platform (provide the IDP as a service), enabling (coach teams on new skills), and complicated-subsystem (own a deep specialty) — plus three interaction modes (collaboration, X-as-a-service, facilitating). The platform team's job is to offer the IDP "as a service" to reduce stream-aligned teams' cognitive load. This framing keeps the platform focused on reducing load rather than becoming a gatekeeper.
 
 **Q: How do you measure whether your platform is succeeding?**
-Primarily adoption (what fraction of teams/services use the golden path) and DORA outcomes (rising deployment frequency and shrinking lead time/MTTR/change-failure-rate) for teams on the platform versus off it, plus developer satisfaction surveys. Vanity metrics like "templates created" are misleading because they do not prove the platform reduced anyone's pain. If adoption is low, treat it as a product failure and go talk to your users.
+Primarily adoption (what fraction of teams/services use the golden path) and DORA outcomes (rising deployment frequency and shrinking change lead time, failed deployment recovery time, and change fail rate) for teams on the platform versus off it, plus developer satisfaction surveys. Vanity metrics like "templates created" are misleading because they do not prove the platform reduced anyone's pain. If adoption is low, treat it as a product failure and go talk to your users.
 
 **Q: A team complains the golden path does not fit their use case. How do you respond?**
 First treat it as product feedback: understand the gap and decide whether to extend the golden path (if the need is common) or provide a documented, supported escape hatch to the underlying primitives (if it is genuinely an edge case). Forcing them into an ill-fitting path creates a golden cage and erodes trust; blocking them outright pushes them to bypass the platform. The right answer is almost always to keep the primitives accessible while improving the path for the next team with the same need.
@@ -461,7 +476,7 @@ A platform team offers the IDP as an ongoing, self-service relationship, while a
 
 **Scenario**: A 12-team SaaS company has every team writing its own CI pipeline, Helm chart, and Terraform. New-service setup takes 6–9 days, observability is inconsistent, and 4 of 30 services have no clear owner — during a recent incident, responders spent 40 minutes just finding who owned a failing service. The platform team's mandate: cut service creation to under an hour and guarantee every service is owned, observable, and deployed via GitOps.
 
-The team builds a Backstage portal with one golden-path scaffolder template ("standard microservice") that generates a repo pre-wired with CI/CD, a Helm chart, OpenTelemetry, and a `catalog-info.yaml`, then registers it and lets Argo CD ([`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md)) sync it. Provisioning of databases is exposed as a Crossplane Claim.
+The team builds a Backstage portal with one golden-path scaffolder template ("standard microservice") that generates a repo pre-wired with CI/CD, a Helm chart, OpenTelemetry, and a `catalog-info.yaml`, then registers it and lets Argo CD ([`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md)) sync it. Provisioning of databases is exposed as a namespaced Crossplane composite resource.
 
 The first rollout shipped a template that let developers skip the owner field, and within two weeks the catalog had 7 new but unowned services — recreating the exact problem they set out to solve.
 
@@ -489,7 +504,7 @@ spec:
         owner:
           type: string
           ui:field: OwnerPicker
-          ui:options: { allowedKinds: [Group] }   # must pick a real team
+          ui:options: { catalogFilter: [{ kind: Group }] }   # must pick a real team
   steps:
     - id: validate-owner
       name: Enforce ownership

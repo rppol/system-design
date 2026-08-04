@@ -10,7 +10,7 @@ DevSecOps embeds security controls into every stage of the software delivery lif
 
 The practical surface area covers four pillars. **Code-level scanning**: SAST (static analysis of source), DAST (dynamic analysis of a running app), and SCA (software composition analysis of dependencies). **Artifact integrity**: image scanning with Trivy or Grype, SBOM generation with syft, and cryptographic signing with cosign. **Provenance**: SLSA attestations that prove how and where an artifact was built, anchored in a tamper-evident transparency log (Rekor). **Admission enforcement**: a Kubernetes gate that refuses to run any image lacking a valid signature and provenance.
 
-This module assumes you already understand pod-level controls (see [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md)) and secret storage (see [`../secrets_management/README.md`](../secrets_management/secrets_management.md)). Here the focus is the pipeline: shift-left scanning, signing with Sigstore keyless flows, SLSA levels 1-4, and the verification chain that ends at an admission controller.
+This module assumes you already understand pod-level controls (see [`kubernetes_security`](../kubernetes_security/kubernetes_security.md)) and secret storage (see [`secrets_management`](../secrets_management/secrets_management.md)). Here the focus is the pipeline: shift-left scanning, signing with Sigstore keyless flows, the SLSA Build track (L1-L3), and the verification chain that ends at an admission controller.
 
 ---
 
@@ -50,23 +50,23 @@ This module assumes you already understand pod-level controls (see [`../kubernet
 | SCA | Dependency manifests vs CVE DB | Trivy, Grype, Snyk, Dependabot | PR / build |
 | Image scan | OS + language layers in container | Trivy, Grype, Clair | Build / registry |
 | Secret scan | Hardcoded credentials in git | gitleaks, trufflehog | Pre-commit / push |
-| IaC scan | Terraform/K8s misconfig | Checkov, tfsec, Conftest | PR |
+| IaC scan | Terraform/K8s misconfig | Checkov, Trivy (`config` mode), Conftest | PR |
 
 **Signing strategies:**
 
 - **Key-based signing**: a long-lived private key (KMS-backed) signs artifacts. Strong but key rotation and theft are operational burdens.
 - **Keyless signing (Sigstore)**: cosign requests a short-lived certificate from Fulcio bound to an OIDC identity (GitHub Actions token, Google account). The signature plus certificate are recorded in Rekor, a public append-only transparency log. No long-lived key to steal — the certificate expires in 10 minutes.
 
-**SLSA (Supply-chain Levels for Software Artifacts) ladder:**
+**SLSA (Supply-chain Levels for Software Artifacts) Build track:**
 
 | Level | Requirement | Resists |
 |-------|-------------|---------|
-| L1 | Provenance exists, scripted build | Mistakes, basic tampering |
-| L2 | Hosted build service, signed provenance | Tampering after build |
-| L3 | Non-falsifiable provenance, isolated builds | A malicious build job |
-| L4 | Hermetic + reproducible builds, two-party review | Insider compromise of build platform |
+| L0 | Nothing — the absence of SLSA | Nothing |
+| L1 | Provenance exists, consistent scripted build | Mistakes, wrong-commit releases |
+| L2 | Hosted build platform generates and signs the provenance | Tampering after the build |
+| L3 | Hardened builder: runs isolated from one another, signing material unreachable from user build steps | Tampering during the build — a malicious build job or a hostile tenant |
 
-Each level only defends against a strictly stronger adversary than the one before it; the climb is cumulative, not additive — you cannot skip from L1 to L3.
+Each level only defends against a strictly stronger adversary than the one before it; the climb is cumulative, not additive — you cannot skip from L1 to L3. Requirements are organized into independent **tracks**, so a build level says nothing about the source: the separate Source track runs L1 (version controlled) through L4 (two-party review of every change to a protected branch), and hermetic/reproducible builds are not a level requirement at all.
 
 ```mermaid
 stateDiagram-v2
@@ -78,24 +78,24 @@ stateDiagram-v2
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    state "L1: provenance exists,<br/>scripted build" as L1
-    state "L2: hosted build service,<br/>signed provenance" as L2
-    state "L3: non-falsifiable provenance,<br/>isolated builder" as L3
-    state "L4: hermetic + reproducible,<br/>two-party review" as L4
+    state "Build L0: no provenance" as L0
+    state "Build L1: provenance exists,<br/>consistent build" as L1
+    state "Build L2: hosted platform<br/>signs the provenance" as L2
+    state "Build L3: hardened builder,<br/>isolated runs" as L3
 
-    [*] --> L1
+    [*] --> L0
+    L0 --> L1: resists mistakes,<br/>wrong-commit releases
     L1 --> L2: resists tampering<br/>after build
-    L2 --> L3: resists a malicious<br/>build job
-    L3 --> L4: resists insider<br/>compromise
-    L4 --> [*]
+    L2 --> L3: resists tampering<br/>during the build
+    L3 --> [*]
 
+    class L0 frozen
     class L1 lossN
     class L2 mathOp
     class L3 train
-    class L4 frozen
 ```
 
-The L2-to-L3 jump matters most: it is the point where even a malicious build job running inside your own pipeline can no longer forge its own provenance, which is why most mature platforms target L3 as a pragmatic ceiling and treat L4's hermetic reproducibility as an expensive final step.
+The L2-to-L3 jump matters most: it is the point where even a malicious build job running inside your own pipeline can no longer forge its own provenance or reach the platform's signing material. L3 is the top of the Build track, so "SLSA L3" is the realistic target for a production pipeline rather than a waypoint on the way to something stricter.
 
 ---
 
@@ -203,16 +203,16 @@ cosign sign --yes myrepo/api@${DIGEST}
 # Rekor returns an entry UUID; the signature is now publicly auditable
 ```
 
-**Step 5 — Attach SLSA provenance.** cosign attest binds the build metadata (builder ID, source commit, materials) as an in-toto attestation. SLSA L3 requires this provenance be produced by the hosted runner, not the user job, so it cannot be forged.
+**Step 5 — Attach SLSA provenance.** cosign attest binds the build metadata (builder ID, source commit, materials) as an in-toto attestation. Build L3 requires the build platform itself to generate and sign this provenance outside the user-controlled job, so a compromised build step cannot forge it.
 
 ```bash
 cosign attest --yes --type slsaprovenance \
   --predicate provenance.json myrepo/api@${DIGEST}
 ```
 
-**Step 6 — Admission verification.** The Sigstore policy-controller (or Kyverno) admission webhook intercepts every pod and runs the equivalent of `cosign verify`, checking the signature, the certificate identity regexp, and Rekor inclusion. Unsigned or wrong-identity images are denied. See [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md) for how this sits alongside Pod Security Standards.
+**Step 6 — Admission verification.** The Sigstore policy-controller (or Kyverno) admission webhook intercepts every pod and runs the equivalent of `cosign verify`, checking the signature, the certificate identity regexp, and Rekor inclusion. Unsigned or wrong-identity images are denied. See [`kubernetes_security`](../kubernetes_security/kubernetes_security.md) for how this sits alongside Pod Security Standards.
 
-**GitHub Actions OIDC** is the keystone: instead of storing a long-lived `AWS_SECRET_ACCESS_KEY`, the workflow assumes an IAM role via a federated OIDC trust, getting credentials scoped to ~1 hour. This also feeds the Fulcio identity. See [`../secrets_management/README.md`](../secrets_management/secrets_management.md) for the broader OIDC-to-cloud pattern. The workflow declares the minimal permissions explicitly:
+**GitHub Actions OIDC** is the keystone: instead of storing a long-lived `AWS_SECRET_ACCESS_KEY`, the workflow assumes an IAM role via a federated OIDC trust, getting credentials scoped to ~1 hour. This also feeds the Fulcio identity. See [`secrets_management`](../secrets_management/secrets_management.md) for the broader OIDC-to-cloud pattern. The workflow declares the minimal permissions explicitly:
 
 ```yaml
 permissions:
@@ -227,7 +227,7 @@ permissions:
 
 ## 7. Real-World Examples
 
-- **Kubernetes project itself** signs all release artifacts with cosign keyless and publishes SLSA L3 provenance; consumers verify against the `kubernetes-release` identity before deploying.
+- **Kubernetes project itself** signs every release artifact — tarballs, binaries, SBOMs, container images, and the build provenance — with cosign keyless; consumers verify images against `--certificate-identity krel-trust@k8s-releng-prod.iam.gserviceaccount.com --certificate-oidc-issuer https://accounts.google.com` before deploying (binaries use the `krel-staging@` identity).
 - **Google's Binary Authorization** (GKE) enforces an admission policy requiring attestations from named attestors; a deploy of an unattested image is rejected at the API server.
 - **Chainguard Images** ship with SBOMs and signatures by default and are rebuilt nightly to keep CVE counts near zero — a direct response to the cost of patching long-lived base images.
 - **The npm `ua-parser-js` hijack (2021)**: a maintainer account takeover pushed crypto-mining payloads to a package with 8 million weekly downloads. Provenance signing (npm now supports Sigstore attestations) is the structural fix.
@@ -341,7 +341,7 @@ Keyless signing eliminates the long-lived private key, which is the single most 
 An SBOM is a machine-readable inventory of every component in an artifact, typically in CycloneDX or SPDX format. Its operational value appears during an incident like Log4Shell: instead of guessing which of 400 services are affected, you query your SBOM store for `log4j-core < 2.17` and get an exact list in seconds. Generate SBOMs with syft at build time and store them queryably; an SBOM you cannot search is compliance theater.
 
 **Q: Walk through the SLSA levels.**
-SLSA L1 requires that provenance exists and the build is scripted; L2 adds a hosted build service producing signed provenance, resisting post-build tampering; L3 requires non-falsifiable provenance generated by an isolated builder the user job cannot tamper with; L4 adds hermetic and reproducible builds plus two-party review, resisting insider compromise. The jump from L2 to L3 is the most important because L3 means even a malicious build step cannot forge the provenance. Most mature platforms target L3 as a pragmatic ceiling since L4's hermetic reproducibility is expensive.
+SLSA organizes requirements into tracks, and the Build track runs L0 to L3: L0 is the absence of SLSA, L1 requires a consistent build process that produces provenance, L2 adds a hosted build platform that generates and signs that provenance (resisting tampering after the build), and L3 requires a hardened builder whose runs are isolated from one another and whose signing material is unreachable from user-defined build steps (resisting tampering during the build). The jump from L2 to L3 is the most important because L3 means even a malicious build step cannot forge the provenance, and L3 is the top of the Build track. Source-side guarantees live in a separate Source track (L1 version-controlled through L4 two-party review), so quoting a build level says nothing about how the code got reviewed.
 
 **Q: What does Rekor provide that a signature alone does not?**
 Rekor is an append-only transparency log that provides tamper-evident, publicly auditable proof that a signature existed at a point in time. A bare signature can be created and discarded silently; a Rekor entry (with its UUID and inclusion proof) means an attacker cannot retroactively sign a malicious artifact without leaving a permanent public record. Verifiers should require Rekor inclusion so that signing events are auditable and non-repudiable.
@@ -362,13 +362,13 @@ Provenance is signed metadata describing how an artifact was built — the sourc
 Scope every token to least privilege: a job that builds repo A should hold a token that can push only to repo A's registry path with a short TTL, not org-wide write. Use OIDC federation instead of static secrets, separate the signing step into an isolated job with its own narrow identity, and require SLSA L3 so the provenance itself is generated outside the user-controlled job. This way a compromised build step cannot forge provenance or reach other repositories.
 
 **Q: What is the practical difference between CycloneDX and SPDX?**
-Both are standard SBOM formats; CycloneDX (OWASP) is security-focused with first-class vulnerability and VEX support, while SPDX (Linux Foundation, ISO/IEC 5962) is license-and-compliance-focused and broader in scope. In practice CycloneDX is more common in security tooling pipelines and SPDX in legal/compliance contexts. syft emits both, so generate the format your downstream consumers expect rather than betting on one.
+Both are standard SBOM formats; CycloneDX (OWASP, standardized as ECMA-424) is security-focused with first-class vulnerability and VEX support, while SPDX (Linux Foundation, ISO/IEC 5962) is license-and-compliance-focused and broader in scope. In practice CycloneDX is more common in security tooling pipelines and SPDX in legal/compliance contexts. syft emits both, so generate the format your downstream consumers expect rather than betting on one.
 
 **Q: How would you roll out signature enforcement without breaking existing deploys?**
 Start the policy in `warn` mode so it logs violations without denying, sign all artifacts in CI, then watch the warning rate drop toward zero as old unsigned images age out. Once warnings are near zero and a break-glass path is tested, flip the policy to `enforce` per-namespace, starting with low-risk namespaces. This staged rollout surfaces unsigned legacy workloads before they cause an outage and gives teams time to onboard their signing pipelines.
 
 **Q: What does IaC scanning catch that SAST and SCA don't?**
-IaC scanning (Checkov, tfsec, Conftest) analyzes Terraform and Kubernetes manifests for misconfiguration, catching things like a public S3 bucket or an overly permissive security group. SAST looks at application source and SCA looks at dependency manifests, so neither would catch an `aws_s3_bucket_acl` resource set to `public-read`; IaC scanning is the category that treats infrastructure definitions as the attack surface they actually are. Run it as its own PR gate alongside SAST and SCA, not as a substitute for either.
+IaC scanning (Checkov, Trivy's config/misconfiguration mode, Conftest) analyzes Terraform and Kubernetes manifests for misconfiguration, catching things like a public S3 bucket or an overly permissive security group. SAST looks at application source and SCA looks at dependency manifests, so neither would catch an `aws_s3_bucket_acl` resource set to `public-read`; IaC scanning is the category that treats infrastructure definitions as the attack surface they actually are. Run it as its own PR gate alongside SAST and SCA, not as a substitute for either.
 
 **Q: Why is pre-commit secret scanning not sufficient by itself?**
 A pre-commit hook runs entirely on the developer's machine, so it can always be bypassed with `git commit --no-verify` or by simply not installing it, meaning a leaked credential can still reach the remote repository. The fix is defense in depth: pre-commit for fast local feedback plus a server-side push-time check (or a CI job) that re-scans every commit regardless of what ran locally, so the control cannot be silently skipped. Treat pre-commit as a courtesy to developers, not the actual security boundary.
@@ -421,7 +421,7 @@ cosign attest --yes --type slsaprovenance --predicate provenance.json myrepo/api
 # Deployment manifest references myrepo/api@${DIGEST} — the exact signed artifact.
 ```
 
-**Outcome.** After a 3-week staged rollout (warn → enforce per namespace), 100% of production images are signed and provenance-bearing. The next typosquat attempt is caught at the Trivy gate, and an attempted manual `kubectl apply` of a laptop-built image is denied by the webhook in ~200ms with a clear "no matching signatures" error. The SBOM store later answers a Log4Shell-style query across all 40 services in under 5 seconds. See [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md) for the complementary pod-runtime controls and [`../secrets_management/README.md`](../secrets_management/secrets_management.md) for the OIDC-to-cloud trust setup.
+**Outcome.** After a 3-week staged rollout (warn → enforce per namespace), 100% of production images are signed and provenance-bearing. The next typosquat attempt is caught at the Trivy gate, and an attempted manual `kubectl apply` of a laptop-built image is denied by the webhook in ~200ms with a clear "no matching signatures" error. The SBOM store later answers a Log4Shell-style query across all 40 services in under 5 seconds. See [`kubernetes_security`](../kubernetes_security/kubernetes_security.md) for the complementary pod-runtime controls and [`secrets_management`](../secrets_management/secrets_management.md) for the OIDC-to-cloud trust setup.
 
 **The staged rollout that got there without an outage:**
 
