@@ -827,16 +827,6 @@ You define views in ordinary SQL over sources such as Kafka topics or Postgres c
 
 Reach for it when a dashboard, an alert or a serving path needs a continuously fresh join across streams and you would rather write SQL than maintain a stream-processing job. The costs are memory, because maintained state lives in the cluster, and pricing that follows it. A warehouse refreshed every few minutes is far cheaper whenever seconds of staleness are acceptable, which is most of the time.
 
-### Maxwell
-**Short:** MySQL binlog reader that publishes row changes as JSON to Kafka, used for outbox and CDC pipelines.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @1
-
-It registers with MySQL as a replication client -- the same protocol a replica uses -- reads the row-based binary log, and emits one JSON message per inserted, updated or deleted row carrying the database, table, operation, the new row and, for an update, the previous values. Its binlog position is stored in a schema inside the source database, so a restart resumes rather than replays, and a bootstrap command dumps an existing table's contents into the stream before switching to live changes.
-
-Reach for it when the source is MySQL, the destination is Kafka and JSON is an acceptable wire format -- outbox relays and cache or index invalidation are the common uses, and it needs no Kafka Connect cluster to run. The limits are its scope: MySQL only, no schema registry and therefore no Avro or Protobuf contracts, and far fewer destinations and transforms than Debezium, which is where a multi-engine estate ends up.
-
 ### Maxwell's Daemon
 **Short:** MySQL binlog change-data-capture daemon emitting row changes as JSON to Kafka; simpler than Debezium, fewer connectors.
 **Kind:** tech

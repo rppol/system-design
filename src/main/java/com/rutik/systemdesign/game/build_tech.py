@@ -532,6 +532,19 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     # citation means.
     "triton": "openai triton",
     "triton inference server": "nvidia triton",
+    # Vault: the bare word only ever meant HashiCorp Vault here, but two §11 cells
+    # manufactured it anyway -- "External Secrets Operator / Vault" split on the " / ",
+    # and "Vault (HashiCorp)" had its trailing parenthetical stripped. Both cells now say
+    # "HashiCorp Vault" outright and the duplicate `### Vault` record is gone; this alias
+    # is the safety net so the next one does not re-split the product in two. Safe because
+    # "Ansible Vault" and "Azure Key Vault" are their own keys, not this one.
+    "vault": "hashicorp vault",
+    # Maxwell is DELIBERATELY NOT ALIASED, though it looks like the same case. The CDC
+    # daemon's bare name collides with NVIDIA's Maxwell GPU architecture, which cuda/
+    # discusses at length -- an alias would silently turn a future cuda §11 "Maxwell"
+    # into a MySQL binlog reader. The single citation (java/microservices_patterns) was
+    # changed to "Maxwell's Daemon" and the duplicate record deleted instead. Fix the
+    # citation, not the key, whenever the bare word is genuinely ambiguous.
     # --- 2026-07-31 classification pass -------------------------------------------
     # 94 merges from a reviewed pass over 134 heuristic candidate groups. The bar was
     # "err heavily toward KEEP; a false merge fuses two distinct tools forever" -- 32
@@ -830,6 +843,10 @@ TECH_LABELS = {
     "gpt-4o": "GPT-4o",
     "graphrag": "Microsoft GraphRAG",
     "hashicorp/raft": "hashicorp/raft",
+    # Pins the display name against the `vault` alias above: the vote is by surface form
+    # with shortest-wins-ties, so one future bare "Vault" would otherwise flip the label
+    # and orphan the `### HashiCorp Vault` record. Must match that heading exactly.
+    "hashicorp vault": "HashiCorp Vault",
     "helm": "Helm",
     "httpx.asyncclient": "httpx.AsyncClient",
     "hugging face": "Hugging Face",

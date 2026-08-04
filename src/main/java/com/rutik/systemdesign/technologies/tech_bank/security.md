@@ -1975,16 +1975,6 @@ Reach for it when a repository has years of history and the question is which le
 **Lang:** *
 **Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @2
 
-### Vault
-**Short:** HashiCorp's secrets store for credentials, signing keys and PKI, with dynamic leases and audited access.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/secrets-and-cryptography @1
-
-It is organized as secrets engines rather than one flat store: KV for static secrets, dynamic engines that mint a short-lived database or cloud credential on request and revoke it when the lease expires, a PKI engine that issues certificates, and transit, which encrypts and signs on your behalf so the key never leaves Vault at all. Auth methods map a workload identity — a Kubernetes service account, cloud IAM role, or OIDC subject — to policies, and every access is written to an audit log.
-
-Reach for it when credentials must be short-lived and centrally revocable instead of long-lived environment variables copied between systems; the dynamic-credential model means a leaked secret expires on its own. The costs are that unsealing, key rotation, and storage backend health become your problem, and that Vault sits on the critical path of everything that needs a credential — which is why it is run highly available.
-
 ### Vault Agent
 **Short:** Client-side Vault daemon that authenticates for your app, caches tokens and leases, and renders secrets into files.
 **Kind:** tech

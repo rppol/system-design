@@ -353,7 +353,7 @@ roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k
 | kube-bench | CIS Benchmark auditing |
 | Trivy / Grype | Image + cluster CVE scanning |
 | Falco / Tetragon (eBPF) | Runtime threat detection |
-| External Secrets Operator / Vault | Secret management |
+| External Secrets Operator / HashiCorp Vault | Secret management |
 | cosign / Sigstore | Image signing + verification |
 | IRSA / Workload Identity | Keyless cloud access |
 | NetworkPolicy (Calico/Cilium) | Network segmentation |

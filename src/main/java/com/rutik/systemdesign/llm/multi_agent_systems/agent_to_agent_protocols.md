@@ -1086,7 +1086,7 @@ callback endpoint is an unauthenticated write path into your orchestrator's task
 | **Redis** | Task state storage | Store task status with TTL; pub/sub for SSE fanout |
 | **Prometheus + Grafana** | Monitoring | Track: task submission rate, error rate, p99 latency per agent |
 | **OpenTelemetry** | Distributed tracing | Propagate trace context across A2A hops via `traceparent` header |
-| **Vault (HashiCorp)** | Private key storage | Store agent signing keys; never hardcode in application config |
+| **HashiCorp Vault** | Private key storage | Store agent signing keys; never hardcode in application config |
 
 ---
 

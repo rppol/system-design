@@ -573,7 +573,7 @@ a big-bang rewrite of anything business-critical — the failure surface is enor
 | Concern | Tools |
 |---------|-------|
 | Saga orchestration | Temporal, Cadence, Camunda/Zeebe, Axon Framework |
-| Outbox / CDC | Debezium, Kafka Connect, Maxwell |
+| Outbox / CDC | Debezium, Kafka Connect, Maxwell's Daemon |
 | Messaging | Apache Kafka, RabbitMQ, AWS SQS/SNS |
 | Idempotency / dedup | Postgres UNIQUE constraint, Redis SETNX + TTL |
 | Tracing | OpenTelemetry, Jaeger, AWS X-Ray, Zipkin |
