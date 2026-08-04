@@ -315,6 +315,7 @@ const STUDY_ORDER = {
   ],
   technologies: [
     "technologies/apache_airflow","technologies/temporal_durable_execution","technologies/nvidia_triton_inference_server","technologies/intel_openvino",
+    "technologies/envoy_proxy",
   ],
 };
 

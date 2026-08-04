@@ -31,7 +31,7 @@ collisions explicitly in the module's intro — e.g. `nvidia_triton_inference_se
 (OpenAI Triton, the GPU kernel DSL). Same word, unrelated products; both files must
 say so on first mention.
 
-**Two disambiguation precedents, both by extending the slug rather than adding a marker:**
+**Three disambiguation precedents, all by extending the slug rather than adding a marker:**
 
 1. *Vendor differs from a same-named product* — spell out the full product descriptor.
    `nvidia_triton_inference_server` (2026-07) took this route rather than
@@ -48,13 +48,29 @@ say so on first mention.
    term also does real work here: it names the half of the tier role
    `data-movement/workflow-and-durable-execution` that means Temporal, keeping it
    distinct from `apache_airflow`, which owns the "workflow" half.
+3. *Vendor is a foundation, not a company, and the product's own name already carries a
+   descriptor* — use the product's full self-name. `envoy_proxy` (2026-08-04) took this
+   route. Envoy has no vendor in the `<vendor>_` sense: Lyft originated it in 2016,
+   donated it to the CNCF in September 2017, and it graduated in November 2018 with
+   maintainers across Google, Lyft, Tetrate, Bloomberg and IBM. `cncf_envoy` names a
+   foundation, not a vendor, and would generalize to `cncf_istio`/`cncf_prometheus`;
+   `lyft_envoy` is factually wrong today. A bare `envoy` has **no collision problem in
+   this repo** — verified 2026-08-04, the only other `envoy` string is French prose in an
+   LLM translation example — but a one-token slug would be the section's first break of
+   the two-token shape. The product's own name, used by its domain (`envoyproxy.io`), its
+   GitHub org and its docs title, resolves all three: **`envoy_proxy`**.
 
 ---
 
-## Module List — 4 Modules
+## Module List — 5 Modules
 
 Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
-and then the two serving modules as contrast pairs.
+and then the two serving modules as contrast pairs, with `envoy_proxy` **appended** at
+position 5. Both existing pairs share a property Envoy does not — they *run your
+workload*, while Envoy *moves traffic to* it — so inserting it anywhere in positions 1–4
+would split a pair for no gain. Appending keeps both pairs intact and **opens the third
+pair slot**: if the next technology page is another traffic/edge technology, it belongs
+at position 6, adjacent, forming the "edge and data plane" pair. Do not append blindly.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
@@ -62,6 +78,7 @@ and then the two serving modules as contrast pairs.
 | [`temporal_durable_execution/`](temporal_durable_execution/temporal_durable_execution.md) | Durable execution | Two-plane split (Service never runs your code), event history + replay determinism, activities and the four timeouts, signals/queries/updates, Continue-As-New and the 51,200-event limit, versioning via patching vs Pinned Worker Deployments, shard immutability | Temporal Server 1.31.2 |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
 | [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
+| [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.39.0 |
 
 ---
 
@@ -138,9 +155,11 @@ No module here carries a `<!-- study-paths -->` block, so `questions/paths.json`
 section), so this is a deliberate omission, not a gap.
 
 **Status 2026-08-04 (owner-set):** the section reached **4 modules** with
-`temporal_durable_execution`, crossing the threshold below — and the tier decision was
+`temporal_durable_execution`, crossing the threshold below, and **5 modules** with
+`envoy_proxy` the same day — and the tier decision was
 **deliberately deferred** to a separate change once all four planned technology pages
-have landed. Do not read the un-tiered state as an oversight, and do not add a
+have landed. The deferral **still stands** at 5 modules; `envoy_proxy` deliberately
+carries no `<!-- study-paths -->` block. Do not read the un-tiered state as an oversight, and do not add a
 `<!-- study-paths -->` block to one module on its own: tiering is a section-wide
 decision plus a one-time `README.md` marker-pair setup, and doing it piecemeal produces
 a Senior path that silently advertises a partial section.
@@ -171,7 +190,7 @@ here. There is **no array in `app.js`** to add.
 ## `tech_bank/` — the technology knowledge bank (DATA, not a module)
 
 `technologies/tech_bank/` is the **source of truth for `game/tech_index.json`**: what each
-of the 3,603 indexed tools *is* and what problems it solves, independent of which module
+of the 3,626 indexed tools *is* and what problems it solves, independent of which module
 teaches it. It is authored markdown, committed; the JSON is **generated and gitignored**,
 regenerated by CI on every push exactly like `questions/*.json`, `paths.json`, the
 relatedness graphs and the pre-rendered Mermaid `.mmz` assets.
@@ -237,7 +256,7 @@ tech_bank/
 ```
 
 Shard by **primary tier** — the tier of the tool's FIRST role. Roles are weight-ascending
-in all 3,603 records, so "first" is "best"; only 26 tools have a tie at weight 1. A tool
+in all 3,626 records, so "first" is "best"; only 26 tools have a tie at weight 1. A tool
 lives in exactly one shard and declares all of its roles there, so Redis is filed under
 Caching and still carries its key-value, rate-limiting, broker and semantic-cache roles.
 A record whose primary tier disagrees with its shard is a **warning**, not an error.

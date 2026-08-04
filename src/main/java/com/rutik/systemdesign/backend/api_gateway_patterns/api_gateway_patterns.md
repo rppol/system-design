@@ -715,7 +715,7 @@ Rate limiting per IP allows a single malicious user with many IPs to bypass limi
 | Spring-native gateway | Spring Cloud Gateway (reactive, Netty-based) |
 | Nginx-based | Kong (open source / enterprise), Nginx Plus |
 | Managed cloud | AWS API Gateway, Azure API Management, GCP Apigee |
-| Service mesh with gateway | Istio Ingress Gateway, Envoy as edge proxy |
+| Service mesh with gateway | Istio Ingress Gateway, Envoy as edge proxy — see [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md) for the data plane underneath both |
 | GraphQL federation | Apollo Federation / Apollo Router (router side); Spring for GraphQL + federation-jvm (subgraph side) |
 | Rate limiting backend | Redis (token bucket / sliding window) |
 | Auth | Spring Security OAuth2, Keycloak, Auth0, Okta |

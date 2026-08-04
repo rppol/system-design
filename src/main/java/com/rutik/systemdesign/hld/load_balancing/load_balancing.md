@@ -442,7 +442,7 @@ Note the third row: dropping the interval to 5s while *raising* the threshold to
 
 Everything above is **active** health checking: the load balancer sends its own synthetic probe on a fixed interval. That probe is a different request from the ones real users send, which is exactly the failure mode Core Principle 5 (Failure Isolation) runs into — a backend can answer `GET /health` in 2ms while returning 503s or 10-second latencies to actual traffic. Detection time also has a floor of `interval x N`, so between probes the LB has no opinion at all.
 
-**Passive health checking** closes both gaps by judging a backend on the real responses it is already producing, and ejecting it the moment they go bad. Envoy calls this *outlier detection* and offers four independent triggers:
+**Passive health checking** closes both gaps by judging a backend on the real responses it is already producing, and ejecting it the moment they go bad. Envoy calls this *outlier detection* and offers these independent triggers:
 
 | Trigger | Ejects a host when… | Use it for |
 |---------|---------------------|-----------|
@@ -456,6 +456,8 @@ Two guardrails make ejection safe. `base_ejection_time` bounds how long a host s
 AWS ships the same idea on ALB as a routing algorithm rather than an ejection rule: set the target group's `load_balancing.algorithm.type` to `weighted_random` and turn on `load_balancing.algorithm.anomaly_mitigation`, and the ALB shifts traffic share away from targets whose observed error rate is anomalous relative to their peers — a soft version of ejection that never removes a target outright.
 
 Run both layers. Active checks catch a process that is gone; passive checks catch a process that is present, answering probes, and useless.
+
+One Envoy-specific caveat that decides whether any of this fires: each detector is gated by an `enforcing_*` percentage, and three of them — `enforcing_consecutive_gateway_failure`, `enforcing_failure_percentage` and `enforcing_failure_percentage_local_origin` — default to **0**, so the detector runs and ejects nothing. Envoy's `max_ejection_percent` also defaults to **10**, not the 50 that appears in Istio examples. See [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md) for the full defaults table and the interaction with priority failover and panic mode.
 
 ---
 

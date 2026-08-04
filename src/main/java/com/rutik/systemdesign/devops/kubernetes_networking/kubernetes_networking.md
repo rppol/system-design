@@ -277,7 +277,7 @@ spec:
           - {path: /,    pathType: Prefix, backend: {service: {name: web, port: {number: 80}}}}
 ```
 
-Ingress is feature-frozen; **Gateway API** is its GA successor and where new L7 capability lands. It replaces the single annotation-driven Ingress object with a richer, role-oriented model (`GatewayClass`/`Gateway`/`HTTPRoute`) supporting traffic splitting, header matching, and cross-namespace routing natively. Implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric.
+Ingress is feature-frozen; **Gateway API** is its GA successor and where new L7 capability lands. It replaces the single annotation-driven Ingress object with a richer, role-oriented model (`GatewayClass`/`Gateway`/`HTTPRoute`) supporting traffic splitting, header matching, and cross-namespace routing natively. Implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric. All of those except Traefik and NGINX Gateway Fabric are control planes over the same Envoy data plane — see [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md).
 
 ```mermaid
 flowchart LR

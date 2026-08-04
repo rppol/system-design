@@ -173,6 +173,16 @@ It is a proxy you deploy rather than a hosted edge. The Extensible Service Proxy
 
 Reach for it when the backend runs on GKE, Compute Engine or Cloud Run and you want spec-driven authentication and quotas close to the service. Note the direction of travel: Google's newer API Gateway covers similar ground as a fully managed product and Apigee covers the full-lifecycle case, so a new deployment should compare all three rather than defaulting here. The proxy is also an extra container to size, deploy and keep patched.
 
+### Cloud Service Mesh
+**Short:** Google Cloud's managed xDS control plane, formerly Traffic Director, configuring Envoy sidecars, gateways and proxyless gRPC clients.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2, platform-delivery/cloud-platform-and-cost @3
+
+It is the control-plane half of a mesh delivered as a Google-operated service: you express routing, traffic splitting, health checking and security policy through GCP APIs or Gateway API, and it compiles that intent into xDS and streams it to whatever data plane you run. The unusual reach is the client set, since the same configuration serves Envoy sidecars in GKE, Envoy gateways at the edge, workloads on plain virtual machines, and gRPC clients consuming CDS and EDS directly with no proxy in the path at all.
+
+Reach for it on Google Cloud when you want mesh behaviour without operating a control plane, and especially when the fleet spans Kubernetes and virtual machines or when proxyless gRPC would remove a hop from a latency-sensitive path. The tradeoff is coupling: the data plane stays portable Envoy, but the configuration surface is Google's, so a move off GCP is a control-plane rewrite even though the proxy knowledge transfers.
+
 ### Cloudflare LB
 **Short:** Cloudflare's global L7 load balancer with health checks, geo-steering and failover across origins.
 **Kind:** tech
@@ -212,6 +222,16 @@ Reads default to being served by the leader — strongly consistent except for a
 Connect was the name given to the mesh capability layered onto the existing service catalogue, and that lineage explains its shape. The registry, health checks and KV store already existed, so the mesh added a built-in certificate authority issuing SPIFFE-style workload identities, a sidecar proxy per service instance, and authorization expressed between service identities instead of between IP addresses. The certificate authority can be Consul's own or delegated to Vault, and rotation happens underneath the application.
 
 Reach for it when Consul is already the discovery layer and you want mTLS and policy without introducing a second control plane. The proxy is Envoy by default, with a simpler built-in option for low-throughput cases. The behaviour to internalise is that intentions are enforced by the proxy, so a workload that bypasses its sidecar bypasses the policy, which is why a mesh is not a replacement for network controls. In a Kubernetes-only estate, Linkerd or Istio is a shorter path.
+
+### Contour
+**Short:** CNCF ingress controller for Kubernetes that programs Envoy from Gateway API and its own HTTPProxy resource.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, traffic-edge/proxy-and-load-balancer @2, platform-delivery/kubernetes-and-orchestration @3
+
+It watches Kubernetes objects and translates them into xDS, streaming listeners, routes, clusters and secrets to a fleet of Envoy pods, so a routing change is a push rather than a reload. Alongside Gateway API it offers `HTTPProxy`, an older CRD that predates Gateway API and solves the same problems the Ingress annotations solved badly, notably inclusion of one proxy into another so a platform team can delegate a path prefix to a namespace without giving it the whole hostname.
+
+Reach for it when you want a conservative, long-established Envoy ingress with a modest operational surface and no mesh attached. It competes directly with Envoy Gateway, which is the newer CNCF-native answer to the same problem, and the decision usually comes down to whether the `HTTPProxy` delegation model or Envoy Gateway's policy CRDs fit your organization better.
 
 ### CoreDNS
 **Short:** Plugin-based DNS server that is the default Kubernetes service-discovery resolver, often with a per-node cache.
@@ -283,6 +303,46 @@ Its configuration is dynamic: listeners, routes, clusters and endpoints are push
 
 It terminates and originates mTLS, speaks HTTP/1.1, HTTP/2, HTTP/3 and gRPC natively, translates gRPC-Web for browsers, and emits detailed per-cluster statistics and spans - the observability is a large part of why meshes standardized on it. Rate limiting is deliberately delegated to an external service over gRPC using descriptors, so the quota is shared across every proxy. The costs are real: a sidecar per pod adds a network hop and memory, and hand-written Envoy config is dense enough that most teams only ever touch it through a control plane.
 
+### Envoy AI Gateway
+**Short:** Envoy Gateway extension giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, llm-apps/llm-gateway-and-routing @1, llm-apps/tool-use-and-mcp @2
+
+It exists because model traffic breaks the assumptions ordinary gateways are built on: one request can cost two hundred tokens and the next two hundred thousand, so request-per-second limits are meaningless, and the routing signal often sits inside a streaming body rather than in a header. It solves both with external processing on the request path, and exposes the result as a small set of resources covering routes, backends, provider credentials and gateway configuration, plus routing for Model Context Protocol servers.
+
+Reach for it when you already run Envoy Gateway and want one front door across several model providers with usage accounting, failover and per-tenant token budgets, rather than each application holding its own provider keys. It reached 1.0 in June 2026 with backing from Bloomberg, Tetrate and Nutanix, and it is additive, so adopting it does not change the data plane you are already running.
+
+### Envoy dynamic modules
+**Short:** Envoy extension mechanism loading a native shared object, with an official Rust SDK, instead of a sandboxed Wasm module.
+**Kind:** api
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, devtools/compiler-toolchain-and-codegen @3
+
+A dynamic module is compiled to a shared library and loaded into the proxy process, so extension code runs at native speed with no sandbox boundary and no per-worker virtual machine. That is the whole trade against Wasm: you gain the performance and the ability to use ordinary native libraries, and you accept that a bug in your extension is a proxy crash rather than a failed request. The official SDK is Rust, which takes most of the memory-safety risk off the table without taking away the address-space risk.
+
+It arrived experimental in Envoy 1.34 as an HTTP filter mechanism and expanded substantially in 1.39, which added transport sockets, health checkers, access-log formatters, stats sinks and load-balancer callbacks. Reach for it when a round trip to an external service is unacceptable and you have the Rust expertise plus a serious test story; otherwise external processing keeps your code out of the proxy entirely.
+
+### Envoy Gateway
+**Short:** CNCF control plane that implements the Kubernetes Gateway API by deploying and configuring Envoy as the data plane.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, traffic-edge/proxy-and-load-balancer @2, platform-delivery/kubernetes-and-orchestration @3
+
+It exists so that every vendor stops rewriting the same layer: it watches `GatewayClass`, `Gateway` and route objects, provisions Envoy deployments to serve them, and streams the compiled xDS. Beyond the portable Gateway API it adds policy resources of its own for the behaviour the specification does not model, covering retries, circuit breaking, passive health checking, rate limits and authentication, plus a patch policy that drops through to raw Envoy configuration when the abstraction runs out.
+
+Reach for it as the mainstream successor to a retired ingress-nginx when you need ingress rather than a mesh, since it keeps the mesh decision open at no future cost: the data plane is already Envoy, so adopting Istio later is a control-plane change. Release 1.8.3 bundles Gateway API CRDs v1.5.1 and adds backend reference weights, HTTP/2 keepalive and dynamic module support.
+
+### Envoy Mobile
+**Short:** Envoy's C++ core compiled into an iOS and Android client library, giving mobile apps the same retries, mTLS and stats.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, apis-frameworks/web-framework-and-http-client @2
+
+It embeds the proxy in the application process rather than putting one on the network, so outbound requests from the app run through the same filter chain, retry policy, connection pooling and statistics machinery a server-side Envoy uses, and the mobile client stops being the one hop in the system with no observability and no consistent policy. Configuration can be static or delivered over xDS, which means a mobile fleet can be retargeted without an app release.
+
+Reach for it when mobile clients are a material share of traffic and their network behaviour is invisible or inconsistent across platforms. The constraint is release cadence rather than technology: a change to server-side Envoy ships in minutes and a change to an embedded one ships with the app store review, so anything you might need to change quickly belongs in dynamic configuration. The standalone repository folded back into the main Envoy repository under a mobile directory.
+
 ### Envoy/Istio outlier detection
 **Short:** Mesh-level circuit breaking that ejects an upstream host from the pool after consecutive errors.
 **Kind:** api
@@ -304,6 +364,26 @@ It suits a JVM fleet where a client library can do the discovery and the load ba
 **Kind:** api
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, caching/distributed-cache @2
+
+### ext_authz
+**Short:** Envoy filter that calls an external service over gRPC or HTTP to allow, deny or enrich each request before routing.
+**Kind:** api
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, security/authorization-and-policy @1, security/authentication-and-identity @2
+
+The filter forwards the request headers, and optionally a prefix of the body, to an authorization service, which answers allow, deny with a status and body, or allow with header mutations that downstream filters and the upstream then see. Because the decision lives in a separate process it can be written in any language, deployed and scaled independently, and debugged with ordinary service tooling, at the cost of one network round trip on the critical path of every request it covers.
+
+The setting that decides your failure mode is `failure_mode_allow`. Fail-open is usually wrong for genuine authorization, since an outage of the authorization service becomes an open door, and often right for enrichment filters whose claims a downstream service re-validates anyway. Decide it per filter, record the reasoning, and keep the timeout tight, because this call sits inside every request's latency budget.
+
+### ext_proc
+**Short:** Envoy filter that streams request and response headers, bodies and trailers to an external gRPC server that may mutate them.
+**Kind:** api
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, apis-frameworks/rpc-graphql-and-streaming @2
+
+Where external authorization is a single allow-or-deny question about headers, external processing is a bidirectional streaming session covering the whole exchange: a processing mode selects which phases the server sees, and body handling can be none, fully buffered, streamed chunk by chunk, or partially buffered. The server replies with mutations, so it can rewrite headers, transform a body, or terminate the request outright, all without any code inside the proxy.
+
+Reach for it when the decision or the transformation genuinely needs the payload, which is why it underpins most model gateways: token counting, provider-specific request translation and streaming response inspection are all body problems. The costs are the ones any out-of-process hook carries, a round trip or a held stream plus buffering memory, so choose the narrowest processing mode that answers your question.
 
 ### Failsafe
 **Short:** Lightweight Java resilience library: retry, circuit breaker, timeout, hedge and fallback policies.
@@ -361,6 +441,16 @@ It gives you two static anycast addresses announced from AWS edge locations, so 
 
 Reach for it for global TCP and UDP workloads where the latency variance of the open internet is the problem, for gaming and real-time media, and wherever clients must allowlist fixed addresses. It is a network accelerator rather than a CDN, since nothing is cached, so a content-heavy site gains far more from CloudFront. It carries a fixed hourly charge plus a data premium, so measure the improvement from real client locations before adopting it.
 
+### go-control-plane
+**Short:** The reference Go library for building an xDS control plane, with snapshot caching and aggregated stream serving.
+**Kind:** tech
+**Lang:** go
+**Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2
+
+It provides the server side of the discovery protocol so you supply intent and it handles the wire: a snapshot cache holds a consistent, versioned set of listeners, routes, clusters, endpoints and secrets per proxy identity, and the library serves aggregated and delta streams, tracks acknowledgements and negative acknowledgements, and respects the ordering the protocol requires. Envoy Gateway and several vendor control planes are built on it.
+
+Reach for it when routing genuinely derives from a system you already own, such as a service catalogue, a tenant database or a bespoke deployment tool, in which case a few hundred lines can be smaller to operate than a general-purpose mesh. What you sign up for is real: resource dependency ordering, cluster warming, snapshot consistency and version management are yours, and you become the only team who can debug your control plane during an incident.
+
 ### Guava RateLimiter
 **Short:** Guava's in-process token-bucket limiter that smooths or blocks calls, with an optional warm-up ramp.
 **Kind:** api
@@ -400,6 +490,16 @@ Reach for it when many services in several languages need the same traffic, secu
 It is a standalone Envoy deployment at the cluster edge with no application beside it, configured by the same control plane as the sidecars: a `Gateway` resource declares the ports, protocols and TLS certificates it exposes, and `VirtualService` resources bind hostnames and paths to in-mesh destinations. The traffic rules already used inside the mesh, such as weighted canaries, retries and mirroring, therefore apply identically to external traffic, and telemetry is continuous from edge to workload.
 
 Reach for it when a mesh is already in place and a separate ingress controller would mean maintaining routing rules in two systems. It is a pod like any other, so its replica count, resource requests and autoscaling are yours to size, and its configuration surface is Istio's, which is powerful and easy to get subtly wrong where `Gateway` host matching and `VirtualService` binding interact. Teams standardising on Gateway API can express much of this in that vocabulary instead.
+
+### kgateway
+**Short:** CNCF sandbox Gateway API control plane over Envoy, the renamed donation of Solo.io's Gloo Gateway.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, platform-delivery/kubernetes-and-orchestration @3
+
+It is a Gateway API implementation that programs Envoy, carrying forward the transformation, external authentication and upstream-integration surface Gloo Gateway had built, plus an increasing amount of model-serving and inference routing work aimed at the same problems Envoy AI Gateway addresses. Because the data plane is Envoy, its defaults, response flags and failure modes are the ones any Envoy operator already knows.
+
+Reach for it when you want the Gloo feature surface under neutral CNCF governance, or when its inference routing fits a workload better than the alternatives. The timeline matters to anyone already on the predecessor: the open-source Gloo Gateway reaches end of life on 31 December 2026, so an existing deployment has a migration to plan rather than a choice to defer.
 
 ### Kiali
 **Short:** Istio's observability console: live service topology, traffic flow, mTLS status and config validation.
@@ -564,6 +664,16 @@ In .NET it plugs into the HTTP client factory so outbound calls inherit a policy
 An interface VPC endpoint is an elastic network interface in your own subnet with a private address, and it fronts either an AWS service or a service another account published behind a Network Load Balancer. Traffic to it never touches an internet gateway or a NAT gateway, security groups on the interface control who may use it, and an endpoint policy can restrict which API actions and resources are permitted through it.
 
 Reach for it for private access to AWS APIs from isolated subnets and for consuming partner services without peering. Two practical points dominate: private DNS must be enabled or configured so the service's normal hostname resolves to the endpoint, otherwise clients silently keep using the public path, and interface endpoints carry an hourly charge per availability zone plus data processing, which becomes significant across many services and accounts. Gateway endpoints for S3 and DynamoDB are free where they apply.
+
+### Proxy-Wasm
+**Short:** The ABI specification letting a sandboxed WebAssembly module run as a proxy filter, implemented by Envoy and others.
+**Kind:** spec
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, runtime-systems/runtime-internals-and-types @3
+
+It defines the callbacks a module receives for each phase of a request and the host functions it may call back into, so extension code compiled to WebAssembly from Rust, C++ or TinyGo runs inside a sandbox with no access to the host beyond that surface. Envoy is the reference implementation and runs a virtual machine per worker thread, which is why memory cost multiplies by concurrency and why per-module state is not shared across workers.
+
+Reach for it when an extension must be portable and sandboxed, and when a bug should fail a request rather than crash the proxy. The honest cost is operational rather than latency: building, versioning, distributing and debugging a WebAssembly module is a discipline most teams underestimate, and calling an external service over the authorization or processing filters is usually simpler when a network hop is acceptable.
 
 ### PSC
 **Short:** Google Private Service Connect: exposes one service privately across VPCs or projects without public IPs or peering.
@@ -781,6 +891,16 @@ It works purely in DNS. A client resolving your name receives an answer chosen b
 
 Reach for it for global distribution across regions, clouds or on-premises endpoints, and for protocols other than HTTP, since nothing about it is HTTP-specific. The DNS mechanism is also the limit: answers are cached for the record's TTL and by resolvers that ignore it, so failover takes minutes rather than seconds, and there is no TLS termination, caching, firewall or path-based routing. Front Door is the anycast proxy to reach for when those matter.
 
+### waypoint proxy
+**Short:** An Envoy deployed per service or namespace in Istio ambient mode, handling L7 policy only for workloads that need it.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2
+
+In ambient mode the per-node ztunnel already carries L4 and mutual TLS for every pod, so a waypoint is added only where a service needs request-level behaviour: path and claim based authorization, header routing, retries, weighted splits and HTTP telemetry. Traffic for a waypointed service is routed through it by ztunnel, and because it is shared by a whole service or namespace it is deployed, sized and upgraded on its own schedule rather than requiring every application pod to restart.
+
+The number that decides the argument is its cost. On Istio's own benchmark a waypoint runs around 0.25 vCPU and 60 MB, slightly more than a sidecar, and it adds a hop for the traffic it handles. So ambient does not make L7 cheaper than sidecars, it makes L7 an opt-in per-service decision instead of a mandatory per-pod one.
+
 ### xDS
 **Short:** Envoy's discovery-service API family: a control plane streams endpoint, cluster, route and listener config to proxies.
 **Kind:** spec
@@ -790,3 +910,13 @@ Reach for it for global distribution across regions, clouds or on-premises endpo
 It is a family of gRPC and REST APIs, with LDS for listeners, RDS for routes, CDS for clusters, EDS for endpoints and SDS for secrets, that a proxy subscribes to and a control plane streams, so configuration is pushed rather than polled and applies without a restart. Consistency across resource types is the hard part: the aggregated variant carries every type on one stream so ordering is well defined, and the delta protocol sends only what changed, which matters when endpoints churn in a large fleet.
 
 You meet it as a protocol to implement rather than to configure, whether writing your own control plane or using the existing libraries. Its significance is that it decoupled the data plane from the control plane and became a de facto standard beyond Envoy, with gRPC clients able to consume it directly for proxyless load balancing. Writing one is a serious undertaking, which is why Istio, Consul and off-the-shelf gateways exist.
+
+### ztunnel
+**Short:** Istio's per-node Rust proxy carrying L4 traffic and mutual TLS over HBONE, replacing the per-pod sidecar in ambient mode.
+**Kind:** tech
+**Lang:** rust
+**Roles:** traffic-edge/service-mesh-and-discovery @1, security/authentication-and-identity @2
+
+It is deliberately not an L7 proxy. Its job is to give every pod on the node a mutually authenticated, identity-aware transport without any sidecar being injected, tunnelling connections between nodes over HBONE and enforcing L4 authorization along the way. Because it does not parse HTTP it stays very small, and because it is per node rather than per pod its cost scales with cluster size rather than with workload count.
+
+The measured figures are the reason it exists: on Istio's own benchmark it runs at roughly 0.06 vCPU and 12 MB against a sidecar's 0.20 vCPU and 60 MB, and it removes the sidecar lifecycle problems entirely, including init-container ordering, job pods that never terminate and mesh upgrades that restart every pod. Anything needing request-level policy is handed to a waypoint proxy instead. It reached general availability with Istio 1.24.

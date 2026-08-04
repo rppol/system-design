@@ -8,6 +8,8 @@ files this module contributes to each curated path; omit a tier to leave it out
 
 A service mesh is a dedicated infrastructure layer for handling service-to-service communication in a microservices architecture. It handles traffic management, security (mTLS), and observability without requiring changes to application code. In Istio's sidecar mode an Envoy proxy is injected alongside each service instance and intercepts all inbound and outbound traffic; in ambient mode a per-node `ztunnel` handles L4 and mTLS with optional per-service `waypoint` proxies for L7, so pods carry no sidecar at all. Either way a single control-plane binary, `istiod`, computes and pushes the proxy configuration. Service discovery is the mechanism by which services locate each other's network addresses, which can be client-side (service queries a registry directly), server-side (a load balancer queries the registry), or DNS-based (Kubernetes Services).
 
+The data plane itself — listeners, filter chains, clusters, the xDS protocol, and Envoy's own configuration surface and defaults — is covered in [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md); this module covers the mesh pattern and Istio's CRD surface over it.
+
 ---
 
 ## 2. Intuition
@@ -513,7 +515,7 @@ than the two-and-a-half-minute staleness you were trying to fix.
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| Service mesh (Istio) | Automatic mTLS, observability, traffic control; no code changes | Operational complexity, sidecar overhead (~5-10ms latency, ~50MB RAM per pod) |
+| Service mesh (Istio) | Automatic mTLS, observability, traffic control; no code changes | Operational complexity, sidecar overhead (~0.20 vCPU and ~60MB RAM per pod; ~1.7ms p90 / ~2.7ms p99 added for the client-side and server-side proxies combined) |
 | Client-side discovery (Eureka) | Simple, low latency | Logic in every service, registry becomes critical SPOF |
 | Server-side discovery (ALB) | Simple client | Extra network hop, LB becomes bottleneck |
 | DNS-based (Kubernetes Services) | Simplest, built-in | Limited metadata, no fine-grained traffic control |
@@ -585,7 +587,7 @@ Mutual TLS (mTLS) means both the client and server authenticate each other using
 **Q: How does xDS protocol work in Istio?**
 **Short:** xDS is the API Istiod uses to push listener, route, cluster, and endpoint configuration to Envoy sidecars.
 
-xDS (x Discovery Service) is the API between Istio's control plane (Istiod) and Envoy sidecar proxies. It consists of several sub-APIs: LDS (Listener Discovery Service) configures what ports Envoy listens on; RDS (Route Discovery Service) configures routing rules (VirtualService); CDS (Cluster Discovery Service) defines upstream service clusters (DestinationRule); EDS (Endpoint Discovery Service) provides healthy endpoint lists for each cluster. Istiod watches Kubernetes Service and Pod resources, merges Istio CRD configurations (VirtualService, DestinationRule), and pushes the derived xDS configuration to all relevant Envoy proxies. This is how a change to a VirtualService takes effect across all pods within seconds without restart.
+xDS (x Discovery Service) is the API between Istio's control plane (Istiod) and Envoy sidecar proxies. It consists of several sub-APIs: LDS (Listener Discovery Service) configures what ports Envoy listens on; RDS (Route Discovery Service) configures routing rules (VirtualService); CDS (Cluster Discovery Service) defines upstream service clusters (DestinationRule); EDS (Endpoint Discovery Service) provides healthy endpoint lists for each cluster. Istiod watches Kubernetes Service and Pod resources, merges Istio CRD configurations (VirtualService, DestinationRule), and pushes the derived xDS configuration to all relevant Envoy proxies. This is how a change to a VirtualService takes effect across all pods within seconds without restart. The protocol's own semantics — aggregated versus separate streams, resource dependency ordering, Delta versus state-of-the-world, and what happens when a route arrives before its cluster — belong to the data plane and are covered in [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md).
 
 **Q: What is the startup probe in Kubernetes and when should you use it?**
 **Short:** Startup probes gate liveness and readiness until a slow-starting app finishes booting, avoiding premature restarts.
@@ -608,9 +610,9 @@ A VirtualService controls where a request routes to, and a DestinationRule contr
 Deploy PERMISSIVE mode first so every pod accepts both plaintext and mTLS, migrate health checks to Istio's mTLS-bypass port, then switch to STRICT. Step one: apply a `PeerAuthentication` with `mode: PERMISSIVE`, which lets sidecars accept both encrypted and plaintext traffic so nothing breaks while some callers still lack a sidecar. Step two: verify every caller-callee pair actually negotiates mTLS with `istioctl authn tls-check`, and repoint any Kubernetes health check that hits the pod directly to Istio's reserved port 15021 (`/healthz/ready`), which bypasses mTLS specifically for kubelet probes. Step three: only after tls-check shows 100% mTLS traffic and health checks pass through 15021, flip `PeerAuthentication` to `mode: STRICT` — the case study in §10 is the cautionary tale, since skipping straight to STRICT before fixing health checks crash-loops every pod in the namespace at once.
 
 **Q: What is the actual resource and latency cost of putting an Envoy sidecar in front of every pod?**
-**Short:** Each Envoy sidecar adds roughly 5-10ms of p99 latency per hop and about 50MB of RAM across every pod.
+**Short:** Roughly 0.20 vCPU and 60MB of RAM per sidecar, and about 2.7ms of added p99 latency for both proxies on a call combined, not per hop.
 
-Each Envoy sidecar typically adds 5-10ms of p99 latency per hop and reserves around 50MB of RAM, multiplied across every pod in the mesh. From the tradeoffs table in §8: with 25 services averaging 4 replicas each, that is roughly 5GB of cluster-wide RAM spent on sidecars alone before any application logic runs, plus a CPU request per sidecar the scheduler must find room for on every node. Latency compounds with call depth — a request fanning out through 4 services now crosses 8 sidecar hops, client-side and server-side Envoy on each leg, which at 5-10ms each can add 40-80ms to a call chain that previously had none. This is why §9 draws the line at roughly 20+ services before a mesh pays for itself; below that, Spring Cloud Gateway plus Resilience4j delivers similar value without the per-hop tax.
+On Istio's published benchmark (Istio 1.24, bare metal, 1,000 rps, 1KB payload) each sidecar costs about **0.20 vCPU and 60MB of RAM**, multiplied across every pod in the mesh. From the tradeoffs table in §8: with 25 services averaging 4 replicas each, that is roughly 6GB of cluster-wide RAM spent on sidecars alone before any application logic runs, plus a CPU request per sidecar the scheduler must find room for on every node. Latency is much smaller than folklore suggests — the last figure Istio stated in prose (1.13.4, default config with telemetry, 1KB, 1,000 rps) was **+1.7ms p90 and +2.7ms p99 for the two proxies on a call combined**, not per hop, so a request fanning out through 4 services adds single-digit rather than tens of milliseconds. The `5-10ms per hop` figure still repeated in blog posts is high by roughly 6-12x. Ambient mode changes the arithmetic again: a per-node `ztunnel` handling L4 and mTLS costs about 0.06 vCPU and 12MB, with a `waypoint` (0.25 vCPU, 60MB) only for services that need L7. This is why §9 draws the line at roughly 20+ services before a mesh pays for itself; below that, Spring Cloud Gateway plus Resilience4j delivers similar value without the per-hop tax. The proxy-side detail behind these numbers is in [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md).
 
 **Q: How does Istio route pod traffic into the Envoy sidecar without any application code changes?**
 **Short:** An init container's iptables rules transparently redirect all pod traffic through the Envoy sidecar's ports.
@@ -647,7 +649,7 @@ The two settings solve the same problem in incompatible ways, and only the start
 - Use `ServiceEntry` to register external services (third-party APIs, databases) in the mesh for uniform observability
 - Label all pods with `version` label for subset-based traffic splitting (canary deployments)
 - Test mTLS configuration with `istioctl authn tls-check`
-- Monitor Envoy sidecar resource usage — CPU and memory overhead is real (~50MB RAM per sidecar)
+- Monitor Envoy sidecar resource usage — CPU and memory overhead is real (~0.20 vCPU and ~60MB RAM per sidecar at 1,000 rps)
 - Use Kiali to visualize service topology and identify unexpected cross-service connections
 
 ---
