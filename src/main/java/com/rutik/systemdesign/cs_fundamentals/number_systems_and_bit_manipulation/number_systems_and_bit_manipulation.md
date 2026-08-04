@@ -208,7 +208,7 @@ a | b | a AND b | a OR b | a XOR b | NOT a
 | Clear lowest set bit | `n & (n - 1)` | Turns off rightmost 1; useful in Kernighan's bit-count |
 | Get lowest set bit | `n & (-n)` | Isolates the rightmost 1 (used in Fenwick tree) |
 | Count set bits (naive) | loop with `n & 1` + `n >>= 1` | O(number of bits) |
-| Count set bits (fast) | `bin(n).count('1')` in Python; `Integer.bitCount(n)` in Java | Maps to `POPCNT` CPU instruction |
+| Count set bits (fast) | `n.bit_count()` in Python; `Integer.bitCount(n)` in Java | Maps to `POPCNT` CPU instruction. `bin(n).count('1')` builds a string first and does not |
 | Swap a and b | `a ^= b; b ^= a; a ^= b` | XOR swap — no temp variable needed |
 | Multiply by 2^k | `n << k` | Left shift |
 | Integer divide by 2^k | `n >> k` | Arithmetic right shift (signed) |
@@ -342,9 +342,10 @@ by 10."
 
 **Why this works and what breaks without it.** Shifting is one wire-level operation, no adder involved,
 which is why compilers rewrite `x * 8` as `x << 3` automatically. Two traps: right shift is *floor*
-division, not truncation, so `-7 >> 1 == -4` while `-7 // 2` in C truncates toward zero to `-3`; and the
-shift amount is taken modulo the register width in Java and C, so `1 << 32` on a 32-bit `int` yields `1`,
-not `0` (see Pitfall 2). Never hand-write shift-for-divide in production code — the compiler already did
+division, not truncation, so `-7 >> 1 == -4` while `-7 / 2` in C truncates toward zero to `-3`; and a
+shift count at or above the register width is not the zero you expect — Java masks the count to the low
+5 bits for `int` (so `1 << 32` yields `1`), while in C and C++ it is outright undefined behaviour
+(see Pitfall 2). Never hand-write shift-for-divide in production code — the compiler already did
 it, and you have only removed the reader's ability to see the intent.
 
 ### 4.5 IEEE-754 Float Representation
@@ -458,7 +459,7 @@ Signed:    0    1    2    3    4    5    6    7   -8   -7   -6   -5   -4   -3   
 ### Bit Counting via Kernighan's Method
 
 ```
-n = 0b10110  (5 bits set: 2)
+n = 0b10110  (= 22, three bits set)
 Step 1: n & (n-1) = 0b10110 & 0b10101 = 0b10100  (cleared rightmost set bit)
 Step 2: n & (n-1) = 0b10100 & 0b10011 = 0b10000
 Step 3: n & (n-1) = 0b10000 & 0b01111 = 0b00000
@@ -514,9 +515,11 @@ def count_bits_kernighan(n: int) -> int:
     return count
 
 def count_bits_builtin(n: int) -> int:
-    """O(1) — maps to single POPCNT instruction on modern CPUs."""
-    return bin(n).count('1')   # Python
+    """Fastest — compiles down to a POPCNT instruction per machine word."""
+    return n.bit_count()   # Python 3.10+
     # Java: Integer.bitCount(n)
+    # Note: bin(n).count('1') gives the same answer but materialises a string,
+    # so it is O(bits) with allocation, not a hardware popcount.
 ```
 
 ### 6.2 Find the Single Non-Duplicate Element (XOR)
@@ -579,18 +582,18 @@ def reverse_bits(n: int) -> int:
 ```python
 # BROKEN: comparing floats with ==
 def is_half(x: float) -> bool:
-    return x == 0.5   # OK for 0.5 (representable exactly), BROKEN for 0.1+0.4
+    return x == 0.5   # OK for the literal 0.5 (exact), BROKEN for a computed 0.5
 
 # BROKEN example:
-val = 0.1 + 0.4
-print(val == 0.5)   # False: 0.1+0.4 = 0.5000000000000001 in float64
+val = 1.1 - 0.6
+print(val == 0.5)   # False: 1.1 - 0.6 = 0.5000000000000001 in float64
 
 # FIX: use an epsilon comparison for computed floats
 import math
 def is_approx_equal(a: float, b: float, rel_tol: float = 1e-9) -> bool:
     return math.isclose(a, b, rel_tol=rel_tol)
 
-print(is_approx_equal(0.1 + 0.4, 0.5))  # True
+print(is_approx_equal(1.1 - 0.6, 0.5))  # True
 ```
 
 ---
@@ -601,11 +604,11 @@ print(is_approx_equal(0.1 + 0.4, 0.5))  # True
 
 **Unix file permissions** — `rwxr-xr--` is stored as 0o754 = 0b111 101 100. `chmod 644` is a bitwise operation: 0b110 100 100. The `os.stat()` mode field in Python uses bitwise AND with constants like `stat.S_IRUSR` (0o400) to check individual permissions.
 
-**Bloom filters** — set membership data structure uses k hash functions, each hashing an element to a bit position. Membership check: test if all k bits are set. False positives possible, false negatives impossible. Every check is k bitwise OR operations on a bit array — O(k) time, O(m/8) bytes for m bits.
+**Bloom filters** — set membership data structure uses k hash functions, each hashing an element to a bit position. Membership check: test if all k bits are set. False positives possible, false negatives impossible. Insertion is k bitwise ORs into a bit array and a lookup is k bitwise AND tests — O(k) time either way, O(m/8) bytes for m bits.
 
 **Java HashMap bucket index** — `HashMap.put(key, value)` computes `(n-1) & hash(key)` to choose a bucket, where n is a power of 2. This bitwise AND replaces modulo (`%`) for power-of-two sizes, which is why HashMap capacity is always a power of 2: `1 << 4 = 16, 1 << 5 = 32`, etc. The AND is 5–10× faster than integer modulo on modern CPUs.
 
-**Cryptographic hash functions** — SHA-256 consists exclusively of bitwise ops (AND, OR, XOR, NOT) and bit rotations applied over 64 rounds. The bitwise nature makes SHA-256 extremely fast (hardware can compute ~500 MB/s per core) and provides the avalanche effect (one bit change in input cascades to ~50% of output bits changing).
+**Cryptographic hash functions** — SHA-256's round function is built from bitwise ops (AND, XOR, NOT), bit rotations and right shifts, plus addition modulo 2³² (the one non-bitwise ingredient, and the one that supplies carry propagation between bit positions), applied over 64 rounds. The bitwise nature makes SHA-256 extremely fast (hardware can compute ~500 MB/s per core) and provides the avalanche effect (one bit change in input cascades to ~50% of output bits changing).
 
 ---
 
@@ -661,16 +664,21 @@ print((n >> bit_pos) & 1)   # 0 -- wait, expected 1?
 # bit at position 1 (value 2^1 = 2) is set: (0b1010 >> 1) & 1 == 1 ✓
 ```
 
-### Pitfall 2: Integer overflow in bit shifting (Java)
+### Pitfall 2: Shifting by at least the register width
 
-```python
-# BROKEN (Java): shifting by >= 32 on an int is undefined behaviour in some langs
-// int x = 1 << 32;  // Java: undefined! Shift amount is taken mod 32.
-// 1 << 32 in Java == 1 << 0 == 1  (NOT 0 as expected)
+```java
+// BROKEN: expecting 1 << 32 to be zero, or to be 4294967296.
+int x = 1 << 32;   // == 1. Java masks the shift count to its low 5 bits for
+                   // int (low 6 bits for long), so 32 becomes 0 and nothing moves.
 
-// FIX: use long (64-bit) when shifting by >= 32
-long x = 1L << 32;  // 4294967296 ✓
-// Python: no overflow (arbitrary precision), but be aware of semantics.
+// FIX: shift a 64-bit value when the count can reach 32.
+long y = 1L << 32; // 4294967296
+
+// In C and C++ the same expression is UNDEFINED BEHAVIOUR, not a masked shift:
+// a shift count >= the promoted operand's width has no defined result, so the
+// compiler may fold it to anything. Never rely on observing 1, 0, or a wrap.
+// Python has neither trap: ints are arbitrary-precision, so 1 << 32 is exact
+// and 1 << 10_000 simply allocates more digits.
 ```
 
 ### Pitfall 3: NOT (~) on Python integers
@@ -705,7 +713,7 @@ if math.isclose(x, 0.3, rel_tol=1e-9):
 
 | Tool / Concept | Purpose | Notes |
 |---------------|---------|-------|
-| `bin(n)`, `hex(n)`, `oct(n)` | Python base conversion | Built-in; `bin(n).count('1')` = popcount |
+| `bin(n)`, `hex(n)`, `oct(n)` | Python base conversion | Built-in; for popcount use `n.bit_count()` (3.10+), not `bin(n).count('1')` |
 | `int('1010', 2)` | Binary string to int | `int(s, base)` for any base |
 | `Integer.bitCount(n)` | Java popcount | Maps to POPCNT instruction |
 | `Integer.toBinaryString(n)` | Java binary representation | Unsigned 32-bit |
@@ -728,7 +736,7 @@ Two's complement represents -k as 2ⁿ - k (equivalently: flip all bits of |k| a
 XOR all elements. Each pair cancels (`a ^ a = 0`), leaving only the unique element. XOR is commutative and associative so order doesn't matter. Code: `result = 0; for x in arr: result ^= x; return result`.
 
 **Q4: How would you count the number of set bits in an integer?**
-Three approaches: (a) loop and check last bit (`n & 1`), shift right — O(log n); (b) Kernighan's: `while n: n &= n-1; count += 1` — O(k) where k is the number of set bits; (c) built-in `bin(n).count('1')` in Python or `Integer.bitCount(n)` in Java — O(1) using a POPCNT CPU instruction. Kernighan's is faster than (a) when set bits are sparse.
+Three approaches: (a) loop and check last bit (`n & 1`), shift right — O(log n); (b) Kernighan's: `while n: n &= n-1; count += 1` — O(k) where k is the number of set bits; (c) built-in `n.bit_count()` in Python (3.10+) or `Integer.bitCount(n)` in Java — a single POPCNT CPU instruction per machine word. Note that the older Python idiom `bin(n).count('1')` returns the right answer but builds a string, so it is not the hardware popcount. Kernighan's is faster than (a) when set bits are sparse.
 
 **Q5: Explain endianness and when it matters.**
 Endianness is the byte order for multi-byte values in memory. Little-endian (x86/x86-64) stores the least-significant byte at the lowest address. Big-endian stores the most-significant byte first. It matters when: serialising data to disk or network (use explicit byte-order convention, e.g., network byte order = big-endian, `htonl`/`ntohl`), writing binary file parsers (JPEG/PNG/WAV headers have specific endianness), or casting an integer pointer to a byte pointer.
@@ -785,26 +793,27 @@ With XOR alone you cannot distinguish two missing numbers (the XOR of the pair i
 from __future__ import annotations
 
 class Bitset:
-    """Fixed-size bitset backed by a list of Python ints (each 64 bits on CPython)."""
+    """Fixed-size bitset backed by a bytearray: exactly 8 positions per byte,
+    with none of the per-object overhead a list of Python ints would carry."""
 
     def __init__(self, size: int) -> None:
-        self._bits: list[int] = [0] * ((size + 63) // 64)  # ceil(size/64) words
+        self._bytes = bytearray((size + 7) // 8)   # ceil(size/8) bytes
         self._size = size
 
     def set(self, pos: int) -> None:
-        word, bit = divmod(pos, 64)
-        self._bits[word] |= (1 << bit)
+        byte, bit = divmod(pos, 8)
+        self._bytes[byte] |= (1 << bit)
 
     def get(self, pos: int) -> bool:
-        word, bit = divmod(pos, 64)
-        return bool((self._bits[word] >> bit) & 1)
+        byte, bit = divmod(pos, 8)
+        return bool((self._bytes[byte] >> bit) & 1)
 
     def clear(self, pos: int) -> None:
-        word, bit = divmod(pos, 64)
-        self._bits[word] &= ~(1 << bit)
+        byte, bit = divmod(pos, 8)
+        self._bytes[byte] &= ~(1 << bit)
 
     def count(self) -> int:
-        return sum(bin(w).count('1') for w in self._bits)
+        return sum(b.bit_count() for b in self._bytes)
 
 # BROKEN: using a plain Python set — 50 MB for 1M integers
 seen: set[int] = set()
@@ -830,7 +839,7 @@ for uid in stream:
 **Discussion Q&As**:
 
 **Why does `n & (-n)` isolate the lowest set bit?**
-`-n` is the two's complement of n, which flips all bits and adds 1. Flipping all bits of n makes every bit below the lowest set bit become 1, and the lowest set bit becomes 0. Adding 1 carries through all the 1s up to the position of the lowest set bit, which flips back to 1 — with all bits below it becoming 0. ANDing with the original n leaves only this bit. Example: n = 0b10110, -n = 0b01010 (two's complement) — wait, let me recalculate: n=0b10110=22, -n=-22=0b...101010 in arbitrary precision. Actually for a clean example: n=0b01100=12, -n=0b...10100=-12 (flip: 0b10011, +1: 0b10100). n & -n = 0b01100 & 0b10100 = 0b00100 = 4 = rightmost set bit. ✓
+`-n` is the two's complement of n, which flips all bits and adds 1. Flipping all bits of n makes every bit below the lowest set bit become 1, and the lowest set bit becomes 0. Adding 1 carries through all the 1s up to the position of the lowest set bit, which flips back to 1 — with all bits below it becoming 0. ANDing with the original n leaves only this bit. Worked in 5 bits with n = 12: n = 0b01100, flip gives 0b10011, add 1 gives 0b10100 = -12. Then `n & -n` = 0b01100 & 0b10100 = 0b00100 = 4 — the *value* of the rightmost set bit, not its index (which would be 2).
 
 ---
 

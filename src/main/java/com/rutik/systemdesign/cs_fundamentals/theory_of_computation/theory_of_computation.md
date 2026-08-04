@@ -55,7 +55,7 @@ The practical payoff is recognition, not derivation. You will not re-derive the 
 | Type 3 — Regular | DFA / NFA | `(ab)*`, "ends in 01" | n/a — floor of the hierarchy |
 | Type 2 — Context-free | PDA | `{aⁿbⁿ : n ≥ 0}` | Not regular — pumping lemma (§6.4) |
 | Type 1 — Context-sensitive | Linear-bounded automaton | `{aⁿbⁿcⁿ : n ≥ 0}` | Not context-free — CFL pumping lemma |
-| Type 0 — Recursively enumerable | Turing machine | Any decidable language | Decidable ⊊ recognizable in general |
+| Type 0 — Recursively enumerable | Turing machine | Every decidable language, plus recognizable-only ones | Strictly larger than context-sensitive: an LBA always halts, a TM need not |
 | (recognizable only) | TM that may loop forever | The Halting Problem | Not decidable — no TM always halts correctly |
 | (not even recognizable) | none | Complement of the Halting Problem | If it were recognizable, Halting would be decidable |
 
@@ -202,7 +202,7 @@ stateDiagram-v2
 ```
 *Trace on `1101`: q0 -(1)-> q0 -(1)-> q0 -(0)-> q1 -(1)-> q2 -- accept.*
 
-Both examples need exactly 3 states. That is not a coincidence of these two problems — it reflects how much "memory of the past" the language actually requires, which is precisely what subset construction measures in general (§6.2).
+Both examples happen to land on 3 states for unrelated reasons — three residue classes in the first, three distinguishable suffix histories in the second. The general rule is the **Myhill-Nerode theorem**: the minimal DFA has exactly one state per equivalence class of "prefixes that no suffix can tell apart", so the state count *is* the measure of how much of the past a language forces you to remember, and a language is regular precisely when that count is finite.
 
 ### 6.2 Subset Construction — NFA to DFA
 
@@ -278,15 +278,15 @@ len(accepting)   # 4   -- half the subsets contain q3
 
 ```
   DFA state (= NFA subset)     on 0    on 1    accept?
-  --------------------------------------------------------
-  A = {q0}                      A       B       no
-  B = {q0,q1}                   C       D       no
-  C = {q0,q2}                   E       F       no
-  D = {q0,q1,q2}                 G       H       no
-  E = {q0,q3}                    A       B       yes
-  F = {q0,q1,q3}                  C       D       yes
-  G = {q0,q2,q3}                  E       F       yes
-  H = {q0,q1,q2,q3}                G       H       yes
+  ----------------------------------------------------
+  A = {q0}                     A       B       no
+  B = {q0,q1}                  C       D       no
+  C = {q0,q2}                  E       F       no
+  D = {q0,q1,q2}               G       H       no
+  E = {q0,q3}                  A       B       yes
+  F = {q0,q1,q3}               C       D       yes
+  G = {q0,q2,q3}               E       F       yes
+  H = {q0,q1,q2,q3}            G       H       yes
 ```
 
 A 4-state NFA became an **8 = 2³**-state DFA. In general, the "nth-from-last symbol is 1" language needs an (n+1)-state NFA but a minimal 2ⁿ-state DFA — this exact family is the standard proof that subset construction's exponential worst case is tight, not just a loose upper bound.
@@ -618,7 +618,7 @@ The whole reduction hinges on that lack of slack. If the budget were even one la
 
 ## 7. Real-World Examples
 
-**RE2 vs backtracking regex engines.** Google's RE2 (and its Java port `re2j`) compiles patterns into an automaton and simulates it directly, guaranteeing linear-time matching in the pattern's length — the price is dropping backreferences and lookaround, which require more than regular power to express. `java.util.regex`, PCRE, and Python's `re` instead simulate the NFA via backtracking, which supports those richer features but can take exponential time on adversarial input. See [Regex Engine and ReDoS](../../java/strings_and_text/regex_engine_and_redos.md) for the full backtracking-vs-DFA mechanics and [Strings and Text](../../java/strings_and_text/strings_and_text.md) for the surrounding Java string internals.
+**RE2 vs backtracking regex engines.** Google's RE2 (and its Java port `re2j`) compiles patterns into an automaton and simulates it directly, guaranteeing a match time linear in the *input* length (and at worst proportional to the pattern size as a constant factor) with no backtracking — the price is dropping backreferences and lookaround, which require more than regular power to express. `java.util.regex`, PCRE, and Python's `re` instead simulate the NFA via backtracking, which supports those richer features but can take exponential time on adversarial input. See [Regex Engine and ReDoS](../../java/strings_and_text/regex_engine_and_redos.md) for the full backtracking-vs-DFA mechanics and [Strings and Text](../../java/strings_and_text/strings_and_text.md) for the surrounding Java string internals.
 
 **Parsers are pushdown automata with a tree bolted on.** ANTLR (LL(*)) and yacc/bison (LALR) both generate parsers that are operationally pushdown automata: an explicit or implicit stack tracks nested grammar rules while building an AST. This is precisely why "just use a regex" fails for JSON, XML, HTML, or any programming-language grammar — none of those languages are regular, and the moment you need to validate nesting, you need at least a CFG.
 
@@ -626,7 +626,7 @@ The whole reduction hinges on that lack of slack. If the budget were even one la
 
 **Package manager dependency resolution is SAT in a trench coat.** Resolving "install package A, which needs B ≥ 2.0 and C < 3.0, which conflicts with D" is Boolean satisfiability over version constraints — NP-hard in general. OCaml's `opam` explicitly calls out to a SAT/ASP solver (`aspcud`/`mccs`); Dart's package manager popularized the PubGrub algorithm; pip's modern resolver does backtracking search for the same reason. These systems don't dodge NP-hardness — they exploit the fact that real dependency graphs are far more structured than worst-case instances.
 
-**Register allocation is graph coloring.** A compiler assigns each live variable to one of a fixed number of physical registers such that no two variables live at the same time share a register — vertices are variables, edges connect variables with overlapping lifetimes, and colors are registers. GCC and LLVM both implement variants of Chaitin's graph-coloring allocator, using heuristics (not exact algorithms) precisely because register allocation with a fixed color count is NP-complete.
+**Register allocation is graph coloring.** A compiler assigns each live variable to one of a fixed number of physical registers such that no two variables live at the same time share a register — vertices are variables, edges connect variables with overlapping lifetimes, and colors are registers. GCC's IRA is a Chaitin-Briggs graph-coloring allocator; LLVM's default `greedy` allocator works on the same interference graph but replaces coloring with priority-ordered live-range splitting and spilling. Both are heuristics rather than exact algorithms, precisely because register allocation with a fixed color count is NP-complete.
 
 **Modern SAT solvers rout the "NP-complete means impossible" myth daily.** CDCL (Conflict-Driven Clause Learning) solvers — MiniSat, Glucose, CryptoMiniSat, Kissat — solve real hardware-verification and software-model-checking SAT instances with millions of variables and clauses, because industrial instances have exploitable structure that worst-case complexity theory says nothing about. Intel and AMD use SAT-based equivalence checking to verify chip designs against their specifications before tape-out.
 

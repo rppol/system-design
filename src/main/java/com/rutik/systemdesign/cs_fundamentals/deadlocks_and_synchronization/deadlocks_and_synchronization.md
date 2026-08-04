@@ -135,7 +135,7 @@ flowchart LR
     class P1,P2 req
     class R1,R2 base
 ```
-Two processes, two single-instance resources — P3 is part of the scenario but never joins this cycle. P1 holds R1 while waiting on R2, and P2 holds R2 while waiting on R1; the dotted "waits for" edges close the loop back on themselves. In a single-instance resource-allocation graph, a cycle like this is both necessary and sufficient for deadlock.
+Two processes, two single-instance resources. P1 holds R1 while waiting on R2, and P2 holds R2 while waiting on R1; the dotted "waits for" edges close the loop back on themselves. In a single-instance resource-allocation graph, a cycle like this is both necessary and sufficient for deadlock.
 
 ### Dining Philosophers Problem
 
@@ -458,7 +458,7 @@ def detect_deadlock(
 
 ## 7. Real-World Examples
 
-**Deadlock in database transactions**: Two transactions T1 and T2 each lock rows in different tables and wait for the other's lock. Most databases (PostgreSQL, MySQL InnoDB) detect this via a wait-for graph with a background cycle-detection thread (every 50–500 ms). The database selects the "cheapest" transaction to abort and rolls it back. The aborted transaction receives an error and can be retried by the application.
+**Deadlock in database transactions**: Two transactions T1 and T2 each lock rows in different tables and wait for the other's lock. Most databases (PostgreSQL, MySQL InnoDB) detect this with a wait-for graph, but they check at different moments: PostgreSQL runs the cycle search only in a backend that has already been blocked on a lock for `deadlock_timeout` (default 1 s), so detection is lazy and costs nothing on an uncontended system; InnoDB runs it on every lock wait, which detects faster and costs more (and can be traded away with `innodb_deadlock_detect=OFF` in favour of plain `innodb_lock_wait_timeout`). The database then picks a victim transaction to abort and rolls it back. The aborted transaction receives an error and can be retried by the application.
 
 **Priority inversion at Mars Pathfinder**: A VxWorks real-time system (1997) suffered repeated system resets. Root cause: a low-priority task held a mutex needed by a high-priority task; a medium-priority task preempted the low-priority task, preventing it from releasing the mutex — the high-priority task was indefinitely blocked. Fix: enable priority inheritance in the mutex configuration. This is now standard guidance for real-time systems.
 
@@ -466,7 +466,7 @@ def detect_deadlock(
 
 **Java `synchronized` and monitor**: Java's `synchronized` keyword implements the monitor pattern. Every Java object has an intrinsic monitor. `synchronized(obj) { ... }` acquires obj's monitor mutex on entry and releases on exit. `obj.wait()` releases the monitor and blocks; `obj.notify()` wakes one waiting thread. The key rule: always call `wait()` in a `while` loop, not an `if` — spurious wakeups are possible. See [`java/concurrency`](../../java/concurrency/concurrency.md) for ReentrantLock, AQS, and Condition variable deep dives.
 
-**Lock-free programming (CAS)**: Modern concurrent data structures avoid mutex overhead using Compare-And-Swap (CAS). `compare_and_swap(addr, expected, new)` atomically: if *addr == expected, write new and return true; else return false. CAS-based algorithms are wait-free or lock-free (no deadlock possible). Used in Java's `AtomicInteger`, `ConcurrentLinkedQueue`, and Python's `ctypes` atomic operations. Downside: ABA problem — value changes A→B→A, CAS sees A and succeeds incorrectly.
+**Lock-free programming (CAS)**: Modern concurrent data structures avoid mutex overhead using Compare-And-Swap (CAS). `compare_and_swap(addr, expected, new)` atomically: if *addr == expected, write new and return true; else return false. CAS-based algorithms are wait-free or lock-free (no deadlock possible). Used in Java's `AtomicInteger` and `ConcurrentLinkedQueue`, C++'s `std::atomic`, and Rust's `std::sync::atomic`. Python exposes no CAS primitive at all — `ctypes` has no atomic operations, and even in the free-threaded 3.14 build a read-modify-write on a shared object needs a `threading.Lock`. Downside: ABA problem — value changes A→B→A, CAS sees A and succeeds incorrectly.
 
 ---
 
@@ -533,17 +533,39 @@ def thread2():
 ```
 
 ```python
-# FIX: define a global ordering (e.g., by id()); always acquire lower id first
-def safe_acquire(lock_x, lock_y):
+# FIX: define a global ordering (e.g., by id()); always acquire lower id first.
+# Wrap it so acquisition AND release are both handled, on every path.
+from contextlib import contextmanager
+
+@contextmanager
+def ordered_locks(lock_x, lock_y):
     first, second = (lock_x, lock_y) if id(lock_x) < id(lock_y) else (lock_y, lock_x)
     first.acquire()
-    second.acquire()
+    try:
+        second.acquire()
+        try:
+            yield
+        finally:
+            second.release()
+    finally:
+        first.release()
 
-def thread_safe():
-    safe_acquire(lock_a, lock_b)
-    safe_acquire(lock_b, lock_a)   # same effective order
-    lock_b.release(); lock_a.release()
+def thread1_fixed():
+    with ordered_locks(lock_a, lock_b):   # physical order decided by id(), not by
+        ...                               # the order the caller happened to write
+
+def thread2_fixed():
+    with ordered_locks(lock_b, lock_a):   # arguments reversed, SAME physical order
+        ...                               # -> no circular wait
 ```
+
+Two traps this shape avoids. First, `threading.Lock` is **not** reentrant, so a helper
+that merely acquires — and is then called twice in one function to "cover both
+orders" — self-deadlocks on the second call rather than fixing anything; each lock must
+be taken exactly once per critical section. Second, `id()` is only a valid global order
+because these lock objects outlive the whole program; CPython reuses `id()` values after
+an object is freed, so for locks with real lifecycles assign an explicit rank (an enum,
+or a `level` attribute on the lock) instead of relying on the address.
 
 ### Pitfall 2 — Checking condition with `if` instead of `while` (spurious wakeup)
 
@@ -676,7 +698,7 @@ A monitor is a higher-level synchronization construct that combines a mutex with
 Priority inversion: a high-priority thread (H) is blocked by a low-priority thread (L) that holds a mutex H needs; a medium-priority thread (M) preempts L, delaying L indefinitely — H is indirectly blocked by M despite M having lower priority than H. Three mitigations: (1) Priority inheritance: temporarily boost L's priority to H's level while L holds the mutex; L completes quickly, releases, H proceeds. (2) Priority ceiling protocol: each mutex has a ceiling priority = max priority of any thread that can acquire it; a thread holds a mutex only at the ceiling priority. (3) Lock-free algorithms: eliminate mutexes, eliminating priority inversion at the source.
 
 **Q10: How do databases handle deadlocks?**
-Databases detect deadlocks by maintaining a wait-for graph updated on every lock request. PostgreSQL runs a background deadlock detector every `deadlock_timeout` (default 1 second). When a cycle is found, PostgreSQL selects the "cheapest" transaction to abort (fewest locks held, or youngest transaction) and rolls it back with an error code (ERROR 40P01: deadlock detected). The application must catch this error and retry the transaction. InnoDB (MySQL) runs detection on every lock wait (not just periodically) — faster detection but higher overhead. See [`database/concurrency_control_and_locking`](../../database/concurrency_control_and_locking/concurrency_control_and_locking.md).
+Databases detect deadlocks with a wait-for graph. PostgreSQL does it lazily and in-line: a backend that has been blocked on a lock for `deadlock_timeout` (default 1 second) runs the cycle search itself — there is no background detector thread, which is why an uncontended system pays nothing for it. When a cycle is found the waiting backend aborts its own transaction and rolls it back with SQLSTATE 40P01, `deadlock_detected`. The application must catch this error and retry the transaction. InnoDB (MySQL) runs detection on every lock wait (not just periodically) — faster detection but higher overhead. See [`database/concurrency_control_and_locking`](../../database/concurrency_control_and_locking/concurrency_control_and_locking.md).
 
 **Q11: What is a reentrant (recursive) lock and when do you need one?**
 A reentrant lock can be acquired multiple times by the same thread without deadlocking. It maintains an acquisition count; the lock is released only when the count reaches 0. Needed when: a method acquires a lock and calls another method that also acquires the same lock (e.g., a recursive method that synchronizes on `this`, or utility methods called from within a lock). In Java: `ReentrantLock` and `synchronized` (intrinsic lock) are both reentrant. Non-reentrant mutex re-acquisition by the same thread deadlocks immediately. Caution: reentrant locks make it easier to accidentally hold locks for too long across nested calls.
@@ -691,7 +713,7 @@ Compare-And-Swap (CAS) checks if a value equals "expected" before swapping. ABA 
 Pessimistic locking: acquire a lock before accessing the resource; no other thread can access while the lock is held. Guaranteed no conflicts; may cause contention. Example: `synchronized`, `ReentrantLock`. Optimistic locking: read without a lock; check if the value changed before writing (CAS or version number). If changed, retry. Efficient when contention is low; degrades under high contention (many retries). Example: Java's `AtomicInteger.compareAndSet()`, database `UPDATE ... WHERE version = ?`. Databases use both: MVCC (optimistic reads) + row-level locks (pessimistic writes).
 
 **Q15: How do you design a lock-free counter in Python?**
-Python's GIL prevents true parallelism for CPU-bound code in threads, but I/O-bound threads can interleave. For a truly thread-safe counter: (1) Use `threading.Lock` with a plain integer — correct, simple. (2) Use Python's `ctypes` with C atomic operations — lock-free, but complex. (3) Use `concurrent.futures` with each worker updating only local state; aggregate at the end. For async contexts: use `asyncio.Lock` (not `threading.Lock`). In Java: `AtomicInteger.incrementAndGet()` uses a CAS loop — lock-free, linearisable, and efficiently maps to a single CPU instruction (LOCK XADD on x86).
+The honest answer is that you mostly cannot, and the interviewer is checking whether you know why: CPython exposes no compare-and-swap primitive to Python code, and `ctypes` has no atomic operations either — so `counter += 1` is a non-atomic read-modify-write no matter what type you store it in. Options, best first: (1) `threading.Lock` around a plain `int` — correct and simple, and the right default. (2) `itertools.count()`, whose `next()` is a single C-level operation and therefore atomic in CPython — but that is a CPython implementation detail, not a language guarantee, and it gives you a generator, not a readable value. (3) Per-worker local counters via `concurrent.futures`, aggregated at the end — this is the pattern that actually scales, because it removes the shared write entirely. For async contexts use `asyncio.Lock`, never `threading.Lock`. Note that the GIL is *not* the reason this works: a free-threaded 3.14 build still requires the lock, and on the GIL build the increment can still be interrupted between bytecodes. Contrast Java: `AtomicInteger.incrementAndGet()` is a genuine CAS loop that HotSpot intrinsifies to a single `LOCK XADD` on x86 — lock-free and linearisable.
 
 ---
 
@@ -827,12 +849,15 @@ def process_order_fixed(sku_a: str, sku_b: str):
 | Lock held by crashed service | TTL expiry (30s) releases the lock automatically |
 | Lock contention (two services) | Second service retries with backoff; acquires after first releases |
 | Redis failure | Lock acquisition fails; order processing halted gracefully |
-| Network partition | Redis `SET NX EX` is atomic; no split-brain lock duplication |
+| Network partition / failover | `SET NX EX` is atomic **on one node**, but a single-instance Redis lock is not partition-safe. Redis replication is asynchronous, so a primary that fails over before the key replicates lets the new primary grant the same lock to a second holder — a real mutual-exclusion violation, not a theoretical one |
+| Client stalls past the TTL (GC pause, long syscall) | The lock expires while the client still believes it holds it, and a second holder is admitted. The TTL that prevents deadlock is exactly what breaks safety here |
+
+The last two rows are the reason a distributed lock is a *liveness* tool, not a safety one. If correctness depends on mutual exclusion, the lock alone is not enough: pair it with a monotonically increasing **fencing token** that the protected resource checks and refuses if it has already seen a higher one, or make the protected operation idempotent (here, a conditional decrement guarded by the order id). Everything above still earns its place — it stops two healthy services from colliding, which is the common case — but it must not be the only thing standing between you and overselling.
 
 **Discussion questions**:
 1. How does the Lua script in `release()` prevent a race between checking the token and deleting the key?
 2. What is the risk of setting `ttl_seconds` too low?
-3. How does the Redlock algorithm (Antirez) extend this to multiple Redis nodes for higher availability?
+3. How does the Redlock algorithm (Antirez) extend this to multiple Redis nodes, and why does Kleppmann's critique argue that it still does not give you a safety guarantee without fencing tokens?
 
 ---
 

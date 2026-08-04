@@ -38,7 +38,7 @@ This module covers: greedy proof techniques (exchange argument, matroid theory c
 
 **Optimal substructure**: After making the greedy choice, the remaining sub-problem has optimal substructure (the greedy choice + optimal solution to the remainder = overall optimal).
 
-**Matroid theory (concept)**: Matroids formalise the class of problems for which greedy works optimally — problems with an independence structure satisfying the hereditary property (subsets of feasible sets are feasible) and the augmentation property (if A and B are feasible and |A| < |B|, there exists an element in B\A that can be added to A while staying feasible). Kruskal's MST and fractional knapsack satisfy matroid conditions; 0/1 knapsack does not.
+**Matroid theory (concept)**: Matroids formalise the class of problems for which greedy works optimally — problems with an independence structure satisfying the hereditary property (subsets of feasible sets are feasible) and the augmentation property (if A and B are feasible and |A| < |B|, there exists an element in B\A that can be added to A while staying feasible). Kruskal's MST is the canonical instance (the graphic matroid: a set of edges is independent if it is acyclic), and unit-time task scheduling with deadlines and penalties is another. Fractional knapsack is *not* a matroid result — it is a set of divisible amounts, not an independence system, and its greedy is justified by an exchange argument / LP duality instead. 0/1 knapsack has neither.
 
 ### Divide and Conquer Structure
 
@@ -89,17 +89,18 @@ weaker, much more provable claim, and it happens to be equivalent.
 | `\|OPT'\| >= \|OPT\|` | "No worse." This is the whole burden of proof |
 | induction | Repeat the swap on the sub-problem left after removing `g` |
 
-**Walk one example.** Activity selection on A [1,3], B [2,4], C [3,5], D [4,6], E [5,7]. Greedy picks by
-earliest finish, so `g = A`. Suppose an adversary hands you an optimal schedule starting with B instead:
+**Walk one example.** Activity selection on A [1,3], B [2,4], C [3,5], D [4,6], E [6,8]. Greedy picks by
+earliest finish, so `g = A`. The maximum here is 3 activities, and `{B, D, E}` is a genuinely optimal
+schedule that does *not* contain A — exactly the adversary the exchange argument has to answer:
 
 ```
-  timeline    1    2    3    4    5    6    7
-  greedy g =  A[1,3]                                finish 3
-  their  o =       B[2,4]                           finish 4
+  timeline    1    2    3    4    5    6    7    8
+  greedy g =  A[1,3]                                     finish 3
+  their  o =       B[2,4]                                finish 4
 
-  OPT  = { B[2,4], D[4,6] }              2 activities
+  OPT  = { B[2,4], D[4,6], E[6,8] }      3 activities  (optimal: 3 is the max)
   swap B -> A:
-  OPT' = { A[1,3], D[4,6] }              2 activities   <- still valid, still 2
+  OPT' = { A[1,3], D[4,6], E[6,8] }      3 activities   <- still valid, still 3
 
   is OPT' valid?  A finishes at 3; D starts at 4; 3 <= 4, no overlap.   yes
   why is it ALWAYS valid?  finish(A) = 3 <= finish(B) = 4, so anything that
@@ -107,7 +108,7 @@ earliest finish, so `g = A`. Suppose an adversary hands you an optimal schedule 
   free up time, never consume more.
 
   induct: remove A, re-run greedy on what starts at or after 3
-       -> picks C[3,5], then E[5,7]   ->  { A, C, E } = 3 activities
+       -> picks C[3,5], then E[6,8]   ->  { A, C, E } = 3 activities
 ```
 
 **Why the "no worse" direction is enough.** If swapping could ever *improve* `OPT`, then `OPT` was not
@@ -156,7 +157,9 @@ The same failure with 0/1 knapsack, capacity 10:
 
   note: make the items DIVISIBLE and greedy becomes optimal again --
   it would take all of A plus 4/5 of B for 30 + 16 = 46. The 0/1
-  constraint is what breaks the matroid structure, not the ratio rule.
+  constraint is what breaks the exchange argument, not the ratio rule:
+  with fractions there is always leftover capacity to fill, so swapping
+  a lower-ratio unit for a higher-ratio one never wastes room.
 ```
 
 ### Divide and Conquer Patterns
@@ -226,7 +229,7 @@ recursion tree for `n = 8`. Level i has `a^i` nodes, each of size `n/b^i`, each 
     2        4      2         2           8       <- identical
     3        8      1         1           8       <- identical
                                       -------
-                          total = 8 x 4 levels = 32 = n log n     CASE 2
+              total = 8 x 4 levels = 32 = n(log2(n) + 1) = Theta(n log n)  CASE 2
 
   Strassen     a=7  b=2  d=2     log_2(7) = 2.807 > d = 2   ratio = 7/4 = 1.75
   level   nodes   size   work/node   level total
@@ -264,8 +267,9 @@ famous *only* because it drops `a` from 8 to 7 — same `b`, same `d`, and the e
 subproblems down to 3, `log_2(3) = 1.585`. In a Case-3 algorithm, shaving the combine step is wasted
 effort; only killing a recursive call moves the exponent. In a Case-1 algorithm the reverse holds. And
 the theorem simply does not apply when `f(n)` is not polynomial — `T(n) = 2T(n/2) + O(n log n)` (closest
-pair) falls in the gap between Cases 2 and 3 and needs the recursion tree drawn by hand, which is
-Pitfall 5.
+pair) falls in the gap between Case 2 and Case 1: the combine work beats `n^log_b(a) = n`, but only by a
+log factor, not by the polynomial factor Case 1 requires. It needs the recursion tree drawn by hand (the
+answer is `Theta(n log^2 n)`), which is Pitfall 5.
 
 ---
 
@@ -273,7 +277,7 @@ Pitfall 5.
 
 ### Interval Scheduling — Earliest Finish Time
 
-Intervals sorted by finish time: A [1,3], B [2,4], C [3,5], D [4,6], E [5,7].
+Intervals sorted by finish time: A [1,3], B [2,4], C [3,5], D [4,6], E [6,8].
 
 ```mermaid
 flowchart LR
@@ -288,7 +292,7 @@ flowchart LR
     A(["A 1–3<br/>take: first pick"]) --> B["B 2–4<br/>skip: starts 2, before finish 3"]
     B --> C(["C 3–5<br/>take: starts 3, clear of finish 3"])
     C --> D["D 4–6<br/>skip: starts 4, before finish 5"]
-    D --> E(["E 5–7<br/>take: starts 5, clear of finish 5"])
+    D --> E(["E 6–8<br/>take: starts 6, clear of finish 5"])
     E --> result(["Selected A, C, E<br/>3 intervals (max)"])
 
     class A,C,E train
@@ -301,7 +305,7 @@ If we took B instead (finishes later at 4), C [3,5] would conflict.
 
 ### Huffman Coding — Greedy Tree Construction
 
-Characters and frequencies: a:5, b:9, c:12, d:13, e:16, f:45. Six greedy merges (always combine the two lowest-frequency nodes) build the tree bottom-up; edge labels below are the resulting 0/1 code bits.
+Characters and frequencies: a:5, b:9, c:12, d:13, e:16, f:45. Five greedy merges — n−1 for n = 6 symbols, always combining the two lowest-frequency nodes — build the tree bottom-up; edge labels below are the resulting 0/1 code bits.
 
 ```mermaid
 flowchart TD
@@ -609,13 +613,13 @@ def closest_pair(points: List[Point]) -> float:
 
 **Huffman coding in compression**: Used in the DEFLATE algorithm (underlying gzip, PNG, zlib), JPEG Huffman entropy coding, and MP3 audio compression. In practice, static Huffman codes are precomputed for a corpus, while adaptive Huffman builds the tree dynamically as data is read. The codes produced are prefix-free: no code is a prefix of another, enabling unambiguous decoding.
 
-**Interval scheduling in operating systems**: The Linux Completely Fair Scheduler (CFS) assigns CPU time using a red-black tree of runnable tasks sorted by virtual runtime. This is a continuous greedy selection: always run the task with the smallest virtual runtime. See [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) for CFS in production.
+**Interval scheduling in operating systems**: Linux's fair-class scheduler keeps runnable tasks in an augmented red-black tree and pops the front of it on every reschedule — a continuous greedy selection. Since kernel 6.6 the key is EEVDF's earliest *virtual deadline* among the tasks that are currently eligible, replacing CFS's smallest *virtual runtime*; the greedy structure is identical, only the sort key changed. See [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) for CFS in production.
 
 **Kruskal's MST in networking**: Network topology optimisation (finding the minimum-cost spanning tree for a backbone network), cluster analysis (single-linkage hierarchical clustering), and approximating TSP solutions use Kruskal's greedy MST algorithm. See [`graphs_tries_and_advanced_structures`](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) for Kruskal implementation.
 
 **Merge sort in external databases**: PostgreSQL and MySQL use external merge sort for queries that exceed memory — see [`sorting_and_searching`](../sorting_and_searching/sorting_and_searching.md) case study. The merge phase is D&C: recursively merge pairs of sorted runs.
 
-**Karatsuba multiplication in cryptography**: RSA key generation and elliptic curve operations require multiplying 2048–4096-bit integers. The naive O(n²) algorithm is too slow. Karatsuba's O(n^1.585) D&C algorithm is used in GMP (GNU Multiple Precision Arithmetic Library), which underlies OpenSSL's bignum operations.
+**Karatsuba multiplication in cryptography**: RSA key generation and elliptic curve operations require multiplying 2048–4096-bit integers. The naive O(n²) algorithm is too slow. Karatsuba's O(n^1.585) D&C algorithm is what GMP (GNU Multiple Precision Arithmetic Library) switches to above a small limb-count threshold, and OpenSSL's self-contained BIGNUM library does the same in `bn_mul_recursive`.
 
 ```mermaid
 xychart-beta
@@ -829,7 +833,7 @@ The exchange argument proves that the greedy choice can always be swapped into a
 Proof by exchange argument: take any optimal solution O. If O includes a different first interval than greedy, swap in the greedy's first interval (earliest finish time). Because the greedy interval finishes no later, it cannot block more future intervals than the original choice — the number of intervals selected stays the same or increases. Repeat until O equals the greedy solution. Therefore greedy achieves the maximum count.
 
 **Q3: When does greedy fail for knapsack and why?**
-Greedy by value/weight ratio fails for 0/1 (indivisible items) knapsack. Counterexample: capacity=10, items={(v=6,w=4), (v=5,w=3), (v=5,w=3)}. Greedy (ratio: 1.5, 1.67, 1.67) takes the two ratio-1.67 items (total w=6, v=10). Optimal: all three items, total w=10, v=16. The greedy fails because committing to the highest-ratio item may leave capacity that combines better with lower-ratio items. Fractional knapsack (items divisible) is solvable by greedy.
+Greedy by value/weight ratio fails for 0/1 (indivisible items) knapsack. Counterexample: capacity=10, items={(v=30,w=6), (v=20,w=5), (v=20,w=5)}. Ratios are 5.0, 4.0, 4.0, so greedy commits to the ratio-5 item first, leaving capacity 4 — which fits neither of the weight-5 items — for a total of 30. Optimal is the two ratio-4 items together: w=10, v=40. The greedy fails because committing to the highest-ratio item strands capacity that would have combined better with lower-ratio items. Fractional knapsack (items divisible) is solvable by greedy.
 
 **Q4: State the Master theorem and apply it to merge sort and binary search.**
 T(n) = aT(n/b) + O(n^d). Compare d vs log_b(a). Merge sort: a=2, b=2, d=1. log_2(2)=1=d → Case 2 → O(n log n). Binary search: a=1, b=2, d=0. log_2(1)=0=d → Case 2 → O(log n). Karatsuba: a=3, b=2, d=1. log_2(3)≈1.585 > 1=d → Case 3 → O(n^1.585).
@@ -915,7 +919,7 @@ def min_encoding_servers(streams: List[Tuple[int, int]]) -> int:
     return len(active_servers)
 
 
-# Example: 10 concurrent streams -> 3 servers needed
+# Example: 10 streams, with 4 of them live at once around t=3.5 -> 4 servers needed
 streams = [(1, 4), (2, 5), (3, 8), (5, 9), (6, 10), (7, 11), (8, 12), (9, 13), (4, 7), (1, 6)]
 print(min_encoding_servers(streams))   # 4
 ```
@@ -956,8 +960,11 @@ def broken_compress(text: str) -> str:
         raise ValueError("Too many distinct characters for 5-bit coding")
     fixed_codes = {c: format(i, "05b") for i, c in enumerate(chars)}
     return "".join(fixed_codes[ch] for ch in text)
-    # 5 bits/char regardless of frequency -- vs Huffman's 2.2 bits/char average
-    # for typical text -> 2.3x worse than Huffman on natural language
+    # 5 bits/char regardless of frequency. Huffman on order-0 English character
+    # frequencies averages ~4.2 bits/char (it cannot beat the ~4.1-bit order-0
+    # entropy of the source), so the fixed code is only ~1.2x worse here. The
+    # skewed alphabets Huffman really wins on are things like JSON log keys --
+    # and beating 4 bits/char on prose needs LZ77 first (discussion Q3).
 ```
 
 ```python
@@ -973,8 +980,8 @@ def fixed_compress(text: str) -> Tuple[str, dict[str, str]]:
 
 | Metric | Fixed-width (5-bit) | Huffman |
 |--------|--------------------|----|
-| Bits per char (English text) | 5.0 | ~2.2 |
-| Compression ratio vs 8-bit ASCII | 62.5% | 27.5% |
+| Bits per char (order-0 English) | 5.0 | ~4.2 (order-0 entropy is ~4.1) |
+| Compression ratio vs 8-bit ASCII | 62.5% | 52.5% |
 | Codebook size | 32 entries | n entries (n = distinct chars) |
 | Build time | O(1) | O(n log n) |
 | Decode time | O(L) | O(L) (with pre-built trie) |

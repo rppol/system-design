@@ -22,7 +22,7 @@ Complexity analysis answers the fundamental question an engineer asks before cho
 
 **Mental model**: Every algorithm's cost can be written as a polynomial in n (or a log, exponential, factorial). Asymptotic analysis keeps only the term that dominates at large n and drops the constant coefficient. `3n² + 100n + 500` is O(n²) because at n = 1,000,000 the `3n²` term is 3 × 10¹², the `100n` term is 10⁸, and the constant is irrelevant.
 
-**Why it matters**: A poorly chosen O(n²) algorithm on 10,000 records takes roughly 100 million operations; the O(n log n) alternative takes ~130,000 — a 770× difference. At one billion records the gap is 50 billion vs 30 million — unreachable vs fast. Knowing complexity lets you make architectural decisions before writing a line of code.
+**Why it matters**: A poorly chosen O(n²) algorithm on 10,000 records takes roughly 100 million operations; the O(n log n) alternative takes ~130,000 — a 770× difference. At one billion records the gap is 10¹⁸ vs 3 × 10¹⁰ — unreachable vs about 30 seconds. Knowing complexity lets you make architectural decisions before writing a line of code.
 
 **Key insight**: Big-O is a guarantee about asymptotic growth, not a promise about constant factors or small-n behaviour. At n = 5, an O(n²) algorithm with a tiny constant may run faster than an O(n log n) algorithm with a large constant. Interview questions almost always mean "for large n" — state this assumption explicitly.
 
@@ -115,7 +115,7 @@ xychart-beta
 | O(n²) | Quadratic | 4× | Bubble/insertion/selection sort, naive substring match |
 | O(n³) | Cubic | 8× | Naive matrix multiplication |
 | O(2^n) | Exponential | 2ⁿ | Recursive Fibonacci (naive), power set enumeration |
-| O(n!) | Factorial | n·(n-1)! | Brute-force TSP, permutation generation |
+| O(n!) | Factorial | (2n)!/n! — astronomical | Brute-force TSP, permutation generation |
 
 **Stated plainly.** *"The class name is not a speed — it is a rule for what happens to your cost when the input doubles."* That is the only column that carries engineering information. `O(n²)` does not mean "slow"; it means "every time your data doubles, your bill goes up 4×", which is what turns a fine prototype into a 3 a.m. incident when the customer grows.
 
@@ -146,7 +146,7 @@ xychart-beta
   n              O(log n)      O(n)        O(n log n)          O(n^2)         O(2^n)
   ------------------------------------------------------------------------------------
   10                3 ns       10 ns             33 ns          100 ns         1.0 us
-  1,000            10 ns      1.0 us           10.0 us          1.0 ms       4 e13 yr
+  1,000            10 ns      1.0 us           10.0 us          1.0 ms      3 e284 yr
   1,000,000        20 ns      1.0 ms           19.9 ms        1,000   s       heat death
 ```
 
@@ -178,7 +178,7 @@ Now the payoff — grow the input a thousandfold and count again:
   1,024                 10                10.0
   1,000,000             19                19.9
 
-  n went up 1,000,000x       ->  the work went up from 3 steps to 20.
+  n went up 125,000x         ->  the work went up from 3 steps to 20.
 ```
 
 That is why §7's claim about Redis holds: a leaderboard of 10 million users costs ~23 skip-list steps, and a leaderboard of 20 million costs ~24. **Doubling the data adds one step.** Also note the base almost never matters — `log₂ n` and `log₁₀ n` differ by the constant factor `log₂ 10 ≈ 3.32`, and constants are dropped, which is why nobody writes the base inside a Big-O.
@@ -216,9 +216,9 @@ That is why §7's claim about Redis holds: a leaderboard of 10 million users cos
       9             8           YES          8       1       9         24
      10-16         16            no          0       1       1     25..31
   ---------------------------------------------------------------------------
-  copies total = 1 + 2 + 4 + 8 = 15   (= n - 1, and always < n)
+  copies total = 1 + 2 + 4 + 8 = 15   (= n - 1 when n is a power of 2; always < 2n)
   writes total = 16                   (= n, one per append)
-  TOTAL        = 31                   (< 2n = 32)
+  TOTAL        = 31                   (< 3n = 48, the general bound)
 
   amortized cost per append = 31 / 16 = 1.94  ->  a constant  ->  O(1) amortized
 ```
@@ -234,9 +234,9 @@ Every row costs 1 except four spikes, and the spikes get rarer at exactly the ra
   grow by 1 each time      15      1+2+...+15 = 120     120/16=7.5 -> O(n)
 ```
 
-Grow-by-one gives `n(n-1)/2` copies — for n = 1,000 that is 499,500 copies instead of 999. This is not a theoretical distinction: it is why every real dynamic array (Python `list`, Java `ArrayList`, C++ `vector`, Go slices) multiplies its capacity by a factor rather than adding a fixed amount.
+Grow-by-one gives `n(n-1)/2` copies — for n = 1,000 that is 499,500 copies instead of 1,023. This is not a theoretical distinction: it is why every real dynamic array (Python `list`, Java `ArrayList`, C++ `vector`, Go slices) multiplies its capacity by a factor rather than adding a fixed amount.
 
-**Why "amortized" is not "average".** Average-case is a statement about *input distribution* — it can be defeated by an unlucky or adversarial input. Amortized is a statement about *the sequence of operations* and holds for every possible input, adversarial included: no attacker can make n appends cost more than 2n, because the resize schedule is determined by the structure, not the data. What amortized still does **not** promise is any single operation's latency — the append that triggers a copy of a 1-million-element array really does take O(n), which is the tail-latency trap in Pitfall 1 and Q2.
+**Why "amortized" is not "average".** Average-case is a statement about *input distribution* — it can be defeated by an unlucky or adversarial input. Amortized is a statement about *the sequence of operations* and holds for every possible input, adversarial included: no attacker can make n appends cost more than 3n, because the resize schedule is determined by the structure, not the data. What amortized still does **not** promise is any single operation's latency — the append that triggers a copy of a 1-million-element array really does take O(n), which is the tail-latency trap in Pitfall 1 and Q2.
 
 ### 4.3 Recurrence Relations and Master Theorem
 
@@ -313,9 +313,9 @@ Node count doubles per level while per-node work halves — they cancel exactly,
 
 Here the levels do *not* balance — each one costs twice the last, so the bottom level swamps everything above it and the total is just the leaf count. That is the signature of Case 1: **cost concentrated at the leaves.** This is also exactly what Strassen attacks in Q18 — dropping `a` from 8 to 7 changes `log₂ a` from 3 to 2.807, and since `a` sits in the *exponent*, removing one of eight multiplications is worth more than any constant-factor tuning ever could be.
 
-**Case 3, for contrast.** `T(n) = 2T(n/2) + n²`: `log₂ 2 = 1`, and `n² = Ω(n^(1+ε))` with `ε = 1`, so the combine step dominates and `T(n) = Θ(n²)`. The recursion is irrelevant — the top-level call alone already does all the work the algorithm will ever do.
+**Case 3, for contrast.** `T(n) = 2T(n/2) + n²`: `log₂ 2 = 1`, and `n² = Ω(n^(1+ε))` with `ε = 1`, so the combine step dominates and `T(n) = Θ(n²)`. Case 3 carries one extra hypothesis the flowchart cannot show — the **regularity condition** `a·f(n/b) ≤ c·f(n)` for some `c < 1` and all large n, which here reads `2·(n/2)² = n²/2 ≤ ½·n²` and holds. Every polynomially-bounded `f` you will meet satisfies it; it is what makes Case 3 a theorem rather than a rule of thumb. The recursion is irrelevant — the top-level call alone already does all the work the algorithm will ever do.
 
-**Why this exists.** Without the master theorem you would expand the recurrence by hand every time, which is slow and error-prone under interview pressure. With it, analysing merge sort is: count the calls (2), read the shrink factor (2), read the combine cost (n), compare `n` to `n^1`, answer `Θ(n log n)` — about ten seconds. Note the limits: it only applies when subproblems are *equal-sized*, so `T(n) = T(n-1) + O(1)` (linear recursion, → O(n)) and `T(n) = 2T(n-1) + O(1)` (Q17, → O(2^n)) are outside its scope and must be expanded directly. Quicksort's worst case, `T(n) = T(n-1) + O(n)`, is the same story — unequal splits — and that is precisely why it degrades to O(n²).
+**Why this exists.** Without the master theorem you would expand the recurrence by hand every time, which is slow and error-prone under interview pressure. With it, analysing merge sort is: count the calls (2), read the shrink factor (2), read the combine cost (n), compare `n` to `n^1`, answer `Θ(n log n)` — about ten seconds. Note the limits: it only applies when subproblems are *equal-sized*, so `T(n) = T(n-1) + O(1)` (linear recursion, → O(n)) and `T(n) = 2T(n-1) + O(1)` (Q17, → O(2^n)) are outside its scope and must be expanded directly. The three cases also do not cover every equal-split recurrence — `T(n) = 2T(n/2) + n log n` falls in the gap between Case 2 and Case 3 (`n log n` is neither `Θ(n)` nor `Ω(n^(1+ε))`), and needs the recursion tree by hand (the answer is `Θ(n log² n)`). Quicksort's worst case, `T(n) = T(n-1) + O(n)`, is the same story — unequal splits — and that is precisely why it degrades to O(n²).
 
 ```mermaid
 flowchart TD
@@ -435,10 +435,10 @@ xychart-beta
     title "Copies per append (capacity doubles: 1, 2, 4, 8, 16)"
     x-axis "append index" [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     y-axis "copies made" 0 --> 8
-    bar [0, 1, 0, 2, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8]
+    bar [0, 1, 2, 0, 4, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0]
 ```
 
-Copies spike only at the resize points (append 2, 4, 8, 16), each one copying the array's prior capacity (1, 2, 4, 8) into the doubled buffer. Total copies after n appends = n-1 < n. Amortized 1 copy per append → O(1) amortized.
+Copies spike only at the resize points — appends 2, 3, 5 and 9, the ones that arrive with the buffer already full — each copying the array's prior capacity (1, 2, 4, 8) into the doubled buffer. Total copies after 16 appends = 15; in general fewer than 2n. Amortized about 1 copy per append → O(1) amortized.
 
 ---
 
@@ -508,8 +508,8 @@ class DynamicArray:
         self._data[self._size] = val
         self._size += 1
     # Amortized: every element is copied at most once per doubling step.
-    # Total copies for n appends = n/2 + n/4 + ... = n-1 < n.
-    # Amortized cost per append = (n + n) / n = 2 = O(1).
+    # Total copies for n appends = ... + n/4 + n/2 + n < 2n.
+    # Amortized cost per append = (n writes + <2n copies) / n < 3 = O(1).
 ```
 
 ### 6.4 Space Complexity: Call Stack
@@ -549,8 +549,9 @@ def factorial_iter(n: int) -> int:
     factorial(4)                2
       factorial(3)              3
         factorial(2)            4
-          factorial(1)          5           <- PEAK, all frames still open
-            factorial(0)        6  -> returns 1, and the stack unwinds
+          factorial(1)          5
+            factorial(0)        6           <- PEAK, all frames still open;
+                                               returns 1, and the stack unwinds
   ------------------------------------------------------------
   peak frames = n + 1  ->  O(n) space, despite zero explicit allocation
 
@@ -578,9 +579,9 @@ Both functions are `O(n)` time. They differ by a factor of n in space, and the d
 
 **Merge sort for external sort** — when sorting a file larger than RAM, merge sort's O(n log n) with a sequential access pattern is ideal: it divides the file into sorted runs (using available RAM), then k-way merges them with O(n log k) total I/O, which is far more cache/disk-friendly than quicksort's random pivoting.
 
-**Binary search in databases** — B+Tree index lookup is O(log n) page reads: a 1-billion-row table with 1 KB pages and 100-byte keys fits in a B+Tree of height ~4–5. Finding any row costs 4–5 page reads = 4–5 random disk seeks (~40 ms on HDD, ~0.4 ms on SSD) regardless of table size.
+**Binary search in databases** — B+Tree index lookup is O(log n) page reads: a 1-billion-row table with 8 KB pages and 100-byte keys gives a fanout of ~80, so the B+Tree has height ~5 (80⁵ ≈ 3.3 × 10⁹). Finding any row costs 4–5 page reads = 4–5 random disk seeks (~40 ms on HDD, ~0.4 ms on SSD) regardless of table size.
 
-**Moore's Law does not save you from O(n²)** — with hardware 1000× faster, an O(n²) algorithm on n = 10⁶ goes from infeasible to merely 10⁶ seconds. An O(n log n) algorithm on the same data takes 20 seconds. Complexity class, not hardware, is the engineering lever.
+**Moore's Law does not save you from O(n²)** — take n = 10⁹ and today's ~10⁹ operations/second. The O(n²) algorithm needs 10¹⁸ operations = 32 years; give it hardware 1000× faster and it still needs 10⁶ seconds, about 11 days. The O(n log n) algorithm needs 3 × 10¹⁰ operations — 30 seconds on the *unimproved* machine. Complexity class, not hardware, is the engineering lever.
 
 ---
 
@@ -705,13 +706,13 @@ In adversarial inputs (hash collision attacks), a naive hash function can cause 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between O, Θ, and Ω?**
-O is an upper bound (worst case or tighter): `f ≤ c·g` for large n. Ω is a lower bound: `f ≥ c·g`. Θ is a tight bound: both O and Ω hold simultaneously. In interviews "this runs in O(n)" is often used loosely to mean Θ(n) — clarify if precision matters. The key gotcha: O(n) includes O(1), O(log n), etc. — O is not equality.
+O is an upper bound, not necessarily a tight one: `f ≤ c·g` for large n. (O is orthogonal to best/average/worst — you can bound any of the three with O.) Ω is a lower bound: `f ≥ c·g`. Θ is a tight bound: both O and Ω hold simultaneously. In interviews "this runs in O(n)" is often used loosely to mean Θ(n) — clarify if precision matters. The key gotcha: O(n) includes O(1), O(log n), etc. — O is not equality.
 
 **Q2: Is the amortized cost of a dynamic array append O(1) or O(n)?**
 O(1) amortized, O(n) worst case. A single append may trigger a resize that copies all n elements, costing O(n). But the resize doubles capacity, so the next resize won't happen for another n appends. Spreading the O(n) resize cost over n appends gives O(1) amortized. In real-time / latency-critical systems this distinction matters — a worst-case O(n) spike can miss a deadline even if the average is O(1).
 
 **Q3: What is the time complexity of building a heap from an unsorted array?**
-O(n), not O(n log n). The naive explanation "insert n elements, each O(log n)" gives O(n log n), but `heapify` (sift-down from the middle) is O(n). The key insight: most nodes are near the leaves and sift-down distance is small; only O(n/4) nodes are height-1, O(n/8) are height-2, etc. The sum ∑k · n/2^(k+1) converges to 2n.
+O(n), not O(n log n). The naive explanation "insert n elements, each O(log n)" gives O(n log n), but `heapify` (sift-down from the middle) is O(n). The key insight: most nodes are near the leaves and sift-down distance is small; only about n/4 nodes are height-1, n/8 are height-2, etc. Summing sift-down work over all heights gives ∑_{h≥0} h · n/2^(h+1) = n, since ∑_{h≥0} h/2^h = 2.
 
 **Q4: Quicksort is O(n log n) average and O(n²) worst case. When does the worst case occur?**
 When the pivot is always the minimum or maximum element — producing partitions of size 0 and n-1. This happens on already-sorted or reverse-sorted input with a naive "pick first element" pivot. Fix: randomise the pivot (expected O(n log n)), use median-of-three, or use introsort (switches to heapsort when recursion depth exceeds 2 log n).
@@ -738,7 +739,7 @@ O(n log n). Python uses Timsort, a hybrid merge sort / insertion sort. It is O(n
 O(1) amortized for get, set, and delete. Python dicts use open addressing with a load factor of roughly 2/3; when exceeded, the dict is resized (rehashed) to a new table. The resize copies all n entries at O(n) cost but is rare — amortized O(1) per operation. Python 3.7+ also preserves insertion order (via a separate compact array), but the complexity is the same.
 
 **Q12: You have an O(n²) algorithm and an O(n log n) algorithm. For what value of n do they cross over (assuming constants c₁ = 1000 for O(n log n) and c₂ = 1 for O(n²))?**
-Solve `1000 × n log n = 1 × n²` → `1000 log n = n` → `n ≈ e^(1000/n)`, numerically approximately n ≈ 14,000 (check: 1000 × 14000 × 13.4 ≈ 1.88 × 10⁸, 14000² = 1.96 × 10⁸ — they are close). The lesson: constants matter at moderate n; at large n the O(n²) always loses.
+Solve `1000 × n log₂ n = 1 × n²` → `n = 1000 log₂ n`, which has no closed form; iterate it and it converges to n ≈ 13,750 (check at n = 14,000: 1000 × 14,000 × 13.77 = 1.93 × 10⁸ versus 14,000² = 1.96 × 10⁸ — n² has just overtaken). The lesson: constants matter at moderate n; at large n the O(n²) always loses.
 
 **Q13: What is the time complexity of finding the Kth smallest element?**
 Multiple approaches: (a) sort and index — O(n log n); (b) min-heap of size n + extract k times — O(n + k log n); (c) max-heap of size k — O(n log k); (d) quickselect — O(n) average, O(n²) worst case with random pivot, O(n) worst case with median-of-medians. Interviews expect you to know quickselect's O(n) average.
@@ -756,7 +757,7 @@ BST: O(log n) lookup, O(log n) insert, always ordered. Hash table: O(1) average 
 The recurrence is T(n) = 2T(n-1) + O(1). This is O(2^n). The call tree has 2^n leaf nodes. Classic example: naive recursive Fibonacci. Fix: memoise (O(n) time and space) or use bottom-up DP (O(n) time, O(1) space with rolling variables).
 
 **Q18: What is the time complexity of matrix multiplication, and is there a better algorithm?**
-Naive: O(n³) for two n×n matrices. Strassen's algorithm: O(n^2.807) using 7 recursive multiplications instead of 8. The current best theoretical bound is O(n^2.371...) (Williams et al. 2024), but these advanced algorithms have huge constants and are not practical for typical matrix sizes. In practice, highly optimised BLAS libraries approach O(n³) with vectorised AVX/CUDA operations that have tiny constants.
+Naive: O(n³) for two n×n matrices. Strassen's algorithm: O(n^2.807) using 7 recursive multiplications instead of 8. The current best theoretical bound is O(n^2.3714) (Alman, Duan, Vassilevska Williams, Xu, Xu and Zhou, "More Asymmetry Yields Faster Matrix Multiplication", ω < 2.371339), but these advanced algorithms have huge constants and are not practical for typical matrix sizes. In practice, highly optimised BLAS libraries approach O(n³) with vectorised AVX/CUDA operations that have tiny constants.
 
 **Q19: What makes counting sort/radix sort O(n), when comparison sorts have a lower bound of Ω(n log n)?**
 The Ω(n log n) lower bound applies to *comparison-based* sorting — any algorithm that can only compare elements has at least n log n comparisons in the decision tree. Counting sort and radix sort are *non-comparison* — they use the numeric value of keys to place them directly. This sidesteps the comparison lower bound. Counting sort: O(n + k) where k is the range of values. Radix sort: O(d(n + k)) where d is digits and k is digit range (10 for decimal). If k = O(n), both are O(n). Trade-off: requires integer keys with a bounded range; cannot sort arbitrary comparable objects.
@@ -843,7 +844,7 @@ def get_rank(player: str) -> int:
     return (rank + 1) if rank is not None else -1
 
 def get_top_k(k: int) -> list[tuple[bytes, float]]:
-    return r.zrevrange(LEADERBOARD, 0, k - 1, withscores=True)  # O(k + log n)
+    return r.zrange(LEADERBOARD, 0, k - 1, desc=True, withscores=True)  # O(k + log n)
 ```
 
 **Complexity comparison**:

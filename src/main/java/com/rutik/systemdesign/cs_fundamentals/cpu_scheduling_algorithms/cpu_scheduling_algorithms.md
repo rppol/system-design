@@ -14,7 +14,7 @@ The CPU scheduler (dispatcher) selects from the pool of ready threads and assign
 
 Scheduling affects four key metrics: **throughput** (tasks completed per second), **latency/response time** (time from submission to first response), **turnaround time** (submission to completion), and **fairness** (each thread gets a proportional share of CPU over time). These metrics are often in tension — prioritising low-latency interactive tasks can starve batch jobs.
 
-This module covers the classical scheduling algorithms (FCFS, SJF, SRTF, Round-Robin, Priority, MLFQ) and the Completely Fair Scheduler (CFS), which is used by the Linux kernel and is the scheduler behind every Linux server, Android device, and container workload.
+This module covers the classical scheduling algorithms (FCFS, SJF, SRTF, Round-Robin, Priority, MLFQ) and the scheduler that actually runs every Linux server, Android device, and container workload: the `SCHED_NORMAL` class in `kernel/sched/fair.c`. That class was the Completely Fair Scheduler (CFS) from 2007 until Linux 6.5, and has been **EEVDF** (Earliest Eligible Virtual Deadline First) since. EEVDF keeps CFS's weights and virtual runtime and adds a per-task deadline, so nearly everything you know about vruntime and nice values still applies — but "Linux uses CFS" has been the wrong answer since 2023.
 
 ---
 
@@ -24,7 +24,7 @@ This module covers the classical scheduling algorithms (FCFS, SJF, SRTF, Round-R
 
 **Mental model**: Model each thread as a job with an arrival time, a burst time (CPU work remaining), and possibly a priority. The scheduler's job is to order these jobs on the CPU, minimising a weighted combination of latency and fairness.
 
-**Why it matters**: Scheduling directly determines user-perceived latency. A web server's request thread at priority 20 and a data-crunching batch job at priority 19 may differ by only 1 priority level — but if the scheduler doesn't preempt the batch job quickly enough, response times spike. Knowing CFS's virtual-runtime mechanism explains why `nice -n 19 python crunch.py` makes a script "politely" yield to other processes.
+**Why it matters**: Scheduling directly determines user-perceived latency. A web server's request thread at nice 0 and a data-crunching batch job one step away at nice +1 differ by a single priority level — a weight of 1024 against 820 — but if the scheduler does not preempt the batch job quickly enough, response times spike. Knowing the virtual-runtime mechanism explains exactly how much `nice -n 19 python crunch.py` really yields: weight 15 against 1024, so about 1.4% of the CPU when it competes with a nice-0 process, not "only when idle".
 
 **Key insight**: All classical scheduling algorithms are approximations of the oracle algorithm **SRTN** (Shortest Remaining Time Next / SRTF). SRTN is optimal for minimising average waiting time but requires knowing future burst times — which is impossible in practice. Real schedulers approximate SRTN by using recent CPU usage as a proxy for future burst time.
 
@@ -38,7 +38,7 @@ This module covers the classical scheduling algorithms (FCFS, SJF, SRTF, Round-R
 
 **Priority**: A numerical weight assigned to each thread. Higher-priority threads are scheduled before lower-priority ones. Linux nice values: -20 (highest priority) to +19 (lowest). Priority scheduling combined with preemption: a newly runnable high-priority thread immediately preempts the running thread.
 
-**Starvation**: A low-priority thread that never gets CPU time because higher-priority threads are always ready. Prevention: aging (gradually increase priority of waiting threads), or guarantee a minimum time slice (CFS's minimum granularity).
+**Starvation**: A low-priority thread that never gets CPU time because higher-priority threads are always ready. Prevention: aging (gradually increase priority of waiting threads), or proportional-share accounting, which starves nobody by construction — under EEVDF a thread that has been denied CPU accumulates positive *lag*, which is precisely what makes it eligible to run next.
 
 **Multi-level feedback queue (MLFQ)**: Tracks a thread's recent behaviour. Threads that frequently use their full quantum are demoted (CPU-bound); threads that block early are promoted (I/O-bound/interactive). This approximates SRTN by observing actual behaviour rather than requiring future knowledge.
 
@@ -56,17 +56,26 @@ This module covers the classical scheduling algorithms (FCFS, SJF, SRTF, Round-R
 | Round-Robin (RR) | Preemptive | Fairness, interactivity | Overhead for short quanta; poor for I/O-bound |
 | Priority | Preemptive/Non-preemptive | Differentiated service | Starvation of low-priority threads |
 | MLFQ | Preemptive | Approximates SRTN without knowledge | Complex; tunable parameters |
-| CFS (Linux) | Preemptive | Weighted fairness | Complex; not strictly low-latency for real-time |
+| CFS (Linux, 2007–6.5) | Preemptive | Weighted fairness | Complex; latency depends on how many threads are runnable |
+| EEVDF (Linux `SCHED_NORMAL`, 6.6+) | Preemptive | Weighted fairness *plus* a latency guarantee per task | Complex; still not hard real-time |
 
-### Linux CFS (Completely Fair Scheduler)
+### Linux `SCHED_NORMAL` — CFS, and EEVDF since kernel 6.6
 
-CFS does not use fixed time quanta. Instead: each runnable thread has a **virtual runtime** (vruntime) — the total CPU time it has received, weighted by its priority (inverse of nice weight). The scheduler always runs the thread with the **smallest vruntime** — the thread that has received the least proportional CPU time. The data structure is a red-black tree sorted by vruntime.
+Neither scheduler uses a fixed time quantum. Both give each runnable thread a **virtual runtime** (vruntime) — CPU time received, divided by the thread's weight — and keep runnable threads in a red-black tree keyed on it.
 
-Key properties:
-- Fairness: over long periods, each thread gets exactly its proportional share.
-- Minimum granularity: a thread gets at least `sched_min_granularity_ns` (default 4 ms) before being preempted.
-- Target latency: `sched_latency_ns` (default 8–24 ms) — CFS aims for every runnable thread to get CPU at least once per target latency period.
-- Weight: nice value → weight via a fixed lookup table (nice 0 = weight 1024; each nice level changes weight by ~25%).
+**CFS (2007 – Linux 6.5)** simply ran the thread with the **smallest vruntime**: the one that had received the least proportional CPU. Its shape was set by two tunables:
+- Target latency `sched_latency_ns` (6–24 ms) — every runnable thread should get CPU once per period.
+- Minimum granularity `sched_min_granularity_ns` (0.75–4 ms) — the floor on a slice, which is what broke the target-latency promise once enough threads were runnable.
+
+**EEVDF (Linux 6.6+)** — Earliest Eligible Virtual Deadline First — keeps the weights and vruntime and adds two ideas:
+- **Lag**: how much CPU a thread is owed relative to its fair share. Positive lag = under-served. A thread is **eligible** only when its lag is ≥ 0, which is what stops a thread that just ran from immediately running again.
+- **Virtual deadline**: eligible-time plus the thread's *request* (its slice), scaled by weight. Among eligible threads, the one with the **earliest virtual deadline** runs.
+
+The practical consequences:
+- **Both tunables are gone.** `sched_latency_ns` and `sched_min_granularity_ns` no longer exist. What remains is a single base slice at `/sys/kernel/debug/sched/base_slice_ns` (700 µs in current mainline), scaled per thread by weight.
+- **Latency is now per-task and requestable.** A thread can ask for a shorter slice via `sched_setattr()`'s `sched_runtime`, buying an earlier deadline (better latency) at the cost of more preemptions — something CFS had no way to express.
+- **Weights are unchanged.** nice → weight still comes from the same fixed `sched_prio_to_weight` table (nice 0 = 1024; each nice step is ~25%, i.e. a factor of 1.25). Everything in the vruntime arithmetic below still holds.
+- **"CFS bandwidth control" keeps its name.** The cgroup quota mechanism (`cpu.max` on cgroup v2, `cpu.cfs_quota_us`/`cpu.cfs_period_us` on v1) is still called CFS bandwidth control in the kernel, and still works exactly as before. Do not "correct" that string to EEVDF.
 
 ---
 
@@ -217,11 +226,11 @@ stateDiagram-v2
 
 Q0 is the high-priority queue (8ms quantum), Q1 is mid (16ms), Q2 is low (plain FCFS). An interactive web request that blocks after ~3ms of CPU stays in Q0 for low latency; a CPU-bound batch job burns through its full quantum at each level and sinks to Q2, returning to Q0 only via aging.
 
-### CFS Virtual Runtime
+### Virtual Runtime — CFS's Pick, and What EEVDF Adds
 
 ```mermaid
 sequenceDiagram
-    participant S as "CFS Scheduler"
+    participant S as "Fair-class scheduler"
     participant A as "A (vruntime)"
     participant B as "B (vruntime)"
     participant C as "C (vruntime)"
@@ -241,11 +250,11 @@ sequenceDiagram
     Note over S,C: A=8, B=4, C=4 - smallest is B, runs next
 ```
 
-CFS always dispatches the runnable thread with the smallest vruntime (kept in a red-black tree), so three equal-weight (nice 0) threads converge on exactly 33% of CPU each. A thread at nice=-5 has 3x the weight of nice=0, so its vruntime advances only 1/3 as fast and it earns 3x more CPU time.
+CFS always dispatched the runnable thread with the smallest vruntime (kept in a red-black tree), so three equal-weight (nice 0) threads converge on exactly 33% of CPU each. A thread at nice=-5 has 3x the weight of nice=0, so its vruntime advances only 1/3 as fast and it earns 3x more CPU time. EEVDF changes only the *pick*, not the billing: it first filters to threads whose lag is ≥ 0 (those owed CPU) and then takes the earliest virtual deadline among them. On this trace — three identical threads, all eligible, all with the same slice — EEVDF selects exactly the same order, which is why the vruntime arithmetic below is still the right mental model.
 
 **Stated plainly.** "Charge every thread a bill for the CPU time it uses, but let high-priority threads pay a discounted rate — then always run whoever owes the least."
 
-Priority in CFS is not a queue position and not a bigger time slice. It is a *billing rate*. That single reframing is what makes nice values predictable instead of folklore: a nice value maps to a weight, and CPU share is just that weight over the sum of all weights.
+Priority here is not a queue position and not a bigger time slice. It is a *billing rate*. That single reframing is what makes nice values predictable instead of folklore: a nice value maps to a weight, and CPU share is just that weight over the sum of all weights.
 
 | Symbol | What it actually is |
 |--------|---------------------|
@@ -281,7 +290,7 @@ Priority in CFS is not a queue position and not a bigger time slice. It is a *bi
     1024 / (1024 x 3) = 33.3% each, exactly as the trace above shows.
 ```
 
-**Why this beats fixed priorities and fixed quanta.** A strict priority scheduler answers "who runs next" and nothing else, which is why it starves low-priority threads — there is no accounting that ever lets them catch up. CFS's bill always grows for whoever is running, so *every* runnable thread eventually holds the minimum vruntime and gets the CPU; nice -5 makes C's turn come around three times as often, but it never stops A's turn from arriving. The knob is also composable: this is exactly the mechanism behind `cpu.shares` in cgroups, where a container's share is its weight over the sum of sibling weights, computed with the identical `w_i / sum(w)` arithmetic one level up the hierarchy.
+**Why this beats fixed priorities and fixed quanta.** A strict priority scheduler answers "who runs next" and nothing else, which is why it starves low-priority threads — there is no accounting that ever lets them catch up. Here the bill always grows for whoever is running, so *every* runnable thread eventually holds the minimum vruntime (equivalently, accumulates positive lag under EEVDF) and gets the CPU; nice -5 makes C's turn come around three times as often, but it never stops A's turn from arriving. The knob is also composable: this is exactly the mechanism behind cgroup CPU weights (`cpu.weight` on cgroup v2, `cpu.shares` on v1), where a container's share is its weight over the sum of sibling weights, computed with the identical `w_i / sum(w)` arithmetic one level up the hierarchy.
 
 ---
 
@@ -457,9 +466,9 @@ def cfs_simulate(tasks: list[CFSTask], total_time_us: int) -> None:
 
 ## 7. Real-World Examples
 
-**Linux CFS in containers**: Docker and Kubernetes use Linux cgroups to limit CPU: `cpu.shares` maps to CFS weights, `cpu.cfs_quota_us / cpu.cfs_period_us` sets hard CPU limits. A container with `--cpus=0.5` gets at most 50% of one CPU — the kernel uses CFS bandwidth control to enforce this. See [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md).
+**Linux scheduling in containers**: Docker and Kubernetes use Linux cgroups to limit CPU. On cgroup v2 — the unified default on all current distros — `cpu.weight` (1–10000, default 100) is the proportional share and `cpu.max` (`"<quota> <period>"`, e.g. `50000 100000`) is the hard limit; on legacy cgroup v1 those are `cpu.shares` and `cpu.cfs_quota_us`/`cpu.cfs_period_us`. A container with `--cpus=0.5` gets at most 50% of one CPU, enforced by **CFS bandwidth control** — which kept that name after the EEVDF switch, because throttling was never part of the pick algorithm. See [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md).
 
-**Android UI responsiveness**: Android uses CFS with priority boosting for the UI thread. When the user touches the screen, the UI thread is boosted to a high priority for ~100 ms to ensure sub-16 ms frame rendering (60 FPS = 16.67 ms per frame). After 100 ms of inactivity, it returns to normal priority.
+**Android UI responsiveness**: Android runs the same fair scheduling class as mainline (CFS on older kernels, EEVDF on 6.6+) and boosts the UI thread on top of it. When the user touches the screen, the UI thread is boosted to a high priority for ~100 ms to ensure sub-16 ms frame rendering (60 FPS = 16.67 ms per frame). After 100 ms of inactivity, it returns to normal priority.
 
 ```mermaid
 stateDiagram-v2
@@ -469,11 +478,11 @@ stateDiagram-v2
     Boosted --> Normal: 100ms of inactivity
 ```
 
-The UI thread's priority is a two-state lifecycle keyed on touch activity: boosted for about 100 ms after each touch to hit the 16.67 ms (60 FPS) frame budget, then dropped back to normal CFS priority once input goes quiet.
+The UI thread's priority is a two-state lifecycle keyed on touch activity: boosted for about 100 ms after each touch to hit the 16.67 ms (60 FPS) frame budget, then dropped back to normal fair-class priority once input goes quiet.
 
 **Database server process priorities**: PostgreSQL autovacuum runs at `nice +10` by default — lower priority than query-serving processes. This prevents maintenance operations from starving user queries, at the cost of autovacuum potentially falling behind during high-load periods.
 
-**Real-time scheduling in Linux**: `SCHED_FIFO` and `SCHED_RR` are real-time policies that preempt all CFS threads. Used for latency-sensitive tasks (audio processing, industrial control). `SCHED_DEADLINE` (EDF — Earliest Deadline First) is the theoretical-optimal real-time scheduler, available since Linux 3.14.
+**Real-time scheduling in Linux**: `SCHED_FIFO` and `SCHED_RR` are real-time policies that preempt every `SCHED_NORMAL` thread. Used for latency-sensitive tasks (audio processing, industrial control). `SCHED_DEADLINE` (EDF — Earliest Deadline First) is the theoretical-optimal real-time scheduler, available since Linux 3.14.
 
 ---
 
@@ -489,7 +498,7 @@ The UI thread's priority is a two-state lifecycle keyed on touch activity: boost
 | Round-Robin | Moderate | Lower overhead | High | None | Good |
 | Priority | Variable | Variable | Weak | Low priority | Good for high prio |
 | MLFQ | Approximates SRTF | High | Good | With aging | Good |
-| CFS | Fair weighted | High | Excellent | None (min gty) | Good |
+| CFS / EEVDF | Fair weighted | High | Excellent | None (proportional-share accounting) | Good; EEVDF adds a per-task requestable slice |
 
 ### Time Quantum Tradeoff
 
@@ -500,7 +509,7 @@ The UI thread's priority is a two-state lifecycle keyed on touch activity: boost
 | Medium (50–100 ms) | Moderate | Good | Moderate |
 | Very long (infinite) | Poor (= FCFS) | Good | Minimal |
 
-**Rule of thumb**: Quantum should be much larger than context-switch cost (~1 µs) but small enough to provide good response time. Linux's CFS min granularity is 4 ms.
+**Rule of thumb**: Quantum should be much larger than context-switch cost (~1 µs) but small enough to provide good response time. Linux's equivalent knob today is EEVDF's base slice, `/sys/kernel/debug/sched/base_slice_ns` — 700 µs in current mainline, scaled per thread by weight.
 
 ```
 overhead = c / (q + c)
@@ -526,7 +535,7 @@ The table's "Poor (overhead)" verdict on a 1 ms quantum only makes sense once yo
   -------------  -----------------------  -----------  ----------------------
   0.1 ms         0.001 / 0.101            0.9901%      (below the table)
   1   ms         0.001 / 1.001            0.0999%      "Poor (overhead)"
-  4   ms         0.001 / 4.001            0.0250%      Linux CFS min granularity
+  4   ms         0.001 / 4.001            0.0250%      old CFS min granularity
   10  ms         0.001 / 10.001           0.0100%      "Good"
   100 ms         0.001 / 100.001          0.0010%      "Moderate response time"
 
@@ -536,7 +545,7 @@ The table's "Poor (overhead)" verdict on a 1 ms quantum only makes sense once yo
   degraded execution that never appears in the 1 us figure.
 ```
 
-**Why the quantum is chosen from the response-time side instead.** Since direct overhead is negligible above ~1 ms, the binding constraint is the other end: with `n` runnable threads, the worst-case wait for first CPU is `(n - 1) x q`. At `q = 100 ms` and 10 runnable threads that is 900 ms — visibly unresponsive — while at `q = 4 ms` it is 36 ms, under a typical interaction budget. This is why CFS sets a *target latency* (`sched_latency_ns`, 8-24 ms) and divides it among runnable threads rather than fixing a quantum, and why it clamps the result at `sched_min_granularity_ns` (4 ms): the clamp exists precisely to stop a large `n` from driving slices down into the region where cache-refill overhead starts to dominate.
+**Why the quantum is chosen from the response-time side instead.** Since direct overhead is negligible above ~1 ms, the binding constraint is the other end: with `n` runnable threads, the worst-case wait for first CPU is `(n - 1) x q`. At `q = 100 ms` and 10 runnable threads that is 900 ms — visibly unresponsive — while at `q = 4 ms` it is 36 ms, under a typical interaction budget. This is why CFS derived a slice from a *target latency* (`sched_latency_ns`) divided among runnable threads rather than fixing a quantum, and clamped it at `sched_min_granularity_ns` to stop a large `n` from driving slices into the region where cache-refill overhead dominates. EEVDF inverts that: it starts from a fixed base slice (`base_slice_ns`, 700 µs) scaled by weight, and gets its latency guarantee from the virtual *deadline* instead — a thread that wants better latency asks for a **smaller** slice via `sched_setattr()`, which earns it an earlier deadline. The `(n - 1) x q` bound is replaced by a per-task promise that does not degrade as `n` grows.
 
 ---
 
@@ -550,7 +559,7 @@ The table's "Poor (overhead)" verdict on a 1 ms quantum only makes sense once yo
 
 **MLFQ**: Best approximation of SRTF without prior knowledge. Used in general-purpose OS schedulers (Windows MLFQ, earlier Linux). Requires careful tuning of queue levels and quantum sizes.
 
-**CFS**: Default for Linux (and thus most of the world's servers). Ideal when you want fair CPU allocation with optional weighting (nice values). Not suitable for hard real-time tasks (use SCHED_DEADLINE or SCHED_FIFO instead).
+**CFS / EEVDF (`SCHED_NORMAL`)**: Default for Linux (and thus most of the world's servers) — CFS through 6.5, EEVDF from 6.6. Ideal when you want fair CPU allocation with optional weighting (nice values), and, under EEVDF, a per-task latency request. Not suitable for hard real-time tasks (use SCHED_DEADLINE or SCHED_FIFO instead).
 
 ```mermaid
 flowchart LR
@@ -567,7 +576,7 @@ flowchart LR
     start -->|"many short<br/>interactive tasks"| rr([Round-Robin])
     start -->|"differentiated<br/>SLA tiers"| prio([Priority + Aging])
     start -->|"general purpose,<br/>no burst-time knowledge"| mlfq([MLFQ])
-    start -->|"Linux server,<br/>weighted fairness"| cfs([CFS])
+    start -->|"Linux server,<br/>weighted fairness"| cfs([EEVDF / CFS<br/>Linux SCHED_NORMAL])
     start -->|"hard real-time<br/>deadline"| rt([SCHED_DEADLINE /<br/>SCHED_FIFO])
 
     class start mathOp
@@ -579,7 +588,7 @@ flowchart LR
     class rt lossN
 ```
 
-A quick decision guide distilling the five profiles above: match the workload's knowledge, latency, and fairness needs to the scheduler that targets them, falling back to a dedicated real-time policy when CFS's fairness guarantees are not tight enough.
+A quick decision guide distilling the five profiles above: match the workload's knowledge, latency, and fairness needs to the scheduler that targets them, falling back to a dedicated real-time policy when the fair class's guarantees are not tight enough.
 
 ---
 
@@ -642,7 +651,7 @@ def high_priority_work():
 # FIX option 1: Use nice values to give low-priority thread some CPU but less
 # FIX option 2: MLFQ (demote high-priority CPU-bound thread over time)
 # FIX option 3: Aging — increase priority of waiting threads periodically
-# FIX option 4: Reserve CPU quota for low-priority tasks (cgroup cpu.shares)
+# FIX option 4: Reserve CPU weight for low-priority tasks (cgroup v2 cpu.weight)
 ```
 
 ### Pitfall 3 — Thrashing due to too many runnable threads
@@ -666,9 +675,10 @@ FIX: Reduce the number of OS threads.
 
 ```
 BROKEN: Using FCFS for a web server request queue.
-  Long HTML generation task (50ms) arrives before 1000 lightweight health-check requests (0.1ms each).
+  A 50ms HTML generation task arrives just before 1000 health-check
+  requests of 0.1ms each.
   Result: 1000 requests wait 50ms each -> p99 latency = 50ms.
-  
+
 FIX: Use priority queue (health checks get higher priority) or
      Round-Robin with short quanta to interleave requests.
 ```
@@ -676,13 +686,21 @@ FIX: Use priority queue (health checks get higher priority) or
 ### Pitfall 5 — Misunderstanding Linux nice values
 
 ```bash
-# BROKEN assumption: nice -n 19 makes a process run "only when idle"
-# Reality: nice=19 gets 1/4 of normal (nice=0) CPU time when both are runnable.
-# A nice=19 process WILL run and consume CPU if no nice=0 processes are competing.
+# BROKEN assumption 1: nice -n 19 makes a process run "only when idle"
+# BROKEN assumption 2: each nice step is a big jump, so nice 19 is "about a quarter"
+#
+# Reality: nice maps to a weight from the kernel's sched_prio_to_weight table.
+#   nice   0 -> 1024      nice +1 -> 820     (each step is a factor of ~1.25)
+#   nice +19 ->   15      nice -20 -> 88761
+# Against a single nice=0 competitor a nice=19 task gets 15/(15+1024) = ~1.4%
+# of the CPU -- not 25% -- but it is still >0, so it WILL consume CPU, and it
+# takes 100% of the CPU when nothing else is runnable.
 
 # FIX: if you truly want background-only execution, use:
-#   cgroups cpu.cfs_quota_us to hard-limit CPU time, OR
-#   schedtool -B <pid> for SCHED_BATCH (optimised for throughput, lower priority than normal)
+#   cgroup v2 cpu.max (v1: cpu.cfs_quota_us) to hard-limit CPU time, OR
+#   chrt --idle 0 <pid> / schedtool -D <pid> for SCHED_IDLE, the genuinely
+#     run-only-when-nothing-else-wants-the-CPU policy (weight 3), OR
+#   SCHED_BATCH (chrt --batch) if you only want to suppress wakeup preemption
 ```
 
 ---
@@ -695,9 +713,10 @@ FIX: Use priority queue (health checks get higher priority) or
 | `chrt` | Set real-time scheduling policy (SCHED_FIFO, SCHED_RR, SCHED_DEADLINE) | Requires root; use with care |
 | `taskset` | Pin process/thread to specific CPU cores | Reduces cache misses; used in latency-sensitive services |
 | `perf sched` | Profile scheduler behaviour (latency, wakeups) | `perf sched latency` shows scheduling delays |
-| `/proc/<pid>/sched` | Per-process scheduler stats (vruntime, nr_switches) | Read-only; live data |
-| `cgroups cpu.shares` | Weighted CPU allocation between cgroup groups | Used by Docker `--cpu-shares` |
-| `cgroups cpu.cfs_quota_us` | Hard CPU limit per scheduling period | Used by Docker `--cpus=0.5` |
+| `/proc/<pid>/sched` | Per-process scheduler stats (vruntime, nr_switches; `se.slice` and lag fields under EEVDF) | Read-only; live data |
+| `/sys/kernel/debug/sched/base_slice_ns` | EEVDF's base time slice (700 µs in current mainline) | Replaced `sched_latency_ns` / `sched_min_granularity_ns`, both removed in 6.6 |
+| cgroup v2 `cpu.weight` | Weighted CPU allocation between cgroups (1–10000, default 100) | v1 name is `cpu.shares`; Docker `--cpu-shares` |
+| cgroup v2 `cpu.max` | Hard CPU limit — `"<quota_us> <period_us>"` | v1 names are `cpu.cfs_quota_us`/`cpu.cfs_period_us`; Docker `--cpus=0.5`. Still called CFS bandwidth control |
 | `schedtool` | Inspect/set scheduling policy per thread | Linux; `schedtool -I <pid>` for idle scheduling |
 
 ---
@@ -716,23 +735,23 @@ Response time: RR is much better — every process gets CPU within one quantum p
 **Q4: What is Multi-Level Feedback Queue (MLFQ) and how does it approximate SRTF?**
 MLFQ maintains multiple queues with decreasing priority and increasing quantum. New processes start in the highest-priority queue (short quantum). If a process uses its full quantum, it is demoted to a lower queue (assumed to be CPU-bound, given longer quantum). If it blocks before its quantum expires, it stays in the same or higher queue (assumed to be interactive/I/O-bound, needs low latency). CPU-bound processes are demoted over time; I/O-bound processes stay at high priority — approximating "give short jobs priority" without knowing burst times. Aging prevents starvation.
 
-**Q5: What is the Completely Fair Scheduler (CFS) and how is it different from Round-Robin?**
-CFS tracks each runnable thread's virtual runtime — the total CPU time received, inversely weighted by nice priority. CFS always runs the thread with the smallest vruntime (minimum in a red-black tree). Unlike RR's fixed quantum, CFS's effective quantum is dynamic: the target latency (8–24 ms) divided by the number of runnable threads. Fairness guarantee: each thread gets exactly its proportional share over time. CFS weights are exponential in nice level: each nice level changes weight by ~25%.
+**Q5: What scheduler does Linux use for normal threads, and how is it different from Round-Robin?**
+`SCHED_NORMAL` was the Completely Fair Scheduler from 2007 until Linux 6.5, and has been **EEVDF** (Earliest Eligible Virtual Deadline First) since 6.6 — answering "CFS" is the most common way to date yourself in this question. Both track each runnable thread's virtual runtime: CPU time received, divided by a weight derived from its nice value. CFS simply ran the smallest vruntime (leftmost in a red-black tree) with a dynamic slice = target latency / number of runnable threads. EEVDF keeps the weights and vruntime but adds *lag* (how much CPU a thread is owed) and a *virtual deadline*: only threads with lag ≥ 0 are eligible, and among those the earliest deadline runs. That makes latency a per-task property a thread can request via `sched_setattr()`, instead of something that degraded as more threads became runnable. Unlike RR, neither uses a fixed quantum. Weights are exponential in nice level — each step is a factor of ~1.25 — and that table is unchanged across the switch.
 
 **Q6: What is priority inversion and how does priority inheritance solve it?**
 Priority inversion: a high-priority thread H waits for a mutex held by low-priority thread L; a medium-priority thread M preempts L and runs indefinitely; H is blocked because M prevents L from releasing the mutex. Priority inheritance: when L holds a mutex that H is waiting for, the OS temporarily boosts L's priority to H's level. L finishes quickly, releases the mutex, H unblocks. L's priority returns to its normal level. Example: Mars Pathfinder (1997) — a VxWorks real-time system reset repeatedly due to priority inversion until priority inheritance was re-enabled.
 
 **Q7: What is the time quantum selection tradeoff in Round-Robin?**
-Short quantum (1 ms): excellent response time (every process gets CPU within n ms); poor throughput because context-switch overhead (~5 µs) becomes a significant fraction of the quantum (0.5%). Long quantum (100 ms): good throughput; poor response time for n > 10 processes (wait up to 1 second). Sweet spot: quantum >> context-switch time, but small enough for interactive responsiveness. Linux CFS uses a minimum granularity of 4 ms and a target latency of 8–24 ms.
+Short quantum (1 ms): excellent response time (every process gets CPU within n ms), at a *direct* switch cost of only ~0.1–0.5% — the real bill is indirect, because each switch leaves the incoming thread with a cold L1 and a flushed TLB, which costs several microseconds of degraded execution that never shows up in the switch time itself. Long quantum (100 ms): good throughput; poor response time for n > 10 processes (wait up to 1 second). Sweet spot: quantum >> context-switch time, but small enough for interactive responsiveness. Linux no longer exposes a quantum at all: EEVDF (6.6+) scales a base slice — `/sys/kernel/debug/sched/base_slice_ns`, 700 µs in current mainline — by each thread's weight, and lets a latency-sensitive thread request a shorter one via `sched_setattr()`. The old CFS knobs `sched_min_granularity_ns` and `sched_latency_ns` were removed with the switch.
 
 **Q8: How does SCHED_DEADLINE work in Linux and when should you use it?**
 SCHED_DEADLINE implements Earliest Deadline First (EDF) — the theoretically optimal real-time scheduling algorithm. Each task specifies runtime (max CPU time per period), deadline (must finish within deadline of activation), and period. Linux guarantees that the task runs for `runtime` within every `period`, preempting other tasks if necessary. Use for hard real-time tasks (audio processing at 48 kHz needs 0.02 ms of work every 0.021 ms). Not suitable for general-purpose scheduling — requires careful capacity planning (sum of runtime/period over all SCHED_DEADLINE tasks must be ≤ 1 per CPU).
 
 **Q9: What is the difference between CPU burst and I/O burst, and how do they affect scheduling?**
-A CPU burst is a period of pure computation without I/O. An I/O burst is a period blocked waiting for disk/network. Most interactive processes alternate short CPU bursts with I/O bursts. Most batch/compute processes have long CPU bursts and rare I/O. Schedulers (MLFQ, CFS) try to detect burst patterns: frequent short CPU bursts → high priority (interactive, I/O-bound); infrequent long CPU bursts → lower priority (CPU-bound). The scheduler classifies processes by observed behaviour, not by declaration.
+A CPU burst is a period of pure computation without I/O. An I/O burst is a period blocked waiting for disk/network. Most interactive processes alternate short CPU bursts with I/O bursts. Most batch/compute processes have long CPU bursts and rare I/O. Schedulers (MLFQ, and Linux's fair class) try to detect burst patterns: frequent short CPU bursts → high priority (interactive, I/O-bound); infrequent long CPU bursts → lower priority (CPU-bound). The scheduler classifies processes by observed behaviour, not by declaration.
 
-**Q10: How does the Linux `nice` value map to CFS scheduling priority?**
-Nice values: -20 (highest priority) to +19 (lowest). CFS maps each nice value to a weight using a fixed table where adjacent nice levels differ by ~25% (factor 1.25). Nice 0 → weight 1024. Nice -1 → weight 1277 (1024 × 1.25). Nice +1 → weight 820 (1024 / 1.25). A process at nice -20 gets 1024 / 15 ≈ 68× more CPU than a process at nice +19 when both are runnable. A process at nice +19 is not "idle-only" — it still gets CPU when no higher-priority process wants it.
+**Q10: How does the Linux `nice` value map to scheduling priority?**
+Nice values: -20 (highest priority) to +19 (lowest). The kernel maps each nice value to a weight using the fixed `sched_prio_to_weight` table, where adjacent levels differ by ~25% (factor 1.25) — the same table under CFS and EEVDF. Nice 0 → weight 1024. Nice -1 → 1277 (1024 × 1.25). Nice +1 → 820 (1024 / 1.25). The two ends of the table are nice -20 → **88761** and nice +19 → **15**. Get the ratios right: a nice-0 process gets 1024/15 ≈ **68×** more CPU than a nice +19 one, while nice -20 against nice +19 is 88761/15 ≈ **5,900×**. In general two runnable threads split the CPU as `w_a : w_b`, so nice +19 against a single nice-0 competitor receives 15/(15+1024) ≈ 1.4%. A process at nice +19 is still not "idle-only" — it takes the whole CPU when nothing else is runnable. `SCHED_IDLE` (weight 3) is the policy that actually means "only when idle".
 
 **Q11: What is scheduling latency vs throughput, and how do they conflict?**
 Scheduling latency: time from a thread becoming runnable to when it actually gets CPU. Throughput: tasks completed per second. They conflict because reducing latency requires frequent context switches (preempt the running task quickly for the newly ready task), and context switches have overhead (~1–10 µs) that reduces CPU time available for actual work. Real-time systems minimise latency (preempt immediately); batch systems maximise throughput (run tasks to completion). Servers balance: low latency for interactive requests, high throughput for batch jobs.
@@ -755,7 +774,7 @@ Every context switch has a "cache footprint" cost: the evicted process's working
 
 **Use thread pools instead of unbounded thread creation**: Unbounded threads lead to thrashing (too many runnable threads, high context-switch overhead). Set thread pool size to match the workload (CPU count for CPU-bound; higher for I/O-bound but still bounded).
 
-**Use `nice` and cgroups for workload prioritisation**: For mixed-workload servers, set batch jobs to nice +10 or higher. Use cgroups `cpu.shares` (relative weight) for container-level fairness, and `cpu.cfs_quota_us` for hard limits.
+**Use `nice` and cgroups for workload prioritisation**: For mixed-workload servers, set batch jobs to nice +10 or higher. On cgroup v2 (the default everywhere now) use `cpu.weight` for container-level proportional fairness and `cpu.max` for hard limits; the legacy v1 spellings are `cpu.shares` and `cpu.cfs_quota_us`.
 
 **Measure scheduling latency, not just throughput**: A server with 100% throughput at 10,000 QPS may have a p99 latency of 5 seconds if scheduler latency spikes. Use `perf sched latency` and histogram-based latency monitoring.
 
@@ -853,7 +872,7 @@ class BrokenFIFOScheduler:
 **Discussion questions**:
 1. How would you implement priority-based scheduling in a thread pool without modifying the OS scheduler?
 2. What is the risk of setting the aging threshold too low?
-3. How does Kubernetes CPU requests/limits map to Linux CFS `cpu.shares` and `cpu.cfs_quota_us`?
+3. How does a Kubernetes CPU request/limit map onto cgroup v2's `cpu.weight` and `cpu.max` (v1: `cpu.shares` and `cpu.cfs_quota_us`)?
 
 ---
 
@@ -861,5 +880,5 @@ class BrokenFIFOScheduler:
 
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — what gets switched and what it costs
 - [deadlocks_and_synchronization](../deadlocks_and_synchronization/deadlocks_and_synchronization.md) — priority inversion (affects scheduling)
-- [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — CFS in production (cgroups, nice, taskset, perf)
+- [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — the Linux fair scheduler in production (cgroups, nice, taskset, perf)
 - [`java/concurrency`](../../java/concurrency/concurrency.md) — Java thread priorities, ForkJoinPool work-stealing

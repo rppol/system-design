@@ -26,17 +26,17 @@ This module covers paging (the dominant memory management scheme), page table st
 
 **Why it matters**: Virtual memory is what makes modern multiprogramming possible. Without it: programs must know their physical addresses at compile time; one program's bug corrupts another's memory; RAM is limited to what's physically installed. With virtual memory: programs use arbitrary virtual addresses; the OS isolates processes; programs can use more memory than physically installed (at the cost of page faults).
 
-**Key insight**: The TLB miss cost (~100–200 ns for a 4-level page table walk) is the hidden penalty for large working sets. A program that fits in the TLB (~256 MB for 64 L1 TLB entries × 4 MB per huge page) runs at full speed; a program that exceeds the TLB's coverage pays hundreds of nanoseconds per unique page access.
+**Key insight**: The TLB miss cost (~400 ns for a cold 4-level page-table walk — four dependent DRAM reads; the CPU's page-walk caches often shave this to tens of nanoseconds, but the cold case is what a thrashing working set pays) is the hidden penalty for large working sets. A program that fits in the TLB (~128 MB for 64 L1 TLB entries × 2 MB per huge page) runs at full speed; a program that exceeds the TLB's coverage pays hundreds of nanoseconds per unique page access.
 
 ---
 
 ## 3. Core Principles
 
-**Paging**: Divide physical memory into fixed-size frames (4 KB standard, 2 MB or 1 GB "huge pages"). Divide virtual address space into pages of the same size. The page table maps virtual page number → physical frame number + flags (present, dirty, accessed, read-only, user/kernel). Paging eliminates external fragmentation (no contiguous allocation needed) at the cost of internal fragmentation (last page partially filled).
+**Paging**: Divide physical memory into fixed-size frames (4 KB standard on x86-64 and most Linux; **16 KB on Apple Silicon macOS**, and 4/16/64 KB granules on ARM64; plus 2 MB or 1 GB "huge pages"). Divide virtual address space into pages of the same size. The page table maps virtual page number → physical frame number + flags (present, dirty, accessed, read-only, user/kernel). Paging eliminates external fragmentation (no contiguous allocation needed) at the cost of internal fragmentation (last page partially filled).
 
 **Page fault**: When the CPU accesses a virtual address whose page table entry has present-bit = 0, the MMU raises a page-fault exception. The OS handler: (1) checks if the access is valid (not a segfault), (2) finds the required page (in swap, from a file, or zero-filled on first access), (3) loads the page into a free physical frame, (4) updates the page table entry (sets present-bit), (5) resumes the faulting instruction.
 
-**TLB (Translation Lookaside Buffer)**: A hardware cache for page table entries, managed automatically by the MMU. A TLB hit (VPN in cache) takes ~1 cycle. A TLB miss triggers a page-table walk: on x86-64, 4 levels of page table → 4 DRAM accesses (~100 ns each = ~400 ns total). TLBs are fully associative, with 64–1024 entries. On context switch between processes, the TLB is flushed (PCID extensions reduce flushes on modern CPUs).
+**TLB (Translation Lookaside Buffer)**: A hardware cache for page table entries, managed automatically by the MMU. A TLB hit (VPN in cache) takes ~1 cycle. A TLB miss triggers a page-table walk: on x86-64, 4 levels of page table → up to 4 dependent DRAM accesses (~100 ns each = ~400 ns worst case; dedicated page-walk caches for the upper levels usually make the real cost much lower). x86-64 also defines **5-level paging** (LA57), which extends the walk to 5 levels and the virtual address to 57 bits — supported by Ice Lake-SP and later Xeons and by Linux since 4.14, but 4-level/48-bit remains the default. The TLB is itself hierarchical: a small, highly-associative L1 dTLB (64–100 entries on current x86-64) backed by a larger set-associative L2 "STLB" (1,500–3,000+ entries). On context switch between processes, the TLB is flushed (PCID/ASID tagging avoids most of these flushes on modern CPUs).
 
 **Copy-on-write (COW)**: After `fork()`, parent and child share physical pages mapped read-only. The first write to a shared page triggers a page fault; the OS copies the page and maps the copy privately. This makes `fork()` fast (O(page-table-size), not O(address-space-size)).
 
@@ -51,7 +51,7 @@ This module covers paging (the dominant memory management scheme), page table st
 | Structure | Description | Used in |
 |-----------|-------------|---------|
 | Single-level (flat) | One array indexed by VPN; O(1) lookup but huge for large address spaces | 32-bit simple OSes |
-| Multi-level (hierarchical) | Tree of page tables; only allocated for used regions; 4-level on x86-64 | Linux x86-64 (4 levels: PGD/PUD/PMD/PTE) |
+| Multi-level (hierarchical) | Tree of page tables; only allocated for used regions; 4-level (48-bit VA) or 5-level (57-bit VA, LA57) on x86-64 | Linux x86-64 — 4 levels PGD/PUD/PMD/PTE, or 5 with P4D inserted below PGD when LA57 is on |
 | Inverted page table | Indexed by physical frame (not VPN); smaller; requires hash for VPN lookup | IBM PowerPC, HP-UX |
 | TLB-managed (software TLB) | OS handles all TLB misses in software; flexible but slower | MIPS, some RISC architectures |
 
@@ -62,8 +62,9 @@ This module covers paging (the dominant memory management scheme), page table st
 | OPT (Optimal/Bélády) | Evict the page used furthest in future | Minimum possible | No (requires future knowledge) |
 | FIFO | Evict the oldest loaded page | Poor (Bélády's anomaly) | Yes (simple) |
 | LRU | Evict the least recently used page | Near-optimal in practice | Costly (need exact recency) |
-| Clock (Second Chance) | Approximates LRU; use-bit per page | Good | Yes (Linux uses variant) |
-| Clock-Pro | Two-clock hands; distinguishes hot/cold | Better than Clock | Yes (modern Linux) |
+| Clock (Second Chance) | Approximates LRU; use-bit per page | Good | Yes (Linux's active/inactive two-list reclaim is a Clock variant) |
+| Clock-Pro | Two-clock hands; distinguishes hot/cold | Better than Clock | Proposed for Linux but never merged; used in research and some DB buffer pools |
+| MGLRU (Multi-Gen LRU) | Ages pages across several generations instead of two lists; reclaims the oldest generation first | Better than the two-list scheme under memory pressure | Yes — merged in Linux 6.1 behind `CONFIG_LRU_GEN`, toggled at `/sys/kernel/mm/lru_gen/enabled`; shipped on by default on Android and ChromeOS, opt-in in mainline distros |
 | LFU | Evict least frequently used | Poor for recency | Yes |
 
 ### Memory Allocation in the OS
@@ -134,6 +135,8 @@ Every one of those bit-widths is forced by a physical constraint, not chosen for
     A 4-level tree instead allocates only the branches actually used:
     a process touching one page needs 4 tables x 4 KB = 16 KB total.
 ```
+
+**And the same arithmetic gives you 5-level paging for free.** Bolt one more 9-bit index (the P4D level) on top and the address widens to `9 + 9 + 9 + 9 + 9 + 12 = 57 bits` — 128 PiB of address space, 64 PiB of it user-side. That is exactly what x86-64's LA57 mode does; it is available on Ice Lake-SP and later Xeons and supported by Linux since 4.14, but 4-level/48-bit is still the default because the fifth level adds a fifth dependent memory read to every cold page-table walk for address space almost nobody needs yet.
 
 **Why 2 MB and 1 GB are the huge-page sizes.** They are not arbitrary marketing numbers — they are precisely the spans of one PMD and one PUD entry. A huge page is nothing more than stopping the walk one level early and treating that entry's whole span as a single page, which is why only those two sizes exist and why no one offers a 512 KB page. The same identity explains the "512" in "one 2 MB TLB entry replaces 512 4 KB entries" later in Section 7: `2 MB / 4 KB = 512`, the branching factor of the tree.
 
@@ -412,11 +415,16 @@ def measure_tlb_impact(size_mb: int = 256, strides: list[int] = None) -> dict[in
         _ = total   # prevent optimisation
 
     return results
-    # Expected results:
-    # stride=4B:    ~0.5 ns (L1 cache, hot TLB)
-    # stride=64B:   ~1 ns (cache line boundary)
-    # stride=4096B: ~5–10 ns (new TLB entry per access, but fits in TLB)
-    # stride=65536B:~30–50 ns (TLB thrashing for large arrays)
+    # Expected HARDWARE-level cost per access. A CPython for-loop adds roughly
+    # 50-100 ns of interpreter overhead to every row, so read the differences
+    # between rows, not the absolute numbers (0.5 ns/iteration is not reachable
+    # from pure Python — port the loop to C or Cython to see these directly):
+    # stride=4B:     ~1 ns     L1 hit; 16 int32 per 64 B line, one page per 1024 accesses
+    # stride=64B:    ~1-4 ns   new cache line each access, still one page per 64 accesses
+    # stride=4096B:  ~10-30 ns a new page on EVERY access; 256 MB / 4 KB = 65,536
+    #                          distinct pages, far more than any TLB holds -> thrashing
+    # stride=65536B: ~10-30 ns also a new page every access (4,096 distinct pages), and
+    #                          the stride is too large for the hardware prefetcher
 ```
 
 ---
@@ -427,11 +435,11 @@ def measure_tlb_impact(size_mb: int = 256, strides: list[int] = None) -> dict[in
 
 **JVM heap and virtual memory**: JVM allocates its heap via `mmap` with `PROT_NONE` (reserved but not mapped). Physical pages are committed lazily as the GC allocates objects. A 4 GB heap reservation does not require 4 GB of RAM immediately — only committed (accessed) pages consume physical memory. The GC manages object allocation within the heap; the OS manages physical frame allocation and page faults within the heap region. See [`java/jvm_internals`](../../java/jvm_internals/jvm_internals.md).
 
-**Huge pages**: x86-64 supports 2 MB and 1 GB huge pages. Benefits: fewer TLB entries needed for the same memory coverage (one 2 MB huge-page TLB entry covers what 512 regular 4 KB TLB entries would). For databases (PostgreSQL, MySQL), memory-mapped files, and JVM heaps, huge pages reduce TLB miss rate dramatically. In Linux: `mmap(MAP_HUGETLB)` or Transparent Huge Pages (THP, enabled by default).
+**Huge pages**: x86-64 supports 2 MB and 1 GB huge pages. Benefits: fewer TLB entries needed for the same memory coverage (one 2 MB huge-page TLB entry covers what 512 regular 4 KB TLB entries would). For databases (PostgreSQL, MySQL), memory-mapped files, and JVM heaps, huge pages reduce TLB miss rate dramatically. In Linux: `mmap(MAP_HUGETLB)` against a pre-reserved hugetlbfs pool, or Transparent Huge Pages (THP). THP's mode is per-distribution — read `/sys/kernel/mm/transparent_hugepage/enabled` to see whether yours ships `always` or `madvise`; only `always` promotes regions you never asked to be promoted.
 
 **Memory-mapped files**: `mmap()` maps a file into the virtual address space. Reads and writes go through the page cache — the file is loaded page-by-page as needed (demand paging). Databases (SQLite WAL, PostgreSQL shared buffers) and executables (ELF loading via dynamic linker) use mmap. The OS flushes dirty mmap pages to the file asynchronously; `msync()` forces synchronous flush.
 
-**Android's swap mechanism (zRAM)**: Android devices typically have no swap partition. Instead, Linux's `zram` driver creates a compressed in-memory swap device. Pages evicted to zRAM are compressed (~2:1 ratio), effectively extending RAM. A 4 GB device effectively has ~6 GB of "available memory" via zRAM. Compression adds ~50–100 µs latency per evicted/loaded page vs the ~100 µs for SSD swap.
+**Android's swap mechanism (zRAM)**: Android devices typically have no swap partition. Instead, Linux's `zram` driver creates a compressed in-memory swap device. Pages evicted to zRAM are compressed (~2:1 ratio), effectively extending RAM. A 4 GB device effectively has ~6 GB of "available memory" via zRAM. Compressing or decompressing one 4 KB page with lzo-rle or zstd costs only a few microseconds, one to two orders of magnitude less than the ~100 µs of an SSD swap read — which is the entire reason zRAM is worth the CPU.
 
 ---
 
@@ -480,7 +488,7 @@ quadrantChart
 
 | Page size | TLB coverage | Internal fragmentation | Page fault cost | Used in |
 |-----------|-------------|----------------------|-----------------|---------|
-| 4 KB | 4 KB per entry | Low | Low per fault | Default everywhere |
+| 4 KB | 4 KB per entry | Low | Low per fault | Default on x86-64 and most Linux (Apple Silicon macOS uses 16 KB; some ARM64 distros use 64 KB) |
 | 2 MB | 2 MB per entry | High (last 2MB partially used) | Higher per fault | Databases, JVM heap |
 | 1 GB | 1 GB per entry | Very high | Very high per fault | Large in-memory databases |
 
@@ -638,26 +646,26 @@ FIX: pin PostgreSQL to physical memory:
 | `mlock` / `mlockall` | Pin pages to RAM (prevent swap) | Requires root or CAP_IPC_LOCK |
 | `madvise` | Hint to OS about access patterns | MADV_SEQUENTIAL, MADV_RANDOM, MADV_WILLNEED |
 | `numactl` | NUMA memory policy (bind to node) | For multi-socket servers; latency-critical processes |
-| `sysctl vm.swappiness` | Control swap tendency (0–100) | 0 = avoid swap; 60 = default Linux |
+| `sysctl vm.swappiness` | Control swap tendency (0–200 since Linux 5.8; 0–100 before) | 0 = avoid swap until reclaim has no alternative; 60 = default; >100 favours evicting anonymous pages over page cache |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between virtual memory and physical memory?**
-Physical memory is the actual DRAM in the machine. Virtual memory is an abstraction: each process sees a private virtual address space (0 to ~128 TiB on x86-64). The MMU translates virtual addresses to physical addresses on every access using the page table. Virtual address spaces can be larger than physical RAM — pages not currently needed are stored on swap disk. The key benefit is isolation: two processes can use the same virtual address (e.g., code loaded at 0x400000) without conflict — they map to different physical frames.
+Physical memory is the actual DRAM in the machine. Virtual memory is an abstraction: each process sees a private virtual address space (0 to ~128 TiB of user space on x86-64 with the default 4-level/48-bit paging; 64 PiB with 5-level/57-bit LA57). The MMU translates virtual addresses to physical addresses on every access using the page table. Virtual address spaces can be larger than physical RAM — pages not currently needed are stored on swap disk. The key benefit is isolation: two processes can use the same virtual address (e.g., code loaded at 0x400000) without conflict — they map to different physical frames.
 
 **Q2: What is a page fault, and what is the difference between a soft and hard page fault?**
 A page fault is a hardware exception raised by the MMU when the accessed page's present-bit is 0. Soft (minor) page fault: the page is in physical memory but not mapped in the page table (e.g., first anonymous allocation via mmap, copy-on-write trigger, shared library already loaded for another process). The OS updates the page table entry with no I/O — handled in microseconds. Hard (major) page fault: the page must be read from swap disk or a file — takes ~100 µs (SSD) to ~10 ms (HDD). Frequent hard page faults cause "thrashing" — the system spends more time swapping than computing.
 
 **Q3: How does the TLB work and what is a TLB miss?**
-The TLB (Translation Lookaside Buffer) is a small, fully associative hardware cache (64–1024 entries) that stores recent VPN→PFN translations. On every memory access, the MMU checks the TLB first. TLB hit: translation found in ~1 cycle. TLB miss: walk the multi-level page table in memory — 4 DRAM accesses on x86-64 (~400 ns total). Spatial and temporal locality keep TLB hit rates high (>99% for typical programs). Large working sets (hundreds of MB with random access) cause TLB thrashing — hit rate drops, every access pays 400 ns. Huge pages (2 MB each) reduce TLB entry consumption by 512×, mitigating this.
+The TLB (Translation Lookaside Buffer) is a hardware cache of recent VPN→PFN translations, and it is hierarchical on modern x86-64: a small highly-associative L1 dTLB (64–100 entries) backed by a set-associative L2 STLB (1,500–3,000+ entries). On every memory access, the MMU checks the TLB first. TLB hit: translation found in ~1 cycle. TLB miss: walk the multi-level page table in memory — up to 4 dependent DRAM accesses on x86-64 (~400 ns for a fully cold walk; page-walk caches for the upper levels usually make it much cheaper). Spatial and temporal locality keep TLB hit rates high (>99% for typical programs). Large working sets (hundreds of MB with random access) cause TLB thrashing — hit rate drops, every access pays 400 ns. Huge pages (2 MB each) reduce TLB entry consumption by 512×, mitigating this.
 
 **Q4: What is the Clock page-replacement algorithm and how does it approximate LRU?**
 The Clock algorithm maintains a circular buffer of physical frames, each with a use-bit. When a page is accessed, its use-bit is set. When a page must be evicted: the clock hand advances from its current position; if a frame's use-bit is 0, evict it; if the use-bit is 1, clear it (second chance) and advance. This approximates LRU: recently accessed pages have use-bit=1 (protected for one full revolution); pages not accessed in a full revolution are evicted. Linux uses a two-list variant (active/inactive lists) with similar second-chance semantics.
 
 **Q5: What is Bélády's anomaly and which algorithm exhibits it?**
-Bélády's anomaly: adding more physical frames causes more page faults, which is counterintuitive. It is observed with FIFO page replacement. Intuition: FIFO evicts the "oldest" loaded page, which may be a frequently-used page. Adding a frame changes the eviction pattern in a way that evicts pages needed sooner. LRU, OPT, and Clock do not exhibit Bélády's anomaly — they are "stack algorithms" (the set of pages in memory for n frames is always a subset of the pages for n+1 frames).
+Bélády's anomaly: adding more physical frames causes more page faults, which is counterintuitive. It is observed with FIFO page replacement. Intuition: FIFO evicts the "oldest" loaded page, which may be a frequently-used page. Adding a frame changes the eviction pattern in a way that evicts pages needed sooner. LRU, OPT and LFU do not exhibit Bélády's anomaly — they are "stack algorithms" (the set of pages in memory for n frames is always a subset of the pages for n+1 frames). The trap in this question is Clock: Clock/Second-Chance is a FIFO derivative, **not** a stack algorithm, so it can exhibit the anomaly too — just far more rarely than plain FIFO, because the use-bit rescues the hot pages FIFO would have thrown away.
 
 **Q6: How does copy-on-write (COW) make fork() efficient?**
 After `fork()`, the kernel marks all parent's writable pages as read-only in both parent and child page tables but still pointing to the same physical frames. If neither process writes, no copying occurs — ideal for fork+exec (child immediately replaces its address space with exec). When either process writes to a shared page, the write causes a write-protection fault; the OS copies the page into a new physical frame and updates the faulting process's page table. Only actually-modified pages are copied. For a 2 GB process that fork-execs, only the few modified pages (environment, arguments) are copied — typically <1 MB.
@@ -687,7 +695,7 @@ The working set W(t, Δ) is the set of pages referenced by a process in the time
 Paging: memory divided into fixed-size pages (4 KB). No external fragmentation; internal fragmentation in the last page. Address = virtual page number + offset. Supported by hardware MMU. Segmentation: memory divided into variable-size segments (code, data, stack). No internal fragmentation; external fragmentation creates holes. Address = segment number + offset. x86 originally used segmentation (CS, DS, SS, ES registers); modern 64-bit Linux uses flat segments (base=0, limit=max) effectively disabling segmentation in favour of paging. Segmentation is largely a legacy concept.
 
 **Q15: How does the Linux OOM killer decide which process to kill?**
-The OOM killer selects the process with the highest `oom_score`. `oom_score` = proportion of physical memory used by the process + adjustments. `oom_score_adj` (-1000 to +1000) lets you manually tune: -1000 = never kill this process (use for system-critical processes), +1000 = kill first. The OOM killer prefers processes that: (1) use the most memory; (2) have been running the shortest; (3) have the most children; (4) are not kernel threads. To protect a service: set `oom_score_adj = -900` in its systemd unit file (`OOMScoreAdjust=-900`).
+The OOM killer selects the process with the highest `oom_score`. The kernel's `oom_badness()` is deliberately simple: points = RSS + swap entries + page-table bytes, expressed as a fraction of total memory, plus `oom_score_adj` scaled into the same units. `oom_score_adj` (-1000 to +1000) lets you tune it: -1000 makes a task unkillable, +1000 kills it first. So in practice the biggest memory consumer dies, and only three things are exempt — kernel threads, PID 1, and anything at `oom_score_adj = -1000`. (The old pre-2.6.36 heuristic that also weighed process age, `nice` value and child count is long gone; do not quote it.) To protect a service: set `OOMScoreAdjust=-900` in its systemd unit file.
 
 ---
 
@@ -697,7 +705,7 @@ The OOM killer selects the process with the highest `oom_score`. `oom_score` = p
 
 **Disable THP for latency-sensitive databases**: Redis, MongoDB, and MySQL all recommend `echo never > /sys/kernel/mm/transparent_hugepage/enabled`. THP compaction stalls cause multi-millisecond latency spikes at unpredictable intervals.
 
-**Enable huge pages for predictable high-throughput workloads**: PostgreSQL with `huge_pages=on`, Java with `-XX:+UseHugePages`, and Oracle DB with hugepage configurations consistently show 5–20% performance improvements for memory-intensive workloads.
+**Enable huge pages for predictable high-throughput workloads**: PostgreSQL with `huge_pages=on`, Java with `-XX:+UseLargePages` (HotSpot's flag; `-XX:+UseHugePages` does not exist), and Oracle DB with hugepage configurations consistently show 5–20% performance improvements for memory-intensive workloads.
 
 **Set container memory limits equal to memory requests**: Overcommitted containers (limit > request × 2) risk OOM kills under bursty load. For services with SLAs, set limit = request + 20% headroom.
 
@@ -718,9 +726,12 @@ A Java service running in a container with 8 GB memory limit is experiencing int
 vmstat 1 10 | awk '{print $7, $8}'   # si (swap in), so (swap out)
 # si > 0 or so > 0 -> pages being swapped -> latency spikes
 
-# Check RSS vs container limit
-cat /sys/fs/cgroup/memory/memory.usage_in_bytes   # current usage
-cat /sys/fs/cgroup/memory/memory.limit_in_bytes   # limit
+# Check RSS vs container limit (cgroup v2 — the unified default on all current distros)
+cat /sys/fs/cgroup/memory.current   # current usage
+cat /sys/fs/cgroup/memory.max       # limit
+cat /sys/fs/cgroup/memory.pressure  # PSI: how long tasks stalled on memory
+# On a legacy cgroup v1 host the equivalents are
+#   /sys/fs/cgroup/memory/memory.usage_in_bytes and memory.limit_in_bytes
 
 # Check GC and page fault events
 # Java: add -Xlog:gc* to JVM flags
@@ -745,9 +756,9 @@ java \
   -XX:MaxMetaspaceSize=512m \  # cap metaspace
   -XX:+UseG1GC \               # G1: predictable pause targets
   -XX:MaxGCPauseMillis=50 \    # target max GC pause < 50ms
-  -XX:+UseHugePages \          # 2MB pages -> fewer TLB misses
+  -XX:+UseLargePages \         # 2MB pages -> fewer TLB misses (HotSpot's flag name;
+                               #   -XX:+UseTransparentHugePages if no hugetlbfs pool)
   -XX:+AlwaysPreTouch \        # pre-fault all heap pages at startup
-  -Djava.nio.file.spi.DefaultFileSystemProvider=... \
   -jar service.jar
 # Total memory: 4GB heap + 512MB metaspace + ~1GB stacks/direct buffers = ~5.5GB RSS
 # Container limit 8GB: sufficient headroom

@@ -53,7 +53,7 @@ The data structure foundations (adjacency list/matrix, Trie, Union-Find, segment
 | BFS | Unweighted (all = 1) | O(V + E) | O(V) | Social networks, grid problems, word ladder |
 | Dijkstra | Non-negative | O((V+E) log V) | O(V) | Route planning, network routing (OSPF) |
 | Bellman-Ford | Any (detects neg cycles) | O(VE) | O(V) | Arbitrage detection, distributed Bellman-Ford in RIP |
-| SPFA | Typically O(E), worst O(VE) | O(VE) worst | O(V) | Faster Bellman-Ford in practice (queue-based) |
+| SPFA | Any (detects neg cycles) | Typically O(E), worst O(VE) | O(V) | Faster Bellman-Ford in practice (queue-based) |
 | Floyd-Warshall | Any (no neg cycles) | O(V³) | O(V²) | All-pairs shortest path, transitive closure |
 | A* | Non-negative + heuristic | O(E log V) | O(V) | Grid pathfinding (with admissible heuristic) |
 
@@ -259,7 +259,7 @@ Final dist: [0, 4, 5, 2, 3, 7, 4]
 
 ```
 Pattern: "ABCABCABD"
-         0123456789
+          012345678
 
 Build fail[]:
   fail[0] = 0   (A: no proper prefix that is also suffix)
@@ -829,11 +829,11 @@ def z_search(text: str, pattern: str) -> List[int]:
 
 **Dijkstra in network routing**: OSPF (Open Shortest Path First), the most widely deployed interior gateway routing protocol, runs Dijkstra on the weighted link-state graph on every router to compute shortest-path trees. Each router maintains the full topology and runs Dijkstra independently. Modern OSPF implementations use binary heaps achieving O((V+E) log V) per topology change.
 
-**Bellman-Ford in finance**: Arbitrage detection: model currencies as vertices, exchange rates as edge weights (log of rate). A negative cycle means a sequence of exchanges that returns more than the starting amount — Bellman-Ford detects this in O(VE). Used in automated trading systems.
+**Bellman-Ford in finance**: Arbitrage detection: model currencies as vertices and give each exchange rate an edge weight of −log(rate). Multiplying rates around a cycle becomes adding weights, and a product greater than 1 becomes a sum less than 0 — so a negative cycle is exactly a sequence of exchanges that returns more than the starting amount (using +log instead of −log flips the sign and makes the profitable cycle a *positive* one, which Bellman-Ford does not look for) — Bellman-Ford detects this in O(VE). Used in automated trading systems.
 
 **Topological sort in build systems**: Bazel, Gradle, and Make represent build targets as DAG nodes with edges for dependencies. Topological sort finds the order in which targets must be built. Kahn's algorithm is preferable because it naturally detects circular dependencies (unprocessed nodes after Kahn's = nodes in a cycle).
 
-**KMP in grep/search tools**: GNU `grep` uses a variant of BM (Boyer-Moore), but finite-automaton approaches (equivalent to KMP) are used in regex engines for simple patterns. The Linux kernel's `string.h` uses a memchr loop; glibc uses SIMD-optimised KMP variants for `memmem`.
+**KMP in grep/search tools**: GNU `grep` uses a variant of BM (Boyer-Moore), but finite-automaton approaches (equivalent to KMP) are used in regex engines for simple patterns. glibc's `memmem`/`strstr` use the Two-Way algorithm (Crochemore-Perrin) — a linear-time, constant-space method with a Boyer-Moore-style skip — plus vectorised fast paths for short needles; the Linux kernel's `lib/string.c` `strstr()` is a plain naive scan, on the grounds that kernel needles are tiny.
 
 **Rabin-Karp in plagiarism detection**: MOSS (Measure Of Software Similarity, Stanford) uses rolling hashes to find common k-gram fingerprints across student submissions — conceptually Rabin-Karp with multiple patterns using a hash map instead of single-pattern comparison.
 
@@ -859,7 +859,7 @@ def z_search(text: str, pattern: str) -> List[int]:
 
 | Scenario | Best choice | Reasoning |
 |----------|-------------|-----------|
-| Single short pattern, simple code | Naive or Python `in` | O(nm) acceptable for small m |
+| Single pattern, simple code | Python `in` / `str.find` | CPython uses a Two-Way (Crochemore-Perrin) algorithm with a Bloom-filter skip for longer needles, so it is O(n+m) worst case and beats hand-written KMP in practice |
 | Long text, single pattern, worst-case guarantees | KMP or Z-algorithm | O(n+m) guaranteed |
 | Multiple patterns simultaneously | Aho-Corasick | O(n + M + k), k = matches |
 | Rolling hash applications (substring matching, fingerprinting) | Rabin-Karp | Easy to implement; average O(n+m) |
@@ -886,11 +886,25 @@ def z_search(text: str, pattern: str) -> List[int]:
 ### Pitfall 1 — Dijkstra with negative edges (wrong result, no error)
 
 ```python
-# BROKEN: Dijkstra on a graph with negative edge (-5) returns wrong distances
-# Graph: 0->1 (weight=10), 0->2 (weight=2), 2->1 (weight=-5)
-# Correct dist[1] = 2 + (-5) = -3, but Dijkstra finalises dist[1]=10 first
-
-# No error is raised — the algorithm silently returns wrong results.
+# BROKEN: Dijkstra on a graph with a negative edge returns wrong distances.
+# Graph: 0->1 (w=1), 0->2 (w=2), 2->1 (w=-2), 1->3 (w=1)
+#
+#   true distances (Bellman-Ford):  [0, 0, 2, 1]     0->2->1->3 costs 1
+#   Dijkstra with a visited set:    [0, 0, 2, 2]     dist[3] is WRONG
+#
+# Why: 1 is popped at distance 1 and marked visited, so its outgoing edge
+# 1->3 is relaxed with that stale value and yields dist[3] = 2. Vertex 2 is
+# popped next and improves dist[1] to 0 -- but 1 is already visited, so 1->3
+# is never re-relaxed. No error is raised; a wrong number is just returned.
+#
+# The counterexample has to be built carefully: a negative edge alone is not
+# enough. The prematurely finalised vertex must have OUTGOING edges that need
+# the improved distance. And the lazy-deletion form in Section 6 (no visited
+# set, `if d > dist[u]: continue`) re-pushes vertex 1 and does get [0,0,2,1]
+# right here -- but it has stopped being Dijkstra. Its "popped means final"
+# invariant is gone, a single improvement can re-enqueue an entire subtree,
+# and on adversarial graphs the runtime degrades from O((V+E) log V) to
+# exponential. Neither form is safe with negative weights.
 ```
 
 ```python
@@ -969,27 +983,33 @@ def dijkstra_correct(adj, n, src):
 ### Pitfall 4 — KMP: wrong failure function from 1-indexed code
 
 ```python
-# BROKEN: KMP failure function starting fail[0]=0 but off-by-one in loop
+# BROKEN: 0-indexed code carrying the 1-indexed fallback rule. Texts that index
+# the pattern from 1 write the fallback as j = pi[j]; in 0-indexed code it must
+# be j = fail[j - 1]. Transcribing it literally hangs the process.
 def broken_kmp_fail(pattern):
     m = len(pattern)
     fail = [0] * m
     j = 0
     for i in range(1, m):
         while j > 0 and pattern[j] != pattern[i]:
-            j = fail[j - 1]
+            j = fail[j]              # BUG: must be fail[j - 1]
         if pattern[j] == pattern[i]:
             j += 1
         fail[i] = j
-    # BUG: forgot to reset j=0 between calls -> function is not reentrant
     return fail
+    # On pattern "AAB": at i=2 we have j=1 and fail[1]=1, so j = fail[1] = 1
+    # forever. The while loop never terminates and never decreases j -- the
+    # symptom is a pegged CPU and a hung thread, not a wrong answer, which is
+    # why it survives unit tests that only cover patterns with fail[] all zero.
 ```
 
 ```python
-# FIX: use a local variable (j starts at 0, scoped to the function)
+# FIX: fall back to the NEXT-SHORTER border, fail[j - 1], so j strictly
+# decreases on every iteration and the loop is guaranteed to terminate.
 def kmp_failure_function_fixed(pattern: str) -> list[int]:
     m = len(pattern)
     fail = [0] * m
-    k = 0                            # local, not shared
+    k = 0
     for i in range(1, m):
         while k > 0 and pattern[k] != pattern[i]:
             k = fail[k - 1]
@@ -1042,7 +1062,7 @@ def fixed_rabin_karp(text, pattern):
 BFS gives the correct shortest path in terms of hop count (for unweighted graphs) because it processes nodes in non-decreasing order of distance — the first time a node is reached is via the shortest path. DFS explores one path to its end before backtracking; it may find a path that is not shortest. For weighted graphs, neither BFS nor DFS gives shortest weighted paths — use Dijkstra or Bellman-Ford.
 
 **Q2: Why can't Dijkstra handle negative edge weights? Give a concrete counterexample.**
-Dijkstra's invariant: once a vertex u is extracted from the heap, dist[u] is final. With negative weights, a path through an unvisited vertex might use a negative edge to produce a shorter path to u after u has been finalised. Counterexample: vertices {0,1,2}, edges 0->1 (w=2), 0->2 (w=3), 2->1 (w=-2). Dijkstra finalises dist[1]=2 (shortest via 0->1), but the true shortest is 0->2->1 = 1. Bellman-Ford correctly finds this by relaxing edges in two passes.
+Dijkstra's invariant: once a vertex u is extracted from the heap, dist[u] is final. With negative weights, a path through an unvisited vertex might use a negative edge to produce a shorter path to u after u has been finalised. Counterexample: vertices {0,1,2,3}, edges 0->1 (w=1), 0->2 (w=2), 2->1 (w=-2), 1->3 (w=1). Dijkstra pops 1 at distance 1, marks it final, and relaxes 1->3 to give dist[3]=2; popping 2 next improves dist[1] to 0, but 1 is already visited so 1->3 is never re-relaxed and dist[3] stays 2 instead of the true 1. Note that the damage needs the prematurely finalised vertex to have outgoing edges — the toy 3-vertex versions of this counterexample usually still come out right, which is why the bug survives casual testing. Bellman-Ford relaxes every edge on every pass and gets [0, 0, 2, 1].
 
 **Q3: What is the time complexity of Dijkstra with a binary heap and why?**
 O((V + E) log V). Each vertex is extracted from the heap once: V extractions × O(log V) each = O(V log V). Each edge triggers at most one relaxation and heap push: E pushes × O(log V) each = O(E log V). Total: O((V + E) log V). With a Fibonacci heap, decrease-key is O(1) amortised, giving O(V log V + E). In practice, the binary heap version is faster due to better cache behaviour.
@@ -1072,7 +1092,7 @@ Build systems (Bazel, Maven dependency resolution), course prerequisite scheduli
 Undirected: during DFS, if a visited neighbour is not the direct parent of the current vertex (i.e., it's a back edge to an ancestor other than the parent), a cycle exists. Use parent tracking in the DFS call. Directed: use 3-colour DFS (white/unvisited, gray/in-stack, black/done). A gray neighbour is a back edge = cycle. Black neighbours are safe (already fully explored). Undirected cycle detection is simpler because any DFS tree back edge creates a cycle; in directed graphs, only back edges (to gray nodes) create directed cycles — cross edges and forward edges do not.
 
 **Q12: When would you use Floyd-Warshall over Dijkstra for shortest paths?**
-Floyd-Warshall is O(V³) and computes all-pairs shortest paths (APSP). Use it when: you need APSP and V is small (≤500 — beyond that, 500³ = 1.25×10^8 operations becomes slow); the graph has negative weights but no negative cycles. Dijkstra with re-running from each source is O(V(V+E) log V) — faster than Floyd-Warshall for sparse graphs but equally fast for dense. Floyd-Warshall is also trivially simple to implement (three nested loops).
+Floyd-Warshall is O(V³) and computes all-pairs shortest paths (APSP). Use it when: you need APSP and V is small (≤500 — beyond that, 500³ = 1.25×10^8 operations becomes slow); the graph has negative weights but no negative cycles. Dijkstra re-run from each source is O(V(V+E) log V) — much faster than Floyd-Warshall on sparse graphs, but on dense graphs (E ≈ V²) it becomes O(V³ log V), a log factor *slower* than Floyd-Warshall, and it cannot handle negative weights at all. Floyd-Warshall is also trivially simple to implement (three nested loops).
 
 **Q13: Describe 0-1 BFS and when it applies.**
 0-1 BFS: graph where each edge has weight 0 or 1. Use a deque instead of a queue. For weight-0 edges, push the neighbour to the front (it's at the same distance); for weight-1 edges, push to the back. The deque is maintained in non-decreasing distance order. O(V + E) time — faster than Dijkstra's O((V+E) log V) for this special case. Application: minimum number of flips to get from a corrupted binary string to a target (each flip is cost 1; matching characters are cost 0).
@@ -1125,9 +1145,10 @@ from typing import Dict, List, Optional, Set
 def build_order(
     packages: List[str],
     deps: List[tuple[str, str]]   # (package, depends_on)
-) -> Optional[List[str]]:
+) -> List[str]:
     """
-    Returns build order (topological sort), or None if circular dependency found.
+    Returns build order (topological sort).
+    Raises ValueError naming the offending packages on a circular dependency.
     O(V + E).
     """
     adj: Dict[str, List[str]] = defaultdict(list)
@@ -1165,30 +1186,28 @@ def critical_path(
 ) -> tuple[int, List[str]]:
     """
     Longest path in DAG = minimum total build time with unlimited parallelism.
-    O(V + E).
+    O(V + E) — each package is visited once, each dependency edge examined once.
     """
-    order = build_order(packages, deps)
-    if order is None:
-        raise ValueError("Cycle detected")
+    order = build_order(packages, deps)   # raises on a cycle
 
-    adj: Dict[str, List[str]] = defaultdict(list)
+    # preds[p] = the packages that must finish before p can start
+    preds: Dict[str, List[str]] = defaultdict(list)
     for pkg, dep in deps:
-        adj[dep].append(pkg)
+        preds[pkg].append(dep)
 
     # dp[p] = earliest completion time of package p
     dp: Dict[str, int] = {}
     parent: Dict[str, Optional[str]] = {}
 
+    # Topological order guarantees every predecessor of p is already in dp.
     for p in order:
-        # max over all dependencies' completion times, plus own build time
-        if p not in adj or all(dep not in dp for dep in [d for _, dep in deps if _ == p]):
-            dp[p] = build_times.get(p, 1)
-            parent[p] = None
-        else:
-            predecessors = [dep for dep, dependents in adj.items() if p in dependents]
-            best_pred = max(predecessors, key=lambda x: dp.get(x, 0), default=None)
-            dp[p] = (dp.get(best_pred, 0) if best_pred else 0) + build_times.get(p, 1)
-            parent[p] = best_pred
+        best_pred: Optional[str] = None
+        ready_at = 0
+        for q in preds[p]:
+            if dp[q] > ready_at:
+                ready_at, best_pred = dp[q], q
+        dp[p] = ready_at + build_times.get(p, 1)
+        parent[p] = best_pred
 
     critical_pkg = max(dp, key=lambda p: dp[p])
     total_time = dp[critical_pkg]
@@ -1196,9 +1215,9 @@ def critical_path(
     # Reconstruct critical path
     path = []
     node: Optional[str] = critical_pkg
-    while node:
+    while node is not None:
         path.append(node)
-        node = parent.get(node)
+        node = parent[node]
     return total_time, list(reversed(path))
 ```
 
@@ -1220,8 +1239,10 @@ def broken_log_search(log_content: str, error_patterns: List[str]) -> List[str]:
 # For this scenario, approximate with multiple KMP instances:
 def fixed_log_search(log_content: str, error_patterns: List[str]) -> List[tuple[str, List[int]]]:
     """
-    O(n + sum(m_i) + k) where k = total matches.
-    In practice, use a library like 'ahocorasick' (pyahocorasick).
+    One KMP pass per pattern: O(P*n + sum(m_i) + k) for P patterns, k matches.
+    That is already a big win over naive, but it is still P passes over the
+    text. Only Aho-Corasick gets to a single O(n + M + k) pass -- in practice,
+    use a library like 'ahocorasick' (pyahocorasick).
     """
     results = []
     for pattern in error_patterns:
@@ -1239,7 +1260,7 @@ def fixed_log_search(log_content: str, error_patterns: List[str]) -> List[tuple[
 
 | Approach | 10 MB log, 100 patterns | Notes |
 |----------|------------------------|-------|
-| Naive `in` operator | ~20 GB data scanned | O(n × m × #patterns) |
+| Hand-written naive scan | ~20 GB data scanned | O(n × m × #patterns) |
 | KMP per pattern | ~1 GB data scanned | O(n × #patterns) |
 | Aho-Corasick | ~10 MB data scanned | O(n + M + k), single pass |
 

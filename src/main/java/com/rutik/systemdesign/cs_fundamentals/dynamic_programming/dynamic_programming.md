@@ -32,7 +32,7 @@ This module covers the two structural properties that enable DP, the two impleme
 
 ## 3. Core Principles
 
-**Optimal substructure**: An optimal solution to the problem contains optimal solutions to its sub-problems. If you can cut the problem smaller and the optimal pieces assemble into the overall optimum, DP applies. Counterexample: longest simple path in a graph does not have optimal substructure (shortest sub-path may use vertices excluded from other sub-paths).
+**Optimal substructure**: An optimal solution to the problem contains optimal solutions to its sub-problems. If you can cut the problem smaller and the optimal pieces assemble into the overall optimum, DP applies. Counterexample: the longest *simple* path in a graph does not have optimal substructure — its sub-problems are not independent, because each sub-path must avoid the vertices the other sub-path already uses, so splicing two optimal sub-paths together can produce a walk that repeats a vertex and is therefore not a simple path at all.
 
 **Overlapping sub-problems**: The same sub-problems recur many times in the recursive solution. If all sub-problems are distinct (like merge sort's divide), simple recursion is sufficient — DP's memoisation adds overhead without benefit.
 
@@ -72,7 +72,8 @@ case silently reads a zero.
 
 ```
   state       dp[i][w] = the best value obtainable using only the FIRST i items,
-                         with a knapsack capacity of exactly w.
+                         with a knapsack capacity of w -- i.e. total weight AT MOST w,
+                         which is what makes dp[0][w] = 0 legal for every w.
                          table size = (n+1) x (W+1) cells
 
   transition  for each cell, item i is either left behind or taken:
@@ -655,7 +656,7 @@ def lis_nlogn(nums: list[int]) -> int:
 
 **Text diff (git diff)**: The Myers diff algorithm (used by Git, GNU diff) finds the shortest edit script (minimum insertions + deletions) between two files. It is a space-efficient variant of edit distance that finds the path in the edit graph.
 
-**Resource planning / project scheduling**: Knapsack-style DP optimises resource allocation: which projects to fund given a budget constraint (unbounded knapsack = projects can be funded partially; 0/1 knapsack = binary choice). Used in portfolio optimisation, CPU cache partitioning between processes, and cloud spot-instance bidding.
+**Resource planning / project scheduling**: Knapsack-style DP optimises resource allocation: which projects to fund given a budget constraint (0/1 knapsack = fund it or do not; unbounded knapsack = the same project template can be funded any number of times; fractional knapsack — the only one of the three that greedy solves optimally — = a project can be funded partially). Used in portfolio optimisation, CPU cache partitioning between processes, and cloud spot-instance bidding.
 
 **Route optimisation (TSP DP)**: The Held-Karp algorithm solves the Travelling Salesman Problem exactly in O(2^n × n²) using bitmask DP — exponential, but practical for n ≤ 20. Used in parcel delivery route planning and PCB drilling path optimisation.
 
@@ -731,7 +732,7 @@ flowchart TD
 
 *No overlap routes to divide and conquer; overlap without optimal substructure (red) is the case neither technique cleanly solves; overlap plus optimal substructure sends the problem to the exchange-argument test, which decides greedy vs DP.*
 
-**Complexity warning**: DP with O(n × W) where W can be 10^9 (unbounded integer) is pseudo-polynomial — it depends on the numeric value, not just the number of items. This is why knapsack is NP-hard in the general case despite the DP solution working well in practice when W is bounded.
+**Complexity warning**: DP with O(n × W) where W can be 10^9 (unbounded integer) is pseudo-polynomial — it depends on the numeric value, not just the number of items. That is why the DP does not contradict knapsack's NP-hardness: O(nW) is exponential in the *bit-length* of W, so it is not a polynomial-time algorithm even though it works well in practice whenever W is bounded.
 
 ---
 
@@ -855,7 +856,7 @@ def fixed_dp(n):
 | Python `functools.lru_cache` | Memoisation | Per-function cache; clear with `.cache_clear()` |
 | Python `functools.cache` (3.9+) | Memoisation (unbounded) | Simpler alias for `lru_cache(maxsize=None)` |
 | NumPy 2D arrays | Large DP tables | ~10× faster than Python lists for numeric DP |
-| `scipy.spatial.distance` | Edit distance at scale | For small strings; BLAST for biological sequences |
+| `scipy.spatial.distance.hamming` | Equal-length sequence distance | Hamming only — it does NOT compute edit distance and cannot handle insert/delete |
 | `difflib.SequenceMatcher` | Python diff / LCS | Ratcliff/Obershelp — not true LCS but fast |
 | `Levenshtein` PyPI package | Fast edit distance | C extension; ~100× faster than pure Python |
 
@@ -873,7 +874,7 @@ Memoisation: write the recursive solution, add a cache (dict or `lru_cache`). Co
 Given n items each with weight w_i and value v_i, and a capacity W, maximise total value with total weight ≤ W. Each item is used at most once. Recurrence: `dp[i][w] = max(dp[i-1][w], dp[i-1][w - w_i] + v_i)` if `w >= w_i`, else `dp[i-1][w]`. Complexity: O(n × W) time, O(W) space with rolling array. This is pseudo-polynomial (depends on W's numeric value, not its bit-length).
 
 **Q4: Why is knapsack NP-hard if it has a polynomial DP solution?**
-The DP runs in O(nW) which depends on the numeric value of W. If W = 2^30, that's ~10^9 operations — exponential in the bit-length of the input. "Pseudo-polynomial" means polynomial in the input value, not the input size. True polynomial algorithms run in time polynomial in the number of input bits (log W). No such algorithm is known for knapsack, which is why it is NP-hard in the strong sense.
+The DP runs in O(nW) which depends on the numeric value of W. If W = 2^30, that's ~10^9 operations — exponential in the bit-length of the input. "Pseudo-polynomial" means polynomial in the input value, not the input size. True polynomial algorithms run in time polynomial in the number of input bits (log W), and no such algorithm is known for knapsack. Be precise about the flavour of hardness: knapsack is only *weakly* NP-hard. The existence of the O(nW) DP is exactly what rules out strong NP-hardness (a strongly NP-hard problem admits no pseudo-polynomial algorithm unless P = NP), and it is also why knapsack has an FPTAS while, say, TSP does not.
 
 **Q5: What is the recurrence for edit distance and what do the three choices represent?**
 `dp[i][j] = min(dp[i-1][j-1] + cost, dp[i-1][j] + 1, dp[i][j-1] + 1)` where `cost = 0` if `word1[i-1] == word2[j-1]` else 1. Three choices: replace (`dp[i-1][j-1] + cost` — align characters i and j), delete from word1 (`dp[i-1][j] + 1` — consume character i from word1 with a deletion), insert into word1 (`dp[i][j-1] + 1` — consume character j from word2 with an insertion).

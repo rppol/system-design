@@ -40,7 +40,7 @@ A **thread** is the OS's unit of execution. Every process has at least one threa
 
 **PCB / TCB (Process/Thread Control Block)**: The OS maintains a PCB for each process and a TCB for each thread. Key fields in PCB: PID, virtual memory mappings (page table pointer), open file descriptors, signal handlers, parent PID, exit status. Key fields in TCB: thread ID, saved register state (all CPU registers), stack pointer, program counter, scheduling state (ready/running/blocked/zombie).
 
-**User mode vs kernel mode**: The CPU has at least two privilege levels. User-mode code cannot directly access hardware or OS data structures. A **syscall** transitions from user mode to kernel mode: saves user-mode registers, switches to kernel stack, executes kernel code, returns to user mode. Syscall overhead: ~200–1000 ns (50–200 ns for Linux on modern CPUs with KPTI disabled; 200–1000 ns with Spectre/Meltdown mitigations + KPTI enabled).
+**User mode vs kernel mode**: The CPU has at least two privilege levels. User-mode code cannot directly access hardware or OS data structures. A **syscall** transitions from user mode to kernel mode: saves user-mode registers, switches to kernel stack, executes kernel code, returns to user mode. Syscall overhead: ~50–200 ns on Linux without page-table isolation, rising to ~200–1000 ns with KPTI plus the Spectre retpoline/IBPB mitigations. KPTI is the *Meltdown* mitigation specifically, and the kernel switches it off automatically on hardware that reports itself unaffected — all AMD parts and Intel from Ice Lake onward — so on current server CPUs a syscall is back near the low end of that band.
 
 **Thread states**: New → Ready → Running → Blocked (waiting for I/O, lock, sleep) → Ready (unblocked) → Terminated. A "runnable" thread is in the Ready or Running state. A blocked thread consumes no CPU.
 
@@ -53,7 +53,7 @@ A **thread** is the OS's unit of execution. Every process has at least one threa
 | Aspect | Process | Thread |
 |--------|---------|--------|
 | Address space | Private (isolated) | Shared with siblings |
-| Creation cost | ~1–10 ms (fork + page-table copy) | ~10–100 µs (stack allocation) |
+| Creation cost | ~0.1–2 ms (fork copies page tables; cost scales with the parent's mapped size, and fork+exec of a real program lands near 1 ms) | ~10–100 µs (stack allocation) |
 | Context switch cost | ~2–10 µs (TLB flush + cache eviction) | ~0.5–2 µs (no TLB flush if same process) |
 | Communication | IPC (expensive: pipe, socket, shared mem) | Shared memory (cheap but requires synchronisation) |
 | Fault isolation | Crash of one process doesn't kill others | Bug in one thread can corrupt all threads' memory |
@@ -63,7 +63,7 @@ A **thread** is the OS's unit of execution. Every process has at least one threa
 
 | Model | Description | Examples |
 |-------|-------------|----------|
-| 1:1 (kernel threads) | Each user thread maps to one OS thread | Java threads (pre-21), Python threads, most languages |
+| 1:1 (kernel threads) | Each user thread maps to one OS thread | Java *platform* threads (still 1:1 today), Python threads, most languages |
 | M:1 (green threads) | Many user threads on one OS thread | Original Java green threads (pre-1.3), Python stackless |
 | M:N (hybrid) | M user threads on N OS threads (N < M) | Go goroutines (GOMAXPROCS), Java virtual threads (JEP 444) |
 
@@ -396,7 +396,7 @@ def pipe_example() -> str:
 | Model | Memory per task | Context switch cost | Blocking I/O handling | Language examples |
 |-------|----------------|---------------------|-----------------------|-------------------|
 | OS threads (1:1) | ~1–8 MB stack | ~1–10 µs | Thread blocks, OS switches | Java (pre-21), Python |
-| Green threads | ~1–4 KB stack | ~0.1 µs (cooperative) | Entire process blocks | Python 2 stackless |
+| Green threads | ~1–4 KB stack | ~0.1 µs (cooperative) | Entire process blocks | Stackless Python; original Java green threads (pre-1.3) |
 | Goroutines (M:N) | 2–8 KB initial | ~0.1 µs | Goroutine unblocks, OS thread continues | Go |
 | Virtual threads (M:N) | ~1 KB (heap-stored) | ~0.1 µs | Virtual thread unmounts | Java 21+ |
 | Async/await (event loop) | ~KB per task | ~0 (no switch) | Non-blocking I/O only | Python asyncio, Node.js |
@@ -414,7 +414,7 @@ def pipe_example() -> str:
 
 ## 9. When to Use / When NOT to Use
 
-**Use processes (multiprocessing) in Python for CPU-bound work**: Python's Global Interpreter Lock (GIL) prevents true parallelism of CPU-bound code in threads. Use `multiprocessing.Pool` for CPU-intensive tasks — each worker is a separate process with its own GIL. See [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) for applied depth.
+**Use processes (multiprocessing) in Python for CPU-bound work**: the Global Interpreter Lock in the default CPython build prevents true parallelism of CPU-bound code in threads. Use `multiprocessing.Pool` for CPU-intensive tasks — each worker is a separate process with its own GIL. The alternative is the free-threaded build (PEP 703, officially supported since Python 3.14 under PEP 779), which removes the GIL entirely but ships as a separate opt-in interpreter and is not yet the default. See [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) for applied depth.
 
 **Use threads for I/O-bound work in most languages**: Threads block on I/O while other threads run. In Java and Go, threads/goroutines for I/O concurrency are idiomatic. In Python, use `asyncio` or `threading` for I/O-bound work (GIL releases on I/O).
 
@@ -558,8 +558,11 @@ def fixed_iterative(n):
 ### Pitfall 5 — Sharing file descriptors unsafely across fork
 
 ```python
-# BROKEN: forking after opening a file -> both parent and child share the fd
-# Writes from both can interleave (not atomic > PIPE_BUF = 4096 bytes)
+# BROKEN: forking after opening a file -> parent and child share ONE open file
+# description, so they share the file offset and Python's userspace buffer too.
+# Buffered data written before the fork is duplicated and flushed twice, and a
+# large write can be split by the kernel and interleaved with the other process's.
+# (The PIPE_BUF = 4096 atomicity guarantee applies to pipes, not to regular files.)
 f = open("log.txt", "a")
 pid = os.fork()
 if pid == 0:
@@ -587,7 +590,7 @@ if pid == 0:
 | `threading` (Python) | I/O-bound concurrency | GIL limits CPU parallelism |
 | `multiprocessing` (Python) | CPU-bound parallelism | Each worker = separate process |
 | `concurrent.futures` (Python) | ThreadPool / ProcessPool abstraction | `as_completed`, `map`, `submit` |
-| `java.lang.Thread` | OS-thread-level concurrency | 1:1 mapping to OS threads pre-21 |
+| `java.lang.Thread` (platform) | OS-thread-level concurrency | 1:1 mapping to OS threads — still true in Java 21+; virtual threads are an addition, not a replacement |
 | `java.lang.VirtualThread` (Java 21+) | High-concurrency I/O | M:N, ~1KB stack in heap |
 | Go goroutines | Default concurrency primitive | 2–8 KB stack, M:N scheduler |
 | `strace` | Trace syscalls (Linux) | Measure context switch frequency |
@@ -599,7 +602,7 @@ if pid == 0:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between a process and a thread?**
-A process is an isolated instance of a running program with its own virtual address space, file descriptors, and security context. A thread is an execution context within a process — threads share the process's address space (code, heap, file descriptors) but each has its own stack and register state. Creating a process requires copying (or copy-on-write) the page table, costing ~1–10 ms; creating a thread requires only stack allocation (~10–100 µs). The key tradeoff: processes have fault isolation (one process crash doesn't kill others); threads have lower overhead and shared memory communication.
+A process is an isolated instance of a running program with its own virtual address space, file descriptors, and security context. A thread is an execution context within a process — threads share the process's address space (code, heap, file descriptors) but each has its own stack and register state. Creating a process requires duplicating the page tables (the pages themselves are copy-on-write), costing ~0.1–2 ms depending on how much the parent has mapped; creating a thread requires only stack allocation (~10–100 µs). The key tradeoff: processes have fault isolation (one process crash doesn't kill others); threads have lower overhead and shared memory communication.
 
 **Q2: What happens during a context switch? Walk through the steps.**
 (1) The running process's CPU registers (all general-purpose registers, SP, PC, flags) are saved to its TCB in kernel memory. (2) If switching to a different process, the page table register (CR3 on x86) is updated to point to the new process's page table, which flushes the TLB (~200–300 ns per subsequent TLB miss). (3) The new process's registers are loaded from its TCB. (4) The CPU resumes execution at the new process's saved PC. For same-process thread switches, step 2 is skipped — no TLB flush, making it ~5× faster.
@@ -608,7 +611,7 @@ A process is an isolated instance of a running program with its own virtual addr
 Direct cost: ~1–10 µs (saving/restoring registers + TLB flush + cache cold-start after switch). At 10,000 concurrent OS threads, the scheduler cycles through them hundreds of times per second — context-switch overhead can consume 10–20% of CPU time just for scheduling. This is why high-concurrency servers use event loops (single thread, non-blocking I/O), goroutines (M:N scheduling), or virtual threads — they avoid OS-level context switches for I/O-bound work, reducing per-connection cost from 1–10 µs to ~0.1 µs.
 
 **Q4: What are user mode and kernel mode, and why does the distinction exist?**
-The CPU has two privilege levels. User-mode code cannot execute privileged instructions (port I/O, modifying page tables, disabling interrupts). Kernel mode has full CPU privileges. The distinction is a security and stability boundary: malicious or buggy user code cannot corrupt OS data structures or access another process's memory directly. A syscall transitions from user to kernel mode via a software interrupt (x86: `syscall` instruction) — it saves user registers, switches to the kernel stack, and runs the OS handler. Modern Spectre mitigations (KPTI) add ~200 ns overhead to every syscall.
+The CPU has two privilege levels. User-mode code cannot execute privileged instructions (port I/O, modifying page tables, disabling interrupts). Kernel mode has full CPU privileges. The distinction is a security and stability boundary: malicious or buggy user code cannot corrupt OS data structures or access another process's memory directly. A syscall transitions from user to kernel mode via a dedicated fast entry instruction — `syscall` on x86-64, `svc` on ARM64 (the old `int 0x80` software interrupt is legacy) — which saves user registers, switches to the kernel stack, and runs the OS handler. KPTI, the Meltdown mitigation, unmaps most of the kernel from the user page table and so adds a page-table switch (~100–200 ns) to every syscall; Spectre mitigations (retpolines, IBPB) add their own cost. On CPUs the kernel considers Meltdown-immune — all AMD, and Intel from Ice Lake on — KPTI is off by default and that overhead disappears.
 
 **Q5: What is a zombie process and how do you prevent it?**
 A zombie process has exited but its entry in the process table has not been cleaned up — the parent has not yet called `wait()` to collect the exit status. The zombie holds no resources except a PCB entry and a PID. To prevent zombies: always call `waitpid()` after `fork()` in the parent (synchronous cleanup), or install a `SIGCHLD` handler that calls `wait()` asynchronously, or use `subprocess` / `multiprocessing` abstractions that handle reaping automatically. If the parent exits before reaping, the zombie is adopted by `init` (PID 1), which reaps it.
@@ -620,7 +623,7 @@ A zombie process has exited but its entry in the process table has not been clea
 After `fork()`, the parent and child initially share the same physical pages — the kernel marks all pages read-only. When either process writes to a page, the MMU raises a write-protection fault; the kernel then creates a private copy for the writing process and remaps it. COW makes `fork()` O(1) in the common case (if the child immediately calls `exec()`, no pages are copied at all — exec replaces the address space entirely). Without COW, forking a 4 GB process would require copying 4 GB of memory — prohibitively expensive.
 
 **Q8: How does Python's GIL affect threading?**
-Python's CPython interpreter has a Global Interpreter Lock — a mutex that allows only one thread to execute Python bytecode at a time. I/O operations (file read, network) release the GIL, so I/O-bound threads can run concurrently. CPU-bound operations (computation) hold the GIL, so CPU-bound threads cannot parallelise. For CPU-bound parallelism in Python: use `multiprocessing` (separate processes, no GIL), use C extensions that release the GIL (NumPy, pandas), or use PyPy which has a different (optional) GIL design. See [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) for applied depth.
+Python's CPython interpreter has a Global Interpreter Lock — a mutex that allows only one thread to execute Python bytecode at a time. I/O operations (file read, network) release the GIL, so I/O-bound threads can run concurrently. CPU-bound operations (computation) hold the GIL, so CPU-bound threads cannot parallelise. For CPU-bound parallelism in Python: use `multiprocessing` (separate processes, one GIL each), use C extensions that release the GIL (NumPy, pandas), or run a **free-threaded CPython build** — PEP 703's no-GIL interpreter, which PEP 779 promoted from experimental to officially supported in Python 3.14. It is still a separate, opt-in build (`python3.14t`), not the default, and it costs roughly 5–10% single-threaded performance in exchange for real multi-core threading. See [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) for applied depth.
 
 **Q9: What is a thread-local storage (TLS) and when is it used?**
 TLS provides per-thread storage that looks like a global variable but has a separate value for each thread. Used for: database connection pools (each thread holds its own connection), user session data in request-handling threads, per-thread random number generator state (avoid lock contention on shared rand state), transaction context in frameworks (Spring's `TransactionSynchronizationManager` uses TLS to bind the transaction to the current thread). In Python: `threading.local()`. In Java: `ThreadLocal<T>`. Caution: TLS must be explicitly cleaned up to avoid memory leaks in thread-pool scenarios.
@@ -635,7 +638,7 @@ When all non-daemon threads in a Java or Python program finish, the process exit
 Five states: (1) New — created but not started. (2) Ready/Runnable — eligible to run, waiting for CPU. (3) Running — executing on a CPU core. (4) Blocked/Waiting — waiting for a lock, I/O, sleep, or another thread. (5) Terminated — execution complete. Transitions: New→Ready (start()); Running→Ready (preemption by scheduler or Thread.yield()); Running→Blocked (I/O call, lock acquisition, wait(), sleep()); Blocked→Ready (I/O completion, lock release, notify()); Running→Terminated (return from thread function or exit()).
 
 **Q13: How does the OS handle the case where a thread is waiting for I/O that never completes?**
-The thread stays in Blocked state indefinitely — this is a "stuck thread" or I/O hang. Prevention: always set timeouts on I/O operations (`socket.settimeout()`, `connect()` with SO_TIMEOUT in Java). Detection: watchdog threads, health check endpoints, or async timeouts (`asyncio.wait_for()`). Recovery: send a signal to the thread (POSIX `pthread_kill`), or interrupt the blocking syscall (Java's `Thread.interrupt()` raises `InterruptedException` in most blocking calls). Production systems always pair I/O with a timeout and a circuit breaker.
+The thread stays in Blocked state indefinitely — this is a "stuck thread" or I/O hang. Prevention: always set timeouts on I/O operations — `socket.settimeout()` in Python; in Java, `Socket.connect(addr, timeoutMillis)` bounds the connect and `Socket.setSoTimeout()` (the `SO_TIMEOUT` option) bounds each subsequent read. Detection: watchdog threads, health check endpoints, or async timeouts (`asyncio.wait_for()`). Recovery: send a signal to the thread (POSIX `pthread_kill`), or interrupt the blocking syscall (Java's `Thread.interrupt()` raises `InterruptedException` in most blocking calls). Production systems always pair I/O with a timeout and a circuit breaker.
 
 **Q14: What is the difference between concurrency and parallelism?**
 Concurrency: multiple tasks are in progress at the same time — they may interleave on a single CPU (via context switching). Parallelism: multiple tasks execute simultaneously on multiple CPUs/cores. All parallel execution is concurrent; not all concurrent execution is parallel. A single-core machine can have concurrency (via time-slicing) but not true parallelism. Python threads give concurrency (GIL prevents parallelism for CPU-bound code) but not CPU parallelism. Go goroutines on GOMAXPROCS=4 give both concurrency and parallelism.
@@ -758,18 +761,26 @@ Every number in the BROKEN column is driven by *concurrency* (5,000 in-flight re
 
 ```java
 // Java 21 virtual threads — thread-per-request style, but M:N under the hood
+import java.net.InetSocketAddress;
 import java.util.concurrent.Executors;
-import com.sun.net.httpserver.*;
+import com.sun.net.httpserver.HttpServer;
 
-try (var server = HttpServer.create(new InetSocketAddress(8080), 0)) {
-    server.createContext("/poll", exchange -> {
-        Thread.sleep(5000);   // Virtual thread blocks here; carrier thread continues
-        exchange.sendResponseHeaders(200, 0);
-        exchange.getResponseBody().write("update available".getBytes());
-    });
-    server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-    server.start();
-}
+HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
+server.createContext("/poll", exchange -> {
+    try {
+        Thread.sleep(5000);   // Virtual thread unmounts here; carrier thread continues
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();   // HttpHandler cannot throw it
+    }
+    byte[] body = "update available".getBytes();
+    exchange.sendResponseHeaders(200, body.length);
+    try (var out = exchange.getResponseBody()) {
+        out.write(body);
+    }
+});
+server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+server.start();   // non-blocking: do NOT wrap in try-with-resources, which would
+                  // stop the server the instant start() returns
 // 5000 concurrent requests = 5000 virtual threads, ~5 carrier threads
 // Preserves thread-per-request code style; avoids callback hell
 ```

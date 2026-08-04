@@ -32,7 +32,7 @@ This module teaches how recursion works (call stack, base case, recurrence), the
 
 - **Base case is mandatory**: every recursive path must eventually reach a base case. Missing or unreachable base cases cause infinite recursion and stack overflow.
 - **Trust the recursive call**: when writing the recursive step, assume the recursive call returns the correct answer for the smaller input — do not trace through the entire call tree in your head. This is the principle of *inductive reasoning* applied to code.
-- **Call stack mechanics**: each recursive call creates a new **stack frame** holding local variables, the return address, and parameters. Stack depth = maximum number of simultaneous live stack frames = maximum recursion depth. Typical default Python stack limit: 1000 frames. Java default thread stack: 512 KB–1 MB (approximately 5,000–20,000 frames depending on frame size).
+- **Call stack mechanics**: each recursive call creates a new **stack frame** holding local variables, the return address, and parameters. Stack depth = maximum number of simultaneous live stack frames = maximum recursion depth. Typical default Python stack limit: 1000 frames. Java default thread stack: 1 MB on 64-bit HotSpot for Linux x86-64, 2 MB on macOS/AArch64 (`-XX:ThreadStackSize`), which is roughly 10,000–50,000 frames depending on frame size.
 - **Tail recursion**: a recursive call where the recursive call is the very last operation. Many compilers (but not Python's CPython) optimise tail calls to reuse the caller's stack frame, giving O(1) stack space. In Python/Java, always convert deep tail recursion to iteration if stack overflow is a risk.
 - **Memoisation = recursion + caching**: add a cache (`dict` / `@functools.lru_cache`) to avoid recomputing overlapping subproblems. This converts exponential naive recursion to polynomial DP.
 - **State in backtracking**: maintain a mutable state (path, partial solution) and undo the change after the recursive call (the "undo" step). This ensures state is consistent when the recursion backtracks.
@@ -108,7 +108,7 @@ executing exactly one leaf, so only the frames on that single root-to-leaf path 
 already popped or have not been pushed. That is why the `2^n` Fibonacci tree still fits comfortably in
 memory even though it takes forever — it is `O(n)` stack, `O(2^n)` time. The failure mode is the mirror
 image: a `b = 1` linear recursion over a 100,000-element linked list has trivial time but `d = 100,000`,
-which overruns CPython's default limit of 1,000 frames and blows a Java thread's 512 KB–1 MB stack. The
+which overruns CPython's default limit of 1,000 frames and blows a Java thread's 1–2 MB stack. The
 two fixes are unrelated because the two dials are unrelated: memoisation attacks `b^d` (see Pitfall 2),
 while converting to iteration or an explicit stack attacks `d`.
 
@@ -153,8 +153,8 @@ pending arithmetic, any wrapping expression, any `finally` block? If yes, it is 
 
 **Why CPython refuses to do this, and what to do instead.** Guido van Rossum has rejected TCO in CPython
 deliberately: eliminating frames destroys the traceback, and a readable stack trace was judged more
-valuable than the optimisation. Java's HotSpot does not perform it either (it would break the
-`StackWalker` and security-manager stack inspection). So in both languages the accumulator rewrite buys
+valuable than the optimisation. Java's HotSpot does not perform it either (it would break `StackWalker`
+and every caller-sensitive API that reads the live call stack). So in both languages the accumulator rewrite buys
 you *nothing* on its own — `fact(10000, 1)` still raises `RecursionError`. The rewrite is still worth
 knowing, because a tail-recursive function converts to a `while` loop mechanically: the accumulator
 becomes a local variable and the recursive call becomes a reassignment of the parameters. That loop is
@@ -221,7 +221,7 @@ happens (on the way *up*, after each return, never on the way down).
 | depth | Frames alive right now. The peak of this is your space cost |
 | `O(n)` space | `n` frames alive at the deepest point of a linear recursion |
 | `RecursionError` | CPython's guard, tripping at 1,000 frames by default (`sys.setrecursionlimit`) |
-| `StackOverflowError` | The JVM's version, at 512 KB–1 MB of stack, roughly 5,000–20,000 frames |
+| `StackOverflowError` | The JVM's version, at 1–2 MB of stack, roughly 10,000–50,000 frames |
 
 **Walk one example.** `factorial(4)` traced frame by frame, downward then upward:
 
@@ -247,9 +247,12 @@ happens (on the way *up*, after each return, never on the way down).
 **Why the peak depth is the number that matters, and what breaks when it grows.** Steps 1–5 cost memory
 that is not released until steps 6–10 unwind, so the peak — not the total call count — sets the space
 bill. Push the same shape to `factorial(2000)` and you have 2,000 pending multiplications and 2,000 live
-frames: CPython raises `RecursionError` at 1,000, and raising the limit with
-`sys.setrecursionlimit(100000)` does not help, because the *C* stack underneath is a fixed OS allocation
-and will segfault instead. The real fixes are structural: convert to a loop (factorial is a one-line
+frames: CPython raises `RecursionError` at 1,000. Raising the ceiling with
+`sys.setrecursionlimit(100000)` does work for a purely Python-to-Python recursion on CPython 3.12+, which
+no longer consumes a C stack frame per Python call — but it is not a general escape hatch, because any
+recursion that detours through C (a `__repr__`, a comparison callback, `json`, `re`) is still capped by a
+separate C-recursion limit, and on a small thread stack an over-raised limit trades a clean
+`RecursionError` for a hard crash. The real fixes are structural: convert to a loop (factorial is a one-line
 `for`), use an explicit heap-allocated stack for tree and graph traversals, or run the recursion on a
 `threading.Thread` created with a larger `threading.stack_size()`. This is also the difference between a
 recursion depth of `n` and `log n` — an unbalanced BST degenerates to `d = n` and overflows, while a
@@ -263,12 +266,10 @@ arr = [1, 3, 5, 7, 9]   target = 10
       lo=0            hi=4     sum = 1+9 = 10 ✓  → return (0, 4)
 
 arr = [1, 3, 5, 7, 9]   target = 12
-       ^           ^
-      lo=0        hi=3      sum = 1+7 = 8 < 12 → lo++
-           ^       ^
-          lo=1    hi=3      sum = 3+7 = 10 < 12 → lo++
-               ^   ^
-              lo=2 hi=3     sum = 5+7 = 12 ✓  → return (2, 3)
+       ^               ^
+      lo=0            hi=4     sum = 1+9 = 10 < 12 → lo++
+          ^            ^
+         lo=1         hi=4     sum = 3+9 = 12 ✓  → return (1, 4)
 ```
 
 ### Sliding Window (Minimum Window Substring)
@@ -438,7 +439,7 @@ def permutations(nums: list[int]) -> list[list[int]]:
 
 **JSON/XML parsers** — parsing a nested JSON object `{"a": {"b": {"c": 1}}}` naturally uses recursive descent. The grammar is recursive (an object can contain objects), so the parser mirrors that structure. Each recursive call handles one nesting level. Deep nesting (> 100 levels) can cause stack overflows in naive parsers — many production parsers maintain an explicit stack.
 
-**Git commit history** — `git log --graph` is a DFS traversal of the commit DAG. Each commit links to parent commits; merges have two parents. Following the chain from HEAD recursively traces all ancestors. `git rebase --onto` traversively rewrites commits.
+**Git commit history** — `git log --graph` is a DFS traversal of the commit DAG. Each commit links to parent commits; merges have two parents. Following the chain from HEAD recursively traces all ancestors. `git rebase --onto` walks that same ancestry chain to decide which commits to rewrite.
 
 **Binary search in databases** — a B+Tree index lookup is literally binary search at each node level. "Is the key in the left subtree or the right?" is asked O(height) = O(log n) times, each cutting the search space in half. The same pattern appears in every sorted structure: skip lists, sorted arrays, LSM-tree bloom filter levels.
 
@@ -511,7 +512,7 @@ This triages the table above into the order an interviewer expects you to reason
 - The recursive formulation is significantly clearer than an iterative one.
 
 **Do NOT use recursion when:**
-- Recursion depth can exceed ~1000 in Python (default `sys.setrecursionlimit`) or ~5000–20000 in Java without stack size tuning. Convert to iterative with an explicit stack.
+- Recursion depth can exceed the default 1000 in Python (`sys.setrecursionlimit`) or ~10,000–50,000 in Java without stack size tuning. Convert to iterative with an explicit stack.
 - The algorithm is tail-recursive and the language does not optimise it — use a loop.
 - The naive recursion revisits the same subproblems (e.g., Fibonacci without memoisation) — use DP instead.
 - Simplicity and debuggability are paramount and an iterative form is equally clear.
@@ -542,7 +543,7 @@ def fib_naive(n: int) -> int:
     if n <= 1:
         return n
     return fib_naive(n - 1) + fib_naive(n - 2)
-# fib(40) makes ~2 billion recursive calls. fib(50) is infeasible.
+# fib(40) makes 2*F(41) - 1 = 331,160,281 calls. fib(50) is 40 billion -- infeasible.
 
 # FIX: memoisation → O(n) time, O(n) space
 import functools
@@ -585,10 +586,10 @@ def subsets(nums: list[int]) -> list[list[int]]:
     return result
 ```
 
-### Pitfall 4: Sliding Window — Shrinking Past the Left Boundary
+### Pitfall 4: Sliding Window — Materialising the Window Instead of Sliding Indices
 
 ```python
-# BROKEN: left pointer can go past right, creating negative-length window
+# BROKEN: copies the window's elements into a list, so each shrink is O(k)
 def max_sum_subarray_k_broken(arr: list[int], k: int) -> int:
     left = total = best = 0
     window: list[int] = []
@@ -617,8 +618,8 @@ def max_sum_subarray_k(arr: list[int], k: int) -> int:
 | `sys.setrecursionlimit(n)` | Python recursion depth limit | Default 1000; increase carefully |
 | `@functools.lru_cache` | Memoize recursive functions | Python 3.8+; also `@cache` |
 | `collections.deque` | O(1) appendleft/popleft for sliding window | Replaces list.pop(0) which is O(n) |
-| Call stack profiler (`tracemalloc`) | Detect deep recursion / stack overflow | Python; shows frame allocations |
-| JVM stack size `-Xss` | Set thread stack size in Java | Default 512 KB; increase for deep recursion |
+| `faulthandler` | Dump the Python traceback when a deep recursion crashes the interpreter | Python; `faulthandler.enable()` prints the stack on fatal errors, where a normal traceback is lost |
+| JVM stack size `-Xss` | Set thread stack size in Java | Default 1 MB (Linux x86-64) / 2 MB (macOS AArch64); increase for deep recursion |
 | `itertools.combinations`, `permutations` | Built-in combinatorial generators | Use instead of backtracking when you don't need custom constraints |
 
 ---
@@ -626,10 +627,10 @@ def max_sum_subarray_k(arr: list[int], k: int) -> int:
 ## 12. Interview Questions with Answers
 
 **Q1: What is a base case and why is it mandatory?**
-A base case is the condition under which the recursive function returns a result directly without making another recursive call. It is mandatory because without a base case, the recursion never terminates — each call generates another call forever until the call stack exhausts memory (stack overflow / `RecursionError`). Every recursive path must reach a base case. A common interview mistake is writing a base case that is unreachable (e.g., `if n < 0: return` when n decrements toward 0 from a positive value — needs `if n == 0`).
+A base case is the condition under which the recursive function returns a result directly without making another recursive call. It is mandatory because without a base case, the recursion never terminates — each call generates another call forever until the call stack exhausts memory (stack overflow / `RecursionError`). Every recursive path must reach a base case. A common interview mistake is writing a base case the recursion steps straight over — `if n == 0` in a function that recurses on `n - 2` never fires for an odd n, so the recursion runs past zero forever. Guard with `if n <= 0` whenever the step size is not 1.
 
 **Q2: What is the time and space complexity of naive recursive Fibonacci?**
-Time: O(2^n) — the call tree is a nearly-complete binary tree of height n; the number of nodes is ~2^n. Space: O(n) — the maximum depth of the call stack is n (the deepest path is fib(n) → fib(n-1) → ... → fib(1)). Fix with memoisation: O(n) time and O(n) space.
+Time: O(2^n) as the usual loose bound, and Θ(φ^n) ≈ Θ(1.618^n) as the tight one — the call tree is lopsided (the `n-2` branch is shorter than the `n-1` branch), so the exact node count is `2·F(n+1) - 1`, not 2^n; `fib(40)` costs 331 million calls, not the ~10^12 that 2^40 would suggest. Space: O(n) — the maximum depth of the call stack is n (the deepest path is fib(n) → fib(n-1) → ... → fib(1)). Fix with memoisation: O(n) time and O(n) space.
 
 **Q3: When is two-pointer applicable versus a brute-force nested loop?**
 Two-pointer requires the array to be sorted (or have a monotonic property) so that moving a pointer in one direction is guaranteed to improve or worsen the condition being tested. In a sorted array, if the current pair sums to less than the target, moving the left pointer right increases the sum; moving the right pointer left decreases it. Without this monotonic property, you cannot prune and must use a nested loop (O(n²)). Two-pointer reduces to O(n).
@@ -659,7 +660,7 @@ Binary search variant: maintain `[lo, hi]` = `[0, len(arr)]` (inclusive of one p
 (1) Base case — problem is small enough to solve directly. (2) Divide — split the problem into two or more *independent* subproblems of roughly equal size. (3) Conquer — recursively solve each subproblem. (4) Combine — merge the subproblem solutions. The combine step determines the complexity: if combining is O(n) and we split into 2 halves → T(n) = 2T(n/2) + O(n) → O(n log n) by Master Theorem Case 2.
 
 **Q12: How do you use fast-slow pointer to find the middle of a linked list?**
-Start both at head. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. For an even-length list, slow will be at the first of the two middle nodes. This is used in merge sort for linked lists (split at the middle) and in palindrome checking (reverse the second half starting from the middle).
+Start both at head. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. Starting both at `head` with the loop condition `while fast and fast.next`, an even-length list leaves slow on the *second* of the two middle nodes (length 4: slow ends on index 2); start the loop at `while fast.next and fast.next.next` if you need the first one instead — which is the variant merge sort wants, so that the left half is non-empty. This is used in merge sort for linked lists (split at the middle) and in palindrome checking (reverse the second half starting from the middle).
 
 **Q13: What is the pruning in backtracking and why is it critical for performance?**
 Pruning is the early termination of a recursive branch when you can determine that no valid solution exists in the subtree. Example: in N-Queens, if placing a queen in a column puts it in conflict with an already-placed queen, skip all configurations in that subtree. Without pruning, backtracking explores the entire O(n!) solution space. With aggressive pruning, practical performance can be orders of magnitude faster — N-Queens with 15 queens goes from 15! ≈ 1.3 trillion to a tractable solution in milliseconds.
@@ -758,7 +759,7 @@ xychart-beta
     bar [576, 6500000, 15000000000]
 ```
 
-The 4^L branching factor means nodes explored does not scale with grid size — it scales with the word length exponent, so 576 and 6.5M both round to a sliver next to the 30×30 case's 15B ceiling.
+Nodes explored grow only *linearly* with grid size (the m × n starting cells) but *exponentially* with word length, so the 4^L term is the one that decides feasibility — 576 and 6.5M both round to a sliver next to the 30×30 case's 15B ceiling.
 
 Pruning (early `board[r][c] != word[idx]` check) cuts the actual explored nodes to a tiny fraction of the theoretical maximum in practice.
 

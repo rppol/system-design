@@ -30,9 +30,9 @@ Understanding these fundamentals is not just academic: it explains why columnar 
 
 ## 3. Core Principles
 
-**Principle 1 — The memory hierarchy is a latency/capacity tradeoff.** Faster storage is more expensive per byte and harder to manufacture at scale. The hierarchy is: registers (< 1 ns, < 1 KB) → L1 cache (1–4 ns, 32–64 KB per core) → L2 cache (~10 ns, 256 KB–1 MB per core) → L3 cache (~40 ns, 4–32 MB shared) → DRAM (~100 ns, 8–256 GB) → NVMe SSD (~100 µs) → HDD (~10 ms) → tape/cold storage (seconds).
+**Principle 1 — The memory hierarchy is a latency/capacity tradeoff.** Faster storage is more expensive per byte and harder to manufacture at scale. The hierarchy is: registers (< 1 ns, < 1 KB) → L1 cache (1–4 ns, 32–64 KB per core) → L2 cache (~10 ns, 256 KB–3 MB per core) → L3 cache (~40 ns, 4 MB–128 MB shared on client parts, several hundred MB on server parts) → DRAM (~100 ns, 8–256 GB) → NVMe SSD (~100 µs) → HDD (~10 ms) → tape/cold storage (seconds).
 
-**Principle 2 — Cache lines are the unit of transfer.** A cache line is 64 bytes on all modern x86-64 and ARM processors. When the CPU reads a single byte from DRAM, it fetches the entire 64-byte aligned block containing that byte. This makes sequential memory access far cheaper than random access.
+**Principle 2 — Cache lines are the unit of transfer.** A cache line is 64 bytes on every x86-64 processor and on ARM Cortex-A cores; Apple Silicon (M-series) uses 128 bytes, so portable code that pads for false sharing should assume 128. When the CPU reads a single byte from DRAM, it fetches the entire aligned line containing that byte. This makes sequential memory access far cheaper than random access.
 
 **Principle 3 — Locality drives performance.** Spatial locality: if you access address A, you will likely access A+1, A+2, ... soon — load the whole cache line. Temporal locality: if you access A now, you will likely access A again soon — keep it in cache.
 
@@ -59,7 +59,7 @@ A classic 4-stage pipeline:
 | Execute (EX) | Perform ALU operation, address calculation, or initiate memory load/store |
 | Writeback (WB) | Write result back to destination register |
 
-Modern out-of-order processors have 15–25+ pipeline stages, multiple execution units, and can retire 4–6 instructions per cycle.
+Modern out-of-order processors have 15–25+ pipeline stages, multiple execution units, and can retire 6–8 instructions per cycle (Intel Lion Cove and AMD Zen 5 are both 8-wide at rename and retire).
 
 ### Pipeline Hazards
 
@@ -95,8 +95,8 @@ Branch Target Buffer (BTB): a cache of recent branch addresses → predicted tar
 
 | Policy | Write hit behavior | Write miss behavior | Use case |
 |--------|--------------------|--------------------|---------| 
-| Write-through | Write to cache AND main memory simultaneously | Allocate or no-allocate | Simple; always-consistent but high bandwidth |
-| Write-back | Write only to cache; mark line dirty | Allocate on write miss | Lower bandwidth; must flush dirty lines on eviction |
+| Write-through | Write to cache AND the next level simultaneously | Allocate or no-allocate | Simple; always-consistent but high bandwidth. Rare in modern general-purpose CPU caches; found in embedded/DSP designs |
+| Write-back | Write only to cache; mark line dirty | Allocate on write miss | Lower bandwidth; must flush dirty lines on eviction. The policy at every cache level on mainstream x86-64 and ARM |
 | Write-combining | Buffer multiple writes; flush as burst | — | GPU framebuffers, PCIe DMA regions |
 
 ### Cache Replacement Policies
@@ -143,9 +143,9 @@ flowchart TD
 
     subgraph CPU["CPU Core"]
         REG(["Register File<br/>under 1 ns · ~1 KB"]) --> L1["L1 Cache<br/>1-4 ns · 32-64 KB"]
-        L1 --> L2["L2 Cache<br/>~10 ns · 256 KB-1 MB"]
+        L1 --> L2["L2 Cache<br/>~10 ns · 256 KB-3 MB"]
     end
-    L2 --> L3["L3 Cache shared<br/>~40 ns · 4-32 MB"]
+    L2 --> L3["L3 Cache shared<br/>~40 ns · 4-128 MB"]
     L3 --> DRAM["Main Memory DRAM<br/>~100 ns · 8 GB-4 TB"]
     DRAM --> SSD["NVMe SSD<br/>~100 µs · 500 GB-16 TB"]
     SSD --> HDD["HDD / Network Storage<br/>~10 ms · 1 TB-PB scale"]
@@ -203,7 +203,7 @@ Instruction 3:             [IF]--[ID]--[EX]--[WB]
 Instruction 4:                   [IF]--[ID]--[EX]--[WB]
 
 Data hazard (RAW — Read After Write):
-  ADD R1, R2, R3     (R1 written in EX at cycle 3)
+  ADD R1, R2, R3     (R1 computed in EX at cycle 3, written to regfile in WB at cycle 4)
   SUB R4, R1, R5     (R1 read in ID at cycle 3 — TOO EARLY without forwarding)
 
   Without forwarding:  stall 2 cycles (bubble inserted)
@@ -334,7 +334,7 @@ if __name__ == "__main__":
     print(f"Slowdown ratio: {col_time / row_time:.1f}x")
 ```
 
-Row-major access: each successive read hits a value in the same 64-byte cache line — 8 consecutive `int64` values fit in one cache line, so every 8th access is a cache miss. Column-major: each successive read jumps 4096 columns × 8 bytes = 32 KB forward in memory, almost certainly a cache miss each time. On a modern laptop with a 4 MB L3 cache and a 4096×4096 int64 matrix (128 MB), column-major is typically 5–10× slower.
+Row-major access: each successive read hits a value in the same 64-byte cache line — 8 consecutive `int64` values fit in one cache line, so every 8th access is a cache miss. Column-major: each successive read jumps 4096 columns × 8 bytes = 32 KB forward in memory, almost certainly a cache miss each time. On a modern laptop with a 12–24 MB L3 cache and a 4096×4096 int64 matrix (128 MB), column-major is typically 5–10× slower.
 
 **Stated plainly.** "You never pay for one byte — you pay for 64. Spatial locality is just the question of how many of those 64 bytes you actually use before the line is thrown away."
 
@@ -353,7 +353,7 @@ The two traversals execute the *identical* 16.7 million reads, in the identical 
 ```
   Matrix: 4096 x 4096 int64
     elements    = 4096 x 4096          = 16,777,216
-    bytes       = 16,777,216 x 8       = 134,217,728 B = 128 MiB   (>> 4 MB L3)
+    bytes       = 16,777,216 x 8       = 134,217,728 B = 128 MiB   (>> 24 MB L3)
     per line    = 64 B / 8 B           = 8 elements ride along free
 
   ROW-MAJOR   stride = 8 B  (next element is the next address)
@@ -678,7 +678,7 @@ Modern CPUs include a **hardware prefetcher** that monitors access patterns and 
 | Write bandwidth | High (every write goes to DRAM) | Low (writes batched; only evictions write DRAM) |
 | Read after write | No stale reads | No stale reads (reads hit cache) |
 | Power loss risk | Safe — DRAM always current | Dirty data lost if power fails before flush |
-| Common use | L1 write-through to L2 | L2/L3 write-back to DRAM |
+| Common use | Embedded/DSP caches; special memory types (write-combining framebuffers, some MMIO) | Every cache level (L1d, L2, L3) on mainstream x86-64 and ARM CPUs — write-back is the default memory type for normal system RAM |
 
 ### False Sharing vs True Sharing
 
@@ -718,7 +718,7 @@ AMAT = hit_time + miss_rate x miss_penalty
 
 **What the formula is telling you.** "Every access pays the fast-path cost no matter what; on top of that you pay the slow-path cost, but only on the fraction of accesses that actually miss."
 
-The shape matters more than the numbers: it is a fixed toll plus a probabilistic surcharge. That is why a hit rate dropping from 99% to 95% — which sounds like a rounding error — is not a 4% regression but a 5x one.
+The shape matters more than the numbers: it is a fixed toll plus a probabilistic surcharge. That is why a hit rate dropping from 99% to 95% — which sounds like a rounding error — is not a 4% regression: the misses go up 5x, and AMAT goes 2.00 ns to 6.00 ns, a 3x regression.
 
 | Symbol | What it actually is |
 |--------|---------------------|
@@ -893,7 +893,7 @@ def fixed_row_sum(matrix: np.ndarray) -> np.intp:
     total = np.intp(0)
     for row in range(ROWS):
         for col in range(COLS):
-            total += matrix[row, col]  # sequential access — 8 cache misses per 64-byte cache line
+            total += matrix[row, col]  # sequential access — 1 cache miss per 64-byte line, amortized over 8 elements
     return total
 
 def vectorized_sum(matrix: np.ndarray) -> np.intp:
@@ -969,7 +969,7 @@ For production systems, launch the entire process with `numactl --cpunodebind=0 
 |-------------------|----------|-------------|-----------|
 | `perf` (Linux) | Performance profiling | Hardware PMU events: `cache-misses`, `cache-references`, `branch-misses`, `instructions` | `perf stat -e cache-misses,branch-misses ./program` |
 | `perf c2c` | False sharing detection | Reports cache-line contention between cores | Available in Linux perf >= 4.10; shows hot false-sharing lines |
-| Intel VTune Profiler | Micro-architecture analysis | Memory access patterns, NUMA hot spots, pipeline stalls, false sharing | Detailed hardware event breakdown; free for non-commercial |
+| Intel VTune Profiler | Micro-architecture analysis | Memory access patterns, NUMA hot spots, pipeline stalls, false sharing | Detailed hardware event breakdown; free to download and use (standalone or via the Intel oneAPI Base Toolkit) |
 | AMD uProf | Micro-architecture analysis (AMD) | Same as VTune for AMD Ryzen/EPYC | Includes NUMA topology view |
 | `numactl` | NUMA management | Bind processes to NUMA nodes; query topology | `numactl --hardware`; `numactl --cpunodebind=0 --membind=0 <cmd>` |
 | `numastat` | NUMA stats | Show per-node memory allocation and hit/miss rates | `numastat -p <pid>` |
@@ -993,7 +993,7 @@ Sorting places all values that satisfy a branch condition contiguously, so the C
 False sharing occurs when two threads on different cores write to different variables that happen to occupy the same 64-byte cache line. Thread A's write invalidates Thread B's cache-line copy (MESI protocol), forcing Thread B to re-fetch the line — even though Thread B's variable never changed. Symptom: correct results but poor multi-threaded scalability. Detected with `perf c2c` (Linux), Intel VTune Memory Access analysis, or by padding structs and observing throughput change. Fixed by aligning each independently-written variable to a cache-line boundary (64 bytes on x86-64): C `alignas(64)`, Java `@Contended`, Rust `#[repr(align(64))]`.
 
 **Q: What is a cache miss penalty, and what are the three types of cache misses?**
-A cache miss forces the CPU to stall (or switch to other independent instructions) while fetching data from a lower cache level or DRAM. Penalty: L1 miss → L2 hit: ~6 extra cycles; L2 miss → L3 hit: ~20 extra cycles; L3 miss → DRAM: ~200–300 cycles. The three types: (1) Compulsory (cold) miss — first access to a line that was never in cache; unavoidable. (2) Capacity miss — working set exceeds cache size; reduce working set or improve temporal locality. (3) Conflict miss — two frequently-used addresses map to the same cache set in a set-associative cache; resolve with data padding or changing array sizes.
+A cache miss forces the CPU to stall (or switch to other independent instructions) while fetching data from a lower cache level or DRAM. Penalty, using the ~4 / ~30 / ~130 / ~300-cycle ladder from Section 2: L1 miss → L2 hit: ~25 extra cycles; L2 miss → L3 hit: ~100 extra cycles; L3 miss → DRAM: ~170–200 extra cycles. The three types: (1) Compulsory (cold) miss — first access to a line that was never in cache; unavoidable. (2) Capacity miss — working set exceeds cache size; reduce working set or improve temporal locality. (3) Conflict miss — two frequently-used addresses map to the same cache set in a set-associative cache; resolve with data padding or changing array sizes.
 
 **Q: Explain the MESI protocol and why it is necessary.**
 In a multi-core CPU, each core has its own L1/L2 cache. Without coordination, two cores could hold contradictory values for the same address. MESI is a cache coherence protocol with four states per cache line: Modified (dirty, only copy), Exclusive (clean, only copy), Shared (clean, multiple copies), Invalid (stale/absent). When a core wants to write a Shared line, it broadcasts an invalidation to all other cores; they transition to Invalid. When they next read the line, they get the updated value. MESI ensures cache coherence with minimal bus traffic.
@@ -1008,7 +1008,7 @@ A pipeline hazard is a situation that prevents the next instruction from executi
 Branch misprediction occurs when the CPU's branch predictor guesses the wrong path for a conditional branch. The CPU has been executing instructions on the wrong path speculatively; when the branch resolves, the pipeline is flushed and those instructions are discarded. Cost: ~15 cycles on modern Intel/AMD (varies 10–20 cycles by microarchitecture). Modern predictors (TAGE) achieve ~97–99% accuracy in benchmarks. Misprediction rate spikes with random/unpredictable branches (e.g., a search loop terminating at a random position).
 
 **Q: What is a cache line, and how large is it on modern hardware?**
-A cache line is the minimum unit of data transfer between cache levels and between cache and DRAM. On all modern x86-64 (Intel, AMD) and ARM (Cortex-A, Apple M-series) processors, the cache line size is 64 bytes. When you read one byte, the CPU fetches the entire aligned 64-byte block. When you write one byte, the entire line is loaded (write-allocate policy), modified, and marked dirty. Cache-line alignment is why struct padding and `alignas(64)` matter for false sharing.
+A cache line is the minimum unit of data transfer between cache levels and between cache and DRAM. It is 64 bytes on every x86-64 processor (Intel, AMD) and on ARM Cortex-A cores — but **128 bytes on Apple Silicon** (`sysctl hw.cachelinesize` returns 128 on M-series). Assuming 64 everywhere is the classic portability bug: padding to 64 bytes on an M-series Mac leaves two "isolated" counters sharing one line. When you read one byte, the CPU fetches the entire aligned line. When you write one byte, the entire line is loaded (write-allocate policy), modified, and marked dirty. Cache-line alignment is why struct padding and `alignas(64)` matter for false sharing — and why the JVM's `@Contended` pads 128 bytes rather than 64.
 
 **Q: Explain NUMA and why it matters for multi-socket servers.**
 Non-Uniform Memory Access (NUMA): in a multi-socket server, each CPU socket has its own memory controller and local DRAM. Accessing local memory takes ~100 ns; accessing the other socket's DRAM crosses an inter-socket interconnect (Intel QPI/UPI, AMD Infinity Fabric) and costs ~200–300 ns. A process running threads across both sockets with memory allocated on one socket will incur ~2× memory latency for cross-socket accesses. On 2-socket servers running Elasticsearch, PostgreSQL, or Redis, `numactl --interleave=all` spreads memory round-robin across nodes; for latency-critical workloads, `--membind=0 --cpunodebind=0` keeps everything local.
@@ -1017,7 +1017,7 @@ Non-Uniform Memory Access (NUMA): in a multi-socket server, each CPU socket has 
 Each node in a linked list is independently heap-allocated at an arbitrary address. Traversal is a pointer-chase: you cannot know the address of node n+1 until you have loaded node n (pointer field). This defeats spatial prefetching — the hardware prefetcher cannot predict the next address. Each node access is a potential L3 miss (~40 ns) or DRAM miss (~100 ns). A sequentially-allocated array allows the prefetcher to stream ahead, keeping data in L1/L2. Traversing 1 million linked-list nodes can be 5–20× slower than traversing an equivalent array, despite identical O(n) complexity.
 
 **Q: What is write-through vs write-back caching, and which does x86-64 use?**
-Write-through: every store writes simultaneously to the cache and to the next level of the hierarchy (L2 or DRAM). Simpler to implement and always consistent, but generates high write bandwidth. Write-back: the store writes only to the cache; the line is marked "dirty." The dirty line is written back to the next level only when evicted. Generates far less write traffic. Modern x86-64 processors use write-back for L2 and L3; L1 may use write-through to L2 (implementation-specific). DRAM writes happen only on cache eviction or explicit `clflush`.
+Write-through: every store writes simultaneously to the cache and to the next level of the hierarchy (L2 or DRAM). Simpler to implement and always consistent, but generates high write bandwidth. Write-back: the store writes only to the cache; the line is marked "dirty." The dirty line is written back to the next level only when evicted. Generates far less write traffic. Modern x86-64 processors use write-back at **every** cache level, L1d included — write-back (WB) is the default memory type for normal system RAM, and write-through (WT) and write-combining (WC) are reserved for special regions such as MMIO and framebuffers, set via MTRRs or page-table attributes. DRAM writes happen only on cache eviction or explicit `clflush`/`clwb`.
 
 **Q: How does the hardware prefetcher work, and what patterns does it handle poorly?**
 The hardware prefetcher monitors the stream of cache miss addresses. If it detects a stride pattern (e.g., misses at +64, +128, +192 bytes), it issues speculative DRAM reads ahead of time, filling the cache before the CPU explicitly requests the data. It handles sequential access and fixed-stride access well. It handles poorly: pointer chasing (linked lists, trees) where the next address is unknown until the current load completes; irregular strides; access patterns that switch stride mid-stream. Software prefetch (`__builtin_prefetch` in GCC, `_mm_prefetch` intrinsic) can compensate for pointer-chase patterns in performance-critical code.
@@ -1029,7 +1029,7 @@ The BTB is a CPU cache that stores recent branch instruction addresses mapped to
 NumPy defaults to C-order (row-major) storage: elements of a row are contiguous in memory. Iterating row-by-row achieves sequential memory access (spatial locality). Column-by-column iteration jumps by `ncols * 8` bytes between accesses — almost certainly a cache miss for large arrays. For column-heavy workloads, use Fortran-order: `np.array(data, order='F')` or `np.asfortranarray(arr)`. For mixed-access patterns, explicit transposition `arr.T` returns a Fortran-order view with zero data copy. NumPy's vectorized operations (`.sum()`, `.mean()`) internally stride optimally and use SIMD regardless of order for simple reductions.
 
 **Q: What are the concrete latency numbers for each level of the memory hierarchy?**
-Registers: < 1 ns (0–1 cycle). L1 cache: 1–4 ns (4–12 cycles), 32–64 KB per core. L2 cache: ~10 ns (30–40 cycles), 256 KB–1 MB per core. L3 cache: ~40 ns (100–130 cycles), 4–32 MB shared. DRAM: ~100 ns (~300 cycles at 3 GHz). NVMe SSD: ~100 µs (100,000 ns). SATA SSD: ~500 µs. HDD: ~10 ms (10,000,000 ns). These numbers vary slightly by microarchitecture (Intel Golden Cove, AMD Zen 4, Apple M3) but the ratios are stable: L1 is ~100× faster than DRAM; DRAM is ~1000× faster than HDD.
+Registers: < 1 ns (0–1 cycle). L1 cache: 1–4 ns (4–12 cycles), 32–64 KB per core. L2 cache: ~10 ns (30–40 cycles), 256 KB–3 MB per core. L3 cache: ~40 ns (100–130 cycles), 4–128 MB shared on client parts and several hundred MB on server parts (AMD EPYC Turin reaches 384–512 MB, Intel Xeon 6 up to 504 MB). DRAM: ~100 ns (~300 cycles at 3 GHz). NVMe SSD: ~100 µs (100,000 ns). SATA SSD: ~500 µs. HDD: ~10 ms (10,000,000 ns). These numbers vary slightly by microarchitecture (Intel Lion Cove, AMD Zen 5, Apple M5) but the ratios are stable: L1 is ~100× faster than DRAM; DRAM is ~1000× faster than HDD.
 
 **Q: What is out-of-order execution, and how does it relate to the memory hierarchy?**
 Out-of-order (OoO) execution: the CPU does not execute instructions in strict program order. Instead, a scheduler (reservation station) tracks which instructions have all their operands ready and issues them to execution units as soon as they are ready, regardless of program order. The reorder buffer (ROB) holds results until they can be committed in program order (ensuring precise exceptions). OoO execution hides memory latency: while an L3-miss load is pending (~130 cycles), the CPU finds other independent instructions to execute, keeping execution units busy. Without OoO, a single L3 miss would stall the pipeline for 130 cycles.
@@ -1040,7 +1040,7 @@ Out-of-order (OoO) execution: the CPU does not execute instructions in strict pr
 
 **Structure data for access patterns, not logical grouping.** Choose struct-of-arrays (SoA) over array-of-structs (AoS) when hot loops only access a subset of fields. Example: a particle simulation that updates position (x, y, z) every frame should store all x-values contiguously, then all y-values, rather than storing `{x, y, z, mass, charge, ...}` per particle.
 
-**Align independently-written fields to cache-line boundaries.** Any variable written by one thread while other threads may read or write nearby variables should be aligned to 64 bytes. In Python/C: `ctypes.Structure` with explicit padding. In Java: `@Contended`. In Rust: `#[repr(align(64))]`. In C: `alignas(64)`.
+**Align independently-written fields to cache-line boundaries.** Any variable written by one thread while other threads may read or write nearby variables should be aligned to a cache line — 64 bytes on x86-64, 128 bytes on Apple Silicon, so pad to 128 if the code must be portable. In Python/C: `ctypes.Structure` with explicit padding. In Java: `@Contended` (which already pads 128). In Rust: `#[repr(align(64))]`. In C: `alignas(64)`, or C++17 `std::hardware_destructive_interference_size`.
 
 **Prefer sequential memory access over random access.** Hash tables, linked lists, and trees have poor spatial locality. When performance is critical and the working set fits in cache, consider sorted arrays with binary search (excellent spatial locality, log n lookups) or flat hash maps (Robin Hood, open addressing) that avoid pointer chasing.
 
@@ -1246,7 +1246,7 @@ class RouteCounter:
 | Speedup | **8×** | | |
 | Java `LongAdder` vs `AtomicLong` under 16-thread contention | 12× higher throughput | | |
 
-Numbers from published benchmarks on 8-core Intel Ice Lake (Azul Systems blog, 2022; JMH results for Java). Python GIL prevents observing the full hardware effect; use ctypes, Cython, or Rust extensions to benchmark at the hardware level.
+Representative figures for an 8-core Intel server CPU; the Java row is the shape consistently reported by JMH microbenchmarks of `LongAdder` vs `AtomicLong` under heavy write contention. Treat them as orders of magnitude and re-measure on your own hardware. Python GIL prevents observing the full hardware effect; use ctypes, Cython, or Rust extensions to benchmark at the hardware level.
 
 #### Discussion Questions
 
