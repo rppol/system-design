@@ -67,7 +67,8 @@
 ### GPU fleet sizing
 
 ```
-Serving (MIG-sliced A100s, 1g.10gb each = 7 slices/GPU):
+Serving (MIG-sliced A100 80GB, 1g.10gb each = 7 slices/GPU -- the 1g.10gb profile
+exists only on the 80GB card, i.e. p4de.24xlarge, not p4d's 40GB A100s):
   40 models, avg 3 replicas, each fits a 10GB slice = 120 slices
   120 slices / 7 = ~18 physical A100s for serving (call it 24 with headroom + warm pool)
 
@@ -89,19 +90,24 @@ Today: ~$1.8M/month at ~22% utilization. Effectively paying ~$1.8M for ~$400k of
 
 Platform targets:
   - Serving: MIG slicing collapses 40 whole-GPU endpoints (~40 A100s) to ~24 -> save ~16 A100s
-  - Training/batch on Spot (~70% off): 320 bursty GPUs at Spot vs On-Demand
-      On-Demand p4d/8 ≈ $32.77/hr -> ~$4.10/GPU-hr; Spot ≈ $1.25/GPU-hr
+  - Training/batch on Spot (~65% off): 320 bursty GPUs at Spot vs On-Demand
+      On-Demand p4de.24xlarge ≈ $27.45/hr / 8 A100 80GB -> $3.43/GPU-hr; Spot ≈ $1.25/GPU-hr
   - Scale-to-zero + Karpenter consolidation removes idle-node waste
 
-Modeled new spend: ~$760k/month for MORE useful throughput, at ~66% utilization.
-  => ~$1.04M/month saved (~58%), AND more work done. The platform team (say 6 engineers,
-     ~$1.5M/yr loaded) pays for itself in ~6 weeks of savings.
+Modeled new spend: ~$410k/month with training and batch pinned at their peak all month
+  (~$270k at the steady-state mix -- see the §10 worked fleet), at ~66% utilization.
+  Useful-work check: today's $1.8M buys ~525k On-Demand GPU-hours ($1.8M / $3.43), i.e.
+  ~719 GPUs running all month, of which 22% is useful = ~158 GPU-equivalents. The new
+  fleet at peak is 360 GPUs x 66% = ~238 GPU-equivalents. MORE work for less money.
+  => ~$1.4M/month saved (~78%), AND more work done. The platform team (say 6 engineers,
+     ~$1.5M/yr loaded) pays for itself in ~5 weeks of savings.
 ```
 
 ### Control-plane scale
 
 ```
-~360 GPU nodes peak, ~3,000 Pods (serving replicas + training workers + sidecars + dev).
+~45 GPU nodes at peak (360 GPUs at 8 per p4de.24xlarge) plus the CPU fleet, and a few
+thousand Pods (serving replicas + training workers + sidecars + dev notebooks).
 etcd, API server, scheduler must handle Pod churn from bursty training + scale-to-zero.
 Cardinality risk: DCGM exports ~30 series/GPU x 360 GPUs x (MIG multiplies) -> watch it.
   (See ./cross_cutting/prometheus_cardinality_and_scale.md)
@@ -126,7 +132,7 @@ flowchart TD
     subgraph Orch["ORCHESTRATION LAYER"]
         direction LR
         Kueue["Kueue<br/>quotas + fair-share + gang"]
-        TrainOp["Training Operator / KubeRay<br/>PyTorchJob · RayJob"]
+        TrainOp["Kubeflow Trainer / KubeRay<br/>TrainJob · RayJob"]
         KServeN["KServe<br/>serving"]
         PipeN["Pipelines/Argo + Katib<br/>DAGs + HPO"]
         MLflowN["MLflow<br/>tracking + registry"]
@@ -144,7 +150,7 @@ flowchart TD
     Storage["S3 + FSx Lustre<br/>datasets · checkpoints · models"]
     Obs(["Prometheus/Thanos<br/>Grafana"])
 
-    Product -->|"TrainingJob CRD"| Kueue
+    Product -->|"TrainJob CRD"| Kueue
     Product -->|"InferenceService CRD"| KServeN
     Kueue --> Sched
     TrainOp --> Sched
@@ -166,19 +172,19 @@ flowchart TD
     class Storage frozen
     class Obs io
 ```
-*Three planes stacked: the product layer turns a CLI/SDK call into a `TrainingJob` or `InferenceService` CRD, the orchestration layer (Kueue/Training Operator/KServe/Pipelines/MLflow) turns that into scheduled Pods, and the substrate layer (Karpenter's three NodePools + the GPU Operator) turns Pods into running GPUs — artifacts land in S3/FSx and metrics flow to Prometheus/Thanos/Grafana.*
+*Three planes stacked: the product layer turns a CLI/SDK call into a `TrainingJob` or `InferenceService` CRD, the orchestration layer (Kueue/Kubeflow Trainer/KServe/Pipelines/MLflow) turns that into scheduled Pods, and the substrate layer (Karpenter's three NodePools + the GPU Operator) turns Pods into running GPUs — artifacts land in S3/FSx and metrics flow to Prometheus/Thanos/Grafana.*
 
 **Component inventory:**
 - **Product layer**: CLI/SDK + Backstage golden paths; quota & cost views.
 - **Kueue**: cluster-wide quotas, fair-share across teams, gang admission for distributed jobs.
-- **Training**: Kubeflow Training Operator (PyTorchJob/TFJob) and KubeRay (RayJob) — pick per team.
+- **Training**: Kubeflow Trainer (one `TrainJob` CRD, framework chosen by the referenced runtime) and KubeRay (RayJob) — pick per team.
 - **Serving**: KServe `InferenceService` (autoscaling, scale-to-zero, canary), often wrapping Triton.
 - **Pipelines**: Kubeflow Pipelines / Argo Workflows for DAGs; MLflow registry.
 - **Substrate**: EKS, NVIDIA GPU Operator, Karpenter (3 NodePools), Volcano for topology/gang.
 - **Storage**: S3 (durable), FSx for Lustre (hot training data + model weight cache).
 - **Observability**: DCGM exporter + Prometheus/Thanos + Grafana; per-team dashboards.
 
-**Data-flow narrative (training):** ML engineer runs `mlctl train submit job.yaml` → a `PyTorchJob` (labeled with the team's Kueue queue) is created → Kueue checks the team's quota and admits the job only when all N GPUs are simultaneously available (gang) → Volcano places workers topology-aware (NVLink-packed) → Karpenter provisions Spot GPU nodes if needed (lifecycle bring-up, ~110s) → workers run, checkpointing to S3 every ~6 min → on completion the model is logged to MLflow.
+**Data-flow narrative (training):** ML engineer runs `mlctl train submit job.yaml` → a `TrainJob` (labeled with the team's Kueue queue) is created → Kueue checks the team's quota and admits the job only when all N GPUs are simultaneously available (gang) → Volcano places workers topology-aware (NVLink-packed) → Karpenter provisions Spot GPU nodes if needed (lifecycle bring-up, ~110s) → workers run, checkpointing to S3 every ~6 min → on completion the model is logged to MLflow.
 
 **Data-flow narrative (serving):** engineer runs `mlctl serve deploy model.yaml` → a KServe `InferenceService` requesting a `mig-1g.10gb` slice is created → KServe (via Knative) autoscales replicas on RPS, scaling to zero when idle → a canary rollout shifts 5% traffic, checks p99/error metrics, then promotes or rolls back → traffic served behind an ALB.
 
@@ -245,17 +251,19 @@ spec:
 
 ```yaml
 # The training job points at the team's LocalQueue; Kueue does gang admission.
-apiVersion: kubeflow.org/v1
-kind: PyTorchJob
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
 metadata:
-  name: fraud-xgb-pretrain
+  name: fraud-ranker-pretrain
   labels: { kueue.x-k8s.io/queue-name: fraud-team-lq }
 spec:
-  pytorchReplicaSpecs:
-    Master: { replicas: 1, template: {spec: {containers: [{name: pt, image: fraud:v3,
-      resources: {limits: {nvidia.com/gpu: 8}}}]}} }
-    Worker: { replicas: 3, template: {spec: {containers: [{name: pt, image: fraud:v3,
-      resources: {limits: {nvidia.com/gpu: 8}}}]}} }
+  runtimeRef: { name: torch-distributed }   # ClusterTrainingRuntime picks the framework
+  trainer:
+    image: fraud:v3
+    numNodes: 4                             # rank 0 included -- 4 full GPU consumers
+    numProcPerNode: 8                       # one process per GPU
+    resourcesPerNode:
+      limits: { nvidia.com/gpu: 8 }
 # 32 GPUs; admitted only when 32 are available -> released together. No partial placement.
 ```
 
@@ -303,7 +311,7 @@ stateDiagram-v2
     class Provisioning,NodeBringUp,WeightLoad mathOp
     class Serving,Warm train
 ```
-*The cold path (Idle → Provisioning → NodeBringUp → WeightLoad) is what a scale-to-zero model pays on its first request after idling — the ~95s that paged on-call in War story 4 (§9). `minReplicas: 1` plus a warm pool detours straight through Warm to Serving, which is why it's reserved for tier-1 and compliance-critical models.*
+*The cold path (Idle → Provisioning → NodeBringUp → WeightLoad) is what a scale-to-zero model pays on its first request after idling — the ~200s that paged on-call in War story 4 (§9). `minReplicas: 1` plus a warm pool detours straight through Warm to Serving, which is why it's reserved for tier-1 and compliance-critical models.*
 
 ### 4.3 Karpenter NodePools — the three workload classes
 
@@ -318,12 +326,13 @@ spec:
   template:
     metadata: { labels: { workload: training } }
     spec:
+      nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: gpu }
       startupTaints: [{ key: nvidia.com/gpu-not-ready, effect: NoSchedule }]
       taints: [{ key: nvidia.com/gpu, effect: NoSchedule }]
       requirements:
         - { key: karpenter.sh/capacity-type, operator: In, values: ["spot"] }
         - { key: node.kubernetes.io/instance-type, operator: In,
-            values: ["p4d.24xlarge","p5.48xlarge"] }
+            values: ["p4de.24xlarge","p5.48xlarge"] }
   disruption: { consolidationPolicy: WhenEmpty, consolidateAfter: 2m }
   limits: { nvidia.com/gpu: 320 }      # spending circuit breaker
 ---
@@ -335,8 +344,11 @@ spec:
   template:
     metadata: { labels: { workload: serving } }
     spec:
+      nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: gpu-mig }
       requirements:
         - { key: karpenter.sh/capacity-type, operator: In, values: ["on-demand"] }
+        - { key: node.kubernetes.io/instance-type, operator: In,
+            values: ["p4de.24xlarge"] }      # 80GB A100s -- 1g.10gb MIG profile
   disruption: { consolidationPolicy: WhenEmpty, consolidateAfter: 10m }
   limits: { nvidia.com/gpu: 32 }
 ```
@@ -372,7 +384,7 @@ with mlflow.start_run(run_name="fraud-scorer-v8") as run:
     mlflow.log_params({"lr": 3e-4, "batch": 512, "gpus": 32})
     # ... training loop (checkpointing to S3 every ~6 min) ...
     mlflow.log_metric("val_auc", 0.948)
-    mlflow.pytorch.log_model(model, artifact_path="model",
+    mlflow.pytorch.log_model(pytorch_model=model, name="model",
                              registered_model_name="fraud-scorer")
 # Promotion is gated by eval (see §8a); only a model that passes is moved to Production.
 ```
@@ -390,7 +402,7 @@ spec:
       dag:
         tasks:
           - { name: preprocess, template: spark-prep }
-          - { name: train, template: pytorchjob, dependencies: [preprocess] }
+          - { name: train, template: trainjob, dependencies: [preprocess] }
           - { name: eval, template: eval-gate, dependencies: [train] }
           - { name: register, template: mlflow-register, dependencies: [eval] }
           - { name: deploy, template: kserve-canary, dependencies: [register] }
@@ -411,19 +423,19 @@ spec:
     minReplicas: 3
     model:
       resources: { limits: { nvidia.com/gpu: 1 } }   # whole A100 for 4GB
-# (training PyTorchJob with no kueue.x-k8s.io/queue-name label -> no gang admission)
+# (training TrainJob with no kueue.x-k8s.io/queue-name label -> no gang admission)
 ```
 
 ```yaml
 # FIX: MIG slice for serving + Kueue gang admission for training.
 spec:
   predictor:
-    minReplicas: 1                                    # scale-to-zero-aware
+    minReplicas: 1                                    # tier-1 keeps one warm; rare models use 0
     model:
       resources: { limits: { nvidia.com/mig-1g.10gb: 1 } }   # 10GB slice
 # training job now labeled kueue.x-k8s.io/queue-name -> atomic all-or-nothing placement
 ```
-Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices), and the deadlocks vanished — together a ~$420k/month line-item reduction.
+Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices) — 2 fewer p4de.24xlarge at $27.45/hr, **~$40k/month** — and the deadlocks vanished, which bought back far more than the hardware line: the GPUs that were held hostage by partial placements went back to producing training throughput.
 
 ---
 
@@ -441,7 +453,7 @@ Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices), and the dea
 
 **Decision 3: MIG for serving, Spot for training, time-slicing only for dev.**
 - *Alternatives:* time-slice everything (max packing), exclusive GPUs everywhere (max isolation).
-- *Rationale:* Matches isolation to risk — serving needs hardware isolation (MIG) for predictable p99; training is fault-tolerant so Spot's 70% discount wins; dev is trusted/bursty so time-slicing maximizes packing.
+- *Rationale:* Matches isolation to risk — serving needs hardware isolation (MIG) for predictable p99; training is fault-tolerant so Spot's ~65% discount ($1.25 vs $3.43/GPU-hr) wins; dev is trusted/bursty so time-slicing maximizes packing.
 - *Consequences:* MIG fragments (slices wasted if model sizes mismatch slice sizes); Spot needs checkpointing discipline.
 
 ```mermaid
@@ -487,7 +499,7 @@ flowchart LR
 | Substrate | EKS / Kubernetes | Slurm, SageMaker | One substrate for train+serve, rich ecosystem |
 | Quota/gang | Kueue (+Volcano) | Default sched, YuniKorn | Cohort borrowing + gang admission |
 | Serving share | MIG | Time-slicing, exclusive | Isolation for predictable p99 |
-| Training cost | Spot + checkpoint | On-Demand | ~70% cheaper, training is restartable |
+| Training cost | Spot + checkpoint | On-Demand | ~65% cheaper, training is restartable |
 | Serving stack | KServe + Triton | Plain Deployment, Ray Serve | Golden-path CRD, scale-to-zero, throughput |
 | Build vs buy | Build | SageMaker/Anyscale | Savings + control at this scale |
 
@@ -512,7 +524,7 @@ flowchart LR
 | Karpenter | Substrate | Fast, Spot-aware, instance-flexible | AWS-primary; consolidation can disrupt if mis-set |
 | Kueue | Orchestration | Quotas, fair-share, cohort borrowing, gang | Preemption tuning; pairs with Volcano for topology |
 | Volcano | Orchestration | Topology-aware (NVLink) gang scheduling | Overlaps Kueue; clarify which owns what |
-| Kubeflow Training Operator | Orchestration | PyTorchJob/TFJob distributed training | Heavyweight install footprint |
+| Kubeflow Trainer | Orchestration | One `TrainJob` CRD for PyTorch/JAX/DeepSpeed/MPI/XGBoost | Heavyweight install footprint |
 | KubeRay / Ray | Orchestration | Python-native train+serve+tune+data | Another cluster abstraction to operate |
 | KServe + Triton | Serving | Scale-to-zero, canary, max GPU throughput | Knative dependency; cold-start work |
 | MLflow | Tracking/registry | Experiment tracking + model stages | Scaling the tracking DB at high run volume |
@@ -524,7 +536,7 @@ flowchart LR
 | Capability | AWS | GCP | Azure |
 |-----------|-----|-----|-------|
 | Managed K8s + GPU | EKS + GPU Operator | GKE (GPU pools, time-sharing, MIG) | AKS GPU pools |
-| Node autoscaler | Karpenter | GKE node auto-provisioning | Cluster Autoscaler |
+| Node autoscaler | Karpenter | GKE node auto-provisioning | AKS Node Auto Provisioning (Karpenter) |
 | Managed ML platform | SageMaker | Vertex AI | Azure ML |
 | Hot data | FSx for Lustre | Filestore / GCS FUSE | Azure NetApp Files |
 | Managed Prometheus | AMP | Managed Service for Prometheus | Azure Monitor managed Prometheus |
@@ -597,13 +609,13 @@ Symptom: GPU-hours or spend alert spikes. Diagnosis: a buggy job or HPA creating
 
 ## 9. Common Pitfalls & War Stories
 
-**War story 1 — The 9%-utilization serving fleet ($420k/month).** A company served 40 models, each on a whole A100, at ~9% utilization — every model used <10GB of an 80GB card. Allocation dashboards showed "100% of GPUs in use," so no one questioned it until finance flagged the bill. MIG-slicing serving collapsed 40 cards to ~24 and added scale-to-zero for rare models; ~$420k/month recovered. *Lesson: alert on DCGM utilization, never allocation.*
+**War story 1 — The 9%-utilization serving fleet.** A company served 40 models, each on a whole A100, at ~9% utilization — every model used <10GB of an 80GB card. Allocation dashboards showed "100% of GPUs in use," so no one questioned it until finance flagged the bill. MIG-slicing serving collapsed 40 cards to ~24, and scale-to-zero took the rare models to nothing between requests; 5 p4de.24xlarge became 3, recovering **~$40k/month** — and, more importantly, the freed cards absorbed serving growth for a year without a purchase. *Lesson: alert on DCGM utilization, never allocation.*
 
-**War story 2 — Karpenter killed a 5-hour training run nightly.** A training NodePool ran with default `WhenEmptyOrUnderutilized` consolidation; Karpenter judged a node "underutilized" mid-run and disrupted it. Checkpoints were hourly, so each interruption lost ~50 minutes; it happened most nights, quietly burning ~$30k/month in re-computed GPU-hours. Fix: `consolidationPolicy: WhenEmpty` + `do-not-disrupt` annotation + 6-minute checkpoints. *Lesson: protect running training from consolidation; checkpoint frequently.*
+**War story 2 — Karpenter killed a 5-hour training run nightly.** A training NodePool ran with default `WhenEmptyOrUnderutilized` consolidation; Karpenter judged a node "underutilized" mid-run and disrupted it. Checkpoints were hourly, so each interruption lost ~50 minutes; across a 240-GPU training fleet at $1.25/GPU-hr that is ~$250 a night, and it happened most nights — ~$7.5k/month quietly burned re-computing the same steps. Fix: `consolidationPolicy: WhenEmpty` + `do-not-disrupt` annotation + 6-minute checkpoints. *Lesson: protect running training from consolidation; checkpoint frequently.*
 
 **War story 3 — Distributed training deadlock at quarter-end.** Under contention, the default scheduler placed 14 of 16 workers for several jobs; each held its GPUs waiting for the missing 2, which could never schedule. Throughput collapsed across the cluster for hours; a model release slipped a day. Fix: Kueue gang admission (all-or-nothing). *Lesson: never let the default scheduler place distributed training.*
 
-**War story 4 — Cold start paged on-call during an audit.** A compliance model was scaled to zero (rarely used). An auditor hit it; the first request waited ~95s (Karpenter provisioning + ~110s bring-up + 6GB model download), the request timed out, and a synthetic monitor paged. Fix: `minReplicas: 1` for compliance-critical-but-rare models, weights pre-staged on a warm node. *Lesson: scale-to-zero trades cost for cold start; choose per model.*
+**War story 4 — Cold start paged on-call during an audit.** A compliance model was scaled to zero (rarely used). An auditor hit it; the first request waited **~200s** (~40s Karpenter provisioning + ~110s node bring-up + ~50s to pull a 6GB model) — past the 3-minute worst-case cold-start target — the request timed out, and a synthetic monitor paged. Fix: `minReplicas: 1` for compliance-critical-but-rare models, weights pre-staged on a warm node. *Lesson: scale-to-zero trades cost for cold start; choose per model.*
 
 **War story 5 — DCGM cardinality crashed Prometheus.** Enabling per-MIG-slice DCGM metrics across 360 GPUs multiplied series count past the Prometheus memory ceiling; the server OOM-crashed, taking down all platform dashboards during an unrelated incident — so on-call was flying blind. Fix: recording rules + dropping high-cardinality labels + Thanos for long-term, per [`./cross_cutting/prometheus_cardinality_and_scale.md`](./cross_cutting/prometheus_cardinality_and_scale.md). *Lesson: GPU metrics are a cardinality risk; budget series.*
 
@@ -627,13 +639,16 @@ Training capacity (whole GPUs, elastic):
 peak_training_gpus = Σ_jobs (workers × gpus_per_worker) at peak concurrency
   worked: 30 jobs × 8 GPUs = 240 GPUs peak; average ~120 (bursty)
 Spot cost = avg_training_gpus × hours × $1.25/GPU-hr
-  worked: 120 × 730 hr × $1.25 ≈ $109.5k/month (vs ~$359k On-Demand)
+  worked: 120 × 730 hr × $1.25 ≈ $109.5k/month (vs ~$300k On-Demand at $3.43/GPU-hr)
 ```
 
 Per-replica serving sizing (from a capacity test, see [`../performance_and_load_testing/`](../performance_and_load_testing/performance_and_load_testing.md)):
 ```
 measured: fraud-scorer sustains ~50 RPS/replica (MIG slice) at p99 < 150ms (knee at ~70 RPS)
 peak aggregate: 22,000 RPS across all models
+fleet check: 22,000 RPS / 120 replicas = ~180 RPS/replica on average, so most of the 40
+  models are far lighter than fraud-scorer; only the heavy ones sit near 50 RPS/replica,
+  and those are exactly the ones re-tiered below
 for a 4,000-RPS model: 4000 / 50 = 80 replicas... -> but that's 80 slices = ~12 A100s for ONE model
   => such a hot model should get exclusive or larger MIG slices, not 1g.10gb. Re-tier it.
 HPA/KServe scaleTarget = 70% of knee = ~50 RPS/replica (leaves headroom for the ~15s scale lag)
@@ -641,12 +656,13 @@ HPA/KServe scaleTarget = 70% of knee = ~50 RPS/replica (leaves headroom for the 
 
 **Worked fleet example (steady state):**
 ```
-Serving:  24 × p4d (On-Demand) ≈ 24 × $32.77/hr... (note: A100s come 8/instance,
-          so 24 A100s ≈ 3 instances) ≈ 3 × $32.77 × 730 ≈ $71.8k/month
-Training: ~$109.5k/month (Spot, above)
+Serving:  24 A100 80GB On-Demand; they come 8 to a p4de.24xlarge, so 24 = 3 instances
+          3 × $27.45/hr × 730 ≈ $60.1k/month
+Training: ~$109.5k/month (Spot, above; ~$219k if the 240-GPU peak ran all month)
 Batch/dev: ~$60k/month (Spot + time-sliced)
 Storage/control/observability: ~$40k/month
-Total ≈ $280k–$760k/month depending on training burst (vs $1.8M before) at ~66% utilization.
+Total ≈ $270k/month steady, ~$410k with training and batch at peak all month
+      (vs $1.8M before) at ~66% utilization.
 ```
 
 **Scaling triggers:**
@@ -663,19 +679,19 @@ Total ≈ $280k–$760k/month depending on training burst (vs $1.8M before) at ~
 Because GPUs are the dominant cost (often 60–80% of an ML org's cloud bill), so utilization *is* the dollar efficiency of the platform — 22% means you're paying ~3× for the work you get. You raise it with several compounding levers: MIG-slice serving so small models share cards instead of monopolizing them; gang-schedule and bin-pack training; let teams **borrow idle quota** within a cohort (Kueue) so reserved-but-unused GPUs do work; scale rarely-used models to zero; and use Karpenter consolidation to kill idle nodes fast. Crucially you measure DCGM *utilization*, not allocation — many fleets look "100% allocated" while SMs sit at 9%. The combination, not any single lever, gets you from 22% to 65%+.
 
 **Q: Walk me through what happens when a data scientist submits a 32-GPU distributed training job.**
-They run `mlctl train submit`, creating a PyTorchJob labeled with their team's Kueue LocalQueue. Kueue checks the team's ClusterQueue quota; if 32 GPUs are available (own quota or borrowable from the cohort), it admits the job **atomically** — all 32 or none — avoiding the partial-placement deadlock. Volcano then places the 4 workers topology-aware, packing GPUs onto NVLink-connected devices for fast all-reduce. If nodes are needed, Karpenter provisions Spot GPU instances, which go through the ~110s bring-up (driver→toolkit→device-plugin) gated by a startup taint. Workers start, checkpoint to S3 every ~6 minutes (so a Spot reclaim loses little), and on completion the model is logged to MLflow. The whole flow is self-service — the scientist never touched infrastructure.
+They run `mlctl train submit`, creating a `TrainJob` labeled with their team's Kueue LocalQueue. Kueue checks the team's ClusterQueue quota; if 32 GPUs are available (own quota or borrowable from the cohort), it admits the job **atomically** — all 32 or none — avoiding the partial-placement deadlock. Volcano then places the 4 nodes (rank 0 included) topology-aware, packing GPUs onto NVLink-connected devices for fast all-reduce. If nodes are needed, Karpenter provisions Spot GPU instances, which go through the ~110s bring-up (driver→toolkit→device-plugin) gated by a startup taint. Workers start, checkpoint to S3 every ~6 minutes (so a Spot reclaim loses little), and on completion the model is logged to MLflow. The whole flow is self-service — the scientist never touched infrastructure.
 
 **Q: How do you provide multi-tenancy so 14 teams share GPUs without starving or crashing each other?**
 Isolation and fairness at three levels. **Quotas/fairness:** Kueue ClusterQueues give each team a nominal GPU quota with fair-share and cohort borrowing — idle quota is lent and reclaimed via preemption when the owner needs it, which is how you get high utilization without starvation. **Compute isolation:** MIG gives hardware-enforced memory/fault isolation for serving so one tenant can't crash or read another's; training gets whole GPUs. **Blast-radius:** separate NodePools and namespaces, ResourceQuotas, and NodePool `limits` caps so no team's runaway job can provision unbounded GPUs. **Accountability:** per-team GPU-hour chargeback weighted by utilization discourages hoarding. The subtle part is preemption tuning so borrowing doesn't thrash.
 
 **Q: Why separate training and serving onto different node pools and pricing models?**
-They have opposite profiles. Training is long, bursty, fault-tolerant, wants whole/many GPUs, and is happy on Spot (70% cheaper) because it's restartable via checkpointing. Serving is steady, latency-sensitive, wants fractional GPUs (MIG), and needs stable On-Demand capacity plus a warm pool. On a shared pool, Spot reclaims meant for training would kill serving Pods, consolidation churn would destabilize latency-sensitive endpoints, and a single disruption policy can't satisfy both gang-training and PDB-protected serving. Separate Karpenter NodePools let each have the right capacity type, disruption policy, and taints. Kueue borrowing recovers most of the bin-packing efficiency you'd otherwise lose by splitting.
+They have opposite profiles. Training is long, bursty, fault-tolerant, wants whole/many GPUs, and is happy on Spot (~65% cheaper) because it's restartable via checkpointing. Serving is steady, latency-sensitive, wants fractional GPUs (MIG), and needs stable On-Demand capacity plus a warm pool. On a shared pool, Spot reclaims meant for training would kill serving Pods, consolidation churn would destabilize latency-sensitive endpoints, and a single disruption policy can't satisfy both gang-training and PDB-protected serving. Separate Karpenter NodePools let each have the right capacity type, disruption policy, and taints. Kueue borrowing recovers most of the bin-packing efficiency you'd otherwise lose by splitting.
 
 **Q: How do you decide MIG vs time-slicing vs exclusive GPUs for a given workload?**
 By the isolation-vs-utilization tradeoff for that workload's risk. **Exclusive** (whole GPU) for training and the largest models — they need all of it. **MIG** for multi-tenant production inference — hardware-enforced isolation gives predictable p99 and prevents one tenant crashing another, at the cost of fixed slice sizes and some fragmentation. **Time-slicing** only for dev/notebooks and trusted bursty workloads — maximum packing with zero isolation, so a co-tenant's OOM can crash you and p99 is unpredictable. The rule of thumb: if a latency SLA or tenant isolation matters, never time-slice; if it's trusted/bursty and you want max packing, time-slice; if it needs a full card, give it one.
 
 **Q: What's your approach to cost on this platform, and how do you do chargeback?**
-Multiple layers. **Spot** for all fault-tolerant compute (training/batch) with checkpointing — the single biggest lever (~70% off). **MIG + scale-to-zero** to stop over-allocating cards to small/rare models. **Karpenter consolidation** to kill idle nodes within minutes. **NodePool `limits`** as spending circuit breakers. For chargeback: tag Pods → nodes with team labels, attribute GPU-hours per team (via Kubecost or cloud cost-allocation tags), and — critically — show **GPU-hours allocated vs utilized** per team so a team that reserves 100 GPU-hours but uses 8% gets an actionable bill. Billing on utilization-weighted GPU-hours discourages hoarding, which raises fleet utilization for everyone.
+Multiple layers. **Spot** for all fault-tolerant compute (training/batch) with checkpointing — the single biggest lever (~65% off: $1.25 vs $3.43/GPU-hr). **MIG + scale-to-zero** to stop over-allocating cards to small/rare models. **Karpenter consolidation** to kill idle nodes within minutes. **NodePool `limits`** as spending circuit breakers. For chargeback: tag Pods → nodes with team labels, attribute GPU-hours per team (via Kubecost or cloud cost-allocation tags), and — critically — show **GPU-hours allocated vs utilized** per team so a team that reserves 100 GPU-hours but uses 8% gets an actionable bill. Billing on utilization-weighted GPU-hours discourages hoarding, which raises fleet utilization for everyone.
 
 **Q: How does scale-to-zero work and when should you NOT use it?**
 KServe (via Knative) removes all replicas of an idle endpoint, so you pay nothing for GPUs when there's no traffic — essential for the long tail of rarely-used models. The catch is cold start: the first request after scale-down waits for a Pod to schedule, possibly a node to be provisioned (Karpenter, minutes) and brought up (~110s), and multi-GB weights to load — tens of seconds to minutes. Don't use it for latency-critical-but-bursty endpoints, or compliance/SLA-bound models where a cold-start timeout is unacceptable (we got paged when an auditor hit a scaled-to-zero compliance model). For those, `minReplicas: 1` with a warm pool. It's a per-model cost-vs-cold-start decision, not a global setting.

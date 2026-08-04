@@ -81,7 +81,7 @@ A single cluster at 12,000 pods is comfortably inside the upstream-tested envelo
 
 ### etcd object budget
 
-etcd has a default backend quota of **8 GiB** (`--quota-backend-bytes`, max recommended 8 GiB). Every object — pods, endpoints, configmaps, secrets, events, leases — consumes space.
+etcd's own default backend quota is 2 GiB (`--quota-backend-bytes`); EKS runs it at **8 GiB**, the upstream-recommended ceiling and the largest value etcd does not warn about at startup. Every object — pods, endpoints, configmaps, secrets, events, leases — consumes space.
 
 ```
 Objects per cluster (rough):
@@ -171,13 +171,15 @@ flowchart TD
 
     mesh("Cilium ClusterMesh<br/>Submariner fallback")
 
-    eng -- "PR" --> capi
-    capi -- "provisions" --> catalog
-    xplane --> catalog
-    catalog --> policy
-    argocd -- "syncs" --> obs
+    eng -- "PR to<br/>platform repo" --> argocd
+    argocd -- "applies" --> capi
+    argocd -- "applies" --> xplane
+    argocd -- "applies" --> catalog
+    catalog -- "ns · quota · netpol<br/>RBAC · dashboards" --> policy
     catalog -.-> backstage
-    MP -- "CAPI + Argo CD<br/>push / pull" --> FLEET
+    capi -- "provisions<br/>clusters" --> FLEET
+    xplane -- "VPC · IAM · RDS" --> FLEET
+    policy -- "admits" --> FLEET
     use1 --- mesh
     usw2 --- mesh
     euw1 --- mesh
@@ -284,21 +286,28 @@ metadata:
 spec:
   infrastructureRef:
     apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-    kind: AWSManagedControlPlane
-    name: prod-use1-cp
+    kind: AWSManagedCluster       # infra side of an EKS cluster
+    name: prod-use1
   controlPlaneRef:
-    apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-    kind: AWSManagedControlPlane
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+    kind: AWSManagedControlPlane  # control-plane provider group, not infrastructure
     name: prod-use1-cp
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: AWSManagedCluster
+metadata:
+  name: prod-use1
+  namespace: fleet
+spec: {}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
 kind: AWSManagedControlPlane
 metadata:
   name: prod-use1-cp
   namespace: fleet
 spec:
   region: us-east-1
-  version: "1.30"                 # pinned; bumped via PR for upgrades
+  version: "1.35"                 # pinned; bumped via PR for upgrades
   endpointAccess:
     public: false                 # private API endpoint only
     private: true
@@ -324,7 +333,7 @@ spec:
       effect: NoSchedule
 ```
 
-The version field is the upgrade knob: bump `1.30` → `1.31` in a PR, Argo CD rolls the control plane, then CAPA cycles node pools surge-style. The whole fleet upgrade is "merge 50 PRs" (automated via a renovate-style bot), gated by the eval pipeline in §8.
+The version field is the upgrade knob: bump `1.35` → `1.36` in a PR, Argo CD rolls the control plane, then CAPA cycles node pools surge-style. The whole fleet upgrade is "merge 50 PRs" (automated via a renovate-style bot), gated by the eval pipeline in §8.
 
 Cluster lifecycle internals reference: [../kubernetes_architecture/kubernetes_architecture.md](../kubernetes_architecture/kubernetes_architecture.md).
 
@@ -344,7 +353,7 @@ metadata:
 What goes wrong, concretely:
 
 - A `team-payments` Deployment with no resource requests (because nothing forces them) gets scheduled with `BestEffort` QoS. Under node pressure the kubelet evicts *other tenants'* `Burstable` pods first if requests are mis-set, or the payments pods themselves balloon and OOM the node.
-- A buggy batch Job spawns 5,000 pods. With no quota, the scheduler happily places them, Karpenter scales the cluster from 300 to 480 nodes, and `team-search` — sharing the cluster — watches its pods go `Pending` while the autoscaler catches up. A $0 mistake just cost $25k of surprise compute and an SLO breach for an innocent tenant.
+- A buggy batch Job spawns 5,000 pods. With no quota, the scheduler happily places them, Karpenter scales the cluster from 300 to 480 nodes, and `team-search` — sharing the cluster — watches its pods go `Pending` while the autoscaler catches up. A $0 mistake just added 180 m5.2xlarge at $0.384/hr — ~$69/hr, ~$1,700/day of surprise compute that nobody budgeted — plus an SLO breach for an innocent tenant.
 - With no `NetworkPolicy`, `team-payments` pods can `curl` directly into `team-search`'s Redis. A single compromised dependency now has lateral reach across the whole cluster.
 
 The fix is a tenant *template* the controller renders for every namespace — quota, limit defaults, default-deny networking, and least-privilege RBAC:
@@ -430,21 +439,27 @@ For **hard** isolation (untrusted code, regulated workloads, or a tenant that ge
 
 ```yaml
 # vcluster for a tenant needing cluster-admin semantics, isolated from the host.
-apiVersion: v1
-kind: HelmRelease            # via Argo CD / Flux
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
 metadata: { name: vcluster-fraud-ml, namespace: vc-fraud-ml }
 spec:
-  chart: vcluster
+  interval: 10m
+  chart:
+    spec:
+      chart: vcluster
+      sourceRef: { kind: HelmRepository, name: loft, namespace: flux-system }
   values:
     sync:
       toHost:
         ingresses: { enabled: true }
       fromHost:
         nodes: { enabled: true, selector: { labels: { tier: gpu } } }
-    isolation:
-      enabled: true          # injects ResourceQuota + LimitRange + NetworkPolicy on host ns
+    policies:                # ResourceQuota + LimitRange + NetworkPolicy on the host ns
       resourceQuota:
-        quota: { requests.cpu: "32", requests.memory: 128Gi, pods: "200" }
+        enabled: true
+        quota: { requests.cpu: "32", requests.memory: 128Gi, count/pods: "200" }
+      limitRange: { enabled: true }
+      networkPolicy: { enabled: true }
 ```
 
 Tradeoff: a vcluster adds ~150–300 MiB overhead and ~5–15 ms API latency per tenant, so we reserve it for the ~10% of tenants that need it. The rest stay on namespaces. RBAC and PSA details: [../kubernetes_security/kubernetes_security.md](../kubernetes_security/kubernetes_security.md).
@@ -510,12 +525,12 @@ kind: ClusterPolicy
 metadata:
   name: image-and-label-guardrails
 spec:
-  validationFailureAction: Enforce      # block, don't just audit
   background: true
   rules:
     - name: disallow-latest-tag
       match: { any: [{ resources: { kinds: [Pod] } }] }
       validate:
+        failureAction: Enforce            # per-rule: block, don't just audit
         message: "Image tag ':latest' is not allowed; pin a digest or semver."
         pattern:
           spec:
@@ -524,6 +539,7 @@ spec:
     - name: registry-allowlist
       match: { any: [{ resources: { kinds: [Pod] } }] }
       validate:
+        failureAction: Enforce
         message: "Images must come from 123456789.dkr.ecr.us-east-1.amazonaws.com"
         pattern:
           spec:
@@ -532,6 +548,7 @@ spec:
     - name: require-team-label
       match: { any: [{ resources: { kinds: [Namespace] } }] }
       validate:
+        failureAction: Enforce
         message: "Namespaces must carry a 'team' and 'cost-center' label."
         pattern:
           metadata:
@@ -544,9 +561,11 @@ Equivalent guardrails can be expressed in OPA Gatekeeper's Rego if the org stand
 
 ```rego
 # gatekeeper constraint template logic: deny privileged containers
+# Rego v1 (contains/if are mandatory); the ConstraintTemplate carries
+# targets[].code[].source.version: "v1" so Gatekeeper parses it as v1, not v0.
 package k8srequiredsecurity
 
-violation[{"msg": msg}] {
+violation contains {"msg": msg} if {
   c := input.review.object.spec.containers[_]
   c.securityContext.privileged == true
   msg := sprintf("container %q runs privileged; forbidden by org policy", [c.name])
@@ -685,7 +704,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    pr(["Renovate PR<br/>1.30 to 1.31"])
+    pr(["Renovate PR<br/>1.35 to 1.36"])
 
     subgraph GATE["CI gate"]
         kubent("kubent scan<br/>deprecated APIs")
@@ -735,20 +754,24 @@ Per-cluster Prometheus agents `remote_write` to Mimir; **cardinality is the enem
 ```yaml
 # prometheus agent: drop the worst cardinality offenders before remote_write
 metric_relabel_configs:
+  # keep only the families we alert on from this job; everything else is dropped
   - source_labels: [__name__]
-    regex: 'apiserver_request_duration_seconds_bucket'
-    action: keep          # keep the SLI buckets...
+    regex: 'apiserver_request_(total|duration_seconds_bucket)|etcd_request_duration_seconds_bucket'
+    action: keep
+  # collapse the random ReplicaSet + pod suffix so one series survives a rollout
   - source_labels: [pod]
-    regex: '.*-[a-z0-9]{5}$'
-    action: labeldrop     # ...drop the random replicaset suffix churn where safe
+    regex: '(.+)-[a-z0-9]{6,10}-[a-z0-9]{5}'
+    target_label: pod
+    replacement: '${1}'
+    action: replace
 ```
 
 ### (c) Named runbooks
 
 **Runbook 1 — etcd database approaching quota.**
-- *Symptom:* `etcd_mvcc_db_total_size_in_bytes` > 6 GiB (75% of 8 GiB); API writes slowing, p99 > 500 ms.
-- *Diagnosis:* `etcdctl endpoint status`; check for un-compacted history (`etcd_debugging_mvcc_keys_total`), an event flood, or a leaking controller spamming CRs.
-- *Mitigation:* Force compaction + defrag (`etcdctl defrag`, one member at a time to avoid quorum loss); cut event TTL; rate-limit the offending namespace via reduced quota.
+- *Symptom:* `apiserver_storage_size_bytes` > 6 GiB (75% of the 8 GiB EKS ceiling); API writes slowing, p99 > 500 ms.
+- *Diagnosis:* A managed control plane gives you no `etcdctl`, so work from the API: count objects by kind (`apiserver_storage_objects`), look for an event flood or a leaking controller spamming CRs, and check which namespace owns the growth.
+- *Mitigation:* Delete the offending objects (stale Jobs and their pods, orphaned CRs, oversized ConfigMaps); rate-limit the namespace via reduced quota. If the NOSPACE alarm has already fired, EKS's automatic recovery workflow runs compaction and defragmentation — give it ~15 minutes before escalating.
 - *Resolution:* If steady-state is genuinely large, shard the cluster (move a tenant to a new cluster per §10); raise quota only as a stopgap.
 
 **Runbook 2 — admission webhook outage (failurePolicy: Fail).**
@@ -775,11 +798,11 @@ metric_relabel_configs:
 
 **1. The fail-closed webhook that bricked a cluster.** A platform team shipped a Kyverno upgrade that crash-looped on a new CRD. Because every policy had `failurePolicy: Fail`, the dead webhook rejected *all* writes — including the kubelet's pod status updates. The cluster went read-only for **47 minutes**, blocking deploys for **31 tenants** and one customer-facing rollback. Impact: an estimated **$180k** in delayed-revenue from a stuck payments fix. Lesson: exclude `kube-system`, run the webhook HA with a PDB, and rehearse the `failurePolicy: Ignore` break-glass. See [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md).
 
-**2. The missing ResourceQuota (the §4.2 incident, from the field).** Before quotas were enforced, a data team shipped a CronJob with a bug that spawned a new Job every minute without cleanup. Over a weekend it accumulated **18,000 pods**, drove a 300-node cluster to **640 nodes** via the autoscaler, and ran up **~$41,000** in surprise EC2 before Monday. Two co-tenant teams saw pods `Pending` and breached SLO. Lesson: `count/jobs.batch` and `ResourceQuota` are not optional; ship them in the tenant template.
+**2. The missing ResourceQuota (the §4.2 incident, from the field).** Before quotas were enforced, a data team shipped a CronJob with a bug that spawned a new Job every minute without cleanup. Over a weekend it accumulated **18,000 pods**, drove a 300-node cluster to **640 nodes** via the autoscaler, and ran up **~$8,000** in surprise EC2 before Monday (340 extra m5.2xlarge × $0.384/hr × ~63 h). Two co-tenant teams saw pods `Pending` and breached SLO. Lesson: `count/jobs.batch` and `ResourceQuota` are not optional; ship them in the tenant template.
 
 **3. aws-vpc-cni IP exhaustion.** An early cluster used the AWS VPC CNI; at high pod density the ENI/IP limit per node (e.g., ~58 IPs on m5.2xlarge) was exhausted, leaving nodes with free CPU/memory but **no IPs** — pods stuck `ContainerCreating`. ~**1,100 pods** across **40 nodes** were unschedulable for **2 hours** until prefix-delegation was enabled. This drove the migration to Cilium (Decision 3).
 
-**4. etcd defrag without leader awareness.** An engineer ran `etcdctl defrag` against all three etcd members in parallel during a maintenance window. Defrag blocks the member; doing all three at once **lost quorum** and the control plane was down **9 minutes** across one prod cluster. Lesson: defrag one member at a time, never the leader last. Now automated and serialized.
+**4. etcd defrag without leader awareness.** On a self-managed cluster from before the fleet standardized on EKS-managed control planes, an engineer ran `etcdctl defrag` against all three etcd members in parallel during a maintenance window. Defrag blocks the member; doing all three at once **lost quorum** and the control plane was down **9 minutes** across one prod cluster. Lesson: defrag one member at a time and leave the leader for last, so a blocked member never costs you quorum and you do not trigger a chain of leader elections. Now automated and serialized.
 
 **5. Argo CD self-DDoS at fleet scale.** With 50 clusters and app-of-apps, a single root-app change triggered a simultaneous reconcile across all clusters and **~2,000 Applications**, saturating the Argo CD repo-server and Git API rate limits; syncs queued for **35 minutes**, delaying an urgent security patch. Lesson: shard Argo CD by region, tune `--repo-server-timeout-seconds` and sharding, and stagger ApplicationSet rollouts.
 
@@ -869,11 +892,12 @@ Cost:
   Cluster total:        ~$30,600 / month
 
 If tenant count doubles to 80 → ~12,800 pods → ~400 nodes (still < 700) → still one cluster,
-~$58k/month. At ~28 tenants beyond that (≈700 nodes) → provision a second eu-central cluster
-and split tenants by tier (prod vs dev/staging) for blast-radius separation.
+~$60k/month. At ~5 nodes per tenant the 700-node shard threshold lands at ~140 tenants, so
+~60 tenants beyond that point → provision a second eu-central cluster and split tenants by
+tier (prod vs dev/staging) for blast-radius separation.
 ```
 
-The decisive lever remains node bin-packing: improving average pods/node from 40 to 50 (better requests, Karpenter consolidation) drops the 200-node cluster to 160 nodes — a ~$5.6k/month/cluster saving, ~$280k/year across 50 clusters.
+The decisive lever remains node bin-packing: improving average pods/node from 40 to 50 (better requests, Karpenter consolidation) drops the 200-node cluster to 160 nodes — a ~$5.6k/month saving on this one cluster, and ~$280k/month (~$3.4M/year) if the same 20% win lands across all 50.
 
 ---
 
@@ -904,7 +928,7 @@ Every namespace carries mandatory `team` and `cost-center` labels (enforced by K
 Because `failurePolicy: Ignore` means a policy bypass is one webhook crash away — an attacker (or a bug) can ship a privileged pod the moment the webhook blinks, which defeats the point of enforcement. So security-critical policies run `Fail` but with compensating controls: the webhook is HA (3 replicas, PDB, spread across AZs), excludes `kube-system` via `namespaceSelector` so it can never block core control-plane writes, has a tested break-glass to flip to `Ignore`, and is monitored on p99 latency as a first-class SLI. It's a deliberate availability-vs-enforcement tradeoff, made safe by hardening rather than by weakening the policy. See [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md).
 
 **Q: What's the etcd ceiling and how does it shape cluster sizing?**
-etcd's default backend quota is 8 GiB, and beyond ~75% it slows and eventually goes read-only (`NOSPACE` alarm). But raw bytes rarely bind first — steady-state for a 12,000-pod cluster is only ~220 MiB. What actually strains etcd is write throughput and un-compacted MVCC history: event floods, leaking controllers, or `kubectl apply` loops spike fsync latency and apply p99. So you size clusters by control-plane signals (apiserver p99 < 1 s, etcd fsync p99 < 25 ms, node count < 1,000) and shard before any of those breach, rather than chasing the theoretical 5,000-node limit.
+On EKS the etcd backend quota is 8 GiB — the upstream-recommended ceiling, not etcd's own 2 GiB default — and beyond ~75% it slows and eventually goes read-only (`NOSPACE` alarm). But raw bytes rarely bind first — steady-state for a 12,000-pod cluster is only ~220 MiB. What actually strains etcd is write throughput and un-compacted MVCC history: event floods, leaking controllers, or `kubectl apply` loops spike fsync latency and apply p99. So you size clusters by control-plane signals (apiserver p99 < 1 s, etcd fsync p99 < 25 ms, node count < 1,000) and shard before any of those breach, rather than chasing the theoretical 5,000-node limit.
 
 **Q: How do you do self-service onboarding in under 5 minutes without a platform engineer in the loop?**
 The onboarding *is* a Git merge. A tenant opens a PR adding a `Tenant` custom resource; CI validates it against schema and org policy (Kyverno CLI/conftest); on merge, Argo CD applies the CR and a Tenant controller expands it into namespace + quota + limits + default-deny NetworkPolicy + RBAC + dashboards via an ApplicationSet onto the placement-selected cluster. No human approves the K8s plumbing — the policy engine *is* the reviewer. Backstage fronts this with a software template so the developer fills a form rather than writing YAML, and gets a "ready" tile in p95 < 5 min.

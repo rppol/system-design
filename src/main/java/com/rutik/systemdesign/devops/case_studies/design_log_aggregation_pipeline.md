@@ -112,21 +112,21 @@ This single table is the central cost driver: indexing every field in OpenSearch
 
 ### Cost math (monthly, AWS us-east-1, approximate)
 
-Hot SSD (gp3/io2 or instance NVMe) ≈ **$0.08–0.125/GB-month**; S3 Standard ≈ **$0.023/GB-month**; S3 Glacier Instant Retrieval ≈ $0.004/GB-month.
+Hot SSD (gp3/io2 or instance NVMe) ≈ **$0.08–0.125/GB-month**; S3 Standard ≈ **$0.023/GB-month**; S3 Standard-IA ≈ $0.0125/GB-month; S3 Glacier Instant Retrieval ≈ $0.004/GB-month.
 
 ```
 Loki hot index (TSDB on gp3)        ~5 TB     x $0.10/GB  = $512/mo
 Loki chunks in S3 (30-day hot)      158 TB    x $0.023/GB = $3,634/mo
-Cold tier S3 (1 year, 18,250 TB after 10x... )
-   1-year raw 18,250 TB / 10x comp  = 1,825 TB x $0.023   = $42,000/mo  (S3 Standard-IA)
-   move >90d to Glacier IR (~1,600 TB x $0.004)           ≈ $6,400/mo for the tail
-Kafka brokers (12x i3en.2xlarge)    ~$5,600/mo
+Cold tier S3 (1-year raw 18,250 TB / 10x comp = 1,825 TB, 5 TB/day)
+   0-90d    450 TB x $0.0125 (Standard-IA)                = $5,625/mo
+   90-365d  1,375 TB x $0.004 (Glacier IR)                = $5,500/mo
+Kafka brokers (12x i3en.2xlarge on-demand $0.904/h)       = $7,920/mo
 Compute: agents (DaemonSet, ~free), processors (40x c6i.4xlarge spot ~$0.30/h)
    40 x $0.30 x 730                                        = $8,760/mo
-Loki/OpenSearch query+ingester (30x r6i.2xlarge)          ≈ $24,000/mo
+Loki + OpenSearch ingest/query fleet (74 nodes, see §10)  ≈ $26,800/mo
 ```
 
-Loki-based total lands near **$55K–70K/month ≈ $660K–840K/year**, comfortably under the $1.2M target. The equivalent OpenSearch-index-everything design crosses **$3.5M–4.5M/year** purely on hot storage + indexing compute — which is exactly why §5 leans Loki for the bulk path.
+Loki-based total lands near **$59K/month ≈ $700K/year**, comfortably under the $1.2M target. The equivalent OpenSearch-index-everything design crosses **$3.5M–4.5M/year** purely on hot storage + indexing compute — which is exactly why §5 leans Loki for the bulk path.
 
 ---
 
@@ -270,7 +270,7 @@ The single most common production outage in log pipelines: **the agent buffers i
     Name             tail
     Path             /var/log/containers/*.log
     Mem_Buf_Limit    50MB          # when full, tail STOPS reading...
-    Skip_Long_Lines  On            # ...and long lines are silently DROPPED
+    Skip_Long_Lines  On            # ...and any line over the default 32k buffer is DROPPED
     # no storage.type -> overflow cannot spill to disk
 
 [OUTPUT]
@@ -281,7 +281,7 @@ The single most common production outage in log pipelines: **the agent buffers i
     # default Retry_Limit -> gives up after a few retries, then DROPS
 ```
 
-When Kafka stalls for 10 minutes during a broker rebalance, `Mem_Buf_Limit` fills in seconds at 580 MB/s/node-fraction, `tail` stops, and any log file that rotates while paused loses its tail forever. We measured **~40 GB of logs lost per node-hour** in exactly this scenario during a real Kafka upgrade.
+When Kafka stalls for 10 minutes during a broker rebalance, the 50 MB `Mem_Buf_Limit` fills in minutes on a busy node, `tail` stops, and any log file that rotates while paused loses its tail forever. Across 6,000 nodes that is the fleet's whole **580 MB/s — ~2 TB of logs lost per hour** of stall, which is what we measured during a real Kafka upgrade.
 
 **FIX** — filesystem buffer with bounded disk, unlimited retries, and graceful pause (not drop):
 
@@ -300,8 +300,12 @@ When Kafka stalls for 10 minutes during a broker rebalance, `Mem_Buf_Limit` fill
     Name              tail
     Path              /var/log/containers/*.log
     storage.type      filesystem      # <-- overflow spills to DISK, not dropped
-    Mem_Buf_Limit     64MB
-    Skip_Long_Lines   Off             # keep long lines; truncate downstream if needed
+                                      # (with filesystem storage, storage.max_chunks_up
+                                      #  governs the in-memory cap, not Mem_Buf_Limit)
+    Buffer_Chunk_Size 512k
+    Buffer_Max_Size   8M              # a merged Java stack trace must FIT the buffer
+    Skip_Long_Lines   On              # if one still overflows, skip that line --
+                                      # Off makes Fluent Bit stop tailing the file entirely
     DB                /var/log/flb-buffer/tail.db    # durable read offsets
     DB.sync           normal
     Refresh_Interval  5
@@ -318,7 +322,7 @@ When Kafka stalls for 10 minutes during a broker rebalance, `Mem_Buf_Limit` fill
     workers                        2
 ```
 
-Now when Kafka stalls, the agent spills to an 8 GB disk buffer (≈ several minutes of a single node's volume), and because `Retry_Limit no_limits`, it keeps the data and drains it when Kafka recovers. The `tail.db` offset DB ensures that even an agent restart resumes at the exact byte, so a rotated-but-unread file is still read from the saved offset.
+Now when Kafka stalls, the agent spills to an 8 GB disk buffer (≈ 20 hours of an average node's ~97 KB/s share of the fleet's 580 MB/s, and still ~4 hours at the 5x peak), and because `Retry_Limit no_limits`, it keeps the data and drains it when Kafka recovers. The `tail.db` offset DB ensures that even an agent restart resumes at the exact byte, so a rotated-but-unread file is still read from the saved offset.
 
 The BROKEN and FIX configs above are really two different answers to one question — what does the agent do while it is buffering?
 
@@ -442,28 +446,30 @@ librdkafka_options."fetch.message.max.bytes" = "10485760"
 [transforms.parse_and_redact]
 type = "remap"
 inputs = ["kafka_raw"]
-drop_on_error = false      # parse failures route to DLQ, never silently dropped
-reroute_dropped = true
+drop_on_error = true       # an unhandled VRL error drops the event...
+reroute_dropped = true     # ...to the `.dropped` output, which the DLQ sink reads
 source = '''
   # --- parse ---
   parsed, err = parse_json(.message)
   if err == null {
-    . = merge(., parsed)
+    . = merge(., object!(parsed))
   } else {
     # fall back to syslog / leave raw; flag for DLQ if truly unparseable
     .parse_status = "raw"
   }
 
-  # --- normalize schema ---
-  .timestamp = to_timestamp(.timestamp ?? .ts ?? now()) ?? now()
+  # --- normalize schema (every coalesced call must itself be fallible) ---
+  .timestamp = parse_timestamp(.timestamp, "%+") ?? parse_timestamp(.ts, "%+") ?? now()
   .level = downcase(to_string(.level) ?? "info")
-  .service = to_string(.kubernetes.labels.app) ?? .service ?? "unknown"
+  .service = to_string(.kubernetes.labels.app) ?? to_string(.service) ?? "unknown"
 
   # --- PII redaction (runs BEFORE anything is stored) ---
-  .message = replace(.message, r'[\w.+-]+@[\w-]+\.[\w.-]+', "[REDACTED_EMAIL]")
-  .message = replace(.message, r'\b(?:\d[ -]*?){13,16}\b', "[REDACTED_CC]")
-  .message = replace(.message, r'\b\d{3}-\d{2}-\d{4}\b', "[REDACTED_SSN]")
-  .message = replace(.message, r'(?i)bearer\s+[A-Za-z0-9._-]+', "Bearer [REDACTED_TOKEN]")
+  msg = to_string(.message) ?? ""
+  msg = replace(msg, r'[\w.+-]+@[\w-]+\.[\w.-]+', "[REDACTED_EMAIL]")
+  msg = replace(msg, r'\b(?:\d[ -]*?){13,16}\b', "[REDACTED_CC]")
+  msg = replace(msg, r'\b\d{3}-\d{2}-\d{4}\b', "[REDACTED_SSN]")
+  msg = replace(msg, r'(?i)bearer\s+[A-Za-z0-9._-]+', "Bearer [REDACTED_TOKEN]")
+  .message = msg
 
   # --- enrich ---
   .tenant = to_string(.kubernetes.namespace_labels.tenant) ?? "shared"
@@ -472,7 +478,7 @@ source = '''
 [transforms.route]
 type = "route"
 inputs = ["parse_and_redact"]
-route.dlq = '.parse_status == "raw" && !exists(.service)'
+route.dlq = '.parse_status == "raw" && .service == "unknown"'
 
 [sinks.kafka_parsed]
 type = "kafka"
@@ -483,7 +489,7 @@ compression = "lz4"
 
 [sinks.kafka_dlq]
 type = "kafka"
-inputs = ["route.dlq"]
+inputs = ["route.dlq", "parse_and_redact.dropped"]
 bootstrap_servers = "kafka-0:9092"
 topic = "logs.dlq"
 ```
@@ -558,14 +564,14 @@ Loki's model: it indexes only **labels** (`service`, `level`, `tenant`, `cluster
 {service="checkout", level="error"} |= "timeout" | json | duration > 500
 ```
 
-The fix cuts the candidate chunk set from "all prod logs for 30 days" to "checkout error chunks for 1 hour" — a ~10,000x reduction in bytes scanned, bringing p99 back under 3s. Loki [structured metadata](https://grafana.com/docs/loki/) (since Loki 2.9/3.0) lets you attach `request_id` without making it a stream-defining label, which is the modern fix for the high-cardinality-label trap.
+The fix cuts the candidate chunk set from "all prod logs for 30 days" to "checkout error chunks for 1 hour" — a ~10,000x reduction in bytes scanned, bringing p99 back under 3s. Loki [structured metadata](https://grafana.com/docs/loki/) (GA since Loki 3.0) lets you attach `request_id` without making it a stream-defining label, which is the modern fix for the high-cardinality-label trap.
 
 Cold tier rehydration: the S3 cold bucket stores newline-delimited JSON or parquet partitioned by `dt`/`tenant`. A 6-month-old investigation runs an Athena query:
 
 ```sql
 SELECT timestamp, service, message
 FROM logs_cold
-WHERE dt BETWEEN DATE '2025-11-01' AND DATE '2025-11-07'
+WHERE dt BETWEEN DATE '2026-02-01' AND DATE '2026-02-07'
   AND tenant = 'payments'
   AND message LIKE '%OutOfMemoryError%'
 -- partition pruning on dt + tenant scans ~1/2500 of the year's data
@@ -587,7 +593,7 @@ Partition pruning on `dt`+`tenant` means Athena reads gigabytes, not petabytes �
 
 - **Alternatives**: agents → Loki/OpenSearch directly; agents → object storage directly.
 - **Rationale**: direct writes couple ingest availability to storage availability — an OpenSearch GC pause becomes agent drops. Kafka decouples them, gives 8h of replay runway, and lets multiple consumers (Loki, OpenSearch, S3, SIEM, Flink alerting) tee off the same stream.
-- **Consequences**: Kafka is now a tier-0 dependency (~$67K/year + ops). The replay-from-Kafka capability has saved us from data loss during three separate storage outages.
+- **Consequences**: Kafka is now a tier-0 dependency (~$95K/year + ops). The replay-from-Kafka capability has saved us from data loss during three separate storage outages.
 
 ### Decision 3: Redact PII in the processing tier (in-stream), not at the agent or post-storage
 
@@ -648,7 +654,7 @@ quadrantChart
 
 - **Grafana Labs** runs Loki at massive scale internally and for Grafana Cloud, explicitly built around the **label-only index + chunks-in-object-storage** model this design uses. Their engineering writing covers the high-cardinality-label trap (the exact §4.4 BROKEN case), the move to a TSDB index and structured metadata to avoid forcing high-cardinality fields into labels, and query-frontend sharding/splitting for parallelism. They publish concrete guidance that "labels are for low-cardinality dimensions; everything else is log content."
 
-- **Uber** built **uLogger / their logging platform** moving from ELK toward more cost-efficient stores; they've publicly discussed ingesting petabytes and adopting ClickHouse-backed and tiered approaches to control the cost of indexing everything. A recurring theme in their posts: at their volume, the inverted-index overhead of Elasticsearch became the dominant cost, pushing them toward selective indexing and columnar storage for the bulk.
+- **Uber** replaced its ELK-based log analytics with a **schema-agnostic platform on ClickHouse**, reporting roughly 50% cost savings and about 10x the per-node ingest of an Elasticsearch node (~300K logs/sec per ClickHouse node), while keeping Kibana as the interactive query surface via an abstraction layer; they have since been moving that platform onto Apache Pinot to consume Kafka natively and drop the intermediate ingestors. A recurring theme in their posts: at their volume, the inverted-index overhead of Elasticsearch became the dominant cost, pushing them toward selective indexing and columnar storage for the bulk.
 
 - **Netflix** runs log/event pipelines on **Kafka (Keystone)** as the universal ingestion backbone — agents and apps produce to Kafka, and many consumers (Elasticsearch for search, S3/Iceberg for analytics, real-time stream processing) tee off the same streams. This is precisely the "Kafka surge buffer + multiple consumers" pattern in §3; Keystone routes trillions of events/day and uses Kafka + Flink for routing and processing.
 
@@ -697,8 +703,8 @@ Instrument every stage with OTel/Prometheus. The pipeline must be more observabl
 
 | Metric | Source | Alert threshold |
 |--------|--------|-----------------|
-| `flb_output_dropped_records_total` | Fluent Bit | **> 0** (page — we promised no drops) |
-| `flb_storage_chunks_busy_bytes` | Fluent Bit | > 80% of `storage.total_limit_size` |
+| `fluentbit_output_dropped_records_total` | Fluent Bit | **> 0** (page — we promised no drops) |
+| `fluentbit_input_storage_chunks_busy_bytes` | Fluent Bit | > 80% of `storage.total_limit_size` |
 | `kafka_consumergroup_lag` | Kafka exporter | > 5 min of throughput |
 | `vector_component_errors_total` | Vector | rate > 1% of throughput |
 | `logs_dlq_rate` | Kafka `logs.dlq` | > 0.5% of ingest |
@@ -716,7 +722,7 @@ Cardinality is the silent killer of both the log index *and* the metrics you use
 - *Resolution*: fix the slow sink (e.g., OpenSearch hot shard → §runbook 3); add partitions if structurally under-provisioned; post-mortem the key skew.
 
 **Runbook 2 — Agent backpressure / drop risk**
-- *Symptom*: `flb_storage_chunks_busy_bytes` > 80% on many nodes; `flb_output_dropped_records_total` starting to tick up.
+- *Symptom*: `fluentbit_input_storage_chunks_busy_bytes` > 80% on many nodes; `fluentbit_output_dropped_records_total` starting to tick up.
 - *Diagnosis*: Kafka unreachable or slow from those nodes (network partition, broker down, ISR < min). Check `unclean.leader.election` did not fire.
 - *Mitigation*: if Kafka is the issue, restore brokers / failover; agents drain disk buffers automatically on recovery. If disk buffer is genuinely full, temporarily increase `storage.total_limit_size` via DaemonSet rollout.
 - *Resolution*: confirm zero `dropped_records`; if any dropped, identify the window and rehydrate from upstream source files if still present. Right-size disk buffer for peak. See [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md) for the PVC/resource limits that keep the DaemonSet healthy under pressure.
@@ -737,9 +743,9 @@ Cardinality is the silent killer of both the log index *and* the metrics you use
 
 ## 9. Common Pitfalls & War Stories
 
-- **The memory-only agent drop (§4.1)** — During a routine Kafka broker upgrade, agents configured with memory-only buffers and `Retry_Limit 5` silently dropped logs the moment the buffer filled. The pipeline was *blind for the exact 22 minutes* of a downstream incident because the error logs needed to debug it were the ones dropped. Estimated **~14 TB of logs lost**, and an incident extended by ~90 minutes due to missing data. Fix: filesystem buffers + `no_limits` retries everywhere (§4.1).
+- **The memory-only agent drop (§4.1)** — During a routine Kafka broker upgrade, agents configured with memory-only buffers and `Retry_Limit 5` silently dropped logs the moment the buffer filled. The pipeline was *blind for the exact 22 minutes* of a downstream incident because the error logs needed to debug it were the ones dropped. Estimated **~750 GB of logs lost** (22 min at the fleet's 580 MB/s), and an incident extended by ~90 minutes due to missing data. Fix: filesystem buffers + `no_limits` retries everywhere (§4.1).
 
-- **The high-cardinality label that OOM'd Loki** — A team set `request_id` as a Loki label "to make it searchable." Within 40 minutes the ingesters went from 200K to **18M active streams**, heap-exhausted, and crash-looped — taking down log ingest for *all 120 tenants* for **~35 minutes**. Recovery required an emergency relabel rule to drop the label. Lesson: enforce label budgets in CI; `request_id` belongs in structured metadata, not labels.
+- **The high-cardinality label that OOM'd Loki** — A team set `request_id` as a Loki label "to make it searchable." Within 40 minutes the ingesters went from the usual 1.2M to **18M active streams**, heap-exhausted, and crash-looped — taking down log ingest for *all 120 tenants* for **~35 minutes**. Recovery required an emergency relabel rule to drop the label. Lesson: enforce label budgets in CI; `request_id` belongs in structured metadata, not labels.
 
 - **The redaction-after-index compliance gap** — An early version redacted PII in a nightly batch job over already-indexed data. An auditor found that emails and partial card numbers were *queryable* for up to 24h before the batch ran. This was a reportable compliance finding requiring re-indexing of 30 days of data (~1,500 TB reprocessed) and ~3 engineer-weeks. Lesson: redact in-stream, before any store (§4.3).
 
@@ -747,7 +753,7 @@ Cardinality is the silent killer of both the log index *and* the metrics you use
 
 - **Kafka `unclean.leader.election` data loss** — A cluster had `unclean.leader.election.enable=true` (a legacy default). During a multi-broker failure, an out-of-sync replica was elected leader, silently discarding ~4 minutes of un-replicated writes — **~700 GB of logs vanished** with no error surfaced anywhere. Lesson: `unclean.leader.election.enable=false` + `min.insync.replicas=2` is mandatory for a "no drop" pipeline.
 
-- **DEBUG-in-prod cost blowout** — A team shipped a build with `DEBUG` logging on a hot request path; one service's volume jumped 8x, consuming a tenant's entire ingest quota and pushing the cluster to ~62 TB/day for three days before detection. Hot-tier storage and processing autoscale costs rose **~$48K** for the period. Fix: per-tenant volume alerts + level-based sampling under quota pressure (§5 Decision 6). The broader node-resource hardening that keeps such spikes from cascading lives in [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
+- **DEBUG-in-prod cost blowout** — A team shipped a build with `DEBUG` logging on a hot request path; one service's volume jumped 8x, consuming a tenant's entire ingest quota and pushing the cluster to ~62 TB/day for three days before detection. The direct bill barely moved — 12 TB/day extra for three days is **~$450** at the pipeline's ~$1.1K per TB/day-month blended cost — and that is precisely the point: in a label-only architecture a volume blowout costs you *quota, hot-index noise, and on-call time*, not dollars, which is why nobody caught it for three days. The same spike on an index-everything store would have been ~50x that. Fix: per-tenant volume alerts + level-based sampling under quota pressure (§5 Decision 6). The broader node-resource hardening that keeps such spikes from cascading lives in [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
 
 ---
 
@@ -761,12 +767,15 @@ Kafka partitions      = ceil( peak_throughput / per_partition_throughput )
 
 Processor replicas    = ceil( peak_events_per_sec / per_replica_events_per_sec )
                       = ceil( 2,900,000 / 80,000 ) = 37  -> 40 (headroom)
-   (Vector aggregator handles ~80K events/sec/core on parse+redact)
+   (one c6i.4xlarge Vector aggregator sustains ~80K events/sec on parse+redact
+    -- ~5K events/sec per vCPU across its 16 vCPU)
 
-Loki ingesters        = ceil( active_streams / streams_per_ingester )  AND
-                        ceil( ingest_MBps / MBps_per_ingester )
-                      = max( 1.2M / 100K , 580 MB/s / 30 MB/s )
-                      = max( 12 , 20 ) = 20 ingesters (+ RF=3 -> replicas)
+Loki ingesters        = max( active_streams x RF / streams_per_ingester ,
+                             ingest_MBps    x RF / MBps_per_ingester )
+                      = max( 1.2M x 3 / 100K , 580 MB/s x 3 / 30 MB/s )
+                      = max( 36 , 58 ) = 58  -> 60 ingesters
+   (replication_factor=3 means the distributor writes every stream to three
+    ingesters, so the write fleet must carry 3x the distinct ingest rate)
 
 Hot storage (Loki)    = days_hot x daily_raw / compression x (1 + index_overhead)
                       = 30 x 50 TB / 10 x 1.05 = ~158 TB in S3
@@ -779,17 +788,17 @@ Cold storage (S3)     = days_cold x daily_raw / compression
 
 | Tier | Instance | Count | Unit/mo | Subtotal/mo |
 |------|----------|-------|---------|-------------|
-| Kafka brokers | i3en.2xlarge (NVMe, RF=3) | 12 | ~$470 | $5,640 |
+| Kafka brokers | i3en.2xlarge (NVMe, RF=3) | 12 | ~$660 | $7,920 |
 | Processors (Vector) | c6i.4xlarge (spot ~$0.30/h) | 40 | ~$220 | $8,760 |
-| Loki ingesters/queriers | r6i.2xlarge | 20 | ~$370 | $7,400 |
+| Loki ingesters/queriers | r6i.2xlarge | 60 | ~$370 | $22,200 |
 | Loki distributor/frontend | c6i.2xlarge | 8 | ~$250 | $2,000 |
 | OpenSearch (subset) | r6gd.2xlarge | 6 | ~$430 | $2,580 |
 | Hot chunks (S3 Std) | 158 TB | — | $0.023/GB | $3,634 |
-| Cold (S3 Std-IA + Glacier IR) | ~1,825 TB | — | blended | ~$30,000 |
+| Cold (450 TB Std-IA + 1,375 TB Glacier IR) | ~1,825 TB | — | blended | ~$11,125 |
 | Agents (DaemonSet) | on existing nodes | 6,000 | ~$0 | ~$0 |
-| **Total** | | | | **~$60K/mo ≈ $720K/yr** |
+| **Total** | | | | **~$58K/mo ≈ $700K/yr** |
 
-This sits well under the $1.2M/year target with headroom for the OpenSearch subset to grow. The equivalent OpenSearch-index-everything design replaces the ~$15K/mo Loki+chunk line with a ~$280K/mo hot-storage+compute line — the ~$3.3M/year delta that justifies the whole label-only architecture.
+This sits well under the $1.2M/year target with headroom for the OpenSearch subset to grow. The equivalent OpenSearch-index-everything design replaces the ~$28K/mo Loki+chunk line with a ~$280K/mo hot-storage+compute line — the ~$3.0M/year delta that justifies the whole label-only architecture.
 
 For multi-region: each region runs its own collection + Kafka + processing + hot store; cold S3 is replicated cross-region (or uses S3 Cross-Region Replication for DR). Cross-region query federation and the network cost of replication are covered in [`cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md).
 
@@ -822,7 +831,7 @@ Partitions = ceil(peak throughput / per-partition sustainable throughput); at 2.
 Hot tier (Loki, 30 days) keeps recent logs queryable in seconds; everything also lands in S3 as day/tenant-partitioned parquet for a year. Old queries hit the cold tier via Athena, where partition pruning on `dt`+`tenant` scans gigabytes instead of petabytes, costing a few dollars and running in seconds-to-minutes. The tradeoff is that cold queries are non-interactive — acceptable because >99% of queries hit the last 30 days, so paying 12x more to keep a year hot would serve ~1% of traffic.
 
 **Q: A tenant ships DEBUG logging to prod and 8x's their volume — what happens and how do you contain it?**
-Per-tenant ingest quotas cap their hot-tier impact so they can't starve other tenants; a volume-spike alert fires; under quota pressure, level-based sampling reduces DEBUG to a fraction in the *hot* index while keeping 100% in the cheap cold tier. Without these controls you get the real war story: $48K of extra cost over three days and a near-quota-exhaustion event. The structural fix is per-tenant isolation at ingest plus alerting on volume deltas.
+Per-tenant ingest quotas cap their hot-tier impact so they can't starve other tenants; a volume-spike alert fires; under quota pressure, level-based sampling reduces DEBUG to a fraction in the *hot* index while keeping 100% in the cheap cold tier. Without these controls you get the real war story: three days of unnoticed 8x volume that exhausted the tenant's quota and buried on-call in DEBUG lines — the dollar cost was only ~$450, which is exactly why nobody noticed. The structural fix is per-tenant isolation at ingest plus alerting on volume deltas.
 
 **Q: How do you keep one tenant's query from degrading everyone else's?**
 The query-frontend enforces per-tenant limits — `max_query_length` (e.g., 31 days), `max_query_parallelism`, `max_query_series`, and a query timeout — and caches results. An unbounded 30-day, no-selector query gets rejected or throttled instead of fanning into thousands of subqueries that saturate shared queriers. Combined with per-tenant ingest isolation, this bounds blast radius on both read and write paths; without it, one runaway dashboard cost us ~$9K in an afternoon.
@@ -831,7 +840,7 @@ The query-frontend enforces per-tenant limits — `max_query_length` (e.g., 31 d
 Kafka consumer-group lag is the canonical signal: it rises when processors or sinks can't keep up. An HPA scales processors on lag; if a specific sink (e.g., OpenSearch) is the bottleneck, you reroute that sink to S3-only temporarily and backfill, and you raise Kafka retention to buy runway. The whole point of the architecture is that backpressure shows up as *lag* (recoverable) rather than as *agent drops* (unrecoverable).
 
 **Q: How do you detect and recover from data loss if it does occur?**
-Alert on any non-zero `flb_output_dropped_records_total` and any DLQ rate above 0.5% — these are the only places loss can originate. If drops occurred, identify the time window and node set, then rehydrate from the source log files if still present on disk (the agent's offset DB lets you re-read from the last committed offset), or replay from Kafka if the window is within retention. Prevention beats recovery: `unclean.leader.election=false`, filesystem agent buffers, and `Retry_Limit no_limits` mean the recovery path almost never fires.
+Alert on any non-zero `fluentbit_output_dropped_records_total` and any DLQ rate above 0.5% — these are the only places loss can originate. If drops occurred, identify the time window and node set, then rehydrate from the source log files if still present on disk (the agent's offset DB lets you re-read from the last committed offset), or replay from Kafka if the window is within retention. Prevention beats recovery: `unclean.leader.election=false`, filesystem agent buffers, and `Retry_Limit no_limits` mean the recovery path almost never fires.
 
 **Q: How would you scale this pipeline 10x to 500 TB/day?**
 Scale horizontally at every tier and shard by tenant/region: more Kafka partitions and brokers (partitions scale linearly with throughput), more processor replicas (stateless, just add nodes), and shard Loki/OpenSearch by tenant into separate cells to keep blast radius bounded. The real constraints at 10x are Kafka cross-AZ network cost, S3 request rates (use partitioned prefixes to avoid hot prefixes), and cardinality — which is why label discipline and per-tenant limits become even more critical. See the multi-cluster networking cross-cutting doc for the cross-region replication and federation cost model.
