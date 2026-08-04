@@ -839,6 +839,7 @@ each warp is what turns candidates into covered cycles.
 ## 12. Interview Questions with Answers
 
 **Q: Why does increasing block size sometimes make a kernel slower instead of faster?**
+**Short:** A larger block can push a kernel past an occupancy ceiling, usually the register file, forcing register spills to slow local memory or an outright launch rejection.
 A larger block can push a kernel past one of the three occupancy ceilings, usually the
 register-file budget. When it does, the compiler either spills registers to slow local
 memory or the launch is rejected outright with `cudaErrorLaunchOutOfResources` — both
@@ -846,6 +847,7 @@ strictly worse than the smaller block, even though the bigger one "looks" more p
 on paper.
 
 **Q: What actually caps the number of resident warps on an SM?**
+**Short:** Whichever of three budgets runs out first — the register file, the shared-memory carveout, or a hard thread/block count cap — limits resident warps on an SM.
 Whichever of three independent budgets runs out first: the register file, the
 shared-memory carveout, or a hard thread/block count cap. Concretely on an H100 those are
 65,536 32-bit registers/SM, a carveout of up to 228 KB out of the 256 KB unified
@@ -855,12 +857,14 @@ The numbers move by compute capability — the consumer and inference parts (8.6
 than memorizing one GPU's.
 
 **Q: Is higher occupancy always better performance?**
+**Short:** No — occupancy is a latency-hiding capacity, not a throughput measure; many kernels peak at 50-60% occupancy since pushing higher forces register spills.
 No — occupancy is a latency-hiding *capacity*, not a throughput measure. Many kernels
 peak at 50-60% occupancy, because pushing higher forces register spills or shrinks the
 per-thread working set, and the lost instruction-level parallelism costs more than the
 extra resident warps recover.
 
 **Q: What is the difference between "resident" and "active" warps on an SM?**
+**Short:** A resident warp holds registers and shared memory reserved for its block's whole lifetime, while an active warp is the one the scheduler issues an instruction to this cycle.
 A resident warp has its registers and shared memory reserved on the SM for its block's
 whole lifetime; an active or "selected" warp is the one a partition's scheduler is
 issuing an instruction to this cycle. An SM at 100%
@@ -870,6 +874,7 @@ one stalls.
 
 **Q: What happens when a kernel using 96 registers/thread is launched with 1024 threads
 per block?**
+**Short:** The launch is rejected with cudaErrorLaunchOutOfResources because 1024 threads times 96 registers exceeds the SM's entire 65,536-register file.
 The launch is rejected: `cudaLaunchKernel` returns `cudaErrorLaunchOutOfResources`, "too
 many resources requested for launch". 1024 threads x 96 registers = 98,304 registers
 exceeds the SM's entire 65,536-register file, so no block of that shape can be made
@@ -879,6 +884,7 @@ surfaces only at the next `cudaGetLastError()`. The fixes are `__launch_bounds__
 smaller block, or less unrolling; a bigger GPU does not help.
 
 **Q: What does "independent thread scheduling," introduced in Volta, actually change?**
+**Short:** Volta gave every thread its own program counter and call stack, letting diverged warp threads interleave forward progress instead of running branches strictly serially.
 Volta gave every thread its own program counter and call stack, so threads in a diverged
 warp can interleave forward progress instead of running the branch paths strictly
 serially. Before Volta a diverged warp shared one program counter and reconverged at an
@@ -888,6 +894,7 @@ idioms which relied on implicit lockstep are now incorrect and require an explic
 
 **Q: Why does querying `cudaDeviceProp` at runtime matter instead of hardcoding numbers
 from a spec sheet?**
+**Short:** One binary often runs across a GPU fleet where SM count, shared-memory pool, and L2 size all differ between generations, so hardcoded launch constants silently mis-provision.
 Because one binary routinely runs across a fleet mixing GPU generations, and almost every
 number differs between them. An A100 and an H100 differ in SM count (108 vs 132),
 shared-memory pool (164 vs 228 KB) and L2 size (40 vs 50 MB) while sharing the same
@@ -895,6 +902,7 @@ shared-memory pool (164 vs 228 KB) and L2 size (40 vs 50 MB) while sharing the s
 silently under- or over-provisions on the other.
 
 **Q: What is the relationship between SM count and "CUDA core count" on a spec sheet?**
+**Short:** Total CUDA cores equal SM count times cores per SM, but those cores are lockstep lanes, not independent instruction streams, so core count alone doesn't predict divergent-code performance.
 Total CUDA cores = SM count x cores per SM, so an H100's 132 SMs x 128 FP32 cores gives
 the advertised 16,896. Those cores are lanes, not instruction streams: they execute in
 lockstep groups of 32, so the number of genuinely independent instructions in flight is
@@ -903,6 +911,7 @@ does not predict performance on divergent or latency-bound code the way SM count
 per-SM occupancy do.
 
 **Q: What changed structurally in the SM between Volta and Hopper?**
+**Short:** Hopper keeps Volta's four-partition SM layout but adds the Tensor Memory Accelerator for bulk async tile copies and thread-block clusters sharing distributed shared memory.
 Both keep the same four-processing-partition layout, each partition with its own warp
 scheduler, dispatch unit and register-file slice. Hopper adds the Tensor Memory
 Accelerator, a dedicated engine that performs a bulk async tile copy as a single
@@ -911,6 +920,7 @@ blocks resident on different SMs address each other's shared memory as "distribu
 shared memory" — extending the locality unit from one SM to a cluster of SMs.
 
 **Q: What is `cp.async`, and what problem did it solve that earlier generations lacked?**
+**Short:** cp.async copies from global memory straight into shared memory without staging through a register, freeing registers and letting the copy overlap with unrelated compute.
 `cp.async` (Ampere and later) copies from global memory straight into shared memory
 without routing the data through a register first. The pre-Ampere global -> register ->
 shared path burned registers purely as a staging buffer, competing with the compute the
@@ -920,6 +930,7 @@ same warp, which is what makes deep software pipelining of a GEMM tile loop prac
 
 **Q: Why is a GPU's L2 cache size (40 MB on A100, 50 MB on H100) relevant to kernel
 design rather than just an implementation detail?**
+**Short:** A large L2 can hold an entire reused structure so re-read global-memory regions hit in L2 instead of HBM, though that residency can vanish under a co-tenant kernel.
 An L2 that large can hold an entire reused structure, so blocks that re-read the same
 global-memory region hit in L2 instead of HBM. That is an implicit speedup a kernel gets
 without any explicit shared-memory tiling — for example an attention score matrix at
@@ -928,6 +939,7 @@ concurrently running kernel on the device, so the residency you measured in isol
 vanish under a co-tenant.
 
 **Q: When do Tensor Cores actually engage inside an SM, and what happens if they don't?**
+**Short:** Tensor Cores engage only for matrix-multiply-shaped ops at supported precisions with compatible tile shapes via mma/WMMA or a library call; missing the path silently falls back to slow FP32 cores.
 Only for matrix-multiply-shaped operations at supported precisions (FP16, BF16, TF32,
 FP8, INT8) with compatible tile shapes and alignment, issued via `mma`/WMMA intrinsics or
 inside a library call. A hand-written FP32 loop that "looks like a matmul" runs on the
@@ -936,6 +948,7 @@ there is no compiler diagnostic for missing the fast path, only a profile that s
 Tensor Core utilization near zero.
 
 **Q: What is a thread-block cluster (Hopper), and why would a kernel author use one?**
+**Short:** A thread-block cluster is a group of blocks the hardware schedules together, possibly across SMs, letting them address each other's shared memory as distributed shared memory.
 A thread-block cluster is a group of thread blocks the hardware guarantees are scheduled
 together, potentially on different SMs, and that can address each other's shared memory
 directly. NVIDIA calls that region distributed shared memory. It extends cooperative
@@ -945,6 +958,7 @@ requires.
 
 **Q: Why does the register-limited occupancy ceiling favor exactly 32 registers/thread as
 a rule of thumb on modern GPUs?**
+**Short:** regs_per_sm / max_threads_per_sm = 65,536 / 2,048 = 32, so 32 registers/thread is the largest budget that still permits full theoretical occupancy on that GPU.
 Because `regs_per_sm / max_threads_per_sm` = 65,536 / 2,048 = 32. At exactly 32
 registers/thread the register-file ceiling and the resident-thread ceiling coincide, so
 32 is the largest per-thread register budget that still permits 100% theoretical
@@ -954,6 +968,7 @@ division gives 42 registers/thread instead.
 
 **Q: What is the difference between shared memory and L1 cache on modern NVIDIA SMs, and
 why are they unified into one physical pool?**
+**Short:** Shared memory is explicitly kernel-managed while L1 is a hardware-managed cache, but both back onto the same SRAM pool split per-kernel via a configurable carveout.
 Shared memory is explicitly managed by the kernel, while L1 is a hardware-managed cache
 for ordinary global-memory loads. NVIDIA backs both with the same SRAM — 256 KB per SM on
 H100 — and lets a *carveout* decide the split, so a tiling kernel can claim up to 228 KB
@@ -962,6 +977,7 @@ to L1. The split is a per-kernel preference expressed through
 `cudaFuncAttributePreferredSharedMemoryCarveout`, not a compile-time property.
 
 **Q: How much shared memory can a single block actually allocate?**
+**Short:** Static __shared__ arrays cap at 48 KB per block on every architecture; going higher needs a dynamic extern __shared__ allocation plus an explicit opt-in up to the per-block max.
 Static `__shared__` arrays are capped at 48 KB per block on every architecture, whatever
 the SM's pool size. Going above that requires a *dynamic* allocation (`extern __shared__`
 with the size passed as the third launch argument) plus an explicit opt-in via

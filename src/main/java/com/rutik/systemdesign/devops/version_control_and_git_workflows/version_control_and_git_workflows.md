@@ -341,51 +341,83 @@ Purging history alone loops right back to `Compromised` — the secret is still 
 ## 12. Interview Questions with Answers
 
 **Q1: What is a Git commit, internally?**
+**Short:** A commit is an immutable, content-hashed object pointing to a tree snapshot and its parent commits, with branches as movable pointers and HEAD pointing to the current branch.
+
 A commit is an immutable object containing a pointer to a tree (the directory snapshot), pointer(s) to parent commit(s), author/committer metadata, and a message — all hashed to produce its SHA. Branches are just movable pointers to commits, and `HEAD` points to the current branch. Changing any content changes the hash, which is why history is content-addressed and tamper-evident.
 
 **Q2: merge vs rebase — when each, and the golden rule?**
+**Short:** Merge preserves true history with a merge commit; rebase replays commits onto a new base for linear history but rewrites SHAs — never rebase a branch others built on.
+
 Merge preserves true history and creates a merge commit (non-linear graph), good for integrating shared branches. Rebase replays commits onto a new base for linear history but rewrites SHAs. The golden rule: rebase only your *own* unpushed/private branches; never rebase or force-push branches others have based work on, or you erase their reachable history.
 
 **Q3: Why is trunk-based development preferred for CD?**
+**Short:** Trunk-based development merges short-lived branches to main continuously, keeping main always-deployable and minimizing GitFlow's long-lived-branch merge debt.
+
 Short-lived branches merge to `main` continuously, minimizing divergence and merge debt, and keeping `main` always-deployable. Unfinished work hides behind feature flags rather than long-lived branches. This enables frequent, low-risk releases — the essence of continuous delivery — whereas GitFlow's long-lived `develop`/`release` branches batch and delay integration.
 
 **Q4: How do you recover commits after a bad rebase/reset?**
+**Short:** `git reflog` records every movement of HEAD and branch tips with old SHAs, so resetting to the pre-mistake SHA recovers commits until garbage collection runs.
+
 `git reflog` records every movement of `HEAD` (and branch tips) with the old SHAs, even for "rewritten" history, until garbage collection. Find the pre-mistake SHA and `git reset --hard <sha>` (or `git cherry-pick` the lost commits). This is why almost no work is truly lost — Git's objects persist until GC.
 
 **Q5: A secret was committed and pushed. What do you do?**
+**Short:** Rotate the leaked secret immediately since it's compromised the moment it hits a remote, then purge it from history and force-push — scrubbing without rotating is false security.
+
 First, **rotate the secret** — assume it's compromised the moment it hit a remote, because clones and history retain it. Then purge it from history with `git filter-repo` (or BFG) and force-push, coordinating with the team since this rewrites history. Add `gitleaks`/`detect-secrets` as a pre-commit and CI gate to prevent recurrence. Scrubbing without rotating is a false sense of security.
 
 **Q6: Monorepo vs polyrepo tradeoffs?**
+**Short:** A monorepo enables atomic cross-service changes but needs affected-target CI; a polyrepo gives per-service isolation but requires coordinating multiple PRs for cross-service changes.
+
 Monorepo enables atomic cross-service changes in one commit/PR and shared tooling, but needs affected-target CI (Bazel/Nx) to avoid building everything, and access control is coarser. Polyrepo gives per-service isolation, granular permissions, and naturally scoped CI, but cross-service changes require coordinating multiple PRs/repos. Choose based on coupling and tooling investment.
 
 **Q7: What is `git bisect` and when is it invaluable?**
+**Short:** `git bisect` binary-searches between a known-good and known-bad commit to find the one that introduced a regression in O(log n) steps, automatable with `bisect run`.
+
 `git bisect` binary-searches the commit range between a known-good and known-bad commit to find the one that introduced a regression in O(log n) steps. With `git bisect run <script>` it's fully automated — the script's exit code marks each tested commit good/bad. It's the fastest way to localize "it worked last week, broke somewhere since".
 
 **Q8: How does Git underpin GitOps?**
+**Short:** Under GitOps the Git repo holds the desired system state and an in-cluster agent reconciles to match main, so a merge is the deploy and a `git revert` is the rollback.
+
 Under GitOps the Git repo holds the *desired state* of the system (manifests/Helm/Terraform); an in-cluster agent (ArgoCD/Flux) continuously reconciles the cluster to match `main`. A merge is the deploy, a `git revert` is the rollback, and the commit history is a complete, signed audit log of every production change — no out-of-band `kubectl apply`.
 
 **Q9: Why are small, atomic commits valuable operationally?**
+**Short:** Small, atomic commits are easier to review, cleanly revert, bisect at fine granularity, and cherry-pick, unlike a giant commit mixing many changes that can't be partially undone.
+
 They are easier to review, revert (`git revert <sha>` cleanly undoes one change), bisect (finer granularity localizes regressions faster), and cherry-pick (port a fix to a release branch). A giant commit mixing ten changes can't be partially reverted and obscures which change caused a regression.
 
 **Q10: What's the difference between `--force` and `--force-with-lease`?**
+**Short:** `--force` overwrites the remote branch unconditionally; `--force-with-lease` only overwrites if the remote is still at the SHA you last saw, protecting others' pushes.
+
 `--force` overwrites the remote branch unconditionally, potentially erasing commits someone else pushed after your last fetch. `--force-with-lease` only overwrites if the remote is still at the SHA you last saw, aborting if someone else pushed in between — so it protects against clobbering others' work. Even so, reserve force-pushing for your own branches.
 
 **Q11: How do you recover a branch that was deleted with `git branch -D`, after the reflog for that branch name is gone?**
+**Short:** `git reflog show HEAD` still lists the commit HEAD pointed to right before the delete, letting you recreate the branch from that SHA until garbage collection prunes it.
+
 Deleting a branch removes its own reflog, but the commits stay reachable through HEAD's reflog or a full object-database scan until garbage collection runs. `git reflog show HEAD` lists every commit HEAD pointed to, including the tip of the deleted branch right before the delete, so `git switch -c recovered <that-sha>` restores it; if that's not enough, `git fsck --unreachable --no-reflog` surfaces dangling commits directly from the object database. This window isn't infinite — unreachable objects referenced only by expired reflog entries are pruned by `git gc`, with entries for unreachable commits expiring after 30 days by default and reachable ones after 90. If you delete the wrong branch, stop making new commits and run the recovery immediately, since every subsequent `git gc` shrinks the window.
 
 **Q12: Under what concrete conditions would you deliberately choose GitFlow over trunk-based development?**
+**Short:** Choose GitFlow when you must maintain several released versions in production simultaneously, not for a single continuously-deployed SaaS environment.
+
 GitFlow fits when you ship versioned software to customers and must maintain several released versions in production simultaneously. A desktop app or on-prem product supporting v2.x and v3.x concurrently needs long-lived release and hotfix branches to patch an old version without dragging in unreleased work, something trunk-based's single always-deployable main can't cleanly express; regulatory environments requiring a formal, auditable release sign-off before code reaches customers are the other common trigger. Teams sometimes default to GitFlow out of habit for a SaaS product with one continuously-deployed environment, where it only adds merge debt with none of its versioning benefits. Ask whether you support multiple released versions at once — if no, trunk-based almost always wins; if yes, GitFlow's structure earns its overhead.
 
 **Q13: How does `--force-with-lease` actually detect a stale remote, and when can it still be unsafe?**
+**Short:** It compares the remote against your local tracking ref and fails if they differ, but a background fetch that refreshes that ref before you push makes the lease pass and clobber anyway.
+
 It compares the remote branch's current value against your local remote-tracking ref (`refs/remotes/origin/<branch>`) and refuses the push if they differ; given with no arguments it applies that check to every remote ref the push would update. The unsafe case is the opposite of what people assume: a *stale* remote-tracking ref makes the lease correctly fail, and the real hole is anything that refreshes `origin/<branch>` without you integrating the new commits — a `git fetch` in another terminal, an IDE's background fetch, a wrapper script that fetches before pushing — because once the tracking ref matches the remote, the lease passes and you clobber the teammate's commit anyway. That is why "fetch right before force-pushing" is exactly the wrong habit. Add `--force-if-includes`, which additionally requires the remote-tracking tip to be reachable from your branch's reflog (proof you really integrated it), or enable it permanently with `git config --global push.useForceIfIncludes true`; it is a no-op alongside the explicit `--force-with-lease=<branch>:<expected-sha>` form, which is what you pin by hand in automation where you already know the SHA you expect.
 
 **Q14: How do partial clone and sparse checkout make working in a huge monorepo practical?**
+**Short:** Partial clone fetches blob content on demand instead of upfront, while sparse checkout limits the working directory to a chosen path subset, together making huge monorepos practical.
+
 Partial clone skips downloading file contents up front, fetching blobs on demand as you check them out, while sparse checkout limits your working directory to a chosen subset of paths. A Google- or Meta-scale monorepo with millions of files would take hours to fully clone and gigabytes of local disk if cloned normally; `git clone --filter=blob:none` gets history and trees immediately and lazily fetches blob content only for files you actually touch, and `git sparse-checkout set services/payments/` then materializes only that directory in the working tree instead of the entire repo. Commands that need full history or content, like a repo-wide grep across unfetched paths, trigger extra network fetches the first time, so sparse-checkout scope should roughly match what you actually work on. Combine both for monorepos beyond a few gigabytes — partial clone for history and objects, sparse checkout for the working tree — rather than cloning and checking out everything.
 
 **Q15: What problem does Git LFS solve, and how does it avoid bloating the repo with binaries?**
+**Short:** Git LFS replaces a tracked large binary with a small pointer in commit history while the real content lives in separate LFS storage, trading repo bloat for a storage quota.
+
 Git LFS keeps large binary files, like models, videos, and design assets, out of the actual Git object history by storing only a small text pointer in their place. A tracked file configured via `.gitattributes` is replaced in commits by a pointer file containing the object's hash and size, while the real binary content lives in separate LFS storage and is fetched on checkout through smudge and clean filters, keeping clone and fetch fast because history stays small even as binary assets change many times. Every distinct version of a tracked binary still consumes separate LFS storage and bandwidth quota, so LFS trades repo bloat for a quota to manage instead. Track only genuinely large, frequently-changing binaries with LFS — for small or rarely-changing binaries, a normal blob is simpler and avoids the extra infrastructure.
 
 **Q16: Squash-merging every PR gives clean single-commit history — what do you give up operationally?**
+**Short:** Squash-merging collapses a PR's commits into one, so `git bisect` can only localize a regression to the whole PR, and `git revert` reverts the entire change as one unit.
+
 You lose the intermediate commits' granularity, so `git bisect` can only localize a regression to the whole squashed PR, not to a specific commit within it. If a PR had eight commits and introduced a regression in the fifth, a squash-merged history hands bisect only one commit to test, "the whole PR," forcing manual inspection of a larger diff instead of Git narrowing it further; `git revert` likewise reverts the entire PR's change as one unit, which is fine for a self-contained feature but loses the ability to revert just part of a large PR. Teams that squash everything also tend to lose meaningful intermediate commit messages, since only the PR's final squash message survives in main's history. Squash-merge small, single-purpose PRs where the trade is harmless, but consider a real merge commit or per-commit review for large PRs where bisect granularity within the change actually matters.
 
 ---

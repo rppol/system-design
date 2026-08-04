@@ -518,51 +518,83 @@ inputs = { cidr = "10.1.0.0/16" }                         # the ONLY thing that 
 ## 12. Interview Questions with Answers
 
 **Q1: What problem does Terragrunt solve that plain Terraform doesn't?**
+**Short:** Terragrunt eliminates repeating backend/provider/input blocks across environments by generating them from a shared root config and running states in dependency order.
+
 Terragrunt eliminates the repetition of `backend`, `provider`, and `inputs` blocks across many environments by generating them from a shared `root.hcl` and letting each child supply only its deltas. It also runs many states in dependency order (`terragrunt run --all`) and wires outputs between them via `dependency` blocks. Use it when you have enough environments/states that copy-paste causes silent divergence; for a single small stack it's unnecessary overhead.
 
 **Q2: Pulumi vs Terraform — when would you pick each?**
+**Short:** Terraform's declarative HCL keeps infrastructure honest and reviewable; Pulumi's real languages give loops, conditionals, and abstractions at the risk of imperative spaghetti.
+
 Terraform/OpenTofu uses declarative HCL, which keeps infrastructure honest and is easy to review, while Pulumi uses real languages (TypeScript/Python/Go), giving you loops, conditionals, abstractions, and the same test tooling as your app. Pick Pulumi when your team is strongest in a programming language or needs genuine abstraction; pick Terraform when the infra is straightforwardly declarative and you want the larger ecosystem and reviewability. The risk with Pulumi is teams writing imperative spaghetti that breaks the declarative diff model.
 
 **Q3: CloudFormation/CDK vs Terraform — what's the tradeoff?**
+**Short:** CloudFormation/CDK are AWS-native with automatic rollback and drift detection but lock you to AWS; Terraform is multi-cloud with a richer module ecosystem.
+
 CloudFormation is AWS-native with managed stacks, automatic rollback on failure, and built-in drift detection, and CDK lets you synthesize those stacks from real languages — but both lock you to AWS. Terraform is multi-cloud and provider-agnostic with a richer module ecosystem, at the cost of managing your own state and lacking native stack rollback. Choose CloudFormation/CDK for AWS-only shops that value native integration; choose Terraform when multi-cloud or provider breadth matters.
 
 **Q4: What is OpenTofu and why does it exist?**
+**Short:** OpenTofu is the MPL-licensed, Linux Foundation-backed fork of Terraform created after HashiCorp relicensed Terraform to the BUSL, and it's a largely drop-in replacement.
+
 OpenTofu is a fork of Terraform created after HashiCorp relicensed Terraform from MPL 2.0 to the BUSL in 2023; it's MPL-licensed, Linux Foundation-backed, and a drop-in CLI replacement. Migration is largely swapping the binary and re-running `init`, since HCL/providers/workflow are shared. It has begun shipping its own features (e.g., client-side state encryption, enhanced for_each), so the engines are slowly diverging — choose based on licensing comfort and the specific features each offers.
 
 **Q5: How do you test infrastructure code, and what's the difference between `terraform test` and Terratest?**
+**Short:** `terraform test` runs native HCL test files with plan-only checks by default; Terratest is a Go framework that always deploys real infrastructure into a sandbox.
+
 `terraform test` (1.6+) runs native HCL `*.tftest.hcl` files with `assert` blocks, defaulting to plan-only checks (fast, free) but able to do real `apply`/destroy; Terratest is a Go framework that always deploys real infrastructure into a sandbox, asserts against it, and tears it down. Use static analysis and `terraform test` plan-mode for fast PR feedback, and reserve Terratest for module-level confidence where you must verify the resource actually works (e.g., the load balancer serves traffic). Always ensure teardown runs even on failure.
 
 **Q6: What is policy-as-code and where in the pipeline does it run?**
+**Short:** Policy-as-code evaluates governance rules against a Terraform plan automatically, run at plan time in CI so a non-compliant change is blocked before any resource is created.
+
 Policy-as-code expresses governance rules ("no public S3," "only approved instance types," "all resources tagged") as code evaluated automatically against a Terraform plan. It runs at `plan` time in CI — OPA/Conftest on the plan JSON, or Sentinel natively in HCP Terraform — so non-compliant changes are blocked before any resource is created. Running it pre-apply (shift-left) is the whole point; catching a public bucket after it's live is a security incident, not a policy check.
 
 **Q7: Sentinel vs OPA — how do they differ?**
+**Short:** Sentinel is HashiCorp's policy DSL natively integrated into HCP Terraform with enforcement levels; OPA's Rego runs anywhere via Conftest, portable across your whole stack.
+
 Sentinel is HashiCorp's policy DSL, tightly integrated into HCP Terraform and Terraform Enterprise with native enforcement levels (advisory, soft-mandatory, hard-mandatory) on runs; OPA uses the general-purpose Rego language and runs anywhere via Conftest on plan JSON, making it portable across tools (Kubernetes, Docker, CI). Choose Sentinel if you're on HCP Terraform or Terraform Enterprise and want zero-glue integration; choose OPA if you want one policy engine across your whole stack and to avoid vendor lock-in. Many teams pick OPA for portability.
 
 **Q8: How do you keep Terratest from leaking expensive cloud resources?**
+**Short:** Prevent leaks with `defer terraform.Destroy` right after the options struct so teardown runs even on a panic, plus a sandbox account and an orphan-sweeper.
+
 Use `defer terraform.Destroy(t, opts)` placed immediately after the options struct so teardown runs even when assertions panic, and run tests in a dedicated sandbox account with strict budget alarms. Add a scheduled orphan-sweeper that deletes test-tagged resources older than a threshold, and keep tests small and parallel-safe. Real-deploy tests cost real money and minutes, so run them on a schedule or for module changes, not on every commit.
 
 **Q9: When does adding these advanced tools become over-engineering?**
+**Short:** These tools become over-engineering when adopted before the problem exists, like Terragrunt for one environment or a policy engine before you have any policies.
+
 When the problem they solve doesn't exist yet: Terragrunt for one environment, Terratest on every commit for a stable module, or a policy engine before you have any policies are all premature. Each tool adds a moving part to learn and maintain, so adopt them in response to a felt pain — divergence, a production surprise, a compliance requirement — not preemptively. The senior move is matching the layer (engine/orchestration/testing/policy) to the actual problem.
 
 **Q10: How does CDKTF differ from AWS CDK, and which would you pick today?**
+**Short:** AWS CDK synthesizes CloudFormation and is AWS-only; CDKTF synthesized Terraform config for multi-cloud reach but was deprecated and archived by HashiCorp in December 2025.
+
 AWS CDK synthesizes CloudFormation templates and deploys via AWS, so it's AWS-only and uses CloudFormation state; CDKTF synthesized Terraform configuration instead and used Terraform state and providers, making it multi-cloud, and both let you write infrastructure in TypeScript/Python/Go/Java with type-checking and IDE support. The answer for new work is AWS CDK or plain HCL, because HashiCorp deprecated CDKTF in December 2025 and archived the repository read-only — no fixes, no provider-compatibility updates. If you need real-language ergonomics with multi-cloud reach, Pulumi is the live option; if you are on CDKTF today, the supported exits are migrating the synthesized HCL into plain Terraform/OpenTofu, or moving to AWS CDK where the estate is AWS-only.
 
 **Q11: How do you safely migrate from Terraform to OpenTofu (or vice versa)?**
+**Short:** Migrate by pinning the current Terraform version, backing up state, then running `tofu init` against the same backend and confirming `tofu plan` shows no changes.
+
 Pin the current Terraform version and back up state, then install the OpenTofu binary and run `tofu init` against the same backend — the state format is compatible at the fork point, so existing state is read directly. Run `tofu plan` and confirm it shows no changes (proving parity) before applying anything, and update CI to call the new binary. Watch for version-specific feature divergence as the projects evolve, and migrate one state at a time rather than all at once.
 
 **Q12: How do you compose these tools into one delivery pipeline?**
+**Short:** A layered pipeline runs Terragrunt for DRY config, Terraform for planning, static scanners, OPA/Sentinel for policy, and a nightly Terratest job, each stage owning one concern.
+
 A typical layered pipeline: Terragrunt resolves backends/inputs and orders states, Terraform/OpenTofu produces a JSON plan, static scanners (`trivy config`, Checkov) fail fast, OPA/Conftest (or Sentinel) gates on policy, and a nightly Terratest job verifies modules in a sandbox; only after all gates pass does Atlantis or HCP Terraform apply. Each stage owns a distinct concern — DRY, planning, scanning, policy, verification, execution — so a failure points at exactly one layer. This is the mature shape of a governed IaC platform (see [ci_cd_fundamentals](../ci_cd_fundamentals/ci_cd_fundamentals.md) and [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)).
 
 **Q13: Terraform workspaces vs Terragrunt — why is Terragrunt usually the better choice for multi-environment setups?**
+**Short:** Terraform workspaces share the exact same code across environments with differences hacked in via conditionals; Terragrunt generates a genuinely separate config per environment.
+
 Terraform workspaces let one configuration produce multiple state files by switching a workspace name, but every workspace still shares the exact same `.tf` code. Environment-specific differences get hacked in via conditionals scattered through the config, whereas Terragrunt generates a genuinely separate configuration per environment from a shared root, with each environment supplying only its own `inputs` — giving stronger isolation and a clearer blast radius when one environment needs to diverge. Use workspaces for a handful of nearly-identical environments; reach for Terragrunt once environments need real per-env structure.
 
 **Q14: Trivy/Checkov vs OPA/Conftest — what's the practical difference in what they catch?**
+**Short:** Trivy/Checkov statically scan Terraform source with no plan required; OPA/Conftest evaluates the rendered plan, seeing fully resolved values a source-only scan cannot.
+
 Trivy (`trivy config`, which absorbed the whole tfsec rule library) and Checkov are static analyzers that scan Terraform *source* directly against a large built-in rule database, so they run with no plan required and catch misconfigurations expressible from the HCL alone. OPA/Conftest evaluates the rendered `terraform show -json` *plan* instead, so it sees fully resolved, computed values — interpolated variables, module outputs, data-source lookups — that don't exist as literal text in the source. The practical guidance is to run both: static scanners for fast, zero-plan feedback, and plan-based OPA for rules that depend on resolved values a source-only scan can't see.
 
 **Q15: Atlantis vs HCP Terraform — how do you choose a run platform?**
+**Short:** Atlantis is self-hosted and PR-comment-driven with no per-resource SaaS cost; HCP Terraform is HashiCorp's managed service with native Sentinel policy gating.
+
 Atlantis is self-hosted and PR-comment-driven, triggering a run when someone comments `atlantis apply` on a GitHub PR, with state locking to prevent concurrent applies. It gives full control over the runner environment and no per-resource SaaS cost, whereas HCP Terraform is HashiCorp's managed service with VCS-driven runs, built-in Sentinel policy gating, and remote state hosting with no infrastructure to operate yourself. Choose Atlantis when you want a self-hosted, cost-controlled PR workflow; choose HCP Terraform when Sentinel's native policy integration is worth trading control for a managed platform.
 
 **Q16: How does Terragrunt's `dependency` block let one state safely consume another state's outputs?**
+**Short:** A `dependency` block runs another state's `terraform output` and exposes the results as inputs, replacing manual copy-paste of values that drift when that state changes.
+
 A `dependency "vpc" { config_path = "../vpc" }` block runs the VPC state's `terraform output` and exposes the results as `dependency.vpc.outputs.*` in the current module's inputs. It also adds an implicit ordering constraint so `terragrunt run --all apply` provisions the VPC before anything that depends on it, replacing manual copy-paste of a VPC ID between environments (which drifts the moment the VPC is recreated) with a live lookup that always reflects the dependency's current state, while still keeping each environment as an independent Terraform state rather than one giant monolithic configuration. It's the mechanism that lets Terragrunt decompose infrastructure into many small, independently-applicable states without losing the wiring between them.
 
 ---

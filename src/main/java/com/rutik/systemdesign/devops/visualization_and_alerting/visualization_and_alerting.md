@@ -490,51 +490,83 @@ providers:
 ## 12. Interview Questions with Answers
 
 **Q1: What's the difference between a dashboard and an alert, and when do you use each?**
+**Short:** A dashboard is a pull tool a human checks for investigation; an alert is a push tool that interrupts someone because urgent action is needed.
+
 A dashboard is a *pull* tool — a human looks at it to investigate or maintain situational awareness — while an alert is a *push* tool that interrupts a human because action is needed. Use dashboards for investigation, trends, capacity, and showing SLO/error-budget status (RED/USE methods); use paging alerts only for urgent, user-impacting, actionable conditions. Conflating them (dashboarding what should page, or paging what should be a dashboard) is the root of most observability dysfunction.
 
 **Q2: Why alert on symptoms rather than causes?**
+**Short:** Symptoms like error rate and latency are what users experience, catching every problem that matters, while a cause like high CPU pages constantly with no guaranteed user impact.
+
 Symptoms (high error rate, latency, SLO burn) are what users actually experience, so alerting on them catches every problem that matters and ignores causes that have no user impact. A cause like CPU > 80% pages constantly even when the autoscaler absorbs it or it's a harmless batch job, training on-call to ignore pages — which eventually causes a real page to be missed. Page on symptoms tied to user impact; keep causes on dashboards for investigation once a symptom alert fires.
 
 **Q3: What is alert fatigue and how do you fight it?**
+**Short:** Alert fatigue is the desensitization from frequent non-actionable pages that eventually causes a real incident to be missed, fought by keeping every page actionable.
+
 Alert fatigue is the desensitization that happens when on-call receives frequent non-actionable alerts, so they start ignoring or auto-acking pages and eventually miss a real incident. Fight it by ensuring every page is actionable and urgent, deleting or converting noisy cause-based alerts to tickets, grouping correlated alerts so one outage is one page, using SLO burn-rate alerting instead of static thresholds, and auditing alert-to-action ratios (if nobody acts on an alert, kill it). The counterintuitive truth is that fewer, higher-quality alerts make you safer.
 
 **Q4: How do multi-window, multi-burn-rate SLO alerts work and why are they better than static thresholds?**
+**Short:** Multi-window burn-rate alerts fire only when a threshold is exceeded over both a long and short window simultaneously, tying paging directly to SLO breach risk.
+
 They alert when the error-budget burn rate exceeds a threshold over both a long window and a short confirmation window simultaneously — e.g. a fast page at 14.4x burn over 1h confirmed by a 5m window, a slower ticket at 6x over 6h confirmed by 30m. The long window confirms the burn is real (avoiding flapping); the short window makes the alert clear quickly once it resolves and ensures prompt detection of severe burns. They're better than a static threshold because they tie paging directly to the risk of breaching the SLO, balancing fast detection against low noise.
 
 **Q5: What does Alertmanager do between a rule firing and a page?**
+**Short:** Alertmanager groups related alerts into one notification, deduplicates HA replicas, applies inhibition to suppress dependent alerts, and routes by label to the right receiver.
+
 Alertmanager groups related alerts so one root cause produces one notification (not 200), deduplicates identical alerts from HA Prometheus replicas, applies inhibition so a higher-severity alert suppresses dependent lower ones, honors silences during maintenance, and routes alerts by label through a tree to the right receiver. The result is that a node failure dropping 50 pods pages on-call once with a meaningful message rather than 50 times. It's the policy layer that turns raw rule firings into sane human notifications.
 
 **Q6: Explain grouping, inhibition, and silencing with examples.**
+**Short:** Grouping collapses alerts sharing labels into one notification, inhibition suppresses dependent alerts when a parent fires, and silencing mutes matches for a time window.
+
 Grouping collapses alerts sharing labels into a single notification — `group_by: [alertname, cluster]` turns 50 `PodDown` alerts on one cluster into one page. Inhibition suppresses dependent alerts when a parent fires — a `ClusterDown` alert inhibits all the `PodDown` alerts for that cluster so you get the meaningful page only. Silencing mutes matching alerts for a window — you silence a service's alerts during a planned migration so expected noise doesn't page anyone.
 
 **Q7: How do you route alerts to the right people?**
+**Short:** Route alerts with a label-keyed tree — `severity=page` to 24/7 on-call paging, `severity=ticket` to business-hours triage — tuning timing knobs per route.
+
 Use a routing tree keyed on labels: `severity=page` goes to the on-call escalation tool (PagerDuty, Jira Service Management Operations) for 24/7 paging, `severity=ticket` goes to Slack/Jira for business-hours triage, and team labels (`team=payments`) route to that team's specific on-call. Tune `group_wait`/`group_interval`/`repeat_interval` per route so criticals page fast and unresolved ones re-notify. The escalation policy (ack within N minutes or escalate) lives in the on-call tool (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
 
 **Q8: What are the RED and USE methods, and when do you use each?**
+**Short:** RED (rate, errors, duration) fits request-driven services and maps to user experience; USE (utilization, saturation, errors) fits resources for capacity investigation.
+
 RED (Rate, Errors, Duration) is for request-driven services — it tells you how busy a service is, how often it fails, and how slow it is, which maps directly to user experience. USE (Utilization, Saturation, Errors) is for resources like CPU, disk, and network — it tells you how full and stressed the infrastructure is. Use RED for service dashboards and (its symptoms) for alerts; use USE for infrastructure dashboards and capacity investigation, generally not for paging.
 
 **Q9: How do you handle a planned maintenance window without paging everyone?**
+**Short:** Create a scoped, time-boxed Alertmanager silence matching the affected labels, ideally automated from the deploy pipeline so it's reliably created and expires.
+
 Create a scoped Alertmanager silence matching the affected labels (service/cluster) for the maintenance window so expected alerts are muted, ideally automated from the deploy/maintenance pipeline so it's created and expires reliably. This prevents desensitizing on-call with alerts about work they already know about. Make the silence narrow (only the affected components) and time-boxed so unrelated real problems still page during the window.
 
 **Q10: How do dashboards connect to the rest of observability for fast diagnosis?**
+**Short:** A dashboard hierarchy drills from an overview's RED/SLO status into a service's detailed view, then via a latency exemplar into its trace and exact logs.
+
 A well-built dashboard hierarchy drills down: an overview shows all services' RED metrics and SLO/error-budget status, clicking a degraded service opens its detailed dashboard with deploy markers, and clicking a latency exemplar jumps to the slow request's trace, whose `trace_id` then pulls the exact logs. This metric → trace → log pivot turns a vague "something's slow" into a precise root cause in minutes, which is why dashboards should embed exemplars and runbook links and align with the metrics, traces, and logs pillars (see [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md), [observability_tracing_and_otel](../observability_tracing_and_otel/observability_tracing_and_otel.md), [observability_logging](../observability_logging/observability_logging.md)).
 
 **Q11: How exactly does a 14.4x burn rate translate to consuming 2% of a 30-day error budget in one hour?**
+**Short:** A 14.4x burn rate drains a 30-day budget 14.4 times faster than an even rate, consuming 14.4 times 1/720 of the budget — 2% — in a single hour.
+
 Burn rate equals the bad-event ratio divided by the error budget, so a 14.4x burn rate drains the 30-day budget 14.4 times faster than a rate that exhausts it in exactly 30 days. The error budget for a 99.9% SLO is 0.1% (0.001), and a flat rate that exhausts it in exactly 30 days would use 1/720 of the budget every hour, since 720 equals 24 times 30 hours; at 14.4 times that rate, one hour consumes 14.4 × (1/720), which is 0.02, or 2% of the entire budget in a single hour. The same arithmetic gives 6x over 6h as 5% and 3x over 1d as 10% — the design deliberately lets slower, less urgent burns consume a larger share of budget before their ticket-tier alert fires, while the fast page fires early, at only 2% consumed. When adapting these thresholds to a different SLO target, recompute the per-hour budget fraction first, one minus the SLO divided by 720, then choose multipliers based on how much budget you're willing to risk before paging.
 
 **Q12: What do `group_wait`, `group_interval`, and `repeat_interval` each control in an Alertmanager route?**
+**Short:** `group_wait` sets the wait before a new group's first notification, `group_interval` paces later updates, and `repeat_interval` controls re-notification of unresolved alerts.
+
 Each timing knob controls a different phase: `group_wait` batches an alert group's first notification, `group_interval` paces later updates, and `repeat_interval` re-notifies unresolved alerts. `group_wait`, 30 seconds by default and tuned to 10 seconds for critical routes in the sample config, is how long Alertmanager waits after the first alert in a new group before sending the initial notification, giving a few more correlated alerts time to join that same page. `group_interval`, 5 minutes, is the minimum wait before notifying about alerts that joined an already-notified group, and `repeat_interval`, 4 hours, controls how often a still-firing alert gets re-sent so on-call isn't paged every evaluation cycle for the same ongoing issue. Shorten `group_wait`/`group_interval` for critical routes so real incidents notify fast, and set `repeat_interval` long enough to avoid re-paging noise but short enough that a forgotten, still-firing incident doesn't go silent for hours.
 
 **Q13: Using the symptom-vs-cause test, would a never-draining queue and elevated GC pause time each page or stay on a dashboard?**
+**Short:** A never-draining queue pages because a request is stuck right now, while elevated GC pause time stays on a dashboard since it only correlates with latency.
+
 A never-draining queue pages because a user-facing request is stuck waiting right now, while elevated GC pause time stays on a dashboard as an investigatable cause. Applying the "does a user feel it right now" test, a queue that never drains means work is backing up and requests are or will imminently be delayed, which is symptom-tier and immediately actionable, matching the diagram's page examples of SLO burn, error ratio, and p99 latency; GC pauses correlate with latency but aren't guaranteed to be user-visible at any given moment, so they're better surfaced as a dashboard panel an engineer checks once a real symptom, like elevated p99, has already paged. Teams that page directly on GC pause count because it's easy to measure reproduce exactly the alert-fatigue pattern described elsewhere in this module. When in doubt, ask whether the metric is the user's experience or merely correlates with it — only the former belongs on a page.
 
 **Q14: What are the three standard alert severity tiers, and what response does each require?**
+**Short:** The three severity tiers are page/critical for 24/7 wake-up, ticket/warning for business-hours triage, and info for awareness only, chosen deliberately rather than by default.
+
 The three tiers are page/critical, ticket/warning, and info, each mapped to a different urgency and receiver. Page/critical means user impact right now and routes to PagerDuty or Jira Service Management Operations for 24/7 on-call wake-up with an immediate response expected; ticket/warning means something is degraded but not urgent, routing to Slack or Jira for triage within business hours; info is awareness-only, posted to a Slack channel or left on a dashboard with no action expected at all. A common mistake is defaulting new alerts to page/critical "to be safe," which inflates the on-call's page volume with things that were really ticket or info tier and directly causes the alert fatigue described elsewhere in this module. When writing a new alerting rule, choose the severity label deliberately based on the required response time, not by copying whatever severity a similar-looking alert already has.
 
 **Q15: Why provision Grafana dashboards and Alertmanager rules from Git instead of editing them in the UI?**
+**Short:** Provisioning from Git means dashboard and alert changes go through the same PR review and rollback as code, closing the drift problem of an untracked hand-edited panel.
+
 Provisioning as code means dashboards and alert rules are defined in version-controlled files that Grafana and Prometheus load on startup, rather than being hand-edited through a web UI. A provider config pointing Grafana at a file path, or a Terraform resource for a dashboard, means a change goes through the same pull request review, diff, and rollback as any other code change, and the same is true for alerting rules stored as Prometheus rule YAML or Terraform; this closes the classic drift problem where a critical panel or alert threshold was hand-tweaked in production and nobody else knows it changed. A UI-edited dashboard that isn't provisioned from Git will be silently overwritten, or will diverge invisibly, the next time the provisioner reloads its source files. Once a dashboard or alert rule matters enough to be relied on operationally, move it into the provisioned, Git-backed set immediately, and treat any UI edit as a draft to be ported back into code.
 
 **Q16: How do RED, USE, and Google's Four Golden Signals relate, and would you combine them on one dashboard?**
+**Short:** RED covers request-driven services and USE covers resources, and they're often combined on one dashboard since a degrading service is frequently caused by a saturated resource beneath it.
+
 RED covers request-driven services, USE covers resources, and the Four Golden Signals is a closely related service-level framework covering latency, traffic, errors, and saturation. In practice a single service dashboard often combines both scopes: RED panels for rate, errors, and duration on the service itself, plus USE panels for CPU, memory, and disk saturation on the resources or dependencies it runs on, such as its database or message queue, because a request-driven service degrading is frequently explained by a resource underneath it saturating. The Four Golden Signals' addition of "saturation" alongside RED's three signals is effectively bridging the two views into one service-level checklist. Structure a service's overview dashboard as RED for the service plus USE for its dependencies, which answers both whether the service is healthy and, if not, whether the cause is its own logic or something it depends on, in one screen.
 
 ---

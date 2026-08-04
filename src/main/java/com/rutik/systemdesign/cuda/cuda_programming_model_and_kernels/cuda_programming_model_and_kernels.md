@@ -778,51 +778,67 @@ only the mistake of forgetting it.
 ## 12. Interview Questions with Answers
 
 **Q: What happens if you omit the `if (i < n)` bounds check when `N` is not a multiple of `blockDim`?**
+**Short:** Threads with i >= n read/write past the buffer end, corrupting memory or crashing a later unrelated kernel, since CUDA always launches whole rounded-up blocks.
 The extra threads (with `i >= n`) read and write past the end of the allocated buffer, corrupting adjacent device memory or crashing — often on a *later*, unrelated kernel call because launches are asynchronous. CUDA always launches whole blocks, so `gridDim * blockDim` almost never equals `N` exactly; it rounds up, and the guard is the only thing that stops the rounding error from becoming a memory bug.
 
 **Q: Is a CUDA kernel launch synchronous or asynchronous with respect to the host thread?**
+**Short:** A kernel launch is asynchronous — it returns to the host immediately, so results are only guaranteed after a sync call, event wait, or implicit-syncing memcpy.
 Asynchronous — `kernel<<<grid, block>>>(...)` returns control to the host immediately, before the GPU necessarily starts or finishes. The host must call `cudaDeviceSynchronize()`, wait on a stream/event, or issue a `cudaMemcpy` (which syncs implicitly) to be sure the results are ready.
 
 **Q: Why should `blockDim` be chosen as a multiple of 32?**
+**Short:** A block always occupies whole warps rounded up, so a 100-thread block still allocates 4 warps and wastes 28 lanes on every instruction.
 A warp is the hardware's unit of instruction issue at 32 threads, and a block always occupies a whole number of warps rounded up. A block of 100 threads still allocates 4 warps (128 hardware lanes), so 28 lanes are masked off and wasted on every instruction — choosing 96 or 128 instead uses every scheduled lane.
 
 **Q: What is a grid-stride loop and when do you need one instead of a one-thread-per-element kernel?**
+**Short:** A grid-stride loop has each thread process multiple elements by striding gridDim.x*blockDim.x, useful for large runtime N or a fixed reusable launch config.
 A grid-stride loop has each thread process multiple elements, striding by `gridDim.x * blockDim.x` per iteration, instead of launching exactly `ceil(N/blockDim)` blocks for one-thread-per-element. It is needed when `N` is a large runtime value, when you want one fixed, reusable launch configuration across many calls, or when you deliberately cap the grid to just enough blocks to saturate the GPU's SMs.
 
 **Q: Can a bad launch configuration (e.g. `blockDim.x` > 1024) fail silently?**
+**Short:** Yes — launch errors surface only when explicitly checked with cudaGetLastError, so a bad configuration is often blamed on a later, unrelated kernel.
 Yes — kernel launches are asynchronous, so a configuration error surfaces only when you check for it explicitly with `cudaGetLastError()` (or later, confusingly, inside `cudaDeviceSynchronize()` or a subsequent call). Skipping error checks is why a bad launch is often misattributed to an unrelated, later kernel.
 
 **Q: Why does CUDA distinguish `__global__`, `__device__`, and `__host__` instead of one universal function keyword?**
+**Short:** The qualifiers encode where code runs and who may call it: __global__ is a callable device entry point, __device__ is device-only, __host__ is CPU code.
 They encode two separate facts the compiler needs: *where the code runs* and *who may call it*. `__global__` is device code callable from the host — the kernel entry point, and it must return `void`; `__device__` is device code callable only from other device code; `__host__` is ordinary CPU code, the default with no qualifier. `__host__ __device__` compiles the function twice so the same source (e.g. a small math helper) can be called from both a CPU reference implementation and a GPU kernel without duplicating the formula.
 
 **Q: What do `threadIdx`, `blockIdx`, `blockDim`, and `gridDim` each represent?**
+**Short:** threadIdx and blockIdx vary per thread and per block, while blockDim and gridDim are launch-time constants identical across every thread.
 Two are per-thread coordinates and two are launch-time constants broadcast to every thread. `threadIdx` is this thread's coordinate within its own block, so it varies per thread; `blockIdx` is its block's coordinate within the grid, the same for every thread in a block but varying per block; `blockDim` is the block size chosen at launch, identical everywhere; `gridDim` is the grid size chosen at launch, also identical everywhere. The first two vary per thread/block; the last two are launch-time configuration echoed back to every thread.
 
 **Q: How do you compute a flat global index for a 2D image kernel?**
+**Short:** Compute row and col with blockIdx*blockDim+threadIdx per axis, then flatten row-major as idx = row * width + col.
 Apply the 1D formula once per axis, then flatten row-major. That is `row = blockIdx.y * blockDim.y + threadIdx.y`, `col = blockIdx.x * blockDim.x + threadIdx.x`, and finally `idx = row * width + col` — the same `blockIdx*blockDim+threadIdx` pattern used independently on each axis, combined with the standard row-major flattening formula.
 
 **Q: What is `dim3` and why does CUDA use it instead of three separate integers?**
+**Short:** dim3 is a struct of three unsigned ints (x,y,z, default 1) that lets 1D, 2D, and 3D launches share the identical <<<grid, block>>> syntax.
 `dim3` is a small struct of three `unsigned int` fields (`x`, `y`, `z`, each defaulting to 1), used for both `blockDim`/`gridDim` at launch and the built-in coordinate variables inside the kernel. It lets 1D, 2D, and 3D problems share one launch syntax — `dim3(256)` for a vector and `dim3(16,16)` for an image both use the identical `<<<grid, block>>>` launch mechanism.
 
 **Q: What is the maximum number of threads per block, and what caps it?**
+**Short:** 1024 threads per block caps the product blockDim.x*blockDim.y*blockDim.z on every architecture from Kepler to Blackwell, independent of registers or shared memory.
 1024 threads per block on every architecture from Kepler to Blackwell, and it caps the *product* `blockDim.x * blockDim.y * blockDim.z`, not any one axis. It is a fixed scheduling-hardware ceiling, independent of how many registers or how much shared memory the kernel uses — though those resources separately determine how many such blocks can be resident on one SM at a time. Exceeding it fails the launch immediately with `cudaErrorInvalidConfiguration`.
 
 **Q: What is the maximum grid size, and does it differ by dimension?**
+**Short:** gridDim.x can reach 2^31-1, effectively unbounded, but gridDim.y and gridDim.z are capped at 65535 each, so the largest dimension should map to x.
 `gridDim.x` can be up to 2^31-1 (effectively unbounded) on every architecture CUDA still supports, but `gridDim.y` and `gridDim.z` are capped at 65535 each — a much smaller limit. This is why the largest-extent dimension of a multi-dimensional problem should be mapped to the grid's x axis.
 
 **Q: If `gridDim.x * blockDim.x` is smaller than `N`, what happens to the missing elements in a fixed (non-grid-stride) kernel?**
+**Short:** If gridDim.x*blockDim.x falls short of N, the uncovered tail elements are silently never processed, with no crash or error raised.
 They are simply never processed, silently. A fixed one-thread-per-element kernel only touches indices `0` through `gridDim.x*blockDim.x - 1`, so if that product falls short of `N` the tail of the array keeps whatever `cudaMalloc` handed back — no crash, no error code, just an incomplete result that reproduces intermittently. This is exactly the case a grid-stride loop is designed to handle correctly regardless of how the grid is sized.
 
 **Q: In Numba, what does `cuda.grid(1)` do, and what CUDA C++ line does it replace?**
+**Short:** cuda.grid(1) returns the flattened global thread index, equivalent to blockIdx.x*blockDim.x+threadIdx.x, Numba's shorthand for that arithmetic.
 It returns the flattened global thread index, exactly equivalent to `cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x`. The `1` argument asks for the 1D form; pass `2` or `3` and it returns a tuple of 2D or 3D coordinates instead. It is Numba's ergonomic shorthand for the identical arithmetic every CUDA C++ kernel writes explicitly.
 
 **Q: Why can't threads in different blocks reliably synchronize with each other during a kernel?**
+**Short:** __syncthreads() only synchronizes within one block because blocks schedule independently in any order; cross-block sync needs a new launch or cooperative-groups grid sync.
 `__syncthreads()` only synchronizes threads within the same block because blocks are scheduled independently and can run in any order, on any SM, at any time — including one finishing entirely before another starts. Cross-block synchronization requires either splitting the work into separate kernel launches (an implicit global barrier between launches) or the specialized cooperative-groups grid-sync API on hardware/launch configurations that support it — never a plain in-kernel construct.
 
 **Q: What is the practical difference between CuPy's `RawKernel` and `ElementwiseKernel`?**
+**Short:** ElementwiseKernel auto-generates index arithmetic and bounds checks for simple fused ops, while RawKernel takes full CUDA C++ source for complete control.
 `ElementwiseKernel` takes only the per-element math expression; CuPy generates the index arithmetic, the bounds check and the launch configuration for you. That makes it ideal for simple fused elementwise ops but unable to express shared memory or any cross-thread cooperation. `RawKernel` takes a full CUDA C++ source string compiled at first call, giving complete control (shared memory, warp intrinsics, multiple outputs) at the cost of writing the index arithmetic and guard yourself, exactly as in CUDA C++.
 
 **Q: Why is `cudaGetLastError()` needed right after a kernel launch, separate from `cudaDeviceSynchronize()`?**
+**Short:** cudaGetLastError catches launch-configuration errors detected synchronously, while cudaDeviceSynchronize surfaces execution-time errors like illegal memory access.
 They catch two different classes of failure. `cudaGetLastError()` reports errors from the *launch itself*, such as an invalid launch configuration, which the driver detects essentially synchronously; `cudaDeviceSynchronize()` additionally surfaces *execution-time* errors such as an illegal memory access, which only manifest once the kernel actually runs on the GPU. Checking both, immediately after the launch and after the sync, pinpoints whether a failure was a configuration mistake or a runtime fault inside the kernel body.
 
 ---

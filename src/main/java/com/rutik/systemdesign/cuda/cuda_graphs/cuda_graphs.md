@@ -896,6 +896,7 @@ CUDA_CHECK(cudaGraphDestroy(newGraph));
 ## 12. Interview Questions with Answers
 
 **Q: What problem do CUDA graphs solve?**
+**Short:** A captured graph replays a whole kernel/memcpy sequence with one API call, removing the ~5-10us per-launch CPU overhead paid on each individual launch.
 They eliminate the fixed ~5-10
 microsecond CPU-side launch overhead paid on every kernel launch or memcpy by
 capturing a whole sequence once and replaying it with a single API call,
@@ -903,42 +904,54 @@ which matters most for workloads made of many small, fast kernels where that
 per-launch overhead dominates the actual GPU compute time.
 
 **Q: Why does a workload with dozens of tiny kernels become launch-bound
-instead of compute-bound?** Each kernel launch costs a roughly fixed 5-10us
+instead of compute-bound?**
+**Short:** Each launch costs a fixed ~5-10us of CPU/driver overhead, so when kernels themselves run only microseconds, the GPU idles between launches more than it computes.
+Each kernel launch costs a roughly fixed 5-10us
 of CPU/driver overhead regardless of GPU execution time, so when the kernels
 themselves finish in a similar handful of microseconds, the GPU spends more
 time idle waiting for the next launch than it spends actually computing — the
 classic profile of a batch-1 LLM decode step.
 
 **Q: What is the difference between stream capture and explicit graph
-construction?** Stream capture records the graph by observing ordinary
+construction?**
+**Short:** Stream capture records an existing sequence of stream API calls into a graph with no rewrite; explicit construction builds the DAG node-by-node via the Graph API.
+Stream capture records the graph by observing ordinary
 stream API calls you already wrote between `cudaStreamBeginCapture` and
 `cudaStreamEndCapture`, requiring no rewrite, while explicit construction
 builds the DAG node-by-node through the Graph API directly, giving precise
 control at the cost of far more verbose authoring code.
 
 **Q: What does `cudaGraphInstantiate` actually do, and why is it a separate
-step from launching?** It compiles the captured or explicitly built
+step from launching?**
+**Short:** cudaGraphInstantiate compiles the captured graph into a fixed, executable cudaGraphExec_t once, a costly step meant to be amortized over many cheap replays.
+It compiles the captured or explicitly built
 `cudaGraph_t` into a fixed, executable `cudaGraphExec_t`, resolving launch
 configurations and dependency structure once; this compile-like step costs
 noticeably more than a single kernel launch, which is exactly why it must be
 amortized over many cheap replays rather than repeated per iteration.
 
 **Q: Why does replaying an already-instantiated graph cost roughly one launch's
-worth of CPU overhead, no matter how many nodes it contains?** `cudaGraphLaunch`
+worth of CPU overhead, no matter how many nodes it contains?**
+**Short:** cudaGraphLaunch hands the whole pre-resolved DAG to the GPU's hardware scheduler in one driver call, so per-node CPU round trips never happen on replay.
+`cudaGraphLaunch`
 hands the entire pre-resolved DAG to the GPU's own hardware scheduler in a
 single driver call, and the scheduler — not the CPU — fires each node as its
 dependencies complete, so the per-node CPU round trip that eager launches pay
 simply does not happen on replay.
 
 **Q: What happens if you change a device pointer's value in your CPU code and
-then call `cudaGraphLaunch` again without updating the graph?** Nothing
+then call `cudaGraphLaunch` again without updating the graph?**
+**Short:** The graph's kernel nodes still reference the pointers captured at instantiate time, so it silently keeps using the stale buffer with no error raised.
+Nothing
 changes in the graph — its kernel nodes still reference whatever
 pointers/arguments were captured at instantiate time, so the graph silently
 keeps reading and writing the original buffers, producing stale or wrong
 results with no error raised.
 
 **Q: What does `cudaGraphExecUpdate` require to succeed, and what happens when
-that requirement isn't met?** It requires the new graph's topology — node
+that requirement isn't met?**
+**Short:** cudaGraphExecUpdate needs the new graph's topology, node types, and dependency structure to exactly match the instantiated executable's, or it fails and a full re-instantiate is required.
+It requires the new graph's topology — node
 count, node types, and dependency structure — to exactly match the currently
 instantiated executable's topology; if it doesn't match, the call fails and
 returns an error that must be checked, at which point the only remaining
@@ -950,7 +963,9 @@ and will fail the update even when the shape lines up, so always branch on the
 return status rather than assuming a same-shape graph is always patchable.
 
 **Q: How does a CUDA graph handle data-dependent control flow, like an
-early-exit loop?** Through a conditional node: a WHILE node re-runs its body
+early-exit loop?**
+**Short:** Conditional nodes (IF/WHILE/SWITCH) let a device-written value control replay-time branching or trip count while the DAG's topology stays fixed.
+Through a conditional node: a WHILE node re-runs its body
 graph for as long as a device-written condition value stays non-zero, so the
 trip count varies at replay time while the DAG's topology does not. IF nodes
 (with an optional else-body) and SWITCH nodes cover the branching cases, and a
@@ -961,6 +976,7 @@ that changes which kernels get issued — because that changes the node set
 itself, and the only remedy there is a separate captured graph per outcome.
 
 **Q: Why must you warm up a stream before capturing it into a graph?**
+**Short:** The first call into a library like cuBLAS or cuDNN can trigger lazy init or JIT compilation, which capture handles unreliably if not run first.
 The
 first call into a library like cuBLAS or cuDNN often triggers lazy handle
 initialization or JIT compilation, and capturing that first-call side effect
@@ -970,21 +986,27 @@ launches.
 
 **Q: In PyTorch, why does copying data into a static tensor (`static_input.copy_
 (batch)`) work for graph replay but rebinding the Python name
-(`static_input = batch`) does not?** The captured graph's kernels reference
+(`static_input = batch`) does not?**
+**Short:** copy_ writes new data into the same address the captured kernels reference, while rebinding the Python name only repoints the variable, leaving the graph stale.
+The captured graph's kernels reference
 the specific memory address that was live when `torch.cuda.graph(...)`
 captured them; an in-place `copy_` writes new data into that same address,
 while rebinding the Python name only changes what the name points to in
 Python, leaving the graph still reading the old, now-stale buffer.
 
 **Q: When does a CUDA graph actually pay off versus eager launching, in terms
-of iteration count?** Only after enough replays have occurred to amortize the
+of iteration count?**
+**Short:** A graph pays off only after enough replays amortize its one-time capture-and-instantiate cost against the per-launch overhead it saves each iteration.
+Only after enough replays have occurred to amortize the
 one-time capture-plus-instantiate cost against the per-iteration launch-
 overhead savings — a graph run only once or twice is pure overhead with no
 payoff, while one run thousands of times (a long decode loop or many
 training steps) reaps nearly the full benefit.
 
 **Q: What kinds of GPU work can a graph node represent besides a kernel
-launch?** Memory copies, memsets, host-function callbacks, empty
+launch?**
+**Short:** Nodes can be memcpys, memsets, host callbacks, empty ordering nodes, event/semaphore ops, alloc/free nodes, conditional nodes, and child graphs.
+Memory copies, memsets, host-function callbacks, empty
 ordering-only nodes, event record/wait operations, external-semaphore
 signal/wait operations, memory alloc/free nodes, conditional nodes (IF, WHILE,
 SWITCH), and child graphs embedding other graphs — the DAG is a general
@@ -992,7 +1014,9 @@ description of dependent GPU (and host-callback) work, not solely a sequence
 of kernel launches.
 
 **Q: Why do inference engines like vLLM capture separate CUDA graphs per
-batch-size "bucket" instead of one graph for all batch sizes?** A graph's
+batch-size "bucket" instead of one graph for all batch sizes?**
+**Short:** A graph's topology is fixed at capture time, so each batch size is effectively a different topology, requiring one captured graph per bucket.
+A graph's
 topology (and typically its launch configuration) is fixed at capture time,
 so a different batch size is effectively a different topology; bucketing
 captures one graph per common batch size ahead of time and dispatches
@@ -1000,14 +1024,18 @@ incoming requests to the matching bucket rather than trying to force one
 graph to cover every possible shape.
 
 **Q: What roughly is the throughput improvement production LLM inference
-engines report from wrapping the decode step in a CUDA graph?** Commonly
+engines report from wrapping the decode step in a CUDA graph?**
+**Short:** Wrapping the decode step in a CUDA graph commonly reports roughly 1.2-2x throughput gains on launch-bound, small-batch autoregressive generation.
+Commonly
 cited figures are in the range of roughly 1.2-2x on the decode-step
 throughput of launch-bound, small-batch autoregressive generation, since
 collapsing dozens of small kernel launches into a single graph launch removes
 most of the CPU-driver overhead that dominated that regime.
 
 **Q: Why is debugging code inside a captured-and-replayed graph harder than
-debugging the same code run eagerly?** Conventional breakpoint and `printf`-
+debugging the same code run eagerly?**
+**Short:** A replayed graph's GPU scheduler fires nodes without a CPU round trip per kernel, breaking conventional breakpoint/printf debugging that assumes one.
+Conventional breakpoint and `printf`-
 based debugging assumes a CPU round trip accompanies each kernel, which is
 exactly the overhead a graph removes on replay — the GPU's own scheduler
 fires nodes without the CPU issuing each one individually, so it is standard

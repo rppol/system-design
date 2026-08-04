@@ -624,48 +624,78 @@ metric_relabel_configs:
 ## 12. Interview Questions with Answers
 
 **Q1: Why is Prometheus pull-based instead of push-based, and when do you push?**
+**Short:** Prometheus pulls so it can observe target health via the `up` metric, centralize scrape config, and avoid targets needing to know where to send data.
+
 Prometheus scrapes targets so it can observe target health directly (the synthetic `up` metric is 0 when a scrape fails), keep scrape configuration centralized, and avoid every target needing to know where to send data. Push makes sense only for short-lived jobs that exit before a scrape can reach them — those use the Pushgateway, which Prometheus then scrapes. Use pull for everything long-lived; reserve push for batch jobs.
 
 **Q2: What is cardinality and why does it dominate Prometheus capacity planning?**
+**Short:** Cardinality is the number of distinct time series — the product of label-value combinations — and it dominates Prometheus's in-memory RAM cost.
+
 Cardinality is the number of distinct time series, which equals the product of label-value combinations for each metric. Prometheus keeps the active series index and head block in memory (roughly 1–2 KB per series), so a label like `user_id` with 5M values creates 5M series and OOM-kills the server. You plan RAM around active series count and aggressively keep labels bounded; per-request identifiers go to traces/logs, not labels.
 
 **Q3: Explain counter vs gauge vs histogram vs summary.**
+**Short:** Counters only increase (query with `rate()`); gauges move up and down; histograms bucket data into aggregatable quantiles; summaries compute unaggregatable quantiles client-side.
+
 A counter only increases and resets to zero on restart (requests, errors) — you query its `rate()`. A gauge moves up and down (memory, queue depth). A histogram buckets observations and exposes `_bucket`/`_sum`/`_count`, letting you compute aggregatable quantiles across instances with `histogram_quantile`. A summary computes quantiles client-side, which are cheaper but cannot be aggregated across instances (you can't average percentiles) — prefer histograms for fleet-wide latency. A histogram can be exposed classically (one `_bucket` series per boundary, fixed at instrumentation time) or natively (one series carrying exponentially-spaced, auto-adapting buckets), and the native form gives better tail accuracy at a fraction of the cardinality; enable it with `scrape_native_histograms`.
 
 **Q4: Why use `rate()` on counters, and how does it handle restarts?**
+**Short:** `rate()` turns a monotonic counter into a per-second trend and automatically corrects for counter resets caused by process restarts.
+
 `rate(counter[5m])` computes the per-second average increase over the window, turning a meaningless monotonic value into a trend you can graph and alert on. It automatically detects counter resets (a value dropping to a lower number implies a process restart) and corrects for them, so a service restart doesn't show as a huge negative spike. Use `rate` for alerts/graphs, `increase` for "how many in this window," and avoid `irate` for alerts because it's noisy.
 
 **Q5: What's the difference between recording rules and alerting rules?**
+**Short:** Recording rules precompute and store a PromQL expression as a new series for reuse; alerting rules evaluate a condition and fire to Alertmanager when true.
+
 Recording rules precompute a PromQL expression on a schedule and store the result as a new series (named `level:metric:operation`), so expensive queries reused across dashboards and alerts run once instead of per-query. Alerting rules evaluate a boolean condition and, when true for the `for:` duration, emit an alert to Alertmanager. The pattern is: compute the SLI ratio as a recording rule, then write cheap, fast alerting rules on top of that precomputed series.
 
 **Q6: How does the `for:` clause prevent alert flapping?**
+**Short:** The `for:` clause requires an alert condition to stay true continuously for a set duration before firing, so a transient spike that clears never pages.
+
 `for:` requires the alert expression to remain true continuously for that duration before the alert transitions from pending to firing, so a one-off spike that clears within the window never pages anyone. For example `for: 10m` on a 5% error-rate condition means the error rate must stay above 5% for 10 straight minutes. Combine it with multi-window burn-rate logic for SLO alerts so you get both fast detection on severe burns and de-flapping on transient blips.
 
 **Q7: How do multi-window, multi-burn-rate SLO alerts work?**
+**Short:** They fire only when the error-budget burn rate exceeds a threshold over both a long window and a short confirmation window simultaneously, ANDed together.
+
 You alert when the error-budget burn rate exceeds a threshold over both a long window and a short confirmation window simultaneously, ANDed together. A fast page fires at ~14.4x burn over 1h confirmed by a 5m window (consumes ~2% of a 30-day budget in an hour); a slower ticket fires at ~6x over 6h confirmed by 30m. The long window ensures the burn is real and sustained; the short window ensures you alert promptly and stop alerting quickly once it resolves.
 
 **Q8: How does Prometheus store data, and what limits single-node retention?**
+**Short:** Prometheus writes samples to an in-memory head block backed by a WAL, cuts them into immutable 2-hour blocks, and retention is bounded by local disk.
+
 Samples land in an in-memory head block (backed by a WAL for crash recovery), which is cut to immutable 2-hour on-disk blocks and then compacted into larger blocks. Retention is bounded by local disk (`--storage.tsdb.retention.time`, commonly 15–90 days) and there's no native cross-instance aggregation or HA dedup. For long-term and global views you add Thanos (sidecar ships blocks to object storage) or remote-write into Cortex/Mimir.
 
 **Q9: Compare Thanos, Cortex, and Mimir.**
+**Short:** Thanos adds a sidecar shipping local blocks to object storage with minimal Prometheus change; Cortex and its AGPL fork Mimir ingest remote_write into a clustered multi-tenant backend.
+
 All three add long-term storage and horizontal/global scale on top of Prometheus. Thanos uses a sidecar that ships local TSDB blocks to object storage with a Querier that fans out across sidecars and a Store Gateway, plus a Compactor for dedup and downsampling — minimal change to existing Prometheus. Cortex and Grafana Mimir — Mimir is Grafana Labs' AGPLv3 fork of Cortex, while Cortex itself continues as an Apache-2.0 CNCF project — both take Prometheus `remote_write` into a clustered, multi-tenant ingest/query system designed for tens of millions of series per tenant; Mimir is the more commonly chosen of the two for new builds and is the simpler to operate. Choose Thanos for an additive sidecar model, Mimir for a fully clustered remote-write backend.
 
 **Q10: What's the difference between `relabel_configs` and `metric_relabel_configs`?**
+**Short:** `relabel_configs` runs pre-scrape on target meta-labels to select and rewrite targets; `metric_relabel_configs` runs post-scrape to drop noisy series.
+
 `relabel_configs` runs before the scrape and operates on the target's meta-labels — it selects which targets to scrape (`keep`/`drop`) and rewrites target labels like `__address__` and `namespace`. `metric_relabel_configs` runs after the scrape on the resulting samples — it's where you drop noisy or high-cardinality series (`labeldrop`, `drop`) before they hit the TSDB. Together they are your primary cardinality and cost-control levers.
 
 **Q11: How do you compute a p99 latency across all instances of a service?**
+**Short:** Use `histogram_quantile` over `sum by (le) (rate(..._bucket[5m]))`, which works because histogram buckets are additive across instances, unlike summary quantiles.
+
 Use `histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))`: you `rate()` each bucket, `sum by (le)` to aggregate buckets across instances, then interpolate the 99th percentile. This works because histogram buckets are additive across instances, unlike summary quantiles. Make sure your bucket boundaries straddle the SLO threshold, or the interpolation across a too-wide bucket gives an inaccurate quantile.
 
 **Q12: How does Prometheus handle service discovery in Kubernetes?**
+**Short:** `kubernetes_sd_configs` discovers pods, services, and endpoints from the Kubernetes API as targets, tagged with `__meta_kubernetes_*` meta-labels.
+
 `kubernetes_sd_configs` queries the Kubernetes API for pods/services/endpoints/nodes and turns them into targets with `__meta_kubernetes_*` meta-labels. `relabel_configs` then filters to opted-in targets (e.g. `keep` pods with a `prometheus.io/scrape: "true"` annotation), sets the scrape port and path, and copies useful meta-labels (namespace, pod) onto the series. The Prometheus Operator abstracts this with `ServiceMonitor`/`PodMonitor` CRDs so teams declare scraping without editing the central config.
 
 **Q13: What is the `up` metric and why is it useful?**
+**Short:** `up` is a synthetic gauge that is 1 if a target's last scrape succeeded and 0 if it failed, making it the foundation of pull-based target-health alerting.
+
 `up` is a synthetic gauge Prometheus emits per target: 1 if the last scrape succeeded, 0 if it failed. It's the foundation of target-health alerting — `up == 0 for: 5m` tells you a target is down or unreachable, independent of any application metric. Because pull-based scraping owns the connection, `up` is reliable in a way push systems can't replicate (a silent target simply stops being scrapeable).
 
 **Q14: How would you reduce cardinality on an already-overloaded Prometheus?**
+**Short:** Find offending metrics/labels with `topk`/`count by` queries, drop unbounded labels with `metric_relabel_configs`, and replace raw IDs with bounded route templates.
+
 First identify the offenders with `topk(20, count by (__name__)({__name__=~".+"}))` and `count by (label)` queries (or `pint`/tsdb tools) to find which metrics/labels dominate. Then drop unbounded labels at ingest with `metric_relabel_configs` `labeldrop`/`drop`, replace ID labels with bounded route templates in instrumentation, and move per-request identifiers to traces/logs. For sustained scale, shard scraping functionally or remote-write into Mimir/Cortex.
 
 **Q15: How do you make Prometheus highly available without duplicate alerts?**
+**Short:** Run two identical Prometheus instances scraping the same targets so Alertmanager can dedup identical alerts, and put Thanos Querier in front to dedup queries.
+
 Run two identical Prometheus instances scraping the same targets so a single failure doesn't lose data or alerting; both send to Alertmanager, which deduplicates identical alerts by their label set so on-call gets one page, not two. For HA queries and dedup of the two replicas' data, put Thanos Querier in front (it dedupes by a configured replica label). The pattern is: redundant collection plus Alertmanager dedup for alerts and Thanos dedup for queries.
 
 ---

@@ -463,51 +463,83 @@ spec:
 ## 12. Interview Questions with Answers
 
 **Q1: What's the difference between static and dynamic secrets, and why prefer dynamic?**
+**Short:** A dynamic secret is generated on demand with a short lease and auto-revoked on expiry, unlike a long-lived static secret that stays valid until manually rotated.
+
 A static secret is a long-lived value (a stored DB password) handed out and reused, while a dynamic secret is generated on demand with a short lease and automatically revoked when it expires — Vault, for example, mints a unique database user per request with a 1-hour TTL. Dynamic secrets are preferable because a leaked short-lived, per-workload credential has almost no value and revocation is automatic, whereas a leaked static secret stays valid until someone manually rotates it everywhere. The principle is that the best secret is one that doesn't exist long enough to leak.
 
 **Q2: Why aren't native Kubernetes Secrets actually secure by default?**
+**Short:** Kubernetes Secret objects are only base64-encoded in etcd, not encrypted, so anyone with etcd access or sufficient RBAC can read them in plaintext.
+
 Kubernetes `Secret` objects are only base64-encoded in etcd, not encrypted, so anyone with etcd access or sufficient RBAC (`kubectl get secret -o yaml`) can read the plaintext. To make them safe you must enable etcd encryption-at-rest with a KMS provider, tightly scope RBAC, and ideally source the values from an external backend (Vault/cloud) via the External Secrets Operator or CSI driver rather than committing them. Treating base64 as encryption is one of the most common Kubernetes security mistakes.
 
 **Q3: How does HashiCorp Vault's dynamic database secrets feature work end to end?**
+**Short:** Vault's database secrets engine creates a unique DB user with a generated password and TTL on read, then runs a revocation statement to drop it when the lease expires.
+
 You enable the database secrets engine and define a role with `creation_statements` that tell Vault how to create a DB user plus a `default_ttl`; when an app authenticates (e.g., via its Kubernetes service account) and reads `database/creds/<role>`, Vault connects to the DB, creates a unique user with a generated password, and returns it with a lease. When the lease expires Vault runs the revocation statement to drop the user, so there's nothing long-lived. This gives per-workload, short-lived, auto-revoked credentials with a full audit log of every issuance.
 
 **Q4: What is the External Secrets Operator and what problem does it solve?**
+**Short:** ESO is a Kubernetes operator that syncs secrets from an external backend into native K8s Secrets, so Git holds only an ExternalSecret reference, never the value.
+
 ESO is a Kubernetes operator that syncs secrets from an external backend (Vault, AWS/GCP/Azure managers) into native K8s Secrets, driven by a `SecretStore` (how to connect) and `ExternalSecret` (what to fetch) custom resource. It solves the GitOps secrets problem: you commit only the `ExternalSecret` *reference* to Git while the actual value stays in the backend and is refreshed on an interval (e.g., every hour). This keeps secret values out of version control entirely while still letting pods consume ordinary K8s Secrets.
 
 **Q5: Compare Sealed Secrets and SOPS — when would you use each?**
+**Short:** Sealed Secrets encrypts to a cluster-specific key decrypted only by the in-cluster controller; SOPS encrypts files with KMS or age keys decrypted by the GitOps tool.
+
 Both let you keep secrets in Git as ciphertext: Sealed Secrets uses `kubeseal` to encrypt a Secret to a cluster-specific key that only the in-cluster controller can decrypt, while SOPS encrypts file values with a KMS or age key and is decrypted by your GitOps tool (Flux/ArgoCD) at apply time. Use Sealed Secrets when you want a Kubernetes-native, controller-managed flow tied to one cluster; use SOPS when you want a portable, tool-agnostic file-encryption approach that also works outside Kubernetes. Both differ from ESO, which keeps values *out* of Git entirely by referencing an external store.
 
 **Q6: How do you rotate a secret without downtime?**
+**Short:** Rotate with a dual-secret overlap window — create the new credential, migrate clients, confirm no traffic remains on the old one, then revoke it.
+
 Use a dual-secret (overlap) window: create the new credential while the old one is still valid, deploy/migrate clients to the new one, confirm there's no remaining traffic authenticating with the old one, and only then revoke it. Atomic replacement causes outages because in-flight clients still hold the old value and start failing the moment it's invalidated. Managed rotation (AWS Secrets Manager's RDS rotation) implements exactly this pattern, and dynamic secrets sidestep it by issuing fresh short-lived credentials continuously.
 
 **Q7: Why are secrets in Terraform state a problem, and how do you mitigate it?**
+**Short:** Terraform writes sensitive values unencrypted into state JSON even with `sensitive = true`, so anyone who can read the state bucket can read the plaintext secret.
+
 Any sensitive value Terraform manages is written unencrypted into the state JSON, and `sensitive = true` only masks CLI output, not the stored value — so anyone who can read the state bucket can read the password. Mitigate by KMS-encrypting the state backend, locking down bucket access, never committing state to Git, and sourcing secrets at runtime from Vault/Secrets Manager instead of passing them through Terraform (see [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)). The residual risk is why state access must be treated as secret access.
 
 **Q8: How should a workload authenticate to a secrets manager without a bootstrap secret?**
+**Short:** Authenticate via platform identity, like an IAM role bound to a pod's service account, so the workload's existing identity is the credential and there's no secret-zero.
+
 Use platform identity rather than a stored credential: on EKS, associate an IAM role with the pod's service account — EKS Pod Identity is what AWS recommends for new clusters, with IRSA (OIDC-based) still the option for EKS Anywhere, OpenShift, and self-managed clusters — so the workload's identity is the auth; in Kubernetes generally, Vault's Kubernetes auth verifies the pod's projected service-account token against the cluster API and issues a Vault token. This avoids the "secret-zero" chicken-and-egg problem where you'd otherwise need a secret to fetch secrets. The platform's existing identity becomes the trust anchor, scoped by least-privilege policy.
 
 **Q9: Vault vs cloud-native secret managers — how do you choose?**
+**Short:** Vault offers dynamic secrets, PKI, and multi-cloud neutrality but requires you to operate it; cloud-native managers are fully managed but single-cloud with less breadth.
+
 Vault is the most powerful — dynamic secrets, PKI, transit encryption, multi-cloud — but you operate it (unsealing, HA, storage backend), which is real cost; cloud managers (AWS Secrets Manager, GCP/Azure) are fully managed with native IAM integration and built-in rotation but are single-cloud and lack Vault's dynamic-secret breadth. Choose a cloud manager when you're single-cloud and want minimal ops; choose Vault when you need dynamic secrets, multi-cloud neutrality, or advanced features and can invest in running it. There is a third axis worth naming: HashiCorp relicensed Vault from MPL 2.0 to the BUSL in August 2023, so if you need an OSI-approved licence, OpenBao is the Linux Foundation fork that stayed on MPL 2.0 and keeps API compatibility, which is the usual escape hatch for organizations whose policy forbids source-available software. Many orgs use the cloud manager for storage and Vault or OpenBao where dynamic credentials matter.
 
 **Q10: What's the principle of least privilege applied to secrets, and how do you enforce it?**
+**Short:** Least privilege means each workload can read only the specific secrets it needs, enforced with scoped Vault or IAM policies bound to per-service identities.
+
 Each workload should be able to read only the specific secrets it needs and nothing else, so a compromise of one service can't read another's credentials. Enforce it with scoped policies (Vault policies bound to a specific path and auth role, IAM policies limiting `secretsmanager:GetSecretValue` to specific secret ARNs) and per-service identities rather than a shared "app" role. Combined with short TTLs and audit logging, least privilege keeps the blast radius of any single compromise small.
 
 **Q11: How do you prevent secrets from being committed to Git in the first place?**
+**Short:** Run secret-scanning tools like gitleaks as pre-commit hooks and a required CI check to block a leaking commit, and rotate immediately if one ever slips through.
+
 Run secret-scanning tools (`gitleaks`, `trufflehog`, `git-secrets`) as pre-commit hooks and as a required CI check so a commit containing a key is blocked before merge, and enable provider-side push protection (e.g., GitHub secret scanning). Pair this with the architectural fix — workloads reference an external store, so there's no plaintext value to accidentally commit. If a secret does leak, treat it as compromised: rotate immediately, since deleting the commit doesn't remove it from history or anyone's clone.
 
 **Q12: How do secrets management and GitOps coexist when "everything is in Git"?**
+**Short:** GitOps secrets coexist via three patterns: ESO commits only a reference, Sealed Secrets commits controller-decryptable ciphertext, or SOPS commits KMS/age-encrypted files.
+
 You never commit plaintext, so you use one of three patterns: ESO commits only a *reference* and pulls the value from Vault/cloud at runtime; Sealed Secrets commits ciphertext that only the in-cluster controller can decrypt; or SOPS commits KMS/age-encrypted files that Flux/ArgoCD decrypt at apply. All three preserve the GitOps invariant (Git is the source of truth) while keeping the actual secret value either external or encrypted — see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md). The choice is external-store-reference (ESO) vs encrypted-in-Git (Sealed Secrets/SOPS).
 
 **Q13: How do AWS Secrets Manager and SSM Parameter Store compare on cost and features, and when would you pick Parameter Store?**
+**Short:** Secrets Manager costs about $0.40 per secret monthly with built-in rotation, while SSM Parameter Store's standard tier is free but requires building rotation yourself.
+
 Secrets Manager costs about $0.40 per secret per month and includes built-in rotation, while SSM Parameter Store's standard tier is free but requires you to build rotation yourself. Both integrate with ESO/CSI and IAM for access control, but Secrets Manager adds native rotation Lambdas (e.g., RDS rotation) and versioning designed specifically for credentials, whereas Parameter Store is a general-purpose key-value store often reused for non-secret config too. Pick Parameter Store for a large number of low-sensitivity values where the per-secret fee would add up, and Secrets Manager when you want managed rotation without building it. Many teams use both: Parameter Store for app config, Secrets Manager for anything that needs automatic rotation.
 
 **Q14: How does the Secrets Store CSI Driver differ from the Vault Agent Injector for getting secrets into a pod?**
+**Short:** The CSI Driver mounts secrets as a volume with no app changes, fetched once unless auto-rotation is enabled; the Agent Injector runs a sidecar that authenticates itself.
+
 The CSI Driver mounts secrets from Vault or a cloud manager as a volume with no application code changes, while the Agent Injector adds a sidecar/init container that writes secrets to a file or env var. CSI Driver secrets appear as files in a mounted volume, requiring only a volume mount in the pod spec — but they are fetched once at mount time unless you turn on auto-rotation (`--enable-secret-rotation`, default off, `--rotation-poll-interval` 2m), which is the setting teams most often forget — whereas Vault Agent Injector runs alongside the app container, authenticates to Vault itself, and renders templates or raw values before or during the app's lifecycle. Neither, by default, creates a native Kubernetes Secret object the way ESO does, which reduces exposure via `kubectl get secret -o yaml`. Choose the CSI Driver for the simplest no-app-change mounting, and the Agent Injector when you need Vault-specific features like automatic renewal or templated secret files.
 
 **Q15: What is Vault's default lease TTL, and why do dynamic secrets typically use a much shorter one?**
+**Short:** Vault's platform default lease TTL is 768 hours, but dynamic secrets like DB credentials are deliberately issued with much shorter TTLs of minutes to hours.
+
 Vault's platform default lease TTL is 768 hours (32 days), but dynamic secrets like database credentials are typically issued with TTLs of minutes to hours. That 768h figure is a generic ceiling meant for tokens and leases broadly, not a recommendation — leaving a dynamic DB credential's `default_ttl` anywhere near it would recreate the long-lived-secret problem dynamic secrets exist to avoid. Production roles instead set `default_ttl=1h` with a `max_ttl` ceiling like 24h, so credentials auto-expire quickly and the app simply re-fetches on expiry. The gap between the platform default and the deliberately short role-level TTL is the tuning knob that makes dynamic secrets valuable.
 
 **Q16: Why couldn't the leaked-key startup simply rotate its shared 12-service DB password to fix the underlying risk?**
+**Short:** A password shared by 12 services makes rotation an all-or-nothing coordinated redeploy with no rollback safety, which is why it never got rotated at all.
+
 Rotating a password shared by 12 services requires coordinating a redeploy of all 12 at once, so in practice nobody attempted it and the password never rotated. That's the structural flaw: a single static credential fans out to every consumer, so any change is an all-or-nothing operation with high coordination cost and no rollback safety. Replacing it with Vault dynamic secrets fixed this structurally rather than operationally — each service gets its own unique, 1-hour-lease Postgres user, so rotation happens continuously and automatically per service with zero coordination required. The lesson generalizes: sharing one static secret across many consumers doesn't just widen blast radius, it makes rotation practically impossible.
 
 ---

@@ -556,48 +556,78 @@ Track toil as a % of team time (timesheets/ticket tags). Google guidance: keep <
 ## 12. Interview Questions with Answers
 
 **Q1: Define SLI, SLO, and SLA and how they relate.**
+**Short:** An SLI measures service quality as a good/total ratio; an SLO is an internal target for it; an SLA is a contractual promise with penalties, set looser than the SLO.
+
 An SLI is a measured indicator of service quality expressed as a good/total ratio (e.g. fraction of requests under 300ms); an SLO is an internal target for that SLI over a window (e.g. 99.9% over 30 days); an SLA is a contractual promise to customers with financial penalties if breached. They nest: the SLA is set looser than the SLO (e.g. SLA 99.5% vs SLO 99.9%) so you have an internal safety margin and detect trouble before you owe customers refunds. SLIs measure, SLOs target, SLAs commit.
 
 **Q2: What is an error budget and why is it powerful?**
+**Short:** An error budget, computed as 1 minus the SLO, converts the reliability-vs-velocity tradeoff into a shared number that governs when to ship risk versus freeze it.
+
 An error budget is the allowed unreliability, computed as `1 − SLO` (a 99.9% SLO gives a 0.1% budget = 43.2 min/30 days). It's powerful because it converts the perennial reliability-vs-velocity argument into a shared number: if budget remains, dev ships features and takes risks; if it's exhausted, the policy freezes risky launches and everyone focuses on reliability. Reliability becomes a measurable, spendable resource that both dev and ops are jointly accountable for, removing the political tug-of-war.
 
 **Q3: Why is 100% reliability the wrong target?**
+**Short:** 100% reliability is effectively impossible, infinitely expensive to approach, and imperceptible to users, and it leaves zero error budget to ever ship a risky change.
+
 Because it's effectively impossible (deploys, dependencies, and the user's own device/network all fail), infinitely expensive to approach, and imperceptible to users — they can't tell 100% from 99.99% since their own connection injects more failure than your last nines would remove. Targeting 100% also leaves a zero error budget, so you can never ship a risky change and every transient blip is a "breach." The right target is the lowest reliability your users tolerate, leaving a budget to spend on velocity.
 
 **Q4: How do you choose the right SLO target?**
+**Short:** Choose the SLO at the lowest number of nines users can't distinguish from perfect, validated by data, and set it slightly above the SLA for a safety margin.
+
 Start from what users actually perceive and what the business needs: pick the lowest number of nines where users can't distinguish your service from perfect, informed by historical performance and competitor/contract expectations. Validate with data — if dropping from 99.99% to 99.9% produces no measurable change in user behavior or complaints, the extra nine is wasted money. Set the SLO slightly above the SLA for safety margin, and revisit it if you repeatedly exhaust the budget (too strict) or never come close (too loose).
 
 **Q5: What is burn rate, and where does the 14.4x number come from?**
+**Short:** Burn rate measures how fast the error budget is consumed relative to evenly over the window; 14.4x is the exact rate that spends 2% of a 30-day budget in one hour.
+
 Burn rate is how fast you're consuming the error budget relative to "evenly over the window" — a burn rate of 1x exactly exhausts the budget at the window's end, 2x in half the time, and so on. Google's canonical 14.4x fast-page threshold is the exact answer to "spend at most 2% of the month's budget in a single hour": one hour is 1/720 of a 30-day window, so `burn × (1/720) = 0.02` gives `burn = 14.4`. The rough sanity check is that 14.4x would exhaust the whole budget in `30/14.4 ≈ 2` days. You alert on high burn rates over short windows because that's the only way to detect "we'll breach the SLO soon" before it actually happens.
 
 **Q6: Why use multi-window, multi-burn-rate alerts instead of a single threshold?**
+**Short:** A single window either flaps on transient spikes or detects severe burns too slowly; pairing a long confirming window with a short one gives fast, low-noise alerts.
+
 A single short window flaps on transient spikes; a single long window detects severe burns far too slowly. Pairing a long window (confirms the burn is real and sustained) with a short confirmation window (ensures it's still happening and lets the alert clear quickly) gives both fast detection on severe burns and low noise. You then set multiple tiers — 14.4x → page fast, 6x → page/ticket, 1x → slow ticket — so severity matches how urgently the budget is being threatened.
 
 **Q7: What is toil and why cap it at 50%?**
+**Short:** Toil is manual, repetitive, automatable operational work capped at 50% of an SRE's time so the team keeps investing in automation instead of drowning in ops load.
+
 Toil is manual, repetitive, automatable, reactive operational work that scales linearly with the service and produces no lasting value — restarts, manual scaling, ticket-driven provisioning. Google caps it at 50% of an SRE's time because if toil consumes everything, the team never builds the automation that would reduce future toil, and ops load grows unbounded with the service. Capping it forces continuous investment in automation so the team's capacity scales sub-linearly with the system.
 
 **Q8: How does the error-budget policy align dev and ops incentives?**
+**Short:** The error-budget policy makes unreliability's consequence automatic: a healthy budget lets dev ship fast, an exhausted one freezes launches for everyone.
+
 It makes the consequence of unreliability automatic and shared: when the budget is healthy, dev is free to ship fast and take risks (they "own" the budget to spend); when it's exhausted, the policy freezes feature launches and makes reliability bugs top priority for *everyone*, including dev. This removes the adversarial dynamic where ops wants to slow down and dev wants to speed up — both now optimize the same number, and the policy (signed by leadership) enforces the tradeoff without a manager arbitrating each time.
 
 **Q9: What are the four golden signals?**
+**Short:** The four golden signals are latency, traffic, errors, and saturation, recommended as the minimal monitoring set that captures user experience and capacity risk.
+
 Latency (how long requests take, split by success/failure since failed-fast differs from succeeded-slow), traffic (demand on the system, e.g. requests/sec), errors (rate of failed requests), and saturation (how full the system is — the resource closest to its limit). Google's SRE book recommends them as the minimal monitoring set for any user-facing service because together they capture user experience and impending capacity problems. They map naturally onto SLIs (latency/errors) and capacity planning (saturation).
 
 **Q10: How do you do capacity planning the SRE way?**
+**Short:** SRE capacity planning divides forecast peak demand by a target utilization that leaves headroom, then adds N+1 redundancy so losing a zone doesn't breach the SLO.
+
 You plan from forecast demand plus headroom plus failover capacity, not from last week's peak: estimate future peak demand (organic growth, seasonal spikes), divide by a target utilization that leaves headroom for bursts/GC (e.g. 60%), and add N+1 redundancy so losing a zone/instance doesn't breach the SLO. For example, an 80k-rps forecast at 60% utilization on 2k-rps instances needs ~67 instances, provisioned to ~100 across three AZs for failover. You reassess regularly against growth and validate with load tests (see [../../backend/load_and_performance_testing](../../backend/load_and_performance_testing/load_and_performance_testing.md)).
 
 **Q11: What's a blameless postmortem and why does it matter for reliability?**
+**Short:** A blameless postmortem analyzes the systemic and process causes of an incident rather than blaming an individual, because blame drives people to hide information.
+
 A blameless postmortem analyzes an incident focusing on the systemic and process causes — what made the failure possible and what controls were missing — rather than blaming the individual who triggered it. It matters because blame drives people to hide mistakes and withhold information, which prevents the organization from learning, whereas a blameless culture surfaces the real contributing factors and produces durable fixes. The output is concrete, owned, tracked action items that reduce the chance of recurrence (covered in [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
 
 **Q12: How do you measure an availability SLI in PromQL, and what's a common mistake?**
+**Short:** Availability SLIs are computed as good over total events over a window; the common mistake is measuring a load-balancer health check instead of real user requests.
+
 You compute the ratio of good events to total over the window — e.g. `sum(rate(http_requests_total{status!~"5.."}[30d])) / sum(rate(http_requests_total[30d]))` for request success. The common mistake is measuring something that isn't the user's experience, like a load-balancer health check that passes while real requests fail, which reports a falsely perfect SLI. Measure on actual user-facing request outcomes as close to the user as feasible (edge metrics or synthetic/client probes), and define "good" precisely (which status codes, which latency threshold).
 
 **Q13: When should you NOT define formal SLOs?**
+**Short:** Formal SLOs are the wrong call at too-low traffic for ratios to be meaningful, in early-stage products where speed dwarfs reliability, or as unenforced ceremony.
+
 When traffic is too low for ratios to be statistically meaningful (a few requests can't sustain a 99.9% measurement — use coarser windows or simple health checks), when the product is early-stage and shipping speed dwarfs reliability concerns (premature SLOs add ceremony), or for internal/throwaway tools whose downtime costs nothing. Also avoid "SLO theater" — defining SLOs with no enforcing error-budget policy is worse than none because it implies reliability is managed when it isn't. SLOs are worth the overhead only where reliability is genuinely contested and measurable.
 
 **Q14: How do you handle a service that keeps exhausting its error budget?**
+**Short:** Repeated exhaustion means renegotiating the SLO as too strict, or enforcing the policy and investing in reliability until the budget recovers.
+
 First check whether the SLO is realistic — if the service architecturally can't hit it, the SLO may be too strict and should be renegotiated with stakeholders, or the architecture needs reliability investment (redundancy, dependency hardening). Enforce the error-budget policy: freeze risky launches, make reliability bugs P1, and prioritize postmortem action items over the roadmap until the budget recovers. Repeated exhaustion is a signal to either invest in reliability or consciously lower the target — the data forces an explicit decision rather than chronic firefighting.
 
 **Q15: How does SRE differ from traditional ops/DevOps?**
+**Short:** SRE treats operations as a software problem with explicit SLOs, a measured error budget, a capped toil ceiling, and blameless postmortems — a specific implementation of DevOps.
+
 Traditional ops is largely manual and reactive, with reliability as a vague aspiration and a hard org boundary between dev (ship) and ops (stabilize). SRE treats operations as a software problem: it sets explicit reliability targets (SLOs), measures them, manages an error budget that quantifies the velocity-vs-reliability tradeoff, caps manual toil so engineers automate, and runs blameless postmortems. DevOps is the broader cultural movement to break the dev/ops wall; SRE is a specific, prescriptive *implementation* of those principles with concrete practices (error budgets, the 50% toil cap, golden signals) — "class SRE implements interface DevOps."
 
 ---

@@ -789,57 +789,75 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 ## 12. Interview Questions with Answers
 
 **Q: What happens if you compile a CUDA binary only for `sm_80` and run it on an `sm_100` GPU with no PTX embedded?**
+**Short:** The launch fails with cudaErrorNoKernelImageForDevice because the fatbinary has no sm_100 SASS and no embedded PTX for the driver to JIT-compile as a fallback.
 The launch fails at runtime with `cudaErrorNoKernelImageForDevice` ("no kernel image is available for execution on the device"). The driver found no SASS matching `sm_100` in the fatbinary and no PTX to JIT-compile as a fallback, even though the build itself succeeded and any testing on `sm_80` hardware passed cleanly.
 
 **Q: What is the difference between PTX and SASS?**
+**Short:** PTX is NVIDIA's stable, architecture-independent virtual instruction set that the driver can JIT to newer GPUs, while SASS is real machine code tied to one exact architecture.
 PTX (Parallel Thread Execution) is NVIDIA's stable, architecture-independent virtual instruction set; SASS (Streaming Assembly) is the real machine code for one specific `sm_XX` GPU generation. PTX can be JIT-compiled by the driver to run on GPU generations that postdate it, while SASS is tied to the exact architecture `ptxas` assembled it for.
 
 **Q: What is a fatbinary, and why would you want SASS for multiple architectures inside one?**
+**Short:** A fatbinary bundles SASS cubins for several sm_XX targets plus optional PTX in one binary, avoiding JIT overhead on validated GPUs while PTX still covers newer ones.
 A fatbinary is a single container bundling SASS `cubin`s for several concrete `sm_XX` targets plus optionally one or more PTX versions, all embedded in one executable or shared library. Shipping SASS for every GPU generation you've validated avoids JIT overhead on those exact GPUs, while an embedded PTX still covers anything newer.
 
 **Q: What is the practical difference between `-gencode arch=compute_80,code=sm_80` and `-gencode arch=compute_80,code=compute_80`?**
+**Short:** code=sm_80 assembles real SASS for exactly that architecture, while code=compute_80 embeds PTX only, letting the driver JIT it for sm_80 or any newer GPU.
 The first assembles real SASS machine code for exactly an `sm_80` GPU using Ampere-level PTX features; the second embeds the PTX itself (no SASS) so the driver can JIT-compile it for `sm_80` or any newer-generation GPU. The `code=` half of the flag is what decides real-vs-virtual output, not `arch=`.
 
 **Q: Does `nvcc -arch=sm_80` embed a PTX fallback, and where does the fallback actually get lost?**
+**Short:** -arch=sm_80 does embed a PTX fallback since it expands to gpu-code=sm_80,compute_80; the fallback is lost only when switching to an explicit -gencode code=sm_80 form.
 Yes — `-arch=sm_80` is shorthand for `--gpu-architecture=compute_80 --gpu-code=sm_80,compute_80`, so it ships a cubin *and* a `compute_80` PTX blob. The fallback is lost the moment you move to the explicit `-gencode arch=compute_80,code=sm_80` form (which is what any multi-architecture build, CMake's `80-real`, or a `TORCH_CUDA_ARCH_LIST` entry without `+PTX` produces), because there `code=` lists exactly what gets emitted — so you have to add `-gencode arch=compute_XX,code=compute_XX` back by hand.
 
 **Q: What does `__CUDA_ARCH__` do, and when is it undefined?**
+**Short:** __CUDA_ARCH__ is a preprocessor macro set to 100*major+10*minor during each device-code compile pass, and it is undefined during the host-code compilation pass.
 It is a preprocessor macro `nvcc` defines during each device-code compilation pass, set to `100 * major + 10 * minor` (e.g. `800` for `sm_80`), letting a single kernel source branch to different code per target architecture. It is undefined during the host-code compilation pass, so guarding device-only intrinsics with it protects the host build but only if there's no unguarded fallback path referencing them directly.
 
 **Q: Why does `nvcc` invoke two separate compilers for one `.cu` file?**
+**Short:** cudafe++ splits a .cu file into a host translation unit compiled by the system compiler and device units compiled through NVVM/LLVM to PTX then SASS via ptxas.
 `cudafe++` splits the file into a host C++ translation unit and one or more device translation units. The host unit is compiled by your system compiler (gcc/clang/MSVC); the device units go through NVIDIA's own NVVM/LLVM-based front end down to PTX, then `ptxas` down to SASS — the two paths only reconverge at the final link step, which is why host and device code can use different optimization flags entirely.
 
 **Q: What does `ptxas --ptxas-options=-v` tell you and why check it on every hot kernel?**
+**Short:** ptxas --ptxas-options=-v reports register count, shared-memory usage, and spill stores/loads per kernel, the only way to catch an occupancy-capping regression silently.
 It reports the register count, shared-memory usage, and any register spill stores/loads for each compiled kernel. A rising register count or nonzero spill count silently caps how many warps can be resident per SM (lower occupancy) with no compiler error or warning, so it is the only way to catch a performance regression introduced by an innocuous-looking code change.
 
 **Q: What is `nvrtc` and when would you reach for it over ahead-of-time `nvcc`?**
+**Short:** nvrtc compiles CUDA C++ source strings to PTX at process runtime with no .cu file, used when the kernel body depends on runtime-known information like a tensor shape.
 `nvrtc` is a library that compiles CUDA C++ source strings to PTX at process runtime rather than at build time, with no `.cu` file and no `nvcc` subprocess involved. It's the right tool when the kernel body itself depends on information only known at runtime (a tensor shape, a traced computation graph) — it's what CuPy's `RawModule`, Numba's `@cuda.jit`, and PyTorch's Inductor-generated kernels use under the hood.
 
 **Q: What is the difference between the CUDA Driver API and the Runtime API?**
+**Short:** The Runtime API offers implicit context management via <<<grid,block>>> syntax, while the lower-level Driver API exposes explicit context/module handles and loads PTX/cubin at runtime.
 The Runtime API (`cudart`, `<<<grid,block>>>` syntax) is a convenience layer with implicit context management that essentially all application code uses. The Driver API (`cuda.h`, `cuCtxCreate`/`cuModuleLoadData`/`cuLaunchKernel`) is the lower-level layer underneath it, with explicit context and module handles, and is what dynamically loads PTX/cubin blobs — including `nvrtc` output — at runtime.
 
 **Q: Why is a `-G` (debug) build unsuitable for performance measurement?**
+**Short:** -G disables nearly all NVVM/ptxas optimizations to preserve debuggability, so a debug build can run 10-100x slower than the equivalent -O3 release build.
 `-G` disables nearly all of NVVM's and `ptxas`'s optimizations to preserve full debuggability. The resulting kernel can run 10-100x slower than the equivalent `-O3` release build, so any timing taken from a `-G` binary says nothing about production performance.
 
 **Q: What does `-lineinfo` do, and is it safe to use in a profiled production-adjacent build?**
+**Short:** -lineinfo embeds source-line correlation into SASS for Nsight profiling with negligible overhead and no disabled optimizations, so it's safe to keep on in profiled builds.
 `-lineinfo` embeds source-line correlation metadata into the SASS so Nsight Compute/Systems can map hot instructions back to source lines, without disabling optimizations the way `-G` does. It carries negligible runtime overhead, so it is standard practice to keep it on for any build you intend to profile, release or otherwise.
 
 **Q: What tools let you inspect the actual SASS instructions inside a compiled binary?**
+**Short:** cuobjdump -sass and nvdisasm disassemble SASS from a binary or cubin, while cuobjdump --dump-elf lists which sm_XX/compute_XX targets a fatbinary actually contains.
 `cuobjdump -sass <binary>` disassembles the SASS embedded in an object file, executable, or shared library, and `nvdisasm` does the same directly against a standalone `.cubin` file. `cuobjdump --dump-elf`/`-lelf` additionally lists which `sm_XX`/`compute_XX` targets a fatbinary actually contains, which is the fastest way to audit whether a shipped library has the PTX-fallback safety net at all.
 
 **Q: How does CMake's modern `CUDA_ARCHITECTURES` property map onto raw `-gencode` flags?**
+**Short:** A -real suffix maps to real SASS (code=sm_XX) and a -virtual suffix maps to embedded PTX (code=compute_XX), so CMake's syntax directly mirrors -gencode flags.
 Each architecture string carries a `-real` or `-virtual` suffix that maps directly to real SASS or embedded PTX. `"80-real"` expands to `-gencode arch=compute_80,code=sm_80`, while `"90-virtual"` expands to `-gencode arch=compute_90,code=compute_90` — listing `"80-real;90-real;90-virtual"` reproduces the standard forward-compatible pattern of real SASS for two known GPUs plus a JIT fallback beyond Hopper.
 
 **Q: Where does the CUDA driver cache a JIT-compiled kernel, and why does that matter for cold-start latency?**
+**Short:** JIT-compiled SASS is cached on disk at ~/.nv/ComputeCache keyed by driver version and PTX content, so only the first run after a driver change pays the JIT cost.
 JIT output from PTX-to-SASS compilation is cached on disk, keyed by driver version and PTX content, so the JIT cost is paid once per machine rather than once per process launch. The cache lives at `~/.nv/ComputeCache` on Linux (an equivalent `%APPDATA%` path on Windows); the first run on a fresh machine, or after a driver upgrade invalidates the cache, pays the JIT latency, and every subsequent run reuses the cached SASS.
 
 **Q: Why would a library deliberately ship PTX-only, with no real SASS for any architecture?**
+**Short:** PTX-only maximizes portability to any future GPU generation but pays a JIT compile on every first launch on every machine, a poor tradeoff for latency-sensitive kernels.
 PTX-only maximizes portability, because the driver's JIT compiler can target any GPU generation it supports, including ones released after the library shipped. The cost is paying a JIT compile on literally every first launch on every machine — a reasonable tradeoff for source-like portable distribution or infrequently-launched tools, but a poor one for latency-sensitive or performance-critical shipped kernels, where the standard real-SASS-plus-one-PTX-fallback pattern is preferred.
 
 **Q: Does a newer GPU driver always let you run a binary built against an older CUDA toolkit?**
+**Short:** A newer driver can generally run binaries built against an older toolkit, but the reverse needs NVIDIA's CUDA Forward Compatibility package installed on the older driver.
 Generally yes — the CUDA driver's compatibility model is backward compatible, so a newer driver can run binaries and PTX built against older toolkit versions. The harder direction is the reverse: an older driver running a binary built against a much newer toolkit's runtime may not work unless NVIDIA's "CUDA Forward Compatibility" package is installed, which matters most on locked-down data-center clusters that cannot upgrade the driver on demand.
 
 **Q: What do `cudaRuntimeGetVersion` and `cudaDriverGetVersion` each tell you, and why check both at startup?**
+**Short:** cudaRuntimeGetVersion reports the toolkit version the binary was built against, while cudaDriverGetVersion reports the installed GPU driver's version, so checking both catches mismatches.
 `cudaRuntimeGetVersion` reports the CUDA Toolkit version the binary itself was built against, while `cudaDriverGetVersion` reports the version of the GPU driver actually installed on the machine. Checking both at startup — alongside `cudaGetDeviceProperties`'s reported compute capability — lets a program fail with a clear diagnostic instead of a confusing runtime error when the two are mismatched in the unsupported direction.
 
 ---

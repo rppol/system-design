@@ -377,51 +377,83 @@ glob `/*`. Only `${DIR:?msg}` (or an explicit `[ -n "$DIR" ]` guard) rejects the
 ## 12. Interview Questions with Answers
 
 **Q1: What does `set -euo pipefail` do and why is each flag important?**
+**Short:** `-e` exits on any failing command, `-u` errors on unset variables, and `pipefail` fails a pipeline if any stage fails — turning silent continuation into immediate failure.
+
 `-e` exits on any non-zero command so failures don't cascade; `-u` errors on unset variables, catching typos like `$DIR` vs `$DIRR`; `-o pipefail` makes a pipeline fail if *any* stage fails, not just the last. Together they convert silent, dangerous continuation into immediate, debuggable failure — the single most important line in any production script.
 
 **Q2: Why quote variables, and what breaks without it?**
+**Short:** Unquoted `$var` undergoes word-splitting and glob expansion, so `"$var"` must wrap it to preserve a value with spaces or wildcards as one literal token.
+
 Unquoted `$var` undergoes word-splitting (on `IFS`) and glob expansion: a path with spaces becomes multiple arguments, and a value containing `*` or `?` gets expanded against the filesystem. `"$var"` preserves it as a single literal token. The rule: quote unless you specifically want splitting. Quoting alone does not cover the *empty*-value case — `rm -rf "$DIR"/*` with `DIR=""` still expands to `rm -rf /*`, and `set -u` will not save you because the variable is set, just empty; guard those with `"${DIR:?DIR required}"`.
 
 **Q3: What makes a script idempotent and why does it matter for automation?**
+**Short:** An idempotent script produces the same end state whether run once or N times, which matters because automation like CI and cron retries scripts on failure.
+
 Idempotent = running it N times yields the same end state as running it once. It matters because automation is retried (CI re-runs, cron, failed-then-resumed deploys). Use `mkdir -p`, `kubectl apply` over `create`, check-before-append, and conditional creation. Non-idempotent scripts duplicate resources or fail on the second run.
 
 **Q4: When should you stop using bash and switch to Python?**
+**Short:** Switch to Python once you need real data structures, JSON/YAML handling, HTTP retries, concurrency, or the script passes roughly 100 lines.
+
 When you need data structures, JSON/YAML manipulation, HTTP calls with retries, concurrency, or precise error handling — or when the script passes ~100 lines. Bash excels at gluing CLIs and short pipelines; beyond that, its lack of real types, error handling, and testing makes Python/Go far safer.
 
 **Q5: How do exit codes flow through a pipeline, and how does `pipefail` change it?**
+**Short:** Without `pipefail`, `$?` of a pipeline is only the last command's exit code, hiding upstream failures; `pipefail` makes it the rightmost non-zero exit instead.
+
 By default `$?` of `a | b | c` is `c`'s exit code, so a failure in `a` or `b` is hidden. `set -o pipefail` makes the pipeline's exit code the rightmost non-zero one, surfacing upstream failures so `set -e` can act on them.
 
 **Q6: What is `trap` used for in production scripts?**
+**Short:** `trap 'cmd' SIGNAL` registers a handler so cleanup runs on any exit path or lets an entrypoint forward a shutdown signal to the app it launched.
+
 `trap 'cmd' SIGNAL` registers cleanup/handlers. `trap cleanup EXIT` guarantees temp files are removed and locks released on any exit path; `trap 'graceful_shutdown' TERM INT` lets an entrypoint forward shutdown to the app. It's how scripts stay clean under both success and interruption.
 
 **Q7: Why `exec "$@"` at the end of a container entrypoint?**
+**Short:** `exec "$@"` replaces the shell process with the app so the app becomes PID 1 and receives signals like SIGTERM directly instead of the shell swallowing them.
+
 `exec` replaces the shell process with the app, so the app becomes PID 1 and receives signals (SIGTERM) directly instead of the shell swallowing them. Without `exec`, the shell stays PID 1, doesn't forward signals, and graceful shutdown breaks.
 
 **Q8: GitHub Actions `run:` steps — what's a subtle failure mode?**
+**Short:** A `run:` step with no `shell:` key runs as `bash -e {0}`, missing both `pipefail` and `-u`, so mid-pipeline failures and typo'd variables go unnoticed.
+
 A `run:` step with no `shell:` key executes as `bash -e {0}`, which gives you `-e` but neither `pipefail` nor `-u` — so a failing stage in the middle of a pipeline is masked by the last stage's exit 0 and the step goes green, and a typo'd variable silently expands to the empty string. Declaring `shell: bash` changes the invocation to `bash --noprofile --norc -eo pipefail {0}`, which adds pipefail but still not `-u`. Put an explicit `set -euo pipefail` at the top of any multi-line `run:` block so the step's failure semantics do not depend on which shell key someone remembered to write.
 
 **Q9: How do you parse JSON safely in a shell pipeline?**
+**Short:** Use `jq` to parse JSON in a pipeline, since it understands the parsed structure and survives whitespace or ordering changes that break `grep`/`awk`/`cut`.
+
 Use `jq`: `jq -r '.items[].metadata.name'`. It understands JSON structure, handles escaping, and survives whitespace/order changes that break `grep|awk|cut`. For building JSON, `jq -n --arg`/`--argjson` escapes values correctly, avoiding injection from unescaped input.
 
 **Q10: What is `shellcheck` and where does it fit?**
+**Short:** `shellcheck` is a static analyzer that flags unquoted variables and missing `set` flags, run as a required CI gate to catch these bugs before merge.
+
 `shellcheck` is a static analyzer that flags unquoted variables, missing `set` flags, useless `cat`, and dozens of common bugs. Running it as a required CI gate catches the exact classes of error (quoting, exit-code handling) that cause production incidents, before merge.
 
 **Q11: Why can `set -e` combined with `pipefail` abort a script even when `grep` behaves correctly?**
+**Short:** `grep` exits 1 on zero matches, a normal outcome, but `set -e` treats that as fatal outside a conditional, killing a script on its best-case result.
+
 `grep` exits with status 1 when it finds zero matches, which is a normal outcome, not a failure, but `set -e` treats that non-zero as fatal. A bare `count=$(grep -c pattern file.log)` run outside any conditional kills the script the moment zero matches is the best-case result, like "no errors found in today's log" — exactly the outcome you wanted to report as success. Inside an `if grep -q pattern file; then` construct this is harmless because the if context suppresses -e's exit-on-error behavior, but a standalone grep, diff, or cmp (all of which use non-zero for a legitimate "no result" case) isn't protected the same way. Guard any command whose "nothing found" case is expected with an explicit `|| true` or an `if`/`case`, and don't rely on `set -e` alone to distinguish "no results" from "broken."
 
 **Q12: What happens if a script calls `trap` on EXIT more than once, and how does that bite tmpdir cleanup?**
+**Short:** Each `trap ... EXIT` call replaces the previous handler rather than adding to it, so registering it twice silently drops the earlier cleanup and leaks that resource.
+
 Each call to `trap` on EXIT replaces the previous handler instead of adding to it, so only the last-registered cleanup actually runs. A script that runs `trap 'rm -rf "$TMPDIR1"' EXIT` early on and later `trap 'rm -rf "$TMPDIR2"' EXIT` elsewhere silently drops the first handler, so TMPDIR1 leaks on every single run. This is especially common when a script sources helper libraries that each try to register their own EXIT trap, unknowingly clobbering one another with no error or warning. Register exactly one `trap cleanup EXIT` per script, and have that single cleanup function remove every temp file, directory, and lock the script created, tracked in one array.
 
 **Q13: Why is `for f in $(ls *.log); do ...` dangerous even though it looks idiomatic?**
+**Short:** `for f in $(ls *.log)` word-splits the command substitution's output on whitespace, breaking any filename containing a space into multiple wrong loop items.
+
 The unquoted command substitution word-splits its output on whitespace, so a filename like "March 2024.log" becomes two separate loop items. `for f in $(ls *.log)` first expands the glob, then word-splits the command substitution's output again on IFS, breaking on every space, tab, and newline inside a filename, so "March 2024.log" turns into iterations "March" and "2024.log," neither of which exists on disk. The fix is to let the shell glob directly: `for f in *.log; do ... done` preserves each match as one token because globbing, unlike word-splitting, doesn't split on internal whitespace. Never loop over `ls` output — glob directly for simple cases, or use `find ... -print0` piped to a null-delimited read loop for recursive or complex matching.
 
 **Q14: What's a concrete case where a grep-based JSON extraction returns the wrong value that `jq` would get right?**
+**Short:** A naive `grep -o` extraction can match the wrong occurrence when a key name is nested at two levels, while `jq` walks the parsed structure and returns the correct field.
+
 A minified JSON payload with the same key name nested at two different levels makes a naive `grep -o` extraction pull the wrong occurrence. Given a payload where `status` appears both at the top level and nested inside a `metadata` object, `grep -o` matches whichever occurrence comes first in the raw text, and reformatting or minifying the JSON silently changes which value that is; `jq -r '.status'` instead walks the parsed structure and always returns the correct top-level field, regardless of nesting, whitespace, or where else that key name appears in the document. This class of bug is especially dangerous because it doesn't error — it returns a plausible-looking but wrong value, and nothing downstream signals a problem. Treat any JSON parsed by regex as a latent correctness bug, not a style nit, and require `jq` or a real parser for anything touching API responses.
 
 **Q15: Why should the `retry()` backoff loop add random jitter, not just double the delay each time?**
+**Short:** Pure exponential backoff with no jitter makes many clients retry at the exact same instants, recreating the overload; random jitter spreads retries across a window instead.
+
 Pure exponential backoff with no randomness makes many clients retry at the exact same instants, recreating the overload that caused the failures. If 500 clients all failed at once and all back off 2s, 4s, 8s, 16s deterministically, they all retry again at exactly the same wall-clock moments — the classic thundering-herd problem hitting a service that was just starting to recover. Adding jitter, for example sleeping the base delay plus a random amount up to that same delay instead of exactly the delay, spreads those same 500 retries across a window of seconds instead of a single instant. Add jitter by default to any retry loop that calls a shared service rather than a purely local operation — it costs one line and materially reduces cascading-failure risk.
 
 **Q16: How do you tune `shellcheck`'s severity in a CI gate versus a developer's local run?**
+**Short:** `shellcheck -S warning` fails CI on real bugs like unquoted variables without blocking on pure style nits, while a separate non-blocking job can run at `-S style`.
+
 `shellcheck` classifies findings into four severities — error, warning, info, and style — and the `-S` flag sets the minimum severity that fails the run. A CI gate typically runs `shellcheck -S warning` so it fails the build on real bugs like unquoted-variable warnings without blocking on pure style nits, while a separate, non-blocking job can run at `-S style` for extra polish suggestions. Individual findings can be suppressed inline with a `# shellcheck disable=SC2034` comment directly above the offending line when a warning is a deliberate false positive. Gate CI at `-S warning` or stricter, and require review of any inline disable comment since it silences a real check rather than fixing it.
 
 ---

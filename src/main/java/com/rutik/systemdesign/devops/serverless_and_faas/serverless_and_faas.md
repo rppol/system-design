@@ -472,51 +472,83 @@ flowchart LR
 ## 12. Interview Questions with Answers
 
 **Q1: What is a cold start, what causes it, and how do you mitigate it?**
+**Short:** A cold start is the added latency from initializing a fresh execution environment when no warm one exists, mitigated by small packages, reused clients, and provisioned concurrency.
+
 A cold start is the added latency (~100ms-1s) when the platform must initialize a new execution environment — downloading code, starting the runtime, and running your init code — because no warm one is available. It's worsened by large deployment packages, heavy module-level initialization, and (historically) VPC ENI attachment. Mitigate by minimizing package size, reusing SDK clients at module scope, using provisioned concurrency for latency-critical synchronous paths, and SnapStart on Java, Python, or .NET; for truly latency-sensitive endpoints, keep instances warm.
 
 **Q2: Why must serverless functions be idempotent?**
+**Short:** Event sources like SQS and Kinesis guarantee at-least-once delivery, so the same event can invoke a function twice, and a non-idempotent handler would double-process it.
+
 Because event sources like SQS, Kinesis, and EventBridge guarantee at-least-once delivery, so the same event can invoke your function more than once. A non-idempotent handler would double-charge a card or double-insert a record. Make handlers idempotent by deduplicating on a stable key with a conditional write to DynamoDB or by using idempotency keys (e.g., Lambda Powertools), so reprocessing a duplicate is a no-op.
 
 **Q3: When is serverless the wrong choice?**
+**Short:** Serverless is wrong for steady high-throughput workloads, tasks exceeding the timeout or needing persistent connections, single-digit-ms tail latency, or specialized hardware.
+
 When the workload is steady and high-throughput, an always-on container or reserved instance is usually cheaper than per-invocation billing; when tasks exceed the timeout (15 minutes for Lambda) or need persistent connections; when you need predictable single-digit-millisecond tail latency that cold starts violate; or when you need GPUs/specialized hardware. Serverless excels at spiky, event-driven, short, stateless work — not at constant heavy load or long-running stateful processes.
 
 **Q4: How does Lambda's memory setting affect performance and cost?**
+**Short:** Lambda memory and CPU are coupled, so a CPU-bound function can run faster and sometimes cheaper at higher memory because it finishes sooner, not at the smallest setting.
+
 Memory and CPU are coupled — increasing memory proportionally increases allocated vCPU, so a CPU-bound function can run faster (and sometimes cheaper) at higher memory because it finishes sooner. Billing is memory-GB times execution-milliseconds plus per-request, so the cost-optimal setting is found by tuning (e.g., AWS Lambda Power Tuning). Don't assume the smallest memory is cheapest; faster execution at higher memory can lower total cost.
 
 **Q5: What problem do Step Functions solve that plain function chaining doesn't?**
+**Short:** Step Functions provide stateful orchestration — sequencing, branching, retries, and error catching — across stateless functions, unlike brittle hand-chained function calls.
+
 Step Functions provide stateful orchestration — sequencing, branching, parallelism, retries with backoff, error catching, and timeouts — across multiple stateless, time-limited functions, with a durable execution history. Chaining functions that invoke or poll each other is brittle: there's no central state, retries and error handling are hand-rolled, and debugging is hard. Use a state machine for any multi-step workflow that needs reliability and visibility, like order processing or ETL.
 
 **Q6: How do you handle failures in an event-driven serverless pipeline?**
+**Short:** Configure dead-letter queues with a `maxReceiveCount` so poison messages move off the queue after N failures instead of vanishing, and make handlers idempotent.
+
 Configure dead-letter queues (DLQs) on async invocations and SQS event sources with a `maxReceiveCount` so poison messages move to the DLQ after N failed attempts instead of vanishing, and alarm on DLQ depth. Use partial batch failure reporting for SQS so one bad record doesn't fail the whole batch, and make handlers idempotent so retries are safe. After fixing the root cause, replay messages from the DLQ.
 
 **Q7: API Gateway vs ALB in front of Lambda — how do you choose?**
+**Short:** API Gateway adds rich API management like throttling and authorizers for public APIs; an ALB is cheaper at very high volume but lacks API-management features.
+
 API Gateway provides rich API features — request validation, throttling, API keys, usage plans, authorizers (JWT/IAM/Cognito), and caching — and is the default for public APIs, but costs more per request at high volume. An ALB invoking Lambda is cheaper at very high request volumes and integrates with existing VPC/WAF setups but lacks API-management features. Use API Gateway (HTTP API for lower cost) for managed public APIs and ALB-to-Lambda when you need cheap, high-volume routing alongside other targets.
 
 **Q8: What is provisioned concurrency and when do you use it?**
+**Short:** Provisioned concurrency keeps a set number of execution environments pre-initialized so requests never cold-start, used for latency-sensitive synchronous endpoints.
+
 Provisioned concurrency keeps a configured number of execution environments initialized and ready, so requests hitting them incur no cold start. You use it for latency-sensitive synchronous endpoints (user-facing APIs) where the occasional ~500ms cold start is unacceptable, accepting that you pay for the warm capacity even when idle. Reserved concurrency, by contrast, caps maximum concurrency (and guarantees a floor) but doesn't pre-warm.
 
 **Q9: How does scale-to-zero work and what's the tradeoff?**
+**Short:** Scale-to-zero destroys idle execution environments so you pay nothing when there are no events, at the cost of a cold start on the next request after a quiet period.
+
 When there are no events, the platform destroys idle execution environments so you pay nothing for compute — ideal for intermittent workloads. The tradeoff is that the next request after a quiet period hits a cold start. Platforms like Cloud Run and Lambda let you set a minimum/provisioned instance count above zero to trade some cost for guaranteed warm capacity, balancing cost against tail latency.
 
 **Q10: What is Knative and why might you choose it over Lambda?**
+**Short:** Knative brings scale-to-zero and request-driven autoscaling to your own Kubernetes cluster, chosen to avoid vendor lock-in at the cost of operating the cluster yourself.
+
 Knative is a Kubernetes-based serverless framework that brings scale-to-zero, request-driven autoscaling, and eventing to your own cluster, so functions/containers run portably on any Kubernetes (any cloud or on-prem). You'd choose it to avoid vendor lock-in, to run serverless alongside existing Kubernetes workloads, or to meet on-prem/regulatory constraints — at the cost of operating the cluster yourself, which managed FaaS abstracts away.
 
 **Q11: How do you prevent a runaway Lambda from causing a huge bill or outage?**
+**Short:** Cap a function's maximum concurrency with reserved concurrency, avoid recursive triggers, and alarm on concurrency and error rate, since the account default is shared.
+
 Set reserved concurrency to cap a function's maximum concurrent executions, avoid recursive triggers (e.g., a function writing to the same S3 prefix that invokes it), and add CloudWatch alarms on concurrency, error rate, and DLQ depth. Account concurrency defaults to 1000 (soft), shared across functions, so one runaway function can throttle everything unless capped. Test fan-out behavior and put guardrails in before going to production.
 
 **Q12: How do you give a Lambda least-privilege access to other AWS services?**
+**Short:** Give each function its own IAM execution role scoped to only the exact actions and resources it needs, never a broad role shared across many functions.
+
 Each function gets its own IAM execution role with a policy scoped to exactly the actions and resources it needs — for example, `dynamodb:PutItem` on one table and `s3:GetObject` on one bucket prefix — and nothing more. Avoid sharing a broad role across many functions, because that widens the blast radius if one function is compromised. Use IAM Access Analyzer and per-function roles, and reference [secrets_management](../secrets_management/secrets_management.md) for any credentials the function needs.
 
 **Q13: What are Lambda's key hard limits, and how should they shape a design?**
+**Short:** Lambda enforces a 15-minute timeout, a 6 MB sync payload, a 250 MB unzipped package (10 GB for containers), and a shared 1000 concurrent executions.
+
 Lambda enforces a 15-minute max timeout, a 6 MB synchronous payload, a 250 MB unzipped deployment package (10 GB for container images), and a default 1000 concurrent executions per account. These push you toward short, stateless, small-footprint functions: a task needing more than 15 minutes belongs in Step Functions or a container, and a payload over 6MB should go through S3 with a presigned URL instead of the request body. The 250MB package ceiling (or 10GB container image) forces lean dependencies, which directly reduces cold-start init time too. Design any Lambda-based system around these ceilings from the start rather than discovering them under production load.
 
 **Q14: How does a poison record on a Kinesis or DynamoDB stream differ from an SQS failure, and how do you handle it?**
+**Short:** A poison record on an ordered stream blocks the whole shard from progressing, unlike SQS where one bad message is isolated and redriven independently.
+
 A poison record on an ordered stream can block the entire shard from progressing, unlike SQS where one bad message is isolated and redriven to a DLQ independently. Kinesis and DynamoDB streams deliver ordered batches per shard, so if a single record repeatedly fails processing, Lambda keeps retrying that batch and no later record on the same shard is processed until it's resolved — a stuck shard, not just a stuck message. Handle it with a bounded retry count plus `BisectBatchOnFunctionError` to isolate the bad record, and an on-failure destination to remove it from the retry loop, or by catching and swallowing known-bad-record errors in the handler. Unlike SQS's per-message DLQ, stream poison-record handling has to account for ordering being blocked, not just one message being lost.
 
 **Q15: What is SnapStart, and how does it reduce Java cold starts?**
+**Short:** SnapStart cuts Java cold starts roughly 10x by snapshotting an already-initialized environment and restoring from it, instead of rerunning JVM boot and module-level init.
+
 SnapStart cuts Java cold starts roughly 10x by snapshotting an initialized execution environment and restoring from that snapshot instead of rerunning startup. A normal cold start pays for JVM boot plus all module-level init (class loading, connection pools, DI wiring), which is especially expensive for Java; SnapStart runs that init once when you publish a function version, takes an encrypted Firecracker snapshot of the initialized environment, and resumes new environments from that snapshot on subsequent cold starts. It covers Java 11 and later, Python 3.12 and later, and .NET 8 and later — Java sees the largest win because its init is the heaviest, and Java is also the one runtime where SnapStart carries no extra charge (Python and .NET add snapshot-caching and per-restore charges). The operational constraints matter: SnapStart works only on published versions and aliases, never on `$LATEST`, and it cannot be combined with provisioned concurrency, so you pick one or the other per function. Use it for functions with expensive init, but re-test any code that assumes fresh randomness or fresh connections on every cold start, since a restored snapshot reuses whatever the init phase produced.
 
 **Q16: When would you package a Lambda as a container image instead of a zip, and what's the tradeoff?**
+**Short:** Package as a container image when large dependencies or custom runtimes need the 10 GB size ceiling, trading a heavier build pipeline and slower cold starts for that headroom.
+
 Package as a container image when you need large dependencies, custom runtimes, or existing Docker tooling, since it raises the size ceiling to 10 GB versus 250 MB unzipped for a zip package. Container images let you reuse existing Dockerfiles and base images — useful for ML models or native libraries — and share the same ECR-based tooling as your other containerized services, at the cost of a heavier build/push pipeline and typically slower cold starts than a lean zip package. Zip packaging stays the default for simple functions because it's faster to build, deploy, and cold-start. Choose container images when dependency size or tooling consistency outweighs the cold-start and pipeline cost, not as a default.
 
 ---
