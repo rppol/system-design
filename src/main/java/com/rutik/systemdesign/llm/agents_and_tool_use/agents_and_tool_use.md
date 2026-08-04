@@ -750,10 +750,10 @@ Related standalone modules:
 
 | Topic | Module | Key Coverage |
 |-------|--------|-------------|
-| Multi-Agent Systems | [../multi_agent_systems/README.md](../multi_agent_systems/multi_agent_systems.md) | Orchestrator-worker, debate, blackboard, ChatDev, MetaGPT, Swarm |
-| Guardrails & Content Safety | [../guardrails_and_content_safety/README.md](../guardrails_and_content_safety/guardrails_and_content_safety.md) | Input/output filters, NeMo, Llama Guard, prompt injection, HIPAA/PCI |
-| Code Generation | [../code_generation/README.md](../code_generation/code_generation.md) | FIM, SWE-bench, security risks, hallucinated APIs, code agents |
-| Agentic Frameworks | [../agentic_frameworks/README.md](../agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, LCEL, observability |
+| Multi-Agent Systems | [../multi_agent_systems/multi_agent_systems.md](../multi_agent_systems/multi_agent_systems.md) | Orchestrator-worker, debate, blackboard, ChatDev, MetaGPT, Swarm |
+| Guardrails & Content Safety | [../guardrails_and_content_safety/guardrails_and_content_safety.md](../guardrails_and_content_safety/guardrails_and_content_safety.md) | Input/output filters, NeMo, Llama Guard, prompt injection, HIPAA/PCI |
+| Code Generation | [../code_generation/code_generation.md](../code_generation/code_generation.md) | FIM, SWE-bench, security risks, hallucinated APIs, code agents |
+| Agentic Frameworks | [../agentic_frameworks/agentic_frameworks.md](../agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, LCEL, observability |
 
 ---
 

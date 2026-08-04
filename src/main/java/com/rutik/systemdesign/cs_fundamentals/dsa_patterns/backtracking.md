@@ -594,7 +594,7 @@ Final (CORRECT): result = [[], [1], [1,2], [2]]   -- exactly 2^2 = 4 subsets
 
 ## 11. Interview Q&A
 
-**What's the precise difference between "backtracking" and "plain recursive
+**Q: What's the precise difference between "backtracking" and "plain recursive
 DFS"?**
 Plain DFS explores a tree and returns; backtracking explores a tree **while
 mutating shared state** (a path, a board, a set of used elements) and
@@ -603,7 +603,7 @@ explicitly **restores that state** before trying the next sibling branch. The
 branches would see corrupted state left over from previously-explored
 branches (exactly the bug in §8).
 
-**Why is backtracking exponential, and why is that considered "fine" for
+**Q: Why is backtracking exponential, and why is that considered "fine" for
 these problems?**
 Each recursive call branches into multiple choices, and the recursion depth
 equals the solution length — so the total number of leaves in the search
@@ -613,7 +613,7 @@ explicitly constrain `n` to be small (typically `<= 12-20`) — `2^20 ~ 10^6`
 is fast, but `2^50` would not be. The small constraint *is the signal* that
 exponential is the intended complexity class.
 
-**Walk through why `path.pop()` (or `used[i] = False`) is necessary — what
+**Q: Walk through why `path.pop()` (or `used[i] = False`) is necessary — what
 breaks without it?**
 The recursive calls share a *single* mutable `path` (or `used` array) by
 reference — there's only one list object, repeatedly appended to and read
@@ -622,7 +622,7 @@ or "try the next choice" branch starts from whatever state the *previous*
 branch left behind, rather than the state that branch's parent had. See §8
 for a full traced example showing exactly how this corrupts results.
 
-**Subsets II — how do you avoid generating the same subset twice when the
+**Q: Subsets II — how do you avoid generating the same subset twice when the
 input has duplicates, e.g., `nums = [1, 2, 2]`?**
 Sort `nums` first so duplicates are adjacent. In the `for i in range(start,
 len(nums))` loop, add `if i > start and nums[i] == nums[i-1]: continue`. This
@@ -631,7 +631,7 @@ same recursion level** (same `start`) — it does NOT prevent using duplicates
 at *different* levels (i.e., `[2, 2]` as a subset is still generated, just
 only once).
 
-**Permutations: `used[]` array vs. swapping elements in place — what's the
+**Q: Permutations: `used[]` array vs. swapping elements in place — what's the
 tradeoff?**
 The `used[]` array approach (Template 2) is more intuitive and naturally
 supports the duplicate-skipping check for Permutations II. The swap-based
@@ -641,7 +641,7 @@ swap(nums, k, i)` to undo) avoids the extra `O(n)` `used` array and an `O(n)`
 duplicate-handling trickier (requires a `set()` per recursion level to skip
 repeated swap values).
 
-**How does N-Queens' constraint propagation (`cols`, `diag1`, `diag2` sets)
+**Q: How does N-Queens' constraint propagation (`cols`, `diag1`, `diag2` sets)
 make the search dramatically faster than checking the whole board at each
 step?**
 Without the sets, validating "can I place a queen at `(row, col)`?" requires
@@ -653,7 +653,7 @@ pruned immediately** rather than being fully built and then rejected. The
 `row - col` and `row + col` invariants are the standard trick for identifying
 "/" and "\" diagonals in O(1).
 
-**When should you reach for DP instead of backtracking — what's the concrete
+**Q: When should you reach for DP instead of backtracking — what's the concrete
 signal?**
 If the problem asks to **count** or find an **optimal value** (not enumerate
 all solutions), AND the recursive calls are made with the *same arguments*
@@ -665,7 +665,7 @@ exponential backtracking into `O(target * len(candidates))` DP. If the
 problem needs the *actual combinations themselves*, you still need
 backtracking (possibly DP-assisted for pruning).
 
-**For Combination Sum, why does the recursive call use `backtrack(i, ...)`
+**Q: For Combination Sum, why does the recursive call use `backtrack(i, ...)`
 (same index) instead of `backtrack(i + 1, ...)`?**
 `backtrack(i, ...)` allows `candidates[i]` to be chosen **again** in the next
 recursive level — modeling "unlimited supply" of each candidate (e.g.,
@@ -675,7 +675,7 @@ still avoids generating `[2,3,2]` as a *different* combination from
 `[2,2,3]` — order within a combination doesn't matter, only the multiset of
 values chosen.
 
-**Word Search backtracking vs. graph_traversal's flood fill — both mark and
+**Q: Word Search backtracking vs. graph_traversal's flood fill — both mark and
 unmark grid cells. What's actually different?**
 Mechanically, almost nothing — both mark `board[r][c]` before recursing into
 neighbors and restore it after. The difference is **purpose**: flood fill
@@ -686,7 +686,7 @@ a *different* candidate path — e.g., if the first DFS path from a starting
 cell fails to spell the word, a different direction from the same start must
 see the original board.
 
-**Why must `result.append(path[:])` use a copy (`path[:]` or `list(path)`)
+**Q: Why must `result.append(path[:])` use a copy (`path[:]` or `list(path)`)
 instead of `result.append(path)`?**
 `path` is a single mutable list object, repeatedly appended to and popped
 from throughout the entire recursion. `result.append(path)` would store a
@@ -695,7 +695,7 @@ time backtracking finishes (and `path` has been popped back to `[]`), every
 entry in `result` would appear as `[]`, since they all point to the same
 (now-empty) list. `path[:]` creates an independent snapshot at that moment.
 
-**For very small `n` (say `n <= 20`), when would an iterative bitmask
+**Q: For very small `n` (say `n <= 20`), when would an iterative bitmask
 approach beat recursive backtracking for generating subsets?**
 When you don't need subsets in any particular order and want to avoid Python
 recursion overhead (function call costs add up across `2^n` calls). `for

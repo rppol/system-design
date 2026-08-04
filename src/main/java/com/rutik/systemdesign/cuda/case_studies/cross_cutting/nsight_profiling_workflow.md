@@ -96,7 +96,7 @@ section's case studies cite when justifying a fix.
 
 | Metric | What it tells you | Read it as |
 |--------|-------------------|-------------|
-| **Achieved occupancy** | Resident warps ÷ the SM's maximum, averaged over the kernel's run | A *capacity* number, not a throughput number — see [occupancy_and_launch_configuration/README.md](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md). Low occupancy with a memory-bound kernel matters; low occupancy with a compute-bound kernel that already saturates the SM often does not. |
+| **Achieved occupancy** | Resident warps ÷ the SM's maximum, averaged over the kernel's run | A *capacity* number, not a throughput number — see [occupancy_and_launch_configuration/occupancy_and_launch_configuration.md](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md). Low occupancy with a memory-bound kernel matters; low occupancy with a compute-bound kernel that already saturates the SM often does not. |
 | **DRAM throughput (% of peak)** | Bytes moved to/from HBM as a fraction of the GPU's peak bandwidth (e.g. ~3 TB/s on H100 HBM3) | Near the roof (80-95%+) means the memory pipe is nearly saturated — good if every byte moved is useful, bad if most of it is wasted on uncoalesced transactions. |
 | **Compute (SM) throughput (% of peak)** | Issued FLOPs/instructions as a fraction of the SM's peak issue rate | Near the roof means the ALUs are the bottleneck; low alongside high DRAM throughput is the classic memory-bound signature. |
 | **Warp stall reasons** | A histogram of why warps were *not* eligible to issue an instruction on a given cycle | `long scoreboard` (waiting on a global memory load) → memory-bound; `barrier` (waiting at `__syncthreads`) → sync/tiling imbalance; `not selected` (scheduler chose another eligible warp) → usually benign, means enough parallelism exists; `short scoreboard` → shared-memory or texture-load latency. |
@@ -118,7 +118,7 @@ serialization from atomics/barriers) — check occupancy and warp-stall reasons 
 thread reads one element from the source (row-major, coalesced) and writes it to the
 destination (column-major, so consecutive threads in a warp write to addresses 4096
 elements — 16 KB — apart). This is the canonical transpose problem covered in
-[memory_coalescing_and_access_patterns/README.md](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md).
+[memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md).
 
 **Step 1 — `nsys` baseline.** The system-level timeline shows one dominant kernel occupying
 essentially the entire GPU-active time, with no overlapping memcpy or other kernels to
@@ -158,7 +158,7 @@ to reduce wasted bytes, not add more parallelism.
 **Step 4 — fix.** Stage each 32x32 tile through shared memory: read a coalesced row-major
 tile from global memory into a `__shared__ float tile[32][33]` (33 columns — the classic pad
 to dodge the bank-conflict-on-transpose problem, see
-[shared_memory_and_bank_conflicts/README.md](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md)),
+[shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md)),
 `__syncthreads()`, then write the tile back out in coalesced fashion by swapping which index
 maps to `threadIdx.x`. Both the read and the write are now coalesced; the transpose itself
 happens entirely inside shared memory, which has no coalescing requirement.
@@ -309,6 +309,6 @@ memory-optimal.
 ## See Also
 
 - [roofline_and_arithmetic_intensity.md](./roofline_and_arithmetic_intensity.md) — how to compute a kernel's arithmetic intensity by hand and place it against the GPU's ridge point before you ever open a profiler
-- [profiling_and_performance_analysis/README.md](../../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the module-level treatment of this same tooling, with Q&As and additional guided-analysis scenarios
-- [memory_coalescing_and_access_patterns/README.md](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) — the full transpose/coalescing problem this worked example is drawn from
-- [occupancy_and_launch_configuration/README.md](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) — why achieved occupancy is a capacity metric, not a throughput metric, and what actually caps it
+- [profiling_and_performance_analysis/profiling_and_performance_analysis.md](../../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the module-level treatment of this same tooling, with Q&As and additional guided-analysis scenarios
+- [memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) — the full transpose/coalescing problem this worked example is drawn from
+- [occupancy_and_launch_configuration/occupancy_and_launch_configuration.md](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) — why achieved occupancy is a capacity metric, not a throughput metric, and what actually caps it

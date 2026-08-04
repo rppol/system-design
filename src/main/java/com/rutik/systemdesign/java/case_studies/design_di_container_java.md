@@ -810,6 +810,6 @@ null-safety methods.
 ## Cross-Cutting References
 
 - [cross_cutting/concurrency_memory_visibility_primitives.md](cross_cutting/concurrency_memory_visibility_primitives.md) — thread-safety of singleton cache, ThreadLocal for request scope
-- [../../spring/ioc_container/README.md](../../spring/ioc_container/ioc_container.md) — Spring's BeanFactory, ApplicationContext, BeanDefinition
-- [../../spring/spring_proxies/README.md](../../spring/spring_proxies/spring_proxies.md) — CGLIB and JDK proxy wrapping after container creates instances
-- [../../lld/creational/README.md](../../lld/creational/creational.md) — Factory pattern used in binding resolution; Singleton pattern as a scope
+- [../../spring/ioc_container/ioc_container.md](../../spring/ioc_container/ioc_container.md) — Spring's BeanFactory, ApplicationContext, BeanDefinition
+- [../../spring/spring_proxies/spring_proxies.md](../../spring/spring_proxies/spring_proxies.md) — CGLIB and JDK proxy wrapping after container creates instances
+- [../../lld/creational/creational.md](../../lld/creational/creational.md) — Factory pattern used in binding resolution; Singleton pattern as a scope

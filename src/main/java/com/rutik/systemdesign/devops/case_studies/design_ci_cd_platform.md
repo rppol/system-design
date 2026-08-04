@@ -17,7 +17,7 @@
 
 **Why this system exists**: Engineering velocity is gated by feedback loop latency. A 5,000-engineer org pushing code 20 times a day needs builds to start in under 30 seconds and finish in minutes, or developers context-switch and throughput collapses. Hand-rolling this on static Jenkins boxes produces snowflake runners, secret leakage, noisy-neighbor contention, and a $4M/year cloud bill from idle capacity. A purpose-built multi-tenant platform turns that into elastic, isolated, cost-attributed, sub-30-second-start infrastructure.
 
-This case study assumes familiarity with the platform survey in [../ci_cd_platforms/README.md](../ci_cd_platforms/ci_cd_platforms.md) and artifact handling in [../artifact_and_registry_management/README.md](../artifact_and_registry_management/artifact_and_registry_management.md).
+This case study assumes familiarity with the platform survey in [../ci_cd_platforms/ci_cd_platforms.md](../ci_cd_platforms/ci_cd_platforms.md) and artifact handling in [../artifact_and_registry_management/artifact_and_registry_management.md](../artifact_and_registry_management/artifact_and_registry_management.md).
 
 ---
 
@@ -60,9 +60,9 @@ This case study assumes familiarity with the platform survey in [../ci_cd_platfo
 
 ### Out of Scope
 
-- The deployment target itself (k8s clusters, ArgoCD) — see [../gitops_argocd_flux/README.md](../gitops_argocd_flux/gitops_argocd_flux.md).
+- The deployment target itself (k8s clusters, ArgoCD) — see [../gitops_argocd_flux/gitops_argocd_flux.md](../gitops_argocd_flux/gitops_argocd_flux.md).
 - Source-control hosting (we consume webhooks, we do not host Git).
-- Artifact *promotion* / registry internals — see [../artifact_and_registry_management/README.md](../artifact_and_registry_management/artifact_and_registry_management.md).
+- Artifact *promotion* / registry internals — see [../artifact_and_registry_management/artifact_and_registry_management.md](../artifact_and_registry_management/artifact_and_registry_management.md).
 - Test framework internals; we run whatever the user's YAML invokes.
 
 ---
@@ -138,7 +138,7 @@ Control-plane amortized (17.6M jobs/mo):        ≈ $0.0008/job
 Fully-loaded cost ≈ $0.0074/job  → 17.6M jobs/mo ≈ $130k/month
 ```
 
-Spot pricing and right-sizing the dominant lever; see §10 and [../cloud_cost_optimization_finops/README.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
+Spot pricing and right-sizing the dominant lever; see §10 and [../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
 ---
 
@@ -605,7 +605,7 @@ path "secret/data/{{identity.entity.aliases.auth_jwt.metadata.tenant}}/{{identit
 # No wildcard across tenants. A leaked token for tenant A is useless against tenant B.
 ```
 
-See [../secrets_management/README.md](../secrets_management/secrets_management.md) for rotation and the broader secrets model.
+See [../secrets_management/secrets_management.md](../secrets_management/secrets_management.md) for rotation and the broader secrets model.
 
 ---
 
@@ -981,7 +981,7 @@ xychart-beta
 
 The 80/20 Spot blend cuts monthly runner compute from about $192k to about $88k — the roughly $104k/month (about $1.25M/year) gap is Decision 6's single biggest cost lever.
 
-Add ~$20k/month for cache/artifact/log storage + egress + control plane → **~$108k/month all-in**, matching the §2 per-job estimate. Node-level hardening (taints, PodDisruptionBudgets, topology spread for the runner ASG) follows [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md). FinOps levers (right-sizing, Savings Plans on the on-demand floor) are in [../cloud_cost_optimization_finops/README.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
+Add ~$20k/month for cache/artifact/log storage + egress + control plane → **~$108k/month all-in**, matching the §2 per-job estimate. Node-level hardening (taints, PodDisruptionBudgets, topology spread for the runner ASG) follows [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md). FinOps levers (right-sizing, Savings Plans on the on-demand floor) are in [../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
 ### Autoscaler tuning
 

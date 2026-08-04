@@ -936,9 +936,9 @@ chapter summarizes the *book's* framing and cross-links rather than duplicating)
 - [ml/recommender_systems/retrieval_and_ranking.md — candidate retrieval + ranking stages](../../../ml/recommender_systems/retrieval_and_ranking.md)
 - [ml/recommender_systems/collaborative_filtering.md — why CF needs a user dimension (the contrast)](../../../ml/recommender_systems/collaborative_filtering.md)
 - [ml/recommender_systems/deep_learning_recommenders.md — two-tower and neural recommenders](../../../ml/recommender_systems/deep_learning_recommenders.md)
-- [ml/information_retrieval_and_search/README.md — ANN, FAISS/ScaNN, nearest-neighbor serving](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md)
-- [ml/natural_language_processing/README.md — word2vec, skip-gram, negative sampling origins](../../../ml/natural_language_processing/natural_language_processing.md)
-- [ml/self_supervised_and_contrastive_learning/README.md — pulling positives together, pushing negatives apart](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md)
+- [ml/information_retrieval_and_search/information_retrieval_and_search.md — ANN, FAISS/ScaNN, nearest-neighbor serving](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md)
+- [ml/natural_language_processing/natural_language_processing.md — word2vec, skip-gram, negative sampling origins](../../../ml/natural_language_processing/natural_language_processing.md)
+- [ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md — pulling positives together, pushing negatives apart](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md)
 - [ml/case_studies/design_recommendation_engine.md — general recommender architecture reference](../../../ml/case_studies/design_recommendation_engine.md)
 
 ## Further Reading

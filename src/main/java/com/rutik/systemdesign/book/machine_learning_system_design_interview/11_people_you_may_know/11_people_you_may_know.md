@@ -992,13 +992,13 @@ Because true non-edges vastly outnumber edges — with ~10^9 users there are ~10
 ## Cross-links in this repo
 
 - For the repo's own production-depth treatment of GNNs and graph learning, see
-  [ml/graph_neural_networks/README.md](../../../ml/graph_neural_networks/graph_neural_networks.md) — this chapter
+  [ml/graph_neural_networks/graph_neural_networks.md](../../../ml/graph_neural_networks/graph_neural_networks.md) — this chapter
   summarizes the book's PYMK framing; do not read it as a substitute for that module's depth.
 - [ml/recommender_systems/collaborative_filtering.md](../../../ml/recommender_systems/collaborative_filtering.md) — the pairwise/embedding-similarity view that the GNN generalizes.
 - [ml/case_studies/design_recommendation_engine.md](../../../ml/case_studies/design_recommendation_engine.md) — candidate-generation → ranking → re-ranking staging, mirrored here in the batch pipeline.
 - [ml/case_studies/design_marketplace_matching.md](../../../ml/case_studies/design_marketplace_matching.md) — two-sided matching, a close cousin of pair scoring on a bipartite graph.
-- [ml/imbalanced_data_and_leakage_traps/README.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) — the snapshot/point-in-time-correctness leakage trap central to this chapter.
-- [ml/fairness_and_responsible_ai/README.md](../../../ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md) — rich-get-richer bias and new-user cold-start fairness.
+- [ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) — the snapshot/point-in-time-correctness leakage trap central to this chapter.
+- [ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md](../../../ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md) — rich-get-richer bias and new-user cold-start fairness.
 - Sibling chapter: [Ch 1 — Introduction and Overview](../01_introduction_and_overview/01_introduction_and_overview.md) — the 7-step framework this chapter instantiates one last time.
 
 ## Further Reading

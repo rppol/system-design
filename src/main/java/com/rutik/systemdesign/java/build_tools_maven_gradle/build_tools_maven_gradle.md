@@ -883,7 +883,7 @@ one side of the conflicting graph at all (§6.5, §14).
 
 ## 12. Interview Questions with Answers
 
-**Why did adding or upgrading one dependency silently break a completely unrelated part of the application?**
+**Q: Why did adding or upgrading one dependency silently break a completely unrelated part of the application?**
 **Short:** A shared transitive dependency resolved to a version binary-incompatible with what another library was compiled against.
 
 A transitive dependency two or more libraries share got resolved to a version
@@ -895,7 +895,7 @@ runtime, typically as `NoSuchMethodError` or `NoSuchFieldError`, not at
 compile time. Run `mvn dependency:tree` or `gradle dependencies` immediately
 after any dependency bump, before shipping, not after an incident.
 
-**What does Maven's "nearest wins" dependency mediation actually mean?**
+**Q: What does Maven's "nearest wins" dependency mediation actually mean?**
 **Short:** Maven picks the version declared at the shallowest depth in the dependency tree, not the newest version.
 
 It means the version declared at the shallowest depth in the dependency tree
@@ -906,7 +906,7 @@ earlier in `<dependencies>` wins, regardless of which version is newer. Do
 not assume "wins" means "newest" — it means "closest," which is exactly why
 an older transitive version can beat a newer one.
 
-**How does Gradle's default conflict resolution differ from Maven's nearest-wins rule?**
+**Q: How does Gradle's default conflict resolution differ from Maven's nearest-wins rule?**
 **Short:** Gradle keeps the highest version found anywhere in the graph, ignoring declaration order and tree depth.
 
 Gradle compares every version of an artifact found anywhere in the graph and
@@ -916,7 +916,7 @@ exact same dependency graph, as the diamond in §6.9 shows. Override it with
 `resolutionStrategy.force(...)` or a `constraints` block when the highest
 version is not actually the compatible one.
 
-**What is the practical difference between Maven's `compile`, `provided`, `runtime`, and `test` scopes?**
+**Q: What is the practical difference between Maven's `compile`, `provided`, `runtime`, and `test` scopes?**
 **Short:** Each scope controls which classpath a dependency appears on and whether it ships in the final artifact.
 
 They control which classpath — compile, test, or runtime — a dependency
@@ -928,7 +928,7 @@ not to compile (a JDBC driver); `test` never leaves the test classpath.
 Mismatching `provided` — forgetting the container actually supplies it in
 production — is the classic "works in the IDE, fails at deploy" bug.
 
-**What does the maven-shade-plugin's package relocation actually do, and why is merging alone not enough?**
+**Q: What does the maven-shade-plugin's package relocation actually do, and why is merging alone not enough?**
 **Short:** Relocation rewrites a shaded dependency's package names and references so two versions can coexist in one jar.
 
 Relocation rewrites the package names of a shaded dependency's classes, and
@@ -940,7 +940,7 @@ plugin processes silently overwrites the other. Reach for relocation whenever
 you embed a library whose transitive dependency version you cannot control or
 unify with your own.
 
-**Why should a `-SNAPSHOT` dependency never be depended on by a production build?**
+**Q: Why should a `-SNAPSHOT` dependency never be depended on by a production build?**
 **Short:** A SNAPSHOT coordinate can resolve to different bytecode on every rebuild, breaking reproducibility.
 
 A SNAPSHOT version is explicitly mutable — the same coordinate can resolve to
@@ -951,7 +951,7 @@ silently pull in different bytecode on different days. Cut an immutable
 release version before anything downstream, and especially production, ever
 depends on it.
 
-**What is a BOM, and what does `dependencyManagement` with `<scope>import</scope>` actually do?**
+**Q: What is a BOM, and what does `dependencyManagement` with `<scope>import</scope>` actually do?**
 **Short:** A BOM centralizes tested dependency versions, but dependencyManagement never adds a dependency by itself.
 
 A BOM (Bill of Materials) is a POM whose `dependencyManagement` block
@@ -963,7 +963,7 @@ default for when you later declare the dependency, without a version, in
 `<dependencies>`. `spring-boot-dependencies` is the BOM nearly every Spring
 project imports for exactly this reason.
 
-**How many built-in lifecycles does Maven have, and why does that matter?**
+**Q: How many built-in lifecycles does Maven have, and why does that matter?**
 **Short:** Maven has exactly three independent lifecycles - clean, default, and site - that never cross into each other.
 
 Maven has exactly 3 built-in lifecycles — `clean`, `default`, and `site` —
@@ -973,7 +973,7 @@ be chained explicitly as `mvn clean install` if both are wanted. Know this
 cold — it is one of the most commonly asked Maven fundamentals, and the
 usual source of "why didn't my old build artifacts get removed" confusion.
 
-**What does invoking a single phase like `mvn package` actually execute?**
+**Q: What does invoking a single phase like `mvn package` actually execute?**
 **Short:** It runs every phase from validate through package in order, not just the package phase alone.
 
 It executes every phase in the default lifecycle from `validate` through
@@ -983,7 +983,7 @@ too: `test` runs before `package` in the same lifecycle, so a red test never
 lets execution reach the packaging step. Reason about "which phase am I
 invoking" as "which phase am I invoking *and everything before it*."
 
-**What's the difference between Gradle's configuration phase and execution phase?**
+**Q: What's the difference between Gradle's configuration phase and execution phase?**
 **Short:** The configuration phase builds the task graph on every run; the execution phase runs only the requested tasks.
 
 The configuration phase evaluates every build script to construct the task
@@ -994,7 +994,7 @@ served from the build cache. Heavy logic at the top level of a build script
 taxes every command, even `gradle tasks` — use lazy task registration
 (`tasks.register`, not `tasks.create`) to defer real work into execution.
 
-**What is the practical difference between Gradle's `implementation` and `api` configurations?**
+**Q: What is the practical difference between Gradle's `implementation` and `api` configurations?**
 **Short:** api exposes a dependency transitively to consumers, while implementation keeps it private to the declaring module.
 
 `api` exposes a dependency transitively on every consumer's compile
@@ -1005,7 +1005,7 @@ because the type is part of the consumer's own effective compile classpath.
 Default to `implementation`; only promote a dependency to `api` when its
 types genuinely appear in your own module's public method signatures.
 
-**How does Gradle's incremental build (`UP-TO-DATE` checking) actually work?**
+**Q: How does Gradle's incremental build (`UP-TO-DATE` checking) actually work?**
 **Short:** Gradle hashes a task's declared inputs and outputs and skips it as UP-TO-DATE when neither has changed.
 
 Gradle snapshots the hashes of a task's declared inputs and outputs, and if
@@ -1016,7 +1016,7 @@ environment variable directly, without declaring it, can change behavior
 while Gradle still reports `UP-TO-DATE`. Always declare a custom task's real
 inputs and outputs, or incremental build silently lies about correctness.
 
-**What is Gradle's build cache and how is it different from incremental build?**
+**Q: What is Gradle's build cache and how is it different from incremental build?**
 **Short:** The build cache reuses another run's output by input hash, helping even a fresh checkout or teammate's machine.
 
 The build cache stores a task's outputs keyed by a hash of its declared
@@ -1029,7 +1029,7 @@ cold build takes 48 seconds; a local cache hit takes 2.1 seconds (96%
 faster); a remote cache hit on a machine that never built it takes 3.4
 seconds (93% faster).
 
-**What problem does a Gradle version catalog (`libs.versions.toml`) solve?**
+**Q: What problem does a Gradle version catalog (`libs.versions.toml`) solve?**
 **Short:** It centralizes dependency and plugin coordinates in one TOML file with typesafe, typo-proof accessors.
 
 It centralizes every dependency and plugin coordinate and version in one
@@ -1041,7 +1041,7 @@ across N build scripts, with the added benefit of IDE-checked, typo-proof
 accessors. Adopt it in any multi-module Gradle build past two or three
 modules.
 
-**What's the practical difference between Gradle's Groovy DSL and Kotlin DSL?**
+**Q: What's the practical difference between Gradle's Groovy DSL and Kotlin DSL?**
 **Short:** Kotlin DSL is statically typed with IDE autocompletion, while Groovy DSL is dynamically typed and terser.
 
 Groovy DSL (`build.gradle`) is dynamically typed and terser; Kotlin DSL
@@ -1052,7 +1052,7 @@ ceremony for dynamic, ad hoc build logic under Kotlin DSL. Kotlin DSL is
 Gradle's recommended default for new builds; Groovy remains common in older
 or plugin-heavy codebases.
 
-**How does the Maven reactor decide the order to build modules in a multi-module project?**
+**Q: How does the Maven reactor decide the order to build modules in a multi-module project?**
 **Short:** It topologically sorts modules by their declared inter-module dependencies, not by listing order.
 
 It topologically sorts modules by their actual declared inter-module
@@ -1062,7 +1062,7 @@ finished, regardless of listing order in the parent POM. `mvn -pl service-b
 -am install` builds `service-b` plus everything it transitively depends on,
 in the correct order, without building the entire reactor.
 
-**What does a line like `(common-utils:jar:2.4.0:compile - omitted for conflict with 1.0.0)` mean in `mvn dependency:tree` output?**
+**Q: What does a line like `(common-utils:jar:2.4.0:compile - omitted for conflict with 1.0.0)` mean in `mvn dependency:tree` output?**
 **Short:** It shows a version Maven found but excluded because a different version won mediation elsewhere in the tree.
 
 It means Maven found this version of the artifact on this path of the graph
@@ -1073,7 +1073,7 @@ mediation surprise before it becomes a runtime `NoSuchMethodError`. Make
 `dependency:tree` (or `gradle dependencies`) a routine check, not a
 post-incident diagnostic.
 
-**How does a "split package" (two modules exporting the same Java package) behave differently on the classpath vs. the module path?**
+**Q: How does a "split package" (two modules exporting the same Java package) behave differently on the classpath vs. the module path?**
 **Short:** The classpath silently tolerates a split package, while the module path fails hard at startup with a ResolutionException.
 
 On the classpath, it is silently tolerated — the flat classpath just uses
@@ -1085,7 +1085,7 @@ permitted to export the same package. See
 directive reference — this is exactly the class of bug JPMS's strong
 encapsulation catches that the classpath never would.
 
-**When would you choose shading over the Java Platform Module System to resolve a dependency version collision?**
+**Q: When would you choose shading over the Java Platform Module System to resolve a dependency version collision?**
 **Short:** Shading is the pragmatic per-artifact fix when you don't control the whole dependency graph's modularization.
 
 Shading is the pragmatic default whenever you do not control the whole
@@ -1097,7 +1097,7 @@ rarely true of your full third-party dependency set. Reach for shading
 pragmatically today; treat full module-path adoption as a longer migration,
 not a quick fix for one collision.
 
-**Why can two machines with identical source code and dependency versions still produce a different JAR byte-for-byte?**
+**Q: Why can two machines with identical source code and dependency versions still produce a different JAR byte-for-byte?**
 **Short:** The JAR format embeds file timestamps and ordering by default, which commonly differ between build machines.
 
 Because the JAR/ZIP format embeds file timestamps and file ordering by
@@ -1109,7 +1109,7 @@ a fixed value so the same inputs always produce the same bytes. Turn these on
 for any artifact that gets hashed or signed downstream, such as for
 supply-chain provenance checks.
 
-**Why might running `mvn install` on a single module of a multi-module reactor produce a different result than building the whole reactor?**
+**Q: Why might running `mvn install` on a single module of a multi-module reactor produce a different result than building the whole reactor?**
 **Short:** A single-module build resolves sibling dependencies from a possibly stale local repository instead of fresh reactor output.
 
 Because a single-module build resolves sibling dependencies from the local

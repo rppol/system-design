@@ -1031,15 +1031,15 @@ Reduce its distribution rather than remove it — the demoting path is a deliber
   — this chapter summarizes the *book's* framing (early-vs-late fusion, multi-task heads,
   prevalence); the case study is the repo's independent, deeper engineering write-up. Do not treat
   them as duplicates.
-- [ml/multi_task_and_multi_objective_learning/README.md](../../../ml/multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md)
+- [ml/multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md](../../../ml/multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md)
   — shared-bottom multi-task learning, per-task losses, and loss balancing (the 5.2/5.4 core).
-- [ml/imbalanced_data_and_leakage_traps/README.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md)
+- [ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md)
   — why accuracy fails under <1% prevalence, PR-AUC, resampling, and class weighting (the 5.5 core).
 - [ml/case_studies/cross_cutting/model_calibration_and_thresholding.md](../../../ml/case_studies/cross_cutting/model_calibration_and_thresholding.md)
   — per-category thresholds and probability calibration (5.2 heads + 5.7 threshold tuning).
-- [ml/natural_language_processing/README.md](../../../ml/natural_language_processing/natural_language_processing.md)
+- [ml/natural_language_processing/natural_language_processing.md](../../../ml/natural_language_processing/natural_language_processing.md)
   — text encoders, multilingual BERT-family models, tokenization (the text modality in 5.3).
-- [ml/fairness_and_responsible_ai/README.md](../../../ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md)
+- [ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md](../../../ml/fairness_and_responsible_ai/fairness_and_responsible_ai.md)
   — measuring and mitigating over/under-enforcement across languages and groups (5.7 fairness).
 
 ## Further Reading

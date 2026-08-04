@@ -542,7 +542,7 @@ arrays — reach for two heaps only after each narrower question answers "no."
 - Applied: [hld/caching](../../hld/caching/caching.md) — frequency- and recency-based
   eviction policies (LFU) share the "two ordered structures, one frontier"
   shape with the IPO/simulation variants in §6.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
+- Master recognition engine: [dsa_patterns/dsa_patterns.md](dsa_patterns.md).
 - Sibling patterns: [top_k_elements.md](top_k_elements.md),
   [k_way_merge.md](k_way_merge.md).
 

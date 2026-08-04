@@ -487,7 +487,7 @@ Step 5: Evaluate and Iterate
 
 ## Knowledge-Question Map
 
-The highest-frequency LLM *knowledge* questions mapped to the exact file that answers them. For *system design* ("design X") questions, use the interview prep shortcuts table in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency LLM *knowledge* questions mapped to the exact file that answers them. For *system design* ("design X") questions, use the interview prep shortcuts table in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|

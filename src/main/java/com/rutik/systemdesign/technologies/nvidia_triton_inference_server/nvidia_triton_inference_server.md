@@ -13,7 +13,7 @@ Triton is best understood as **the standardization layer for GPU inference**. Be
 **Disambiguation — this is NOT OpenAI Triton.** There are two unrelated things called "Triton" in the GPU world:
 
 - **NVIDIA Triton Inference Server** (this module) — a *serving system*: a deployed process that receives inference requests and returns predictions.
-- **OpenAI Triton** — a *Python kernel DSL* for writing GPU kernels (a compiler front-end that competes with hand-written CUDA), covered in [../../cuda/triton_and_kernel_dsls/README.md](../../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md).
+- **OpenAI Triton** — a *Python kernel DSL* for writing GPU kernels (a compiler front-end that competes with hand-written CUDA), covered in [../../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md](../../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md).
 
 They share only a name. This module is exclusively about the inference server. When someone says "we deploy on Triton" they mean this; when they say "I wrote a Triton kernel" they mean OpenAI's DSL.
 
@@ -310,7 +310,7 @@ version_policy: { latest: { num_versions: 1 } }
 
 ### 6.3 Concurrent Execution via CUDA Streams
 
-`instance_group.count: 2` creates two execution contexts, each with its own **CUDA stream**. While instance 0's batch is computing, instance 1's batch can be copying inputs H2D or running on the copy engines — the GPU overlaps them. More instances raise throughput and GPU utilization up to the point where they contend for SMs or VRAM. (Stream mechanics: [../../cuda/streams_events_and_concurrency/README.md](../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md).)
+`instance_group.count: 2` creates two execution contexts, each with its own **CUDA stream**. While instance 0's batch is computing, instance 1's batch can be copying inputs H2D or running on the copy engines — the GPU overlaps them. More instances raise throughput and GPU utilization up to the point where they contend for SMs or VRAM. (Stream mechanics: [../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md](../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md).)
 
 ### 6.4 Sequence Batching Control Inputs
 
@@ -529,14 +529,14 @@ tritonserver --model-repository=/models \
   --trace-config level=TIMESTAMPS
 ```
 
-`rate=100` samples 1 in 100 requests (tracing every request is expensive); `level` is `OFF`/`TIMESTAMPS`/`TENSORS` (TENSORS also captures input/output values — huge, debug only). The **OpenTelemetry** mode exports OTLP spans that join your distributed trace, so an LLM app's end-to-end trace shows the Triton compute span inline with the gateway and retrieval spans. The legacy file mode (`mode=triton`) writes JSON traces locally. OTel context is covered in [../../devops/ml_platform_and_gpu_infrastructure/README.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).
+`rate=100` samples 1 in 100 requests (tracing every request is expensive); `level` is `OFF`/`TIMESTAMPS`/`TENSORS` (TENSORS also captures input/output values — huge, debug only). The **OpenTelemetry** mode exports OTLP spans that join your distributed trace, so an LLM app's end-to-end trace shows the Triton compute span inline with the gateway and retrieval spans. The legacy file mode (`mode=triton`) writes JSON traces locally. OTel context is covered in [../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).
 
 ### 6.18 TensorRT-LLM Backend — In-Flight Batching and Multi-GPU
 
 The `tensorrtllm` backend is how Triton serves large LLMs at high throughput, and it works differently from the stateless dynamic batcher:
 
 - **In-flight (continuous) batching** — instead of waiting for a whole batch to finish, the backend admits new sequences into the running batch as soon as others emit their EOS token, keeping the GPU near-saturated. This lifts throughput 2-4x over static batching for mixed-length generation.
-- **Paged KV cache** — the KV cache is allocated in fixed blocks (like OS paging) rather than one contiguous per-sequence buffer, cutting fragmentation and letting far more concurrent sequences share VRAM. (Same idea as vLLM's PagedAttention: [../../llm/vllm_deep_dive/README.md](../../llm/vllm_deep_dive/vllm_deep_dive.md).)
+- **Paged KV cache** — the KV cache is allocated in fixed blocks (like OS paging) rather than one contiguous per-sequence buffer, cutting fragmentation and letting far more concurrent sequences share VRAM. (Same idea as vLLM's PagedAttention: [../../llm/vllm_deep_dive/vllm_deep_dive.md](../../llm/vllm_deep_dive/vllm_deep_dive.md).)
 - **Tokenizer in preprocessing** — the raw model is token-in/token-out, so a real deployment is an **ensemble**: a Python `preprocessing` model tokenizes text → `tensorrt_llm` generates → a Python `postprocessing` model detokenizes. NVIDIA ships this as the `tensorrtllm_backend` example repo (`ensemble` + `preprocessing` + `tensorrt_llm` + `postprocessing`).
 - **Multi-GPU via MPI** — tensor/pipeline parallelism across GPUs is orchestrated by an **MPI** launcher (`mpirun` with one rank per GPU). This is why a multi-GPU TensorRT-LLM deployment has a different launch story than a normal Triton model.
 - **Multi-node reality** — Triton is fundamentally a **single-node** server; a model must fit within one node's GPUs. Multi-node LLM serving (a 405B across two nodes) is done with the TensorRT-LLM MPI orchestrator spanning nodes, or by sharding at a higher layer (a router in front of node-local Tritons) — Triton itself does not shard one model across nodes natively.
@@ -850,7 +850,7 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 
 **Do NOT reach for Triton when:**
 
-- You are a **pure-LLM shop** serving a handful of large models — run **vLLM or SGLang directly** for a simpler stack ([../../llm/inference_engines/README.md](../../llm/inference_engines/inference_engines.md); deep dive [../../llm/vllm_deep_dive/README.md](../../llm/vllm_deep_dive/vllm_deep_dive.md)). Triton adds value once you also have non-LLM models to consolidate.
+- You are a **pure-LLM shop** serving a handful of large models — run **vLLM or SGLang directly** for a simpler stack ([../../llm/inference_engines/inference_engines.md](../../llm/inference_engines/inference_engines.md); deep dive [../../llm/vllm_deep_dive/vllm_deep_dive.md](../../llm/vllm_deep_dive/vllm_deep_dive.md)). Triton adds value once you also have non-LLM models to consolidate.
 - You serve **small CPU-only models** — a **FastAPI + ONNX Runtime** service is lighter and cheaper; see the reader-linked case study [../../fastapi/case_studies/design_ml_inference_api_fastapi.md](../../fastapi/case_studies/design_ml_inference_api_fastapi.md).
 - You are choosing **TorchServe** — its repository was **archived on 7 August 2025** and is read-only, with no further bug fixes or security patches; Triton's PyTorch backend or Ray Serve is where PyTorch serving lives now.
 - Your workload is a **Python-heavy multi-step pipeline** where the model is a small part — **Ray Serve** composes Python business logic more naturally than Triton's ensemble/BLS.
@@ -889,16 +889,16 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 - **Readiness and liveness** — probe `GET /v2/health/ready` (all models loaded and healthy) for the readiness gate and `/v2/health/live` for liveness; per-model readiness is `GET /v2/models/{name}/ready`. A pod that passes live but not ready is still loading models — do not send it traffic yet.
 - **Model-control sidecars** — in explicit mode a small sidecar (or an init/CI job) calls the model-control API to load the right models into each replica, decoupling "what code runs" from "what models are loaded".
 - **MIG partitioning per replica** — split one A100/H100 into MIG slices (e.g. 7x 1g.10gb) and schedule one Triton replica per slice, giving hard memory/compute isolation between small models. **MPS** instead lets multiple processes share SMs without hard partitions — looser isolation, higher packing.
-- **DCGM exporter pairing** — run NVIDIA Data Center GPU Manager's Prometheus exporter alongside Triton so the infra layer (per-GPU utilization, memory, temperature, ECC, throttling) sits next to Triton's request metrics on the same dashboard. (GPU infra: [../../devops/ml_platform_and_gpu_infrastructure/README.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).)
+- **DCGM exporter pairing** — run NVIDIA Data Center GPU Manager's Prometheus exporter alongside Triton so the infra layer (per-GPU utilization, memory, temperature, ECC, throttling) sits next to Triton's request metrics on the same dashboard. (GPU infra: [../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).)
 - **KServe / Seldon** — Kubernetes model-serving control planes that run Triton as a backend, adding CRDs, canary, and request-driven autoscaling.
-- **Prometheus + HPA** — scrape 8002 and drive a Horizontal Pod Autoscaler on `nv_inference_queue_duration_us` (queue time), never GPU util. (K8s autoscaling: [../../devops/kubernetes_scheduling_and_autoscaling/README.md](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).)
+- **Prometheus + HPA** — scrape 8002 and drive a Horizontal Pod Autoscaler on `nv_inference_queue_duration_us` (queue time), never GPU util. (K8s autoscaling: [../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).)
 
 ### 11.3 Security and Hardening
 
 - **No built-in authentication or authorization.** Triton's endpoints are unauthenticated by design — anyone who can reach 8000/8001 can invoke or (in explicit mode) load/unload models. **Always front Triton with a gateway** (Envoy, an authenticating ingress, an API gateway, or a NIM wrapper) that enforces authN/authZ, rate limits, and TLS; never expose Triton's ports directly to untrusted networks.
 - **Restrict the model-control and metrics surfaces** — disable the model-control API in fixed deployments (`--model-control-mode=none`) or firewall it, and keep 8002 on the internal monitoring network.
 - **Container hardening** — run the minimal `compose.py` image (smaller attack surface), drop root, mount the model repository read-only, and pin the NGC tag by digest so the backend/CUDA matrix is reproducible and scannable.
-- **MIG / MPS** — Multi-Instance GPU partitions one A100/H100 into isolated slices; Multi-Process Service lets multiple processes share SMs. Both let Triton fleets pack GPUs tighter with different isolation guarantees. Mixed-precision context: [../../cuda/tensor_cores_and_mixed_precision/README.md](../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md).
+- **MIG / MPS** — Multi-Instance GPU partitions one A100/H100 into isolated slices; Multi-Process Service lets multiple processes share SMs. Both let Triton fleets pack GPUs tighter with different isolation guarantees. Mixed-precision context: [../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md](../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md).
 
 ### 11.4 Server Launch Flags Reference
 
@@ -1092,4 +1092,4 @@ No — precision is baked into the artifact at build time, not a runtime toggle 
 
 **Outcome.** Twelve services collapse onto a small shared Triton fleet, average GPU utilization rises from ~18% to a healthy steady-state batched load, idle GPU count drops sharply, and every model now emits the same queue/compute/batch-size metrics — so one dashboard and one autoscaling policy cover the entire model portfolio.
 
-**See also:** [../../ml/model_serving_and_inference/README.md](../../ml/model_serving_and_inference/model_serving_and_inference.md) · [../../ml/model_compression_and_efficiency/README.md](../../ml/model_compression_and_efficiency/model_compression_and_efficiency.md) · [../../devops/ml_platform_and_gpu_infrastructure/README.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) · [../../devops/kubernetes_scheduling_and_autoscaling/README.md](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) · [../../cuda/streams_events_and_concurrency/README.md](../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md) · [../../cuda/tensor_cores_and_mixed_precision/README.md](../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
+**See also:** [../../ml/model_serving_and_inference/model_serving_and_inference.md](../../ml/model_serving_and_inference/model_serving_and_inference.md) · [../../ml/model_compression_and_efficiency/model_compression_and_efficiency.md](../../ml/model_compression_and_efficiency/model_compression_and_efficiency.md) · [../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) · [../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) · [../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md](../../cuda/streams_events_and_concurrency/streams_events_and_concurrency.md) · [../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md](../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)

@@ -654,7 +654,7 @@ table to two 1D rows, or one row) more natural. In interviews, starting
 top-down to *get the recurrence right*, then converting to bottom-up if asked
 about stack depth or space, is a strong demonstration of understanding.
 
-**How do you systematically identify "optimal substructure" and "overlapping
+**Q: How do you systematically identify "optimal substructure" and "overlapping
 subproblems" in a new problem?**
 Write the brute-force recursive solution first: "to solve for `state X`, what
 smaller states do I need answers to, and how do I combine them?" That
@@ -665,7 +665,7 @@ the *arguments* to your recursive calls across different branches: if
 `solve(7) -> solve(5)` via one path, `solve(8) -> solve(5)` via another),
 that's an overlapping subproblem — memoize on those arguments.
 
-**Walk through why `dp = [0] * (amount+1)` is wrong for Coin Change but
+**Q: Walk through why `dp = [0] * (amount+1)` is wrong for Coin Change but
 RIGHT for, say, "number of ways" DP (Coin Change II)?**
 For **minimize** DP (Coin Change), `0` looks like "already the best possible
 value" to `min()`, so nothing can ever improve it — `0` must mean "not yet
@@ -675,7 +675,7 @@ computed," requiring `+infinity`. For **count/sum** DP (Coin Change II,
 that `0` baseline. The right sentinel value depends on the recurrence's
 combining operator: `min`/`max` need `+inf`/`-inf`; `+=`/`or` need `0`/`False`.
 
-**0/1 knapsack vs. unbounded knapsack — why does the capacity-loop DIRECTION
+**Q: 0/1 knapsack vs. unbounded knapsack — why does the capacity-loop DIRECTION
 matter when space-optimizing to 1D?**
 In 2D, `dp[i][t]` (using items `0..i`) depends on `dp[i-1][t - weight]`
 (previous item's row). Collapsing to 1D `dp[t]`, you need `dp[t - weight]` to
@@ -686,7 +686,7 @@ behavior (each item considered once per capacity). Iterating **upward**
 means `dp[t-weight]` may already reflect *this item* having been used —
 giving unbounded behavior (item reusable).
 
-**For LIS, what's the key insight that makes the O(n log n) `tails` array
+**Q: For LIS, what's the key insight that makes the O(n log n) `tails` array
 approach correct — it doesn't even look like it's tracking actual
 subsequences?**
 `tails[k]` = the **smallest possible tail value** among all increasing
@@ -699,7 +699,7 @@ new number, binary search finds where it *would* extend or improve some
 existing subsequence — `len(tails)` at the end is the LIS length, even though
 `tails` itself is generally NOT a valid subsequence of the input.
 
-**How do you reconstruct the actual sequence of choices (not just the
+**Q: How do you reconstruct the actual sequence of choices (not just the
 optimal value) from a DP table?**
 Either (1) store a `parent`/`choice` table alongside `dp`, recording *which*
 transition achieved `dp[state]`'s value, then walk backward from the final
@@ -709,7 +709,7 @@ current `dp` value (e.g., for LCS, check if `dp[i][j] == dp[i-1][j-1]+1`
 implies a "match" move diagonally, else move toward whichever of
 `dp[i-1][j]`/`dp[i][j-1]` equals `dp[i][j]`).
 
-**State-machine DP for stock problems — how do you derive the recurrence
+**Q: State-machine DP for stock problems — how do you derive the recurrence
 without memorizing it?**
 Explicitly enumerate the **states** (e.g., "holding a share," "just sold
 [in cooldown]," "not holding, free to buy") and the **transitions** between
@@ -720,7 +720,7 @@ max(free[i-1], sold[i-1])` (stay free, or cooldown ends). Drawing this as an
 actual state diagram with labeled edges turns "memorize the formula" into
 "read off the formula from the diagram."
 
-**Interval DP — why must the outer loop iterate over interval LENGTH rather
+**Q: Interval DP — why must the outer loop iterate over interval LENGTH rather
 than start index?**
 `dp[i][j]` (interval `[i,j]`) is computed from `dp[i][k]` and `dp[k+1][j]`
 for `i <= k < j` — both of which are **shorter** intervals than `[i,j]`. If
@@ -730,7 +730,7 @@ smaller start `k+1 > i`) might not be computed yet (it has a *larger* start
 index, processed *later* in an `i`-ordered loop). Iterating by **length**
 guarantees every dependency (strictly shorter interval) is already filled in.
 
-**When does greedy work where DP would also "work" — how do you decide which
+**Q: When does greedy work where DP would also "work" — how do you decide which
 to reach for first?**
 Try to articulate an **exchange argument**: "if an optimal solution did NOT
 make the greedy choice at this step, could I modify it to make the greedy
@@ -742,7 +742,7 @@ interview, if you're not sure, mention both: "greedy MIGHT work here if X
 holds — let me check with a small counterexample; if it fails, here's the DP
 fallback."
 
-**Coin Change (minimize, LC 322) vs. Coin Change II (count combinations, LC
+**Q: Coin Change (minimize, LC 322) vs. Coin Change II (count combinations, LC
 518) — why does the loop order (coins outer vs. amount outer) matter for the
 LATTER but the former works either way?**
 For **counting combinations** (order doesn't matter — `{1,2}` and `{2,1}`
@@ -756,7 +756,7 @@ behavior). Swapping the loops in Coin Change II would instead count
 *permutations* (ordered sequences) — a different (also valid, but different)
 problem, [Combination Sum IV (LC 377)](https://leetcode.com/problems/combination-sum-iv/).
 
-**Bitmask DP — when is `O(2^n * n^2)` actually a reasonable complexity to
+**Q: Bitmask DP — when is `O(2^n * n^2)` actually a reasonable complexity to
 propose, and what's the giveaway in the problem statement?**
 When `n <= ~18-20` (so `2^20 ~ 10^6`, times `n^2 ~ 400` is `~4*10^8` —
 borderline but often acceptable with simple per-state work), AND the problem

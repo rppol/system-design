@@ -965,8 +965,8 @@ A: Comments and suggestions can be modeled as a **parallel, secondary operation 
 
 ## Cross-References
 
-- **Operation log as event-sourced source of truth (§4.4, §4.1)** -> [`../event_sourcing_cqrs/README.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md), [`../../backend/event_sourcing_and_cqrs/README.md`](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md)
-- **Document-to-shard routing via consistent hashing (§3, §10)** -> [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md)
-- **Jittered exponential backoff for reconnects (§9 War Story 2)** -> [`../resilience_patterns/README.md`](../resilience_patterns/resilience_patterns.md)
-- **WebSocket session lifecycle and protocol details (§4.3, §7)** -> [`../../backend/websockets_and_sse/README.md`](../../backend/websockets_and_sse/websockets_and_sse.md)
+- **Operation log as event-sourced source of truth (§4.4, §4.1)** -> [`../event_sourcing_cqrs/event_sourcing_cqrs.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md), [`../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md`](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md)
+- **Document-to-shard routing via consistent hashing (§3, §10)** -> [`../consistent_hashing/consistent_hashing.md`](../consistent_hashing/consistent_hashing.md)
+- **Jittered exponential backoff for reconnects (§9 War Story 2)** -> [`../resilience_patterns/resilience_patterns.md`](../resilience_patterns/resilience_patterns.md)
+- **WebSocket session lifecycle and protocol details (§4.3, §7)** -> [`../../backend/websockets_and_sse/websockets_and_sse.md`](../../backend/websockets_and_sse/websockets_and_sse.md)
 - **Connection-density comparison for capacity planning (§10)** -> [`./design_whatsapp.md`](./design_whatsapp.md)

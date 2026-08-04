@@ -1314,7 +1314,7 @@ The main ones are filtering by business type or open-hours, ranking by more than
 - [hld/case_studies/design_proximity_service.md — the HLD deep-dive version of this same design](../../../hld/case_studies/design_proximity_service.md)
 - [book Vol 2 Ch 2 — Nearby Friends (moving objects, high-write location updates)](../02_nearby_friends/02_nearby_friends.md)
 - [book Vol 2 Ch 3 — Google Maps (routing + the same geospatial toolbox at scale)](../03_google_maps/03_google_maps.md)
-- [hld/caching/README.md — Redis caching, TTL, invalidation strategies used on the read path](../../../hld/caching/caching.md)
+- [hld/caching/caching.md — Redis caching, TTL, invalidation strategies used on the read path](../../../hld/caching/caching.md)
 - [book Vol 1 Ch 5 — Design Consistent Hashing (how to shard the business table without mass reshuffle)](../../system_design_interview_vol_1/05_design_consistent_hashing/05_design_consistent_hashing.md)
 
 ## Further Reading

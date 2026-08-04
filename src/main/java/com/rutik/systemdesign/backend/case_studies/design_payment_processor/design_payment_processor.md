@@ -316,18 +316,18 @@ stateDiagram-v2
 
 `COMPENSATED` (not a reset back to `PENDING`) is the terminal failure state — like `COMPLETED`, it exits the lifecycle, so the crash-recovery job in §8 only ever resubmits commands for sagas still stuck in one of the non-terminal states in between.
 
-**Shared primitives.** Backend's `case_studies/` has no `cross_cutting/` directory; by the convention documented in [`../README.md`](../case_studies.md), the shared primitives live as deep-dive modules in the section itself. This case study leans on eight of them:
+**Shared primitives.** Backend's `case_studies/` has no `cross_cutting/` directory; by the convention documented in [`../case_studies.md`](../case_studies.md), the shared primitives live as deep-dive modules in the section itself. This case study leans on eight of them:
 
 | Primitive used here | Deep dive |
 |---|---|
-| Idempotency keys, saga, 2PC alternatives | [`../../distributed_transactions_and_consistency/README.md`](../../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) |
-| Transactional outbox, inbox, DLQ, poison pill | [`../../messaging_patterns/README.md`](../../messaging_patterns/messaging_patterns.md) |
-| Retry with jitter, circuit breaker, bulkhead | [`../../fault_tolerance_patterns/README.md`](../../fault_tolerance_patterns/fault_tolerance_patterns.md) |
-| Partitioning, consumer groups, EOS semantics | [`../../kafka_deep_dive/README.md`](../../kafka_deep_dive/kafka_deep_dive.md) |
-| Pool sizing, leak detection, PgBouncer | [`../../connection_pooling_deep_dive/README.md`](../../connection_pooling_deep_dive/connection_pooling_deep_dive.md) |
-| SLO/SLI, correlation IDs, Micrometer | [`../../observability_and_monitoring/README.md`](../../observability_and_monitoring/observability_and_monitoring.md) |
-| B+tree, WAL, MVCC, partitioning, VACUUM | [`../../database_internals_and_indexing/README.md`](../../database_internals_and_indexing/database_internals_and_indexing.md) |
-| Ledger-first storage design at DB level | [`../../../database/case_studies/design_banking_ledger/README.md`](../../../database/case_studies/design_banking_ledger/design_banking_ledger.md) |
+| Idempotency keys, saga, 2PC alternatives | [`../../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md`](../../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) |
+| Transactional outbox, inbox, DLQ, poison pill | [`../../messaging_patterns/messaging_patterns.md`](../../messaging_patterns/messaging_patterns.md) |
+| Retry with jitter, circuit breaker, bulkhead | [`../../fault_tolerance_patterns/fault_tolerance_patterns.md`](../../fault_tolerance_patterns/fault_tolerance_patterns.md) |
+| Partitioning, consumer groups, EOS semantics | [`../../kafka_deep_dive/kafka_deep_dive.md`](../../kafka_deep_dive/kafka_deep_dive.md) |
+| Pool sizing, leak detection, PgBouncer | [`../../connection_pooling_deep_dive/connection_pooling_deep_dive.md`](../../connection_pooling_deep_dive/connection_pooling_deep_dive.md) |
+| SLO/SLI, correlation IDs, Micrometer | [`../../observability_and_monitoring/observability_and_monitoring.md`](../../observability_and_monitoring/observability_and_monitoring.md) |
+| B+tree, WAL, MVCC, partitioning, VACUUM | [`../../database_internals_and_indexing/database_internals_and_indexing.md`](../../database_internals_and_indexing/database_internals_and_indexing.md) |
+| Ledger-first storage design at DB level | [`../../../database/case_studies/design_banking_ledger/design_banking_ledger.md`](../../../database/case_studies/design_banking_ledger/design_banking_ledger.md) |
 
 ---
 

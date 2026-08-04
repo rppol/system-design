@@ -243,7 +243,7 @@ A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview*
 
 ## Knowledge-Question Map
 
-The highest-frequency DevOps *knowledge* questions mapped to the file that answers them. For *system design* ("design a CI/CD platform", "design an observability stack") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency DevOps *knowledge* questions mapped to the file that answers them. For *system design* ("design a CI/CD platform", "design an observability stack") questions, use the interview-prep shortcuts in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
@@ -507,6 +507,6 @@ Recommended order for interview preparation:
 2. **Week 2 — Kubernetes depth + CI/CD**: finish Phase 2, then Phase 3 (pipelines, GitOps, deployment strategies).
 3. **Week 3 — IaC + Cloud**: Phase 4 (Terraform first), then Phase 5 (AWS-primary).
 4. **Week 4 — Observability, SRE, Security**: Phase 6 (Prometheus + SLOs are most-tested), then Phase 7.
-5. **Review**: work the case studies end-to-end — see [case_studies/README.md](case_studies/case_studies.md) for the guided path.
+5. **Review**: work the case studies end-to-end — see [case_studies/case_studies.md](case_studies/case_studies.md) for the guided path.
 
-Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.
+Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/foundations_and_architecture.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.

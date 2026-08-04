@@ -1323,7 +1323,7 @@ land on the same rescaled prior.
 
 ## 12. Interview Questions with Answers
 
-**Why can a model with 99% accuracy be useless on a fraud dataset?**
+**Q: Why can a model with 99% accuracy be useless on a fraud dataset?**
 **Short:** Always predicting the majority class already hits 99% accuracy while catching zero fraud, since recall is ignored entirely.
 A 99% accuracy score can be worse than useless when positives are rare,
 because always predicting the majority class already achieves that
@@ -1333,7 +1333,7 @@ for every transaction scores 99.9% accuracy while catching zero fraud
 imbalanced data, and inspect the confusion matrix before trusting a single
 summary number.
 
-**Why does fitting a scaler, imputer, or encoder on the full dataset before splitting cause data leakage?**
+**Q: Why does fitting a scaler, imputer, or encoder on the full dataset before splitting cause data leakage?**
 **Short:** Fitting a transformer on all rows before splitting lets test-set statistics like mean and variance leak into training data.
 Fitting any transformer on the full dataset lets statistics computed from
 test rows influence how training rows get transformed. A `StandardScaler`
@@ -1343,7 +1343,7 @@ already leaked into every training row's transformed value. Always call
 `.fit()` only after splitting, ideally inside a `Pipeline` passed to
 `cross_val_score` so each fold refits its own transformers.
 
-**Why does applying SMOTE to the entire dataset before the train/test split leak information?**
+**Q: Why does applying SMOTE to the entire dataset before the train/test split leak information?**
 **Short:** SMOTE-ing before the split can interpolate synthetic training points from neighbors that later land in the test set.
 SMOTE-ing before the split lets synthetic training points be interpolated
 from neighbors that later become test rows. Every synthetic minority point
@@ -1352,7 +1352,7 @@ neighbors; if that neighbor ends up in the test set, its identity is
 smuggled into a training row. Always split first, then call `fit_resample`
 only on the training fold.
 
-**What is target leakage and how do you spot it?**
+**Q: What is target leakage and how do you spot it?**
 **Short:** Target leakage is a feature that encodes the label or is only recorded after the outcome, spotted via implausibly high AUC.
 Target leakage is a feature that encodes the label itself, or is only
 recorded after the outcome already happened. Classic examples include a
@@ -1362,7 +1362,7 @@ the domain, or by one feature dominating SHAP/permutation importance. Audit
 every feature's availability timestamp against the label's event timestamp
 before trusting the model.
 
-**Why is PR-AUC considered more honest than ROC-AUC when positives are rare?**
+**Q: Why is PR-AUC considered more honest than ROC-AUC when positives are rare?**
 **Short:** PR-AUC's baseline equals positive prevalence instead of 0.5, so it doesn't hide massive false-positive counts like ROC-AUC can.
 PR-AUC is more honest under severe imbalance because its baseline equals the
 positive prevalence instead of a fixed 0.5. At a 1:1000 positive ratio a
@@ -1373,7 +1373,7 @@ alongside ROC-AUC — and always beside the prevalence, since PR-AUC is only
 readable relative to that baseline — any time positive prevalence drops
 below about 5%.
 
-**Why can temporal leakage make an offline model look great and then fail after deployment?**
+**Q: Why can temporal leakage make an offline model look great and then fail after deployment?**
 **Short:** Temporal leakage lets future rows train a model meant to predict the past, inflating any score from a random split.
 Temporal leakage lets rows from the future train a model that is supposed to
 predict the past, inflating any score computed from a random split. One
@@ -1383,7 +1383,7 @@ month of live traffic, purely from this mismatch; switching to
 past and validate on a strictly later period, with a purge gap for
 rolling-window features.
 
-**Why does resampling distort probability calibration?**
+**Q: Why does resampling distort probability calibration?**
 **Short:** Resampling changes the training class prior, so predict_proba reflects the resampled ratio rather than the true population rate.
 Resampling changes the class prior seen during training, and `predict_proba`
 reflects whatever prior the model was trained on, not the true population
@@ -1394,7 +1394,7 @@ thing through the loss rather than the data, so they are not a way around
 it; with either, refit Platt scaling or isotonic regression on a held-out,
 un-resampled sample afterward.
 
-**What is wrong with using plain random K-Fold when rows share a group, like the same user or patient?**
+**Q: What is wrong with using plain random K-Fold when rows share a group, like the same user or patient?**
 **Short:** Plain K-Fold can split one entity's rows across train and validation, letting the model memorize entity identity instead of signal.
 Plain K-Fold can split one entity's rows across train and validation,
 letting the model memorize entity identity instead of learning
@@ -1404,7 +1404,7 @@ baseline, producing a CV score (e.g. AUC 0.91) that collapses against
 genuinely new patients in production (e.g. AUC 0.68). Use `GroupKFold` so
 every row from one entity lands in exactly one fold.
 
-**How do you detect leakage after a model is already trained, using adversarial validation?**
+**Q: How do you detect leakage after a model is already trained, using adversarial validation?**
 **Short:** Adversarial validation trains a classifier to tell train rows from test rows on features alone; AUC near 0.5 means no leak.
 Adversarial validation trains a classifier to distinguish train rows from
 test rows using only the features, not the label. Label training rows 0 and
@@ -1414,7 +1414,7 @@ roughly 0.8 means a feature — often an ID or timestamp — lets a model tell
 them apart almost on sight. Inspect that classifier's top-importance
 features first; they usually point straight at the leaking column.
 
-**Why is a suspiciously high validation score, like 0.99 AUC, itself a red flag rather than a win?**
+**Q: Why is a suspiciously high validation score, like 0.99 AUC, itself a red flag rather than a win?**
 **Short:** An implausibly high score like 0.99 AUC is usually a leaking feature or split bug, not a breakthrough, especially on human-behavior tasks.
 An implausibly high validation score is usually a bug report, not a
 breakthrough, especially on a task domain experts would not expect to be
@@ -1424,7 +1424,7 @@ than by a genuinely superb model. Treat any suspiciously high score as a
 trigger to run adversarial validation and a feature-timestamp audit before
 shipping.
 
-**How does SMOTE generate a synthetic minority sample, mechanically?**
+**Q: How does SMOTE generate a synthetic minority sample, mechanically?**
 **Short:** SMOTE interpolates a new point on the line segment between a real minority sample and one of its k nearest minority neighbors.
 SMOTE picks a real minority point, one of its k=5 nearest minority
 neighbors, and interpolates a new point between them. Concretely, `x_new =
@@ -1433,7 +1433,7 @@ point on the line segment connecting the two, never an exact copy of either.
 With fewer than `k_neighbors + 1` minority samples, `k_neighbors` must be
 reduced or SMOTE cannot find enough neighbors to interpolate from.
 
-**What is the difference between SMOTE, ADASYN, and Borderline-SMOTE?**
+**Q: What is the difference between SMOTE, ADASYN, and Borderline-SMOTE?**
 **Short:** SMOTE oversamples uniformly, ADASYN focuses on minority points with more majority neighbors, and Borderline-SMOTE targets boundary cases only.
 All three generate synthetic minority points, but they differ in which
 minority points get oversampled the most. Plain SMOTE oversamples roughly
@@ -1444,7 +1444,7 @@ to minority points already classified as "in danger." Prefer ADASYN or
 Borderline-SMOTE when the minority class has a clearly definable hard region
 near the decision boundary.
 
-**What do Tomek links and NearMiss actually remove during undersampling?**
+**Q: What do Tomek links and NearMiss actually remove during undersampling?**
 **Short:** Tomek links delete majority points forming cross-class nearest-neighbor pairs at the boundary, while NearMiss selects majority points to keep by distance.
 Tomek links remove the majority member of pairs that are each other's
 closest neighbor across classes, cleaning noisy overlap right at the
@@ -1455,7 +1455,7 @@ neighbor count around every minority point). Tomek links are typically a
 light cleaning step (often paired with SMOTE as `SMOTETomek`), while NearMiss
 is a standalone undersampling strategy.
 
-**Mathematically, how do class weights change what a model optimizes?**
+**Q: Mathematically, how do class weights change what a model optimizes?**
 **Short:** Class weights multiply each class's loss contribution by an inverse-frequency factor without touching the data itself.
 Class weights multiply each class's contribution to the loss function by an
 inverse-frequency factor, without touching the data itself. scikit-learn's
@@ -1466,7 +1466,7 @@ are usually the cheapest technique to try first — but the weighted optimum
 is the posterior of a rebalanced population, so recalibrate before reading
 the output as a probability.
 
-**How does focal loss down-weight easy examples, and what does gamma control?**
+**Q: How does focal loss down-weight easy examples, and what does gamma control?**
 **Short:** Focal loss multiplies cross-entropy by (1-p_t)^gamma, shrinking loss from confident correct predictions as gamma increases.
 Focal loss multiplies the cross-entropy term by `(1 - p_t)^gamma`, which
 shrinks toward zero for confident, correct predictions. An easy negative at
@@ -1477,7 +1477,7 @@ loss was designed for ~1:1000 imbalance in object detection (RetinaNet,
 gamma=2, alpha=0.25) and generalizes to any single-model imbalanced
 classification setting.
 
-**How do you correctly combine oversampling with cross-validation?**
+**Q: How do you correctly combine oversampling with cross-validation?**
 **Short:** Oversampling must run inside each CV fold on only that fold's training rows via an imblearn Pipeline, never on the full dataset first.
 Oversampling must run separately, inside each fold, using only that fold's
 training indices — never once on the full dataset before splitting. Wrap
@@ -1486,7 +1486,7 @@ which cannot handle steps that change row count) and pass it to
 `cross_val_score`; the library then calls `fit_resample` fresh on each
 fold's training split and evaluates on the untouched validation split.
 
-**What is threshold moving, and how do you pick the operating threshold?**
+**Q: What is threshold moving, and how do you pick the operating threshold?**
 **Short:** Threshold moving keeps the trained model fixed and instead shifts the cutoff on predict_proba to satisfy a recall or cost target.
 Threshold moving keeps the trained model and its probabilities untouched and
 instead shifts the cutoff applied to `predict_proba` at inference time.
@@ -1496,7 +1496,7 @@ minimizing a business cost function weighting false positives and false
 negatives differently. Because the model never changes, threshold moving is
 the cheapest imbalance fix available and never distorts calibration.
 
-**When should you avoid resampling altogether?**
+**Q: When should you avoid resampling altogether?**
 **Short:** Avoid resampling when raw probabilities feed pricing or risk decisions, since it biases predict_proba away from the true population rate.
 Avoid resampling whenever the model's raw probability feeds a pricing or
 risk-scoring decision, since it biases `predict_proba` away from the true
@@ -1507,7 +1507,7 @@ minority classes where SMOTE has too few neighbors to interpolate
 meaningfully. Default to threshold moving, then class weights, before
 touching the data itself.
 
-**How does leakage show up specifically in time-series feature engineering, like rolling or lag features?**
+**Q: How does leakage show up specifically in time-series feature engineering, like rolling or lag features?**
 **Short:** Rolling and lag features leak when computed over the full timeline before splitting, letting a window absorb validation-period data.
 Rolling and lag features leak when they are computed over the full timeline
 before the train/validation split is applied. A common bug is calling a
@@ -1517,7 +1517,7 @@ few days from the validation window. Compute such windows only from data
 strictly before each prediction timestamp, and add a purge/embargo gap at
 the split boundary.
 
-**What is duplicate leakage, and how do you detect near-duplicate rows across a train/test split?**
+**Q: What is duplicate leakage, and how do you detect near-duplicate rows across a train/test split?**
 **Short:** Duplicate leakage is an exact or near-duplicate row appearing on both sides of a split, found via row hashing or fuzzy similarity.
 Duplicate leakage happens when an exact or near-duplicate row appears on
 both sides of a split, letting the model memorize rather than generalize.
@@ -1527,7 +1527,7 @@ copy) need a fuzzy technique like MinHash or embedding-similarity
 clustering, since they hash differently but still leak the same content.
 Always deduplicate before splitting, not after.
 
-**How does handling extreme imbalance, like 1:100,000, differ from handling 1:1000?**
+**Q: How does handling extreme imbalance, like 1:100,000, differ from handling 1:1000?**
 **Short:** Beyond roughly 1:10,000, resampling and class weighting destabilize, so anomaly-detection framing like Isolation Forest works better.
 At ratios beyond roughly 1:10,000, straightforward resampling and class
 weighting both become unstable, so anomaly-detection framing often works

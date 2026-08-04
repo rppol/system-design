@@ -448,8 +448,8 @@ flowchart TD
 | Segment tree | — | O(log n) | O(log n) | O(log n) | O(n) | Range query + point update |
 | Fenwick tree | — | O(log n) | O(log n) | O(log n) | O(n) | Prefix sum + point update; simpler than segment tree |
 
-*Cross-link:* [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — per-collection Java Big-O table, HashMap load factor deep dive, PriorityQueue internals.
-*Concept module:* [`../complexity_analysis_and_big_o/README.md`](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md)
+*Cross-link:* [`../../java/collections_internals/collections_internals.md`](../../java/collections_internals/collections_internals.md) — per-collection Java Big-O table, HashMap load factor deep dive, PriorityQueue internals.
+*Concept module:* [`../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md`](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md)
 
 ### Sorting Algorithms
 
@@ -619,8 +619,8 @@ See [interview_execution_playbook.md](interview_execution_playbook.md) for the f
 - [dynamic_programming](../dynamic_programming/dynamic_programming.md) — DP family deep-dive: memoisation, tabulation, 4 families
 - [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — Union-find, trie, segment tree, Fenwick tree
 - [study_plans.md](study_plans.md) — Blind 75 + NeetCode 150, pattern-mapped with links and suggested order
-- [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — HashMap, PriorityQueue, TreeMap, ArrayDeque internals
-- [`../../hld/caching/README.md`](../../hld/caching/caching.md) — LRU/LFU as applied data structures (heap + hashmap pattern)
-- [`../../hld/rate_limiting/README.md`](../../hld/rate_limiting/rate_limiting.md) — sliding window counter in production systems
-- [`../../backend/osi_model_and_networking/README.md`](../../backend/osi_model_and_networking/osi_model_and_networking.md) — Dijkstra in OSPF routing, Bellman-Ford in BGP
-- [`../../devops/infrastructure_as_code_terraform/README.md`](../../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) — topological sort in Terraform's plan DAG
+- [`../../java/collections_internals/collections_internals.md`](../../java/collections_internals/collections_internals.md) — HashMap, PriorityQueue, TreeMap, ArrayDeque internals
+- [`../../hld/caching/caching.md`](../../hld/caching/caching.md) — LRU/LFU as applied data structures (heap + hashmap pattern)
+- [`../../hld/rate_limiting/rate_limiting.md`](../../hld/rate_limiting/rate_limiting.md) — sliding window counter in production systems
+- [`../../backend/osi_model_and_networking/osi_model_and_networking.md`](../../backend/osi_model_and_networking/osi_model_and_networking.md) — Dijkstra in OSPF routing, Bellman-Ford in BGP
+- [`../../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md`](../../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) — topological sort in Terraform's plan DAG

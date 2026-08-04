@@ -492,7 +492,7 @@ to a heap of size k unless one of the four narrower shapes above fits better.
 - Applied: [hld/caching](../../hld/caching/caching.md) — LFU cache eviction is a live
   "top-k by frequency" problem at system scale, often implemented with a
   frequency-bucketed doubly linked list instead of a heap for O(1) operations.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
+- Master recognition engine: [dsa_patterns/dsa_patterns.md](dsa_patterns.md).
 - Sibling patterns: [k_way_merge.md](k_way_merge.md), [two_heaps.md](two_heaps.md).
 
 ---

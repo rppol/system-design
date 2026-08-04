@@ -258,7 +258,7 @@ A different cut, not senior-plus-extras. The Principal Path probes platform-leve
 
 ## Knowledge-Question Map
 
-The highest-frequency Spring *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency Spring *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
@@ -410,7 +410,7 @@ The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0
 
 ## 7. Case Studies
 
-For a guided learning path through all 9 case studies, see [case_studies/README.md](case_studies/case_studies.md).
+For a guided learning path through all 9 case studies, see [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Case Study | Core Concepts | Difficulty |
 |------------|---------------|------------|
@@ -443,6 +443,6 @@ Recommended learning order for interview preparation:
 2. **Week 2**: Phases 3–4 (Spring Boot internals, MVC, WebFlux)
 3. **Week 3**: Phases 5–6 (Data, transactions, security)
 4. **Week 4**: Phases 7–8 (Cloud patterns, messaging, testing, performance)
-5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/README.md](case_studies/case_studies.md) for the recommended order
+5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/case_studies.md](case_studies/case_studies.md) for the recommended order
 
-Each module follows the standard 14-section template. See [llm/foundations_and_architecture/README.md](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.
+Each module follows the standard 14-section template. See [llm/foundations_and_architecture/foundations_and_architecture.md](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.

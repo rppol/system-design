@@ -1192,11 +1192,11 @@ Because their rank depends on how many members outscore them across all shards, 
 ## Cross-links in this repo
 
 - [hld/case_studies/design_leaderboard.md — the standalone leaderboard case study (Redis sorted sets, sharding, scatter-gather)](../../../hld/case_studies/design_leaderboard.md)
-- [hld/caching/README.md — Redis, cache patterns, replication, persistence](../../../hld/caching/caching.md)
-- [database/database_caching_patterns/README.md — read-through/enrichment, cache-aside for the profile join](../../../database/database_caching_patterns/database_caching_patterns.md)
-- [book/system_design_interview_vol_1/06_design_a_key_value_store/README.md — replication, consistency, and partitioning primitives behind Redis](../../system_design_interview_vol_1/06_design_a_key_value_store/06_design_a_key_value_store.md)
-- [book/system_design_interview_vol_2/06_ad_click_event_aggregation/README.md — the sibling counting/aggregation design (win events, queues, hot keys)](../06_ad_click_event_aggregation/06_ad_click_event_aggregation.md)
-- [book/designing_data_intensive_applications/06_partitioning/README.md — range vs hash partitioning, hot spots, scatter-gather (DDIA)](../../designing_data_intensive_applications/06_partitioning/06_partitioning.md)
+- [hld/caching/caching.md — Redis, cache patterns, replication, persistence](../../../hld/caching/caching.md)
+- [database/database_caching_patterns/database_caching_patterns.md — read-through/enrichment, cache-aside for the profile join](../../../database/database_caching_patterns/database_caching_patterns.md)
+- [book/system_design_interview_vol_1/06_design_a_key_value_store/06_design_a_key_value_store.md — replication, consistency, and partitioning primitives behind Redis](../../system_design_interview_vol_1/06_design_a_key_value_store/06_design_a_key_value_store.md)
+- [book/system_design_interview_vol_2/06_ad_click_event_aggregation/06_ad_click_event_aggregation.md — the sibling counting/aggregation design (win events, queues, hot keys)](../06_ad_click_event_aggregation/06_ad_click_event_aggregation.md)
+- [book/designing_data_intensive_applications/06_partitioning/06_partitioning.md — range vs hash partitioning, hot spots, scatter-gather (DDIA)](../../designing_data_intensive_applications/06_partitioning/06_partitioning.md)
 
 ## Further Reading
 

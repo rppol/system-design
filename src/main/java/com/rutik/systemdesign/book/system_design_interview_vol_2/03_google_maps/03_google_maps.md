@@ -1056,7 +1056,7 @@ They are background jobs that keep the navigation data current: one refreshes th
 - [hld/case_studies/design_google_maps.md — the repo's deep-dive design of Google Maps](../../../hld/case_studies/design_google_maps.md)
 - [book · Ch 1 — Proximity Service (geohash/quadtree/S2, "near me" queries)](../01_proximity_service/01_proximity_service.md)
 - [book · Ch 2 — Nearby Friends (live location fan-out over WebSockets)](../02_nearby_friends/02_nearby_friends.md)
-- [hld/cdn/README.md — CDN mechanics behind static tile distribution](../../../hld/cdn/cdn.md)
+- [hld/cdn/cdn.md — CDN mechanics behind static tile distribution](../../../hld/cdn/cdn.md)
 - [ml/case_studies/design_eta_prediction.md — ETA as an ML travel-time prediction system](../../../ml/case_studies/design_eta_prediction.md)
 - [ml/README.md — ML section overview (models behind the ETA service)](../../../ml/README.md)
 - [DDIA Ch 5 — Replication (how the location/tile stores stay durable and available)](../../designing_data_intensive_applications/05_replication/05_replication.md)

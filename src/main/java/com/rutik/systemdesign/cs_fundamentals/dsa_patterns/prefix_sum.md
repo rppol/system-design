@@ -348,8 +348,8 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
 - Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array fundamentals, hashmap internals (`defaultdict`, average O(1) operations)
 - [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — Fenwick tree / segment tree for the *mutable* version of this problem
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(n) + O(n) hashmap beats O(n^2) brute force
-- Applied: [`../../database/indexing_deep_dive/README.md`](../../database/indexing_deep_dive/indexing_deep_dive.md) — materialized aggregate columns / running totals in databases are a real-world prefix-sum analog
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../database/indexing_deep_dive/indexing_deep_dive.md`](../../database/indexing_deep_dive/indexing_deep_dive.md) — materialized aggregate columns / running totals in databases are a real-world prefix-sum analog
+- Master index: [dsa_patterns/dsa_patterns.md](dsa_patterns.md)
 
 ---
 

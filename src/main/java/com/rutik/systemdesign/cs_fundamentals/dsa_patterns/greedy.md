@@ -673,7 +673,7 @@ long interval early (because it happens to start first) and force removal of
 many short intervals that would otherwise fit. See the BROKEN->FIX in §8 for
 a concrete counter-example.
 
-**Jump Game (LC 55) and Jump Game II (LC 45) both use `nums[i]` as a max
+**Q: Jump Game (LC 55) and Jump Game II (LC 45) both use `nums[i]` as a max
 jump length — why are the algorithms different?**
 LC 55 only asks "can you reach the end?" — a single `farthest` variable
 suffices, and you fail fast if `i > farthest` (a gap you can never cross). LC
@@ -681,7 +681,7 @@ suffices, and you fail fast if `i > farthest` (a gap you can never cross). LC
 "levels" — hence the extra `current_end`/`jumps` bookkeeping that detects when
 one level's reach is exhausted and the next jump must be counted.
 
-**In the Gas Station problem, why does `total_tank >= 0` guarantee a valid
+**Q: In the Gas Station problem, why does `total_tank >= 0` guarantee a valid
 starting point exists, without checking every possible start?**
 This is a classic greedy/prefix-sum argument: if the total gas across the
 whole circuit is >= total cost, then *some* rotation of the prefix-sum
@@ -700,7 +700,7 @@ the right-to-left pass guarantees the symmetric constraint with the right
 neighbor. Taking `max(left_pass[i], right_pass[i])` per index satisfies both
 constraints simultaneously without violating the other.
 
-**When would I reach for a heap inside a greedy algorithm (e.g., Task
+**Q: When would I reach for a heap inside a greedy algorithm (e.g., Task
 Scheduler, Reorganize String)?** When the "best current choice" changes
 dynamically as you consume items — i.e., the greedy choice is "whichever
 remaining item has the highest frequency/priority *right now*," and that
@@ -708,7 +708,7 @@ ranking shifts after each pick. A pre-sorted array can't represent a ranking
 that changes during the algorithm; a max-heap can pop-and-reinsert in
 O(log n).
 
-**My greedy solution passes the example in the problem statement but fails on
+**Q: My greedy solution passes the example in the problem statement but fails on
 the submission's hidden tests — what should I check?** Stress-test your
 greedy rule against an adversarial small case BEFORE coding: construct an
 input where your sort key or local rule produces two competing "obviously
@@ -742,7 +742,7 @@ placed at the maximum tree depth (longest codes) without increasing the total
 weighted code length compared to any other arrangement — so merging them
 first is always safe.
 
-**How do I avoid analysis paralysis between "is this greedy or DP" during a
+**Q: How do I avoid analysis paralysis between "is this greedy or DP" during a
 45-minute interview?** Default to attempting the greedy approach first IF you
 can state the greedy rule in one sentence AND immediately think of a potential
 counter-example to test. Spend at most ~2 minutes on this gut-check. If you

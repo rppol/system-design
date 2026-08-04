@@ -19,7 +19,7 @@ Key capabilities:
 - Request size limits and query depth controls
 - Security headers via middleware
 - Static analysis integration in CI: `bandit`, `safety`, `pip-audit`
-- Cross-links: [`../authentication_and_security/README.md`](../authentication_and_security/authentication_and_security.md), [`../error_handling_and_validation/README.md`](../error_handling_and_validation/error_handling_and_validation.md)
+- Cross-links: [`../authentication_and_security/authentication_and_security.md`](../authentication_and_security/authentication_and_security.md), [`../error_handling_and_validation/error_handling_and_validation.md`](../error_handling_and_validation/error_handling_and_validation.md)
 
 Python version: 3.12/3.13. FastAPI version: 0.140+. Pydantic version: v2.
 
@@ -65,7 +65,7 @@ Fix: after `session.get()`, compare `resource.owner_id == current_user.id`. Rais
 
 **API2: Broken Authentication**
 
-Weak tokens, unrotated secrets, missing expiry, tokens accepted over HTTP. Covered in depth in [`../authentication_and_security/README.md`](../authentication_and_security/authentication_and_security.md). Summary: HS256 with a 256-bit secret minimum, 15-minute access token expiry, 7-day refresh token with rotation, HTTPS enforced via `Strict-Transport-Security`.
+Weak tokens, unrotated secrets, missing expiry, tokens accepted over HTTP. Covered in depth in [`../authentication_and_security/authentication_and_security.md`](../authentication_and_security/authentication_and_security.md). Summary: HS256 with a 256-bit secret minimum, 15-minute access token expiry, 7-day refresh token with rotation, HTTPS enforced via `Strict-Transport-Security`.
 
 **API3: Broken Object Property Level Authorization (BOPLA)**
 

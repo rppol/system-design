@@ -1138,10 +1138,10 @@ Users click results that appear near the top partly because of their position, n
   [ml/case_studies/design_semantic_search_engine.md](../../../ml/case_studies/design_semantic_search_engine.md)
   — do not treat this summary as a substitute; the case study goes deeper on serving and scale.
 - [ml/case_studies/design_image_classification_pipeline.md](../../../ml/case_studies/design_image_classification_pipeline.md) — the CV-pipeline sibling (preprocessing, CNN backbones, evaluation).
-- [ml/self_supervised_and_contrastive_learning/README.md](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) — SimCLR/MoCo, InfoNCE, temperature, and negative mining in depth.
-- [ml/computer_vision/README.md](../../../ml/computer_vision/computer_vision.md) — ResNet/ViT encoders and image feature extraction.
-- [ml/information_retrieval_and_search/README.md](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md) — retrieval metrics (mAP, recall@k, MRR, nDCG) and ANN indexing.
-- [ml/convolutional_neural_networks/README.md](../../../ml/convolutional_neural_networks/convolutional_neural_networks.md) — the CNN mechanics behind the image encoder.
+- [ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) — SimCLR/MoCo, InfoNCE, temperature, and negative mining in depth.
+- [ml/computer_vision/computer_vision.md](../../../ml/computer_vision/computer_vision.md) — ResNet/ViT encoders and image feature extraction.
+- [ml/information_retrieval_and_search/information_retrieval_and_search.md](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md) — retrieval metrics (mAP, recall@k, MRR, nDCG) and ANN indexing.
+- [ml/convolutional_neural_networks/convolutional_neural_networks.md](../../../ml/convolutional_neural_networks/convolutional_neural_networks.md) — the CNN mechanics behind the image encoder.
 - Sibling chapters: [Ch 1 — Introduction and Overview](../01_introduction_and_overview/01_introduction_and_overview.md) (the 7-step framework this chapter instantiates) and [Ch 4 — YouTube Video Search](../04_youtube_video_search/04_youtube_video_search.md) (multimodal text→video retrieval that reuses this chapter's contrastive-embedding + ANN machinery).
 
 ## Further Reading

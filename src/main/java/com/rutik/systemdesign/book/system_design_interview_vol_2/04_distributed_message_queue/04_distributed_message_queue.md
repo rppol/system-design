@@ -1398,8 +1398,8 @@ Because a partition still holds retained, possibly unconsumed messages that must
 ## Cross-links in this repo
 
 - [hld/case_studies/design_distributed_message_queue.md — the HLD deep dive on this exact problem](../../../hld/case_studies/design_distributed_message_queue.md)
-- [hld/message_queues/README.md — message-queue concepts (P2P vs pub/sub, delivery semantics, backpressure)](../../../hld/message_queues/message_queues.md)
-- [backend/kafka_deep_dive/README.md — Kafka internals: partitions, ISR, log segments, consumer groups](../../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- [hld/message_queues/message_queues.md — message-queue concepts (P2P vs pub/sub, delivery semantics, backpressure)](../../../hld/message_queues/message_queues.md)
+- [backend/kafka_deep_dive/kafka_deep_dive.md — Kafka internals: partitions, ISR, log segments, consumer groups](../../../backend/kafka_deep_dive/kafka_deep_dive.md)
 - [book/DDIA Ch 11 — Stream Processing: logs as the stream substrate, log-based message brokers](../../designing_data_intensive_applications/11_stream_processing/11_stream_processing.md)
 - [book/SDI Vol 2 Ch 6 — Ad Click Event Aggregation: a downstream consumer of exactly this queue](../06_ad_click_event_aggregation/06_ad_click_event_aggregation.md)
 

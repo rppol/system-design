@@ -1554,5 +1554,5 @@ work gets funded.
   and the eval-gated CI that consumes this module's output
 - [Data Flywheels & Continuous Learning](../data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) —
   turning labelled production failures into training data
-- [../../ml/model_evaluation_and_selection/README.md](../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md)
+- [../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md](../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md)
   — calibration, ROC/PR curves, and the classical version of the judge-validation problem

@@ -435,97 +435,97 @@ A team wrote `requires jackson.databind;` against Jackson's auto-derived automat
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between `exports` and `opens` in a `module-info.java`?**
+**Q: What is the difference between `exports` and `opens` in a `module-info.java`?**
 **Short:** exports grants compile/runtime API access; opens additionally allows deep reflection into a package.
 
 `exports` grants other modules compile-time and runtime access to a package's public types, while `opens` additionally grants runtime reflective access to non-public members via `setAccessible(true)`. A package can be exported without being opened (normal API use, no reflection allowed), opened without being exported (reflection-only, no direct compile-time reference), or both. Frameworks that reach into private fields or non-public constructors — Spring, Jackson, Hibernate — need `opens`, not just `exports`; grant it qualified to the specific framework module rather than to everyone.
 
-**Why does `setAccessible(true)` throw `InaccessibleObjectException` on a package that is already `exports`ed?**
+**Q: Why does `setAccessible(true)` throw `InaccessibleObjectException` on a package that is already `exports`ed?**
 **Short:** exports only covers public members, so reflection into private ones still needs a separate opens.
 
 Because `exports` only grants access to a package's public members, and `setAccessible(true)` is specifically the mechanism for reaching non-public members. The module system checks a separate permission for that operation — whether the target package is `opens`ed to the caller's module — and throws `InaccessibleObjectException` naming both modules and the package when it isn't. The fix is adding an `opens ... to` directive (or the command-line equivalent, `--add-opens`), never widening `exports`.
 
-**What is a split package, and why does JPMS forbid it outright?**
+**Q: What is a split package, and why does JPMS forbid it outright?**
 **Short:** JPMS forbids split packages because a class's owning module would become ambiguous.
 
 A split package is the same package name declared inside two different modules, and JPMS refuses to resolve a module graph that contains one. Allowing it would mean a class's owning module is ambiguous, and the JDK deliberately will not silently pick a winner the way the classpath does. The fix is always a rename — one of the two modules has to move its classes to a different package name; there is no configuration flag to permit a split package.
 
-**What happens if two modules on the module path both export the same package?**
+**Q: What happens if two modules on the module path both export the same package?**
 **Short:** Two modules exporting the same package fails module resolution before main() even runs.
 
 Module resolution fails at JVM bootstrap, before `main()` runs — the module system refuses to silently pick a winner. It aborts with a `java.lang.module.ResolutionException` (or `FindException`, depending on which resolution phase detects it), naming both modules and the shared package. Contrast this with the classpath, where the identical conflict silently resolves to whichever JAR the classloader happens to see first — exactly the "JAR hell" bug class JPMS exists to eliminate.
 
-**What happened to `--illegal-access` across Java 9, 16, and 17?**
+**Q: What happened to `--illegal-access` across Java 9, 16, and 17?**
 **Short:** --illegal-access defaulted to permit in Java 9, denied by default in Java 16, and was removed in Java 17.
 
 It was a temporary compatibility switch that let classpath code keep reflecting into JDK internals after Java 9 shipped. It defaulted to `permit` (warn once, then allow) in Java 9-15, flipped to `deny` by default in Java 16 (JEP 396), and was removed outright in Java 17 (JEP 403, LTS). After Java 17, the only way to grant reflective access into a package the module system would otherwise block is an explicit, per-module `--add-opens` (or an `opens` directive) — there is no more ecosystem-wide bypass. This is the single most common cause of "it broke on our Java 17 upgrade" incidents involving reflection-heavy libraries.
 
-**What is an automatic module, and what access does it get by default?**
+**Q: What is an automatic module, and what access does it get by default?**
 **Short:** An automatic module is an unmodularized JAR that reads everything and exports all its packages.
 
 An automatic module is a plain JAR with no `module-info.class` that has been placed on the module path. The JDK derives a name for it — from `Automatic-Module-Name` in its manifest if present, otherwise from the filename — and treats it as reading every other module while exporting and opening every package it contains to everyone. It exists purely as a migration bridge, letting an unmodularized dependency participate in the module graph while you wait for it to ship a real module descriptor. It grants none of JPMS's actual encapsulation — that permissiveness is the point, since the JDK has no descriptor telling it which of the JAR's packages are meant to be internal.
 
-**What is the unnamed module, and can a named module read it?**
+**Q: What is the unnamed module, and can a named module read it?**
 **Short:** The unnamed module holds classpath code, which can read every named and automatic module freely.
 
 The unnamed module is where all classpath code lives — it reads every named and automatic module automatically, so classpath code can call any module's exported API without declaring anything. The reverse generally does not hold: a named module cannot see classpath types by default, because there is no module name to put in a `requires` clause for "the classpath," though `--add-reads app.module=ALL-UNNAMED` can grant it explicitly in the rare case it's needed.
 
-**What's the difference between `requires` and `requires transitive`, and when do you need the latter?**
+**Q: What's the difference between `requires` and `requires transitive`, and when do you need the latter?**
 **Short:** requires transitive re-exports a dependency's readability to any module that requires yours.
 
 Plain `requires` only gives your own module readability; `requires transitive` additionally gives that readability to anyone who requires *your* module, without them declaring it themselves. You need `transitive` specifically when a type from the required module appears in your own module's exported public API (a parameter or return type) — otherwise callers get a "package is not visible" compile error the moment they touch that type, even though they can call your method just fine.
 
-**What does `requires static` do, and when is it used?**
+**Q: What does `requires static` do, and when is it used?**
 **Short:** requires static makes a dependency mandatory to compile but optional at runtime.
 
 `requires static` makes a dependency mandatory at compile time but optional at runtime — analogous to Maven's "provided" scope. It's used for annotation-only JARs (e.g. nullability or code-generation annotations) and optional integrations where the calling code only exercises the dependency along a rarely-hit path; if it's genuinely missing at runtime and that path executes anyway, you get a `NoClassDefFoundError` at that point rather than at module resolution.
 
-**Is bottom-up or top-down migration more common in practice, and why?**
+**Q: Is bottom-up or top-down migration more common in practice, and why?**
 **Short:** Top-down migration is more common because it doesn't wait on third-party modules you don't control.
 
 Top-down is more common, because it lets a team start immediately without waiting on third parties they don't control. Modularizing your own application module first, and bridging every unmodularized dependency as an automatic module, lets you start writing real `requires`/`exports` right away. Bottom-up — modularizing leaf dependencies first and working upward — produces fully-encapsulated modules at every step, but stalls hard the moment a leaf is a third-party JAR that hasn't modularized yet, which is why most teams reach for top-down instead.
 
-**Does `ServiceLoader`/`META-INF/services` still work once an application is modularized?**
+**Q: Does `ServiceLoader`/`META-INF/services` still work once an application is modularized?**
 **Short:** A named module must declare service providers with provides...with; legacy META-INF/services is ignored.
 
 Only for automatic modules and classpath JARs — a named module's service providers must be declared with `provides ... with` in its `module-info.java`, and a legacy `META-INF/services/<interface>` file bundled inside a named module's JAR is silently ignored. `ServiceLoader.load()` itself is unchanged either way; only how providers register differs, which is why migrating a plugin loader to JPMS requires no change to the consumer's call site.
 
-**What does `jlink` actually produce, and why is the resulting image smaller than the full JDK?**
+**Q: What does `jlink` actually produce, and why is the resulting image smaller than the full JDK?**
 **Short:** jlink packages only the modules an app actually needs into a self-contained, far-smaller runtime image.
 
 `jlink` produces a self-contained runtime image containing only the modules an application actually needs. It starts from a set of root modules named in `--add-modules`, walks their `requires` edges, and packages only those modules plus a minimal `bin/java` launcher — not the roughly 95 modules that make up the full JDK. Because most applications only ever touch a handful of platform modules (`java.base`, `java.logging`, `java.sql`, and similar), the resulting image commonly lands well under 100MB where the full JDK is several hundred. `--bind-services` is required in addition to `--add-modules` whenever the app relies on `ServiceLoader`, because ordinary resolution follows `requires` edges only and silently drops service-provider-only modules.
 
-**What is `jdeps` used for in a JDK version-upgrade project?**
+**Q: What is `jdeps` used for in a JDK version-upgrade project?**
 **Short:** jdeps statically analyzes bytecode to flag dependencies on internal JDK APIs before an upgrade.
 
 `jdeps` performs static bytecode analysis to report exactly which modules an application's classes depend on. Its `--jdk-internals` flag specifically surfaces usage of unsupported, internal JDK APIs that are likely to break on the next version. Teams run it in CI ahead of an LTS-to-LTS jump (11 to 17, 17 to 21) to catch breakage before a deploy rather than after. Its blind spot is dynamic behavior — a class loaded via a runtime string, or a service provider reached only through `ServiceLoader` — because that isn't visible as a static reference in the bytecode.
 
-**Can two named modules have a circular `requires` dependency?**
+**Q: Can two named modules have a circular `requires` dependency?**
 **Short:** Two modules cannot have a circular requires dependency, since the module graph must be a DAG.
 
 No — `javac` rejects `module a { requires b; }` and `module b { requires a; }` together as a cyclic dependency, because the readability graph must be a DAG. Services (`uses`/`provides`) are the sanctioned way to express a relationship that feels circular, since they're resolved at runtime through `ServiceLoader` rather than through the compile-time `requires` graph, which never has to reason about the cycle.
 
-**What's the practical difference between the module path and the classpath?**
+**Q: What's the practical difference between the module path and the classpath?**
 **Short:** The module path fails fast on missing or duplicate dependencies; the classpath resolves silently.
 
 The module path enforces strong encapsulation and fails fast — missing dependencies, duplicate modules, and split packages all abort JVM bootstrap before `main()` runs with a clear diagnostic. The classpath has none of that: every public type in every JAR is visible to every other JAR, duplicate/split packages silently resolve by classloading order, and a missing class only surfaces as a `ClassNotFoundException` the first time something actually tries to use it, which can be long after startup.
 
-**What is an `open module`, and when would you use it instead of per-package `opens`?**
+**Q: What is an `open module`, and when would you use it instead of per-package `opens`?**
 **Short:** An open module implicitly opens every package for reflection without exporting any of them.
 
 An `open module` implicitly opens every package it contains for deep reflection, as if every package had its own `opens` directive, without exporting any of them by default. It's a reasonable shortcut for a module that is genuinely just data — JPA entities, plain DTOs — where there's no real logic to protect from reflection; for a module carrying real business logic, prefer per-package, qualified `opens ... to` so you aren't handing out reflective access to code that never needed it.
 
-**Which classloader actually loads the classes inside a named module?**
+**Q: Which classloader actually loads the classes inside a named module?**
 **Short:** JPMS reuses the JDK's existing bootstrap, platform, and application classloader hierarchy.
 
 JPMS reuses the JDK's existing three-loader hierarchy rather than introducing a new one. The Bootstrap classloader loads core platform modules, the Platform classloader loads the rest of the `java.se` platform modules, and the Application classloader loads both classpath JARs and the modules on the application module path. Being "named" vs. "unnamed" is metadata carried alongside a class, not a different loader — the one exception is the JDK's own platform modules, which load through the bootstrap/platform loaders exactly as before JPMS existed.
 
-**Why was JPMS built in the first place — what was the actual pain before Java 9?**
+**Q: Why was JPMS built in the first place — what was the actual pain before Java 9?**
 **Short:** JPMS was built to add compiler-enforced encapsulation and reliable configuration missing on the classpath.
 
 Before Java 9, the classpath gave zero compiler-enforced encapsulation — any public class in any JAR was reachable from any other JAR. "Internal" packages like the ones behind `sun.misc.Unsafe` were reflectively accessible to anyone willing to risk it, and there was no way to ship a smaller JVM than the entire monolithic `rt.jar`. JPMS's three stated goals were reliable configuration (fail fast on a broken dependency graph instead of a runtime surprise), strong encapsulation (make "internal" a compiler fact, not a naming convention), and a scalable platform (`jlink` custom images). Adoption has been slower than the JDK team hoped specifically because so much of the ecosystem still ships classpath-only.
 
-**Why should a library publish `Automatic-Module-Name` in its manifest before it ships a real `module-info.java`?**
+**Q: Why should a library publish `Automatic-Module-Name` in its manifest before it ships a real `module-info.java`?**
 **Short:** Publishing Automatic-Module-Name early pins a stable name before the library's real module ships.
 
 Because the filename-derived automatic module name consumers would otherwise depend on can silently change later. Once the library ships its own real module name, every downstream `requires` statement written against the old, derived name breaks at once. Declaring `Automatic-Module-Name` early pins the name the library intends to use permanently, so the eventual transition to a fully named module is invisible to consumers who already wrote `requires` against that name.

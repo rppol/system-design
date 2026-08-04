@@ -1079,9 +1079,9 @@ Because statelessness is what lets you run many notification servers behind a lo
 ## Cross-links in this repo
 
 - [hld/case_studies/design_notification_system.md — the same problem at 500M-DAU scale, with per-provider token buckets, quiet hours, and priority partitions](../../../hld/case_studies/design_notification_system.md)
-- [hld/message_queues/README.md — the queue primitive that decouples producers from providers and absorbs bursts](../../../hld/message_queues/message_queues.md)
-- [hld/rate_limiting/README.md — token-bucket and sliding-window limiters used per user and per provider](../../../hld/rate_limiting/rate_limiting.md)
-- [hld/resilience_patterns/README.md — retry, backoff, and circuit breakers for flaky third-party providers](../../../hld/resilience_patterns/resilience_patterns.md)
+- [hld/message_queues/message_queues.md — the queue primitive that decouples producers from providers and absorbs bursts](../../../hld/message_queues/message_queues.md)
+- [hld/rate_limiting/rate_limiting.md — token-bucket and sliding-window limiters used per user and per provider](../../../hld/rate_limiting/rate_limiting.md)
+- [hld/resilience_patterns/resilience_patterns.md — retry, backoff, and circuit breakers for flaky third-party providers](../../../hld/resilience_patterns/resilience_patterns.md)
 - [Ch 4 — Design A Rate Limiter — the limiter reused here for per-user and per-provider caps](../04_design_a_rate_limiter/04_design_a_rate_limiter.md)
 
 ## Further Reading

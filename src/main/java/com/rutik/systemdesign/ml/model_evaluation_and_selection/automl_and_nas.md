@@ -8,7 +8,7 @@ Neural Architecture Search (NAS) is the deep-learning-specific corner of AutoML:
 
 The single fact that dominates NAS engineering is cost. The 2017 RL-based NASNet search ran on 500 GPUs for 4 days = **2000 GPU-days**; the differentiable method DARTS reports **1.5 GPU-days (first-order) and 4 GPU-days (second-order)** on CIFAR-10 in its own Table 1 — a **500x to 1300x** reduction — by replacing "train thousands of networks from scratch" with "train one shared supernet once." Transfer accuracy is close but not equal: in the ImageNet mobile setting DARTS reports 26.7% top-1 error against NASNet-A's 26.0%. This module covers that landscape and the multi-fidelity HPO methods (Successive Halving → ASHA → Hyperband → BOHB) that make both AutoML and NAS affordable.
 
-This sub-file **extends** the parent module ([../model_evaluation_and_selection/README.md](model_evaluation_and_selection.md), which covers Optuna/TPE, GridSearchCV, RandomizedSearchCV) and the Hyperband/BOHB treatment in [../experiment_tracking_and_versioning/README.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md). It does not repeat them — it cross-links and adds ASHA and NAS, which neither covers.
+This sub-file **extends** the parent module ([../model_evaluation_and_selection/model_evaluation_and_selection.md](model_evaluation_and_selection.md), which covers Optuna/TPE, GridSearchCV, RandomizedSearchCV) and the Hyperband/BOHB treatment in [../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md). It does not repeat them — it cross-links and adds ASHA and NAS, which neither covers.
 
 ---
 
@@ -336,7 +336,7 @@ ASHA differs from synchronous SHA in one decisive way: it never blocks. Synchron
 
 ### 6.4 Optuna with a Hyperband pruner (cross-link, not repeat)
 
-The parent module ([../model_evaluation_and_selection/README.md](model_evaluation_and_selection.md)) covers TPE and the `MedianPruner` in depth. The only net addition here is that Optuna can use a multi-fidelity pruner directly, giving Hyperband-style early stopping inside a TPE search:
+The parent module ([../model_evaluation_and_selection/model_evaluation_and_selection.md](model_evaluation_and_selection.md)) covers TPE and the `MedianPruner` in depth. The only net addition here is that Optuna can use a multi-fidelity pruner directly, giving Hyperband-style early stopping inside a TPE search:
 
 ```python
 import optuna
@@ -351,7 +351,7 @@ study = optuna.create_study(
 # study.optimize(objective, n_trials=200)  -> this is essentially BOHB
 ```
 
-TPESampler + HyperbandPruner is, conceptually, BOHB. See [../experiment_tracking_and_versioning/README.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) for the Hyperband/BOHB scheduling internals.
+TPESampler + HyperbandPruner is, conceptually, BOHB. See [../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) for the Hyperband/BOHB scheduling internals.
 
 ### 6.5 DARTS — differentiable NAS (torch sketch)
 
@@ -588,7 +588,7 @@ Running an AutoML search without `per_run_time_limit` lets one pathological pipe
 | Once-for-All | supernet NAS | one supernet, per-target sub-nets, no retrain |
 | NAS-Bench-201 / NATS-Bench | NAS benchmarks | tabular lookup of architectures for fair comparison |
 
-Cross-links: [../gpu_and_hardware_optimization/README.md](../gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) (profiling, tensor cores — where the GPU-days go), [../distributed_training/README.md](../distributed_training/distributed_training.md) (DDP/FSDP to parallelize supernet training), [../model_compression_and_efficiency/README.md](../model_compression_and_efficiency/model_compression_and_efficiency.md) (quantization/pruning/distillation that pair with hardware-aware NAS).
+Cross-links: [../gpu_and_hardware_optimization/gpu_and_hardware_optimization.md](../gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) (profiling, tensor cores — where the GPU-days go), [../distributed_training/distributed_training.md](../distributed_training/distributed_training.md) (DDP/FSDP to parallelize supernet training), [../model_compression_and_efficiency/model_compression_and_efficiency.md](../model_compression_and_efficiency/model_compression_and_efficiency.md) (quantization/pruning/distillation that pair with hardware-aware NAS).
 
 ---
 
@@ -678,7 +678,7 @@ TPE decides *which* configuration to try next from past results, while Hyperband
 6. When DARTS produces a skip-heavy cell, switch to **DARTS+/P-DARTS** or add a skip-connect regularizer — it is collapsing, not converging.
 7. **Retrain the top-k weight-sharing candidates standalone** before final selection to correct supernet rank disorder.
 8. Cap **per-trial wall-clock** and total budget; one pathological pipeline can eat the whole search otherwise.
-9. Log every trial (config, budget, score, seed, GPU-hours) with MLflow/W&B — see [../experiment_tracking_and_versioning/README.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md); NAS is un-reproducible without it.
+9. Log every trial (config, budget, score, seed, GPU-hours) with MLflow/W&B — see [../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md); NAS is un-reproducible without it.
 10. Prefer **transfer learning or a known backbone** before committing GPU-months to NAS — most single-task problems do not need a bespoke architecture.
 
 ---
@@ -736,9 +736,9 @@ EfficientNet-B0 has the highest raw accuracy and still finishes last, because 25
 
 A FLOP count would have ranked these blocks completely differently — depthwise convolutions are FLOP-cheap but memory-bandwidth-bound, so on this SoC they cost far more wall-clock than their arithmetic suggests. Putting measured milliseconds in the objective is what let the search find a 27 ms model when three weeks of FLOP-guided hand-tuning could not clear both budgets at once.
 
-4. **Estimation** — a Once-for-All-style elastic supernet trained once (~1200 GPU-hours across 8 GPUs via DDP — see [../distributed_training/README.md](../distributed_training/distributed_training.md)), then sub-nets extracted per latency budget with no retraining.
+4. **Estimation** — a Once-for-All-style elastic supernet trained once (~1200 GPU-hours across 8 GPUs via DDP — see [../distributed_training/distributed_training.md](../distributed_training/distributed_training.md)), then sub-nets extracted per latency budget with no retraining.
 5. **Search** — ASHA over sub-net candidates ranked by the supernet, top-10 retrained standalone to correct weight-sharing rank disorder.
-6. **Compression** — the chosen sub-net is INT8 quantization-aware-trained and pruned per [../model_compression_and_efficiency/README.md](../model_compression_and_efficiency/model_compression_and_efficiency.md), landing under both budgets.
+6. **Compression** — the chosen sub-net is INT8 quantization-aware-trained and pruned per [../model_compression_and_efficiency/model_compression_and_efficiency.md](../model_compression_and_efficiency/model_compression_and_efficiency.md), landing under both budgets.
 
 **Results:**
 

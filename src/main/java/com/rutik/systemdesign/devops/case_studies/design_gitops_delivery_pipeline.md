@@ -80,7 +80,7 @@ flowchart TD
 
 *A control loop nested inside a control loop inside a control loop: a human's PR merge (outer) triggers a Git-vs-cluster diff (middle), and a drifted Rollout resource kicks off a metric-gated traffic shift (inner) — each ring runs on its own cadence, from "per merge" down to "per canary step."*
 
-Why this system exists: at 50 clusters × 500 apps, no human can `kubectl apply` reliably, no human can detect drift across 25,000 live objects, and no human can babysit every one of the ~300 daily deployments. The pipeline must be **declarative** (auditable in Git), **convergent** (self-healing), and **safe-by-default** (metric-gated promotion with automatic rollback). This file designs exactly that, building on [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md) and [`../deployment_strategies/README.md`](../deployment_strategies/deployment_strategies.md).
+Why this system exists: at 50 clusters × 500 apps, no human can `kubectl apply` reliably, no human can detect drift across 25,000 live objects, and no human can babysit every one of the ~300 daily deployments. The pipeline must be **declarative** (auditable in Git), **convergent** (self-healing), and **safe-by-default** (metric-gated promotion with automatic rollback). This file designs exactly that, building on [`../gitops_argocd_flux/gitops_argocd_flux.md`](../gitops_argocd_flux/gitops_argocd_flux.md) and [`../deployment_strategies/deployment_strategies.md`](../deployment_strategies/deployment_strategies.md).
 
 ---
 
@@ -113,7 +113,7 @@ Why this system exists: at 50 clusters × 500 apps, no human can `kubectl apply`
 
 ### Out of Scope
 
-- CI / image build (covered by [`../ci_cd_fundamentals/README.md`](../ci_cd_fundamentals/ci_cd_fundamentals.md)).
+- CI / image build (covered by [`../ci_cd_fundamentals/ci_cd_fundamentals.md`](../ci_cd_fundamentals/ci_cd_fundamentals.md)).
 - Cluster provisioning / IaC (Terraform — see [`cross_cutting/terraform_state_at_scale.md`](cross_cutting/terraform_state_at_scale.md)).
 - Service mesh internals (assumed: Istio or a Gateway-API ingress for traffic splitting).
 - Application-level feature flags (complementary, not replaced).

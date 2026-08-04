@@ -162,7 +162,7 @@ Pick 2-3 components to go deep on (interviewer often guides):
 - [Design a Metrics Monitoring System](case_studies/design_metrics_monitoring.md)
 - [Design Google Drive](case_studies/design_google_drive.md)
 
-See [case_studies/README.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
+See [case_studies/case_studies.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
 
 ---
 
@@ -234,7 +234,7 @@ A different cut, not senior-plus-extras. The Principal Path probes the tradeoff 
 
 ## Knowledge-Question Map
 
-The highest-frequency HLD interview questions mapped to the module that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency HLD interview questions mapped to the module that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|

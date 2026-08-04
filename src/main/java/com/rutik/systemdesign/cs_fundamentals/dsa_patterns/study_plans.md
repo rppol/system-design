@@ -639,7 +639,7 @@ Match phase.*
 
 ## 6. Cross-Links
 
-- [dsa_patterns/README.md](dsa_patterns.md) — the recognition engine these
+- [dsa_patterns/dsa_patterns.md](dsa_patterns.md) — the recognition engine these
   problems drill; if a problem here surprises you (you expected a different
   pattern), revisit §4/§5 (cue table / decision tree)
 - [interview_execution_playbook.md](interview_execution_playbook.md) — once

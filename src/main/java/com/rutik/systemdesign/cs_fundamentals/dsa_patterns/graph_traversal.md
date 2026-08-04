@@ -659,7 +659,7 @@ from multiple sources" problems (Rotting Oranges), BFS is required because it
 explores in increasing-distance order — DFS would find *a* path, not
 necessarily the *shortest* one.
 
-**Why seed a multi-source BFS with all sources at once instead of running BFS
+**Q: Why seed a multi-source BFS with all sources at once instead of running BFS
 from each source separately?**
 Running BFS once per source and taking the minimum would be correct but
 wasteful — O(k · rows · cols) for k sources. Seeding the queue with all k
@@ -668,7 +668,7 @@ distance to the *nearest* source in a single O(rows · cols) pass, because BFS
 processes cells in increasing-distance order regardless of which source they
 came from.
 
-**In the BROKEN→FIX example, why exactly does marking visited "too late" cause
+**Q: In the BROKEN→FIX example, why exactly does marking visited "too late" cause
 infinite recursion, and not just extra work?**
 Because the guard condition `grid[r][c] != "1"` is the *only* thing that stops
 recursion, and it's checked at the *top* of each call using the grid's current
@@ -687,7 +687,7 @@ that corresponds to old node A," which requires a mapping (`old_to_new`), not
 just a boolean set. Registering the new node in the map *before* recursing
 into its neighbors is what makes cycles terminate correctly.
 
-**Why does Word Ladder generate neighbors via 26-letter substitution instead
+**Q: Why does Word Ladder generate neighbors via 26-letter substitution instead
 of comparing every pair of words?**
 Comparing every pair of n words to check "differs by one letter" costs
 O(n² · L) where L is word length. Generating neighbors by trying all 26
@@ -703,7 +703,7 @@ majority of problems) or mention diagonal connections (8-directional). When
 in doubt, 4-directional (`DIRECTIONS_4`) is the default; extending to 8
 directions is a one-line change to the directions list.
 
-**Why is Pacific Atlantic Water Flow solved with two traversals from the
+**Q: Why is Pacific Atlantic Water Flow solved with two traversals from the
 borders instead of one traversal per cell?**
 Checking, from each cell, whether water can reach both oceans would require a
 traversal *from* that cell — O(rows · cols) work per cell, O((rows·cols)²)
@@ -713,7 +713,7 @@ O(rows · cols) each. A cell can reach an ocean iff that ocean's
 backwards-traversal reached the cell. The answer is the intersection of the
 two reachable sets — O(rows · cols) total instead of quadratic.
 
-**What's the difference between Surrounded Regions and Number of Islands —
+**Q: What's the difference between Surrounded Regions and Number of Islands —
 both involve counting/marking regions of the same character?**
 Number of Islands counts *all* connected regions independently. Surrounded
 Regions requires knowing whether a region touches the border — which is a
@@ -722,7 +722,7 @@ The trick is to invert the search: instead of checking "is this region
 surrounded," find all regions connected to the border (which can never be
 surrounded) first, mark them safe, then flip everything else.
 
-**Can recursive DFS on a grid cause a stack overflow, and how do you avoid
+**Q: Can recursive DFS on a grid cause a stack overflow, and how do you avoid
 it?**
 Yes — Python's default recursion limit is ~1000, and a single long, winding
 island can have a DFS call depth equal to its cell count. A grid as small as
@@ -731,7 +731,7 @@ The fix is an **iterative DFS using an explicit stack** (a list, push/pop) or
 switching to BFS with a `deque` — both have identical time/space complexity
 but no call-stack depth limit (bounded only by available memory).
 
-**How would you adapt `num_islands` to also return the size of the largest
+**Q: How would you adapt `num_islands` to also return the size of the largest
 island (Max Area of Island, LC 695)?**
 Change `dfs` from a `None`-returning side-effecting function to one that
 *returns* `1 + dfs(up) + dfs(down) + dfs(left) + dfs(right)` (with the same
@@ -739,7 +739,7 @@ Change `dfs` from a `None`-returning side-effecting function to one that
 Track `max(area, dfs(r, c))` in the outer loop instead of just incrementing a
 counter.
 
-**In `bfs_shortest_path`, why must you check `(nr, nc) not in visited` *before*
+**Q: In `bfs_shortest_path`, why must you check `(nr, nc) not in visited` *before*
 appending to the queue, rather than when popping?**
 If you only check `visited` when popping, the same cell can be appended to the
 queue multiple times by different neighbors *before* any of those copies are

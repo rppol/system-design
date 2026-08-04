@@ -609,7 +609,7 @@ the same "are X and Y connected?" query repeats many times.*
 
 ## 11. Interview Q&A
 
-**Why is Union-Find described as "near O(1)" when `find` walks up a tree —
+**Q: Why is Union-Find described as "near O(1)" when `find` walks up a tree —
 isn't that O(log n) or worse?**
 Without any optimization, yes — a degenerate union sequence can produce an
 O(n)-deep tree. But **path compression** (every `find` call rewires nodes on
@@ -619,7 +619,7 @@ per operation to `O(α(n))`, where `α` is the inverse Ackermann function.
 `α(n) <= 4` for any `n` smaller than the number of atoms in the observable
 universe — so "near O(1)" is not an exaggeration, it's a tight, proven bound.
 
-**When would you choose DFS/BFS over Union-Find for a connectivity problem,
+**Q: When would you choose DFS/BFS over Union-Find for a connectivity problem,
 and vice versa?**
 If you're given the *whole* graph upfront and need to answer connectivity
 questions **once** (e.g., "how many connected components does this static
@@ -629,7 +629,7 @@ you need the answer to update after each one (Number of Islands II), or (2)
 you need to answer **many** "are X and Y connected?" queries efficiently
 without re-traversing the graph each time.
 
-**Walk through path compression step by step — what actually changes in the
+**Q: Walk through path compression step by step — what actually changes in the
 `parent` array?**
 `find(x)` recurses up to the root, then on the way back *down* the call
 stack, sets `parent[node] = root` for every node visited. So if `3 -> 2 -> 0`
@@ -651,7 +651,7 @@ Each element starts in its **own** singleton set, and the representative
 the base case / termination condition for `find` — "if I am my own parent, I
 am the root, stop here."
 
-**Walk through the off-by-one bug in §8 — why specifically does `find(3)`
+**Q: Walk through the off-by-one bug in §8 — why specifically does `find(3)`
 crash, and what's the general lesson?**
 `UnionFindBroken(3)` allocates `parent = [0, 1, 2]` — valid indices are `0`,
 `1`, `2`. But the problem's nodes are 1-indexed up to `n=3`, so node `3` is a
@@ -660,7 +660,7 @@ writing `UnionFind(n)`, check the problem's node-numbering convention** and
 size the array to `max_possible_node_value + 1`, regardless of what `n`
 "means" in the problem statement.
 
-**How does Union-Find detect a cycle, and why does that NOT generalize to
+**Q: How does Union-Find detect a cycle, and why does that NOT generalize to
 directed graphs?**
 For an undirected edge `(u, v)`: if `find(u) == find(v)` *before* you union
 them, then `u` and `v` were already connected via some other path — adding
@@ -684,7 +684,7 @@ create a cycle — skip it. The greedy correctness (cheapest non-cycle-forming
 edge is always safe to add) is the Cut Property of MSTs; Union-Find is just
 the efficient mechanism for the cycle check.
 
-**What extra state does weighted Union-Find (Evaluate Division) need beyond
+**Q: What extra state does weighted Union-Find (Evaluate Division) need beyond
 plain Union-Find?**
 A `weight[x]` array, where `weight[x]` represents the ratio `x / parent[x]`.
 `find(x)` must accumulate the product of `weight` values along the path to
@@ -694,7 +694,7 @@ again). `union(x, y, value)` — given `x / y == value` — computes the relativ
 weight between `x`'s root and `y`'s root using the already-known ratios
 `x/root_x` and `y/root_y`.
 
-**For Number of Islands II, why is Union-Find preferred over re-running DFS
+**Q: For Number of Islands II, why is Union-Find preferred over re-running DFS
 after every cell addition?**
 Re-running DFS from scratch after each of `k` additions costs
 `O(k * rows * cols)` in the worst case. With Union-Find, each addition is one
@@ -702,7 +702,7 @@ Re-running DFS from scratch after each of `k` additions costs
 additions cost roughly `O(k * α(rows*cols))`, which is dramatically cheaper
 for large grids with many incremental updates.
 
-**What does `self.count` track, and what's the subtlety in maintaining it
+**Q: What does `self.count` track, and what's the subtlety in maintaining it
 correctly?**
 `self.count` is the number of disjoint sets (connected components) currently.
 It starts at `n` (everything isolated) and decrements by exactly 1 **only

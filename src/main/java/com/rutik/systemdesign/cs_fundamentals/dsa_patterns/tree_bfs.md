@@ -590,7 +590,7 @@ rather than crashing — easy to miss if the test only checks total node count.
   `ArrayDeque` is the standard Java BFS queue (avoid `LinkedList` as a queue
   for performance); `TreeMap`'s red-black tree balancing relates to the
   `trees_and_binary_search_trees` concept module.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
+- Master recognition engine: [dsa_patterns/dsa_patterns.md](dsa_patterns.md).
 - Sibling pattern: [tree_dfs.md](tree_dfs.md).
 
 ---

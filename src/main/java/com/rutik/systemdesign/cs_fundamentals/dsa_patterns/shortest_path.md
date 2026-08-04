@@ -663,7 +663,7 @@ tentative distance, and **happily overwrote it** — there's no notion of
 
 ## 11. Interview Q&A
 
-**Why doesn't Dijkstra work with negative edge weights — what specifically
+**Q: Why doesn't Dijkstra work with negative edge weights — what specifically
 breaks?**
 Dijkstra's correctness relies on the invariant "when a node is popped, its
 distance is final," which is proven using the fact that all *unpopped* nodes
@@ -674,7 +674,7 @@ already-finalized distance — exactly the scenario traced in §8, where
 `C->B (-5)` makes the true `dist[B] = -3`, but `B` was already finalized at
 `1`.
 
-**Dijkstra vs. Bellman-Ford — beyond "negative weights," what's the practical
+**Q: Dijkstra vs. Bellman-Ford — beyond "negative weights," what's the practical
 tradeoff?**
 Dijkstra is `O((V+E) log V)` — much faster for large graphs, but requires
 non-negative weights. Bellman-Ford is `O(V*E)` — works with negative weights
@@ -692,7 +692,7 @@ edge moves it to the *next* tier (push to back) — the deque's two ends
 naturally represent "current tier" and "next tier" without needing a heap's
 full ordering capability.
 
-**When is Floyd-Warshall's O(V^3) actually acceptable, and what extra
+**Q: When is Floyd-Warshall's O(V^3) actually acceptable, and what extra
 information does it give you that running Dijkstra V times doesn't?**
 O(V^3) is fine for `V` up to a few hundred (10^6-10^8 operations). Running
 Dijkstra from every node is `O(V * (E log V))` — for dense graphs
@@ -701,7 +701,7 @@ Dijkstra from every node is `O(V * (E log V))` — for dense graphs
 cycles) more simply than running Bellman-Ford from every node
 (`O(V^2 * E)`).
 
-**Why doesn't plain Dijkstra directly solve "Cheapest Flights Within K
+**Q: Why doesn't plain Dijkstra directly solve "Cheapest Flights Within K
 Stops"?**
 Dijkstra's greedy invariant assumes that once the cheapest path to a node is
 found, it's final — but here, the cheapest *overall* path to a node might use
@@ -712,7 +712,7 @@ and a *worse* cost but still be useful, which violates "first pop is final."
 Bellman-Ford limited to `K+1` rounds sidesteps this naturally — round `i`
 represents "best cost using at most `i` edges."
 
-**Why use a min-heap in Dijkstra instead of just scanning all unvisited nodes
+**Q: Why use a min-heap in Dijkstra instead of just scanning all unvisited nodes
 for the minimum each iteration (the textbook O(V^2) version)?**
 Both are correct. The O(V^2) scan is actually *better* for **dense** graphs
 (`E ~ V^2`) because `O(V^2)` beats `O((V+E) log V) = O(V^2 log V)`. The
@@ -721,7 +721,7 @@ heap-based version wins for **sparse** graphs (`E ~ V`), where
 so the heap version is the default — but knowing the dense-graph alternative
 is a strong signal of depth in an interview.
 
-**How does Bellman-Ford detect a negative cycle, and why does it take exactly
+**Q: How does Bellman-Ford detect a negative cycle, and why does it take exactly
 `V-1 + 1` rounds?**
 Any shortest *simple* path (no repeated nodes) in a graph with `V` nodes has
 at most `V-1` edges. So after `V-1` rounds of relaxing all edges, every
@@ -731,7 +731,7 @@ infinitely to keep decreasing cost). The `V`-th round (one extra relaxation
 pass) checks: if *anything* still improves after `V-1` rounds, that
 improvement can only come from a negative cycle.
 
-**Path with Maximum Probability uses a max-heap and multiplies probabilities
+**Q: Path with Maximum Probability uses a max-heap and multiplies probabilities
 — why does the greedy "pop is final" invariant still hold here?**
 The invariant requires that extending a path can never *help* relative to
 stopping early — i.e., the "combine" operation must be monotonically
@@ -748,7 +748,7 @@ each BFS layer corresponds to exactly one unit of distance. Dijkstra
 generalizes this to arbitrary non-negative weights by replacing the queue's
 implicit ordering with an explicit min-heap.
 
-**The `if d > dist[u]: continue` line in Template 1 — what does it do, and
+**Q: The `if d > dist[u]: continue` line in Template 1 — what does it do, and
 does omitting it cause wrong answers or just inefficiency?**
 It skips "stale" heap entries — a node can be pushed onto the heap multiple
 times (once per relaxation that improved its distance), but only the
@@ -759,7 +759,7 @@ larger `d` to "worsen" `dist[v]`) — it only causes redundant heap operations
 on entries that will immediately fail the relaxation check anyway. It's a
 performance optimization, not a correctness requirement.
 
-**For DAG shortest path via topological sort, why is it both faster AND more
+**Q: For DAG shortest path via topological sort, why is it both faster AND more
 general (handles negative weights) than Dijkstra?**
 A DAG has no cycles, so "negative cycle" is impossible by definition —
 Bellman-Ford's only advantage over Dijkstra (negative-weight tolerance) comes

@@ -48,7 +48,7 @@ This platform exists because at 2000 engineers and ~4000 microservices, no singl
 - Long-term (multi-year) compliance log archival to Glacier — handled by the security/SIEM pipeline.
 - Synthetic monitoring / probing (Blackbox exporter is referenced but its design is a separate doc).
 
-See [`../observability_metrics_prometheus/README.md`](../observability_metrics_prometheus/observability_metrics_prometheus.md), [`../observability_logging/README.md`](../observability_logging/observability_logging.md), and [`../observability_tracing_and_otel/README.md`](../observability_tracing_and_otel/observability_tracing_and_otel.md) for the underlying single-system modules this case study composes.
+See [`../observability_metrics_prometheus/observability_metrics_prometheus.md`](../observability_metrics_prometheus/observability_metrics_prometheus.md), [`../observability_logging/observability_logging.md`](../observability_logging/observability_logging.md), and [`../observability_tracing_and_otel/observability_tracing_and_otel.md`](../observability_tracing_and_otel/observability_tracing_and_otel.md) for the underlying single-system modules this case study composes.
 
 ---
 

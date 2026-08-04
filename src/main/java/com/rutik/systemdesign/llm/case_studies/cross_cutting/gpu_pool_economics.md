@@ -938,8 +938,8 @@ Work the batch arithmetic: 50 steps for a batch of 4 images is 50 x 6 TFLOP x 4 
 ---
 
 *Cross-references*:
-- Inference engines: [`../../inference_engines/README.md`](../../inference_engines/inference_engines.md)
-- vLLM internals: [`../../vllm_deep_dive/README.md`](../../vllm_deep_dive/vllm_deep_dive.md)
-- Quantization (FP8, INT8): [`../../optimization_and_quantization/README.md`](../../optimization_and_quantization/optimization_and_quantization.md)
-- Token cost modeling: [`../../token_economics_and_cost_optimization/README.md`](../../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md)
-- Deployment and MLOps: [`../../deployment_and_mlops/README.md`](../../deployment_and_mlops/deployment_and_mlops.md)
+- Inference engines: [`../../inference_engines/inference_engines.md`](../../inference_engines/inference_engines.md)
+- vLLM internals: [`../../vllm_deep_dive/vllm_deep_dive.md`](../../vllm_deep_dive/vllm_deep_dive.md)
+- Quantization (FP8, INT8): [`../../optimization_and_quantization/optimization_and_quantization.md`](../../optimization_and_quantization/optimization_and_quantization.md)
+- Token cost modeling: [`../../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md`](../../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md)
+- Deployment and MLOps: [`../../deployment_and_mlops/deployment_and_mlops.md`](../../deployment_and_mlops/deployment_and_mlops.md)

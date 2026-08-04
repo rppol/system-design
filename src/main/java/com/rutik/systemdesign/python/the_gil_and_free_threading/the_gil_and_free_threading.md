@@ -1214,5 +1214,5 @@ is the moment your bottleneck moved.
 4. Always measure; do not assume that more concurrency primitives equals more speed.
 
 **Cross-references:**
-- Compare with Java's synchronized blocks and JVM threading model: [`../../java/concurrency/README.md`](../../java/concurrency/concurrency.md)
-- For asyncio's approach to concurrency (no GIL needed for I/O-bound): [`../asyncio_and_event_loop/README.md`](../asyncio_and_event_loop/asyncio_and_event_loop.md)
+- Compare with Java's synchronized blocks and JVM threading model: [`../../java/concurrency/concurrency.md`](../../java/concurrency/concurrency.md)
+- For asyncio's approach to concurrency (no GIL needed for I/O-bound): [`../asyncio_and_event_loop/asyncio_and_event_loop.md`](../asyncio_and_event_loop/asyncio_and_event_loop.md)

@@ -935,11 +935,11 @@ A: Open Connect's physical logistics — growing the appliance fleet tenfold bec
 
 ## Cross-References
 
-- **CDN architecture and edge caching** -> [`../cdn/README.md`](../cdn/cdn.md), [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
-- **Cassandra / wide-column metadata storage** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/wide_column_databases.md)
-- **EVCache read-through caching in front of Cassandra** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/database_caching_patterns.md)
-- **700+ microservices, Eureka/Zuul** -> [`../microservices/README.md`](../microservices/microservices.md), [`../../backend/microservices_fundamentals/README.md`](../../backend/microservices_fundamentals/microservices_fundamentals.md)
-- **Hystrix/Resilience4j circuit breakers** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md), [`../../spring/spring_cloud_patterns/README.md`](../../spring/spring_cloud_patterns/spring_cloud_patterns.md)
-- **Cross-region Cassandra replication (LOCAL_QUORUM)** -> [`../../database/replication_and_high_availability/README.md`](../../database/replication_and_high_availability/replication_and_high_availability.md), [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
-- **Watch-event streaming for analytics/training** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **CDN architecture and edge caching** -> [`../cdn/cdn.md`](../cdn/cdn.md), [`../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
+- **Cassandra / wide-column metadata storage** -> [`../../database/wide_column_databases/wide_column_databases.md`](../../database/wide_column_databases/wide_column_databases.md)
+- **EVCache read-through caching in front of Cassandra** -> [`../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md), [`../../database/database_caching_patterns/database_caching_patterns.md`](../../database/database_caching_patterns/database_caching_patterns.md)
+- **700+ microservices, Eureka/Zuul** -> [`../microservices/microservices.md`](../microservices/microservices.md), [`../../backend/microservices_fundamentals/microservices_fundamentals.md`](../../backend/microservices_fundamentals/microservices_fundamentals.md)
+- **Hystrix/Resilience4j circuit breakers** -> [`../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md), [`../../spring/spring_cloud_patterns/spring_cloud_patterns.md`](../../spring/spring_cloud_patterns/spring_cloud_patterns.md)
+- **Cross-region Cassandra replication (LOCAL_QUORUM)** -> [`../../database/replication_and_high_availability/replication_and_high_availability.md`](../../database/replication_and_high_availability/replication_and_high_availability.md), [`../../database/consistency_models_and_consensus/consistency_models_and_consensus.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
+- **Watch-event streaming for analytics/training** -> [`../../backend/kafka_deep_dive/kafka_deep_dive.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
 

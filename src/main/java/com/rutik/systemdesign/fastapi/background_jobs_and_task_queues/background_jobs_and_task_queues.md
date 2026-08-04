@@ -5,8 +5,8 @@ senior: background_jobs_and_task_queues.md
 principal: background_jobs_and_task_queues.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
-> Cross-references: [`../../async_patterns_and_pitfalls/README.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md),
-> [`../message_queues_and_event_driven/README.md`](../message_queues_and_event_driven/message_queues_and_event_driven.md),
+> Cross-references: [`../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md),
+> [`../message_queues_and_event_driven/message_queues_and_event_driven.md`](../message_queues_and_event_driven/message_queues_and_event_driven.md),
 > [`../../../hld/case_studies/`](../../hld/case_studies/case_studies.md)
 
 ---

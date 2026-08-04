@@ -485,83 +485,83 @@ A singleton `ConfigService` let short-lived, per-request objects register a `Con
 
 ## 12. Interview Questions with Answers
 
-**Why does `PhantomReference.get()` always return `null`, unlike `WeakReference.get()`?**
+**Q: Why does `PhantomReference.get()` always return `null`, unlike `WeakReference.get()`?**
 **Short:** PhantomReference.get() is hard-coded to return null so a reclaimable object can never be resurrected through it.
 It is hard-coded that way so a reclaimable object can never be resurrected through it. `Weak`/`SoftReference.get()` return the live referent right up until the GC clears it — fine for caching, but if cleanup code could still read the referent back, it could accidentally re-publish a strong reference and undo the very death the reference exists to observe. Phantom references trade away readability entirely: the only information available is that `queue.remove()` returned something, never the object itself.
 
-**What is the classic bug that silently stops a `Cleaner` from ever running its action?**
+**Q: What is the classic bug that silently stops a `Cleaner` from ever running its action?**
 **Short:** A Cleaner never fires when its cleanup Runnable holds a strong reference back to the object it is meant to clean.
 The cleanup `Runnable` captures a reference back to the object it should clean, usually via a non-static inner class or a lambda that reads an instance field. That reference is itself a strong path, so the registered object can never become phantom-reachable, the `Cleaner` never fires, and the resource leaks with no exception and no log line to notice it by. The fix is mechanical: make the cleanup state a `static` nested class holding only the raw resource handle, never the enclosing object.
 
-**Why can a `WeakHashMap` entry survive indefinitely even though its key has no external strong references?**
+**Q: Why can a `WeakHashMap` entry survive indefinitely even though its key has no external strong references?**
 **Short:** A WeakHashMap entry survives when its value strongly references its own key, defeating the weak wrapping entirely.
 Because the map's values are held by ordinary strong references, and a value that references its own key back defeats the weak wrapping entirely. `WeakHashMap` only weakens the key slot; if `value.owner == key` (a common accidental cycle), the map provides a strong path to the value, and the value provides a strong path back to the key, so neither can ever become just-weakly-reachable. This is the single most common `WeakHashMap` production bug — it looks like a self-cleaning cache but never actually cleans anything.
 
-**Why doesn't calling `ThreadLocal.remove()` fully solve leaks if a fresh `ThreadLocal` instance is created on every request?**
+**Q: Why doesn't calling `ThreadLocal.remove()` fully solve leaks if a fresh `ThreadLocal` instance is created on every request?**
 **Short:** remove() only clears the slot for that exact ThreadLocal instance, so a freshly created ThreadLocal per request still leaks.
 Because `remove()` only clears the slot for the specific `ThreadLocal` instance it is called on, and a per-request `ThreadLocal` is a different instance every time. Each pooled thread's `ThreadLocalMap` accumulates one `Entry` per distinct `ThreadLocal` object it has ever seen; the old instance's key does get weakly cleared by the GC on its own, but its value becomes a stale entry that survives until an unrelated future `set()`/`get()` on that same thread happens to probe that exact slot. The fix is always to hold `ThreadLocal` instances in `static final` fields, never construct them per call.
 
-**How many times does a registered `Cleaner` action run, and what triggers it?**
+**Q: How many times does a registered `Cleaner` action run, and what triggers it?**
 **Short:** A registered Cleaner action runs at most once, triggered by either an explicit clean() call or phantom-reachability.
 At most once, whichever trigger comes first: an explicit `cleanable.clean()` call, or the object becoming phantom-reachable. That is what makes it safe to call `close()` on a `try-with-resources` path and still keep the registration as a backstop — the second trigger is a no-op, not a double free. It also means the action must be written to be correct on the `Cleaner`'s own daemon thread, since that is where the GC-driven path runs it.
 
-**What happens if a `Cleaner` action throws an exception?**
+**Q: What happens if a `Cleaner` action throws an exception?**
 **Short:** Exceptions thrown by a Cleaner action are silently ignored, so a cleanup bug fails with no log or stack trace.
 The javadoc is explicit: all exceptions thrown by the cleaning action are ignored, and neither the cleaner nor any other registered action is affected. That isolation is useful, but it also means a bug in the code responsible for releasing a file handle, socket, or native buffer fails completely invisibly — no log, no stack trace, no application-visible signal. Any action worth registering should therefore catch and report its own failures rather than relying on the framework to surface them.
 
-**Why is `SoftReference` a poor substitute for a properly bounded cache like Caffeine?**
+**Q: Why is `SoftReference` a poor substitute for a properly bounded cache like Caffeine?**
 **Short:** SoftReference eviction timing depends on heap size and allocation pressure, not on any policy you control.
 Because its eviction timing depends on heap size and allocation pressure, not on any cache policy you control. Identical code behaves differently on a small heap versus a large one, which makes it nearly impossible to load-test deterministically — `SoftRefLRUPolicyMSPerMB` defaults to 1000ms of survival per free megabyte, so a comfortably-sized heap can hold "soft" entries far longer than intended, while a heap under pressure evicts them far more aggressively than any fixed-size or TTL policy would. A size- and time-bounded cache (Caffeine's `maximumSize`/`expireAfterWrite`) gives a predictable memory footprint and hit rate instead.
 
-**What are the five reachability levels, from strongest to weakest, and what distinguishes each?**
+**Q: What are the five reachability levels, from strongest to weakest, and what distinguishes each?**
 **Short:** The five reachability levels, strongest to weakest, are strong, soft, weak, phantom, and unreachable.
 Strongly, softly, weakly, phantom reachable, and unreachable are the five levels, each one defined as unreachable at any stronger level but reachable through that level's own reference type. Strongly reachable needs no `Reference` object at all; softly/weakly reachable require traversing a `Soft`/`WeakReference`; phantom reachable additionally requires that the object has already been finalized; unreachable means none of the above holds and the memory can be reclaimed. The levels are strictly nested by definition, which is also why the GC evaluates them in that exact order every cycle.
 
-**In what order does a garbage collection cycle process Soft, Weak, and Phantom references?**
+**Q: In what order does a garbage collection cycle process Soft, Weak, and Phantom references?**
 **Short:** A GC cycle evaluates Soft references first, then clears remaining Weak references, and only then enqueues Phantom references.
 Strongly-reachable objects are marked first, then `Soft` references are evaluated, then remaining `Weak` references are cleared unconditionally, and only then are `Phantom` references enqueued. That ordering exists because phantom-reachability is defined to require that finalization has already completed, and a class that does not override `finalize()` — true of nearly every class today — satisfies that condition immediately, so its `PhantomReference` is enqueued in the same cycle it would otherwise have become unreachable, with none of the extra-GC-cycle delay a real `finalize()` override causes.
 
-**What determines exactly when the JVM clears a `SoftReference`, and what flag controls it?**
+**Q: What determines exactly when the JVM clears a `SoftReference`, and what flag controls it?**
 **Short:** HotSpot clears SoftReferences via a heap-size-weighted LRU policy controlled by `-XX:SoftRefLRUPolicyMSPerMB`.
 HotSpot uses a heap-size-weighted LRU policy controlled by `-XX:SoftRefLRUPolicyMSPerMB`, defaulting to 1000. A soft referent survives at least `free_heap_MB x 1000` milliseconds since it was last accessed before becoming eligible for clearing at the next collection, so the same idle cache entry might survive minutes on a heap with gigabytes free but get cleared on the very next GC once free heap shrinks toward zero. The JDK additionally guarantees that all softly-reachable objects are cleared before the JVM ever throws `OutOfMemoryError`.
 
-**What is the internal structure of `ThreadLocalMap.Entry`, and why is only the key wrapped in a `WeakReference`?**
+**Q: What is the internal structure of `ThreadLocalMap.Entry`, and why is only the key wrapped in a `WeakReference`?**
 **Short:** ThreadLocalMap.Entry extends WeakReference<ThreadLocal<?>> and stores the value as a plain, strongly-referenced field.
 `Entry extends WeakReference<ThreadLocal<?>>` and stores the value as a plain, strongly-referenced field alongside it — only the key, the `ThreadLocal` object itself, is weak. This design solves one specific problem: a `ThreadLocal` instance that goes out of scope should not be kept alive just because some live thread's map still mentions it. It does nothing to bound the value, which is exactly why per-request objects stashed in a `ThreadLocal` can still leak on pooled threads even though the key side is weak.
 
-**Does `WeakHashMap` remove a stale entry from the table immediately when the GC clears its key?**
+**Q: Does `WeakHashMap` remove a stale entry from the table immediately when the GC clears its key?**
 **Short:** WeakHashMap does not remove a stale entry immediately; it stays until the next get/put/remove/size call expunges it.
 No — the GC clears the key's referent immediately, but the dead `Entry` stays in the table until the map's next operation. `WeakHashMap` calls `expungeStaleEntries()` — which drains its internal `ReferenceQueue` and unlinks each stale slot — at the start of `get()`, `put()`, `remove()`, and `size()`; if nothing touches the map between the key dying and the next call, `size()` can momentarily report entries whose keys are already gone. This lazy-cleanup design is why `WeakHashMap` is unsuitable for precise, real-time memory accounting.
 
-**How does `java.lang.ref.Cleaner` work internally, and what does it compose?**
+**Q: How does `java.lang.ref.Cleaner` work internally, and what does it compose?**
 **Short:** Cleaner composes a PhantomReference per object, a shared ReferenceQueue, and one daemon thread that runs matching cleanup actions.
 `Cleaner` composes a `PhantomReference` per registered object, a shared `ReferenceQueue`, and one dedicated daemon thread that blocks on `queue.remove()` and runs the matching `Runnable` when something arrives. `Cleaner.create().register(obj, action)` returns a `Cleanable`, and the JDK guarantees the action runs at most once — either because the object became phantom-reachable, or because the caller explicitly invoked `cleanable.clean()` first, whichever happens sooner. It is the same phantom-reference-plus-queue pattern any application code could hand-roll, packaged as a supported, JDK-maintained API.
 
-**Why must the `Runnable` passed to `Cleaner.register()` never reference the object being cleaned?**
+**Q: Why must the `Runnable` passed to `Cleaner.register()` never reference the object being cleaned?**
 **Short:** A cleanup Runnable that references its target object keeps it strongly reachable, so it can never become phantom-reachable.
 Because that reference would itself be a strong path keeping the object reachable, so it could never become phantom-reachable and the cleanup action would never fire automatically. This is why the JDK's own `Cleaner` javadoc example uses a `static` nested class for the cleanup state, holding only the raw resource — a native handle, a file descriptor — rather than the outer object; a non-static inner class or capturing lambda implicitly holds `this` and silently breaks the entire mechanism. It is the single most common mistake teams make when adopting `Cleaner`.
 
-**When should off-heap memory be managed by an FFM `Arena` instead of a `Cleaner`?**
+**Q: When should off-heap memory be managed by an FFM `Arena` instead of a `Cleaner`?**
 **Short:** A confined FFM Arena should manage memory whose lifetime matches a lexical scope, reserving Cleaner for handles you did not allocate.
 Whenever the memory's lifetime matches a lexical scope. A confined `Arena` in a `try-with-resources` frees every segment it allocated at the closing brace, and any access after that throws `IllegalStateException` instead of corrupting the process. `Arena.ofAuto()` exists for the genuinely GC-scoped case, but it is reachability-driven and therefore inherits the same "eventually" timing a `Cleaner` has. Reserve `Cleaner` for handles you did not allocate through the FFM API — a JNI pointer, a file descriptor, a native library object.
 
-**Why is a `Cleaner`'s daemon thread a poor place to do real work?**
+**Q: Why is a `Cleaner`'s daemon thread a poor place to do real work?**
 **Short:** Every registration on one Cleaner shares its single daemon thread, so a slow action delays every other queued cleanup.
 Because every registration on one `Cleaner` instance shares that single thread, so a slow or blocking action delays every other cleanup queued behind it. Cleanup actions should free the handle, close the descriptor, and return; anything that needs to take a lock or talk to the network belongs on the deterministic `close()` path instead. Creating a separate `Cleaner` per subsystem is the standard way to stop one slow resource from starving another.
 
-**Can code get the object back once a `PhantomReference` to it has been enqueued?**
+**Q: Can code get the object back once a `PhantomReference` to it has been enqueued?**
 **Short:** PhantomReference.get() always returns null, so there is no way to get the object back once it is enqueued.
 No — `PhantomReference.get()` is specified to always return `null`, so there is no path from the notification back to the object. That is exactly what makes phantom reachability safe to build cleanup on: by the time a `Cleaner` runs your action, the object it was registered against is unreachable and can never be re-published. `Weak` and `Soft` references do hand back a live referent until they are cleared, which is precisely why they are cache primitives rather than cleanup primitives.
 
-**Why does reference-equality (`==`) matter for Guava's `CacheBuilder.weakKeys()`/`weakValues()`?**
+**Q: Why does reference-equality (`==`) matter for Guava's `CacheBuilder.weakKeys()`/`weakValues()`?**
 **Short:** Guava's weakKeys()/weakValues() compare entries by identity rather than equals(), since a cleared reference cannot call equals() reliably.
 Because entries keyed or valued by weak (or soft) references are compared by identity, not by `equals()`/`hashCode()`, since a cleared reference has nothing left to call those methods on consistently. A cache populated with two separately-constructed but `.equals()`-equal keys will silently treat them as different entries under `weakKeys()`, a common and confusing surprise for anyone used to normal `HashMap` semantics. Guava's own documentation calls this out explicitly, and it is a strong argument for preferring `maximumSize`/`expireAfterWrite` bounded caching unless reference-based eviction is specifically required.
 
-**How do you tell a genuine `ClassLoader` leak apart from a normal application-server redeploy in a heap dump?**
+**Q: How do you tell a genuine `ClassLoader` leak apart from a normal application-server redeploy in a heap dump?**
 **Short:** Counting live instances of the web app's own classloader class in a heap dump distinguishes a leak from a normal redeploy.
 Count live instances of the web application's own classloader class in the dump. A healthy redeploy leaves exactly one (or briefly two, mid-swap); N leaked redeploys leave N simultaneously live instances, each retaining its entire loaded-class graph. Eclipse MAT's duplicate-classes report, or a heap histogram grouped by classloader, surfaces this directly; from there, "Path to GC Root" with weak/soft references excluded shows the actual strong chain pinning the old loader — commonly a self-registered JDBC driver in `DriverManager`, an un-stopped background thread, or a `ThreadLocal` value on a shared pool thread. Metaspace growing after every redeploy without ever shrinking is the symptom; the live-instance count is the proof.
 
-**What is the difference between shallow heap and retained heap, and why does it matter when hunting a leak?**
+**Q: What is the difference between shallow heap and retained heap, and why does it matter when hunting a leak?**
 **Short:** Shallow heap is what an object itself occupies, while retained heap adds everything that would become unreachable if it were removed.
 Shallow heap is the memory an object itself occupies — its header plus its own fields; retained heap is that shallow heap plus everything that would become unreachable if the object were removed. A `HashMap` instance might have a shallow size of a few dozen bytes yet retain gigabytes if it is the only live path to a huge object graph — exactly the shape of most production leaks. Tools like Eclipse MAT build a dominator tree specifically to surface retained size, because sorting by shallow size alone would hide almost every real leak behind thousands of small, individually-innocuous objects.
 

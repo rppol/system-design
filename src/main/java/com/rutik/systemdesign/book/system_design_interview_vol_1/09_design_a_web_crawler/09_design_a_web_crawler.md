@@ -1026,10 +1026,10 @@ Data noise is low-value content such as advertisements, spam URLs, and code snip
 ## Cross-links in this repo
 
 - [hld/case_studies/design_web_crawler.md — the HLD deep dive on this exact system](../../../hld/case_studies/design_web_crawler.md)
-- [hld/message_queues/README.md — queueing primitives behind the URL Frontier](../../../hld/message_queues/message_queues.md)
-- [05_design_consistent_hashing/README.md — the sibling chapter on consistent hashing (distributing hosts across downloaders)](../05_design_consistent_hashing/05_design_consistent_hashing.md)
-- [hld/consistent_hashing/README.md — consistent hashing internals (ring, virtual nodes, rebalancing)](../../../hld/consistent_hashing/consistent_hashing.md)
-- [designing_data_intensive_applications/03_storage_and_retrieval/README.md — hashing, Bloom filters, and storage engines behind Content/URL storage](../../designing_data_intensive_applications/03_storage_and_retrieval/03_storage_and_retrieval.md)
+- [hld/message_queues/message_queues.md — queueing primitives behind the URL Frontier](../../../hld/message_queues/message_queues.md)
+- [05_design_consistent_hashing/05_design_consistent_hashing.md — the sibling chapter on consistent hashing (distributing hosts across downloaders)](../05_design_consistent_hashing/05_design_consistent_hashing.md)
+- [hld/consistent_hashing/consistent_hashing.md — consistent hashing internals (ring, virtual nodes, rebalancing)](../../../hld/consistent_hashing/consistent_hashing.md)
+- [designing_data_intensive_applications/03_storage_and_retrieval/03_storage_and_retrieval.md — hashing, Bloom filters, and storage engines behind Content/URL storage](../../designing_data_intensive_applications/03_storage_and_retrieval/03_storage_and_retrieval.md)
 
 ## Further Reading
 

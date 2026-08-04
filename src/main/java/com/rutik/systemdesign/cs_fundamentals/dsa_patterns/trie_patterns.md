@@ -679,7 +679,7 @@ a silently short one.
 
 ## 11. Interview Q&A
 
-**Why is a trie faster than a hashmap for prefix queries, given that hashmap
+**Q: Why is a trie faster than a hashmap for prefix queries, given that hashmap
 lookups are O(1)?**
 A hashmap gives O(1) for **exact-match** lookups, but "does any key start
 with 'app'?" requires either iterating all keys (O(n·L)) or maintaining a
@@ -697,7 +697,7 @@ sharing. A hashset of strings would store each string once, more compactly.
 Tries win specifically when prefix-sharing is high (natural-language
 dictionaries, URLs, IP routing tables).
 
-**In Word Search II, why build ONE trie from all dictionary words instead of
+**Q: In Word Search II, why build ONE trie from all dictionary words instead of
 running a separate grid-search for each word?**
 Running a separate DFS per word costs `O(words · rows·cols·4^L)` — the grid
 is re-explored from scratch for every word. With a single shared trie, **one**
@@ -706,7 +706,7 @@ DFS pass per starting cell explores all words simultaneously: at each step,
 share this prefix*, all at once. Shared prefixes across words (e.g., "oa" and
 "oat") mean shared trie traversal too.
 
-**Walk through the BROKEN -> FIX in §8 — why does the bug cause MISSED words
+**Q: Walk through the BROKEN -> FIX in §8 — why does the bug cause MISSED words
 rather than just extra time/space?**
 `board[r][c] = "#"` is used as the "currently on this DFS path" marker — it
 must be **scoped to the current call stack**, not permanent. If it's never
@@ -717,7 +717,7 @@ perfectly valid letters needed to spell other words — so words requiring
 those cells are never found. It's a correctness bug, not just an efficiency
 one.
 
-**How does pruning (`nxt.is_end = False` after a match) prevent duplicate
+**Q: How does pruning (`nxt.is_end = False` after a match) prevent duplicate
 results, and could the same word be found twice without it?**
 If a word like "oa" can be spelled via two different paths in the grid (e.g.,
 two different 'o' cells both adjacent to an 'a'), both DFS branches would
@@ -728,7 +728,7 @@ only once. (A more aggressive optimization also deletes leaf trie nodes with
 no remaining children after a match, to prune the trie itself for future
 searches — useful when `find_words` might be called repeatedly.)
 
-**How does the wildcard `.` search in Template 2 avoid being O(26^L) for
+**Q: How does the wildcard `.` search in Template 2 avoid being O(26^L) for
 every query?**
 Worst case (all wildcards, e.g., `"......"`), it genuinely is exponential —
 `O(26^L)` — because every position branches into all 26 children. In
@@ -737,7 +737,7 @@ of the 26 options at any real node, since real dictionaries are sparse), so
 actual runtime is far better than the theoretical worst case. The recursion
 depth is bounded by `O(L)` regardless.
 
-**For Maximum XOR of Two Numbers, what does each "level" of the binary trie
+**Q: For Maximum XOR of Two Numbers, what does each "level" of the binary trie
 represent, and why insert most-significant-bit first?**
 Each level corresponds to one **bit position**, from most significant to
 least significant. Inserting MSB-first means two numbers that differ in a
@@ -748,7 +748,7 @@ correct because higher bits are decided first — a greedy choice at the MSB
 can never be "undone" by a better choice at a lower bit, since
 `2^k > sum(2^0..2^(k-1))`.
 
-**`children: dict[str, TrieNode]` vs. `children: list[Optional[TrieNode]]` of
+**Q: `children: dict[str, TrieNode]` vs. `children: list[Optional[TrieNode]]` of
 size 26 — what's the tradeoff?**
 A `dict` only allocates entries for characters actually present — better for
 sparse alphabets (Unicode, mixed case) or when most nodes have few children.
@@ -758,7 +758,7 @@ if only 1-2 are used. For pure lowercase-English problems, the array is
 common in competitive programming for speed; the dict is more general and
 common in interview-style Python code.
 
-**Why do we need an explicit `is_end` flag — can't we just check
+**Q: Why do we need an explicit `is_end` flag — can't we just check
 `len(node.children) == 0` to mean "this is a complete word"?**
 No — `"car"` and `"card"` are both valid words in the same trie, where `"car"`
 is a **prefix** of `"card"`. The node for `"car"`'s last `'r'` has a child
@@ -766,7 +766,7 @@ is a **prefix** of `"card"`. The node for `"car"`'s last `'r'` has a child
 complete word. `is_end` is the *only* way to mark "a complete word ends here,
 even though the trie continues beyond this point."
 
-**How would Replace Words be solved WITHOUT a trie, and why is the trie
+**Q: How would Replace Words be solved WITHOUT a trie, and why is the trie
 approach better?**
 Without a trie: for each word in the sentence, generate all its prefixes
 (`O(L)` prefixes) and check each against a hashset of roots, taking the

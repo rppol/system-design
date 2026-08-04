@@ -1168,9 +1168,9 @@ Because an in-place model records only the latest balance and overwrites every p
 ## Cross-links in this repo
 
 - [hld/case_studies/design_digital_wallet.md — the HLD case-study version of this problem (2PC/TCC/Saga/event-sourcing walkthrough)](../../../hld/case_studies/design_digital_wallet.md)
-- [hld/event_sourcing_cqrs/README.md — event sourcing and CQRS as a general pattern](../../../hld/event_sourcing_cqrs/event_sourcing_cqrs.md)
-- [hld/distributed_transactions/README.md — 2PC, TCC, Saga at the concept level](../../../hld/distributed_transactions/distributed_transactions.md)
-- [database/distributed_transactions/README.md — distributed transactions and XA from the database side](../../../database/distributed_transactions/distributed_transactions.md)
+- [hld/event_sourcing_cqrs/event_sourcing_cqrs.md — event sourcing and CQRS as a general pattern](../../../hld/event_sourcing_cqrs/event_sourcing_cqrs.md)
+- [hld/distributed_transactions/distributed_transactions.md — 2PC, TCC, Saga at the concept level](../../../hld/distributed_transactions/distributed_transactions.md)
+- [database/distributed_transactions/distributed_transactions.md — distributed transactions and XA from the database side](../../../database/distributed_transactions/distributed_transactions.md)
 - [book · SDI Vol 2 Ch 11 — Payment System (the layer above the wallet)](../11_payment_system/11_payment_system.md)
 - [book · DDIA Ch 9 — Consistency and Consensus (Raft, replicated state machines, linearizability)](../../designing_data_intensive_applications/09_consistency_and_consensus/09_consistency_and_consensus.md)
 

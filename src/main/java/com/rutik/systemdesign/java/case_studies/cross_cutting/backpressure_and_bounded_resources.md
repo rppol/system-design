@@ -855,7 +855,7 @@ hazard remains: a virtual thread inside a **native frame** — a JNI call, or an
 downcall — cannot unmount and holds its carrier until it returns. Watch the
 `jdk.VirtualThreadPinned` JFR event. Ordinary `synchronized` blocks are not a concern; they
 no longer pin. See
-[../../../java/structured_concurrency_and_loom/README.md](../../structured_concurrency_and_loom/structured_concurrency_and_loom.md)
+[../../../java/structured_concurrency_and_loom/structured_concurrency_and_loom.md](../../structured_concurrency_and_loom/structured_concurrency_and_loom.md)
 for details.
 
 **Q15. How would you add observable backpressure metrics to a production service?**

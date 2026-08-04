@@ -1197,7 +1197,7 @@ shared across pre-forked workers. Practical guidance: use `is None` for None che
 `==` for all other equality comparisons because interning behavior is an implementation
 detail not guaranteed by the language spec.
 
-**Q7b: What are immortal objects and what problem do they solve?**
+**Q: Q7b: What are immortal objects and what problem do they solve?**
 **Short:** Immortal objects (PEP 683) carry a sentinel refcount that increment/decrement never change.
 Immortal objects (PEP 683, Python 3.12) are runtime-global objects given a sentinel
 reference count that increment and decrement refuse to modify, so they are never

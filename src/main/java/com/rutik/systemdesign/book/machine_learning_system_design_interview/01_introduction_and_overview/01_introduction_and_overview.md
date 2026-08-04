@@ -1171,11 +1171,11 @@ Keep the test set untouched until the very end so it gives an honest, unbiased e
 ## Cross-links in this repo
 
 - [ml/ml_system_design/design_framework.md — the repo's own ML design framework](../../../ml/ml_system_design/design_framework.md)
-- [ml/ml_interview_patterns/README.md — recurring ML interview patterns and answer structures](../../../ml/ml_interview_patterns/ml_interview_patterns.md)
-- [ml/model_evaluation_and_selection/README.md — deep dive on offline metrics, baselines, model choice](../../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md)
+- [ml/ml_interview_patterns/ml_interview_patterns.md — recurring ML interview patterns and answer structures](../../../ml/ml_interview_patterns/ml_interview_patterns.md)
+- [ml/model_evaluation_and_selection/model_evaluation_and_selection.md — deep dive on offline metrics, baselines, model choice](../../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md)
 - [ml/case_studies/cross_cutting/experimentation_and_online_evaluation.md — A/B testing, shadow, interleaving, bandits in production depth](../../../ml/case_studies/cross_cutting/experimentation_and_online_evaluation.md)
 - [ml/case_studies/cross_cutting/drift_monitoring_and_retraining.md — distribution shift, drift detection, retraining cadence](../../../ml/case_studies/cross_cutting/drift_monitoring_and_retraining.md)
-- [ml/feature_engineering/README.md — scaling, encoding, bucketing, missing values in depth](../../../ml/feature_engineering/feature_engineering.md)
+- [ml/feature_engineering/feature_engineering.md — scaling, encoding, bucketing, missing values in depth](../../../ml/feature_engineering/feature_engineering.md)
 - Sibling book — [Designing ML Systems, Ch 2 — ML systems design intro](../../designing_machine_learning_systems/02_introduction_to_machine_learning_systems_design/02_introduction_to_machine_learning_systems_design.md) (Huyen's framing of the same lifecycle)
 - Sibling book — [SDI Vol 1, Ch 3 — a framework for system design interviews](../../system_design_interview_vol_1/03_a_framework_for_system_design_interviews/03_a_framework_for_system_design_interviews.md) (the general, non-ML interview framework this parallels)
 - For the repo's production-depth treatments of the chapters this framework anchors, see

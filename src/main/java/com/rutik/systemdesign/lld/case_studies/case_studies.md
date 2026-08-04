@@ -208,7 +208,7 @@ for the class diagram. Timebox requirements to 5 minutes maximum.
 | Command pattern (undo/redo) | [../behavioral/command/](../behavioral/command/command.md) |
 | Observer (notifications) | [../behavioral/observer/](../behavioral/observer/observer.md) |
 | Factory + Strategy combo | [../creational/factory_method/](../creational/factory_method/factory_method.md), [../behavioral/strategy/](../behavioral/strategy/strategy.md) |
-| Concurrency in Parking/Elevator | [../concurrency_patterns/README.md](../concurrency_patterns/concurrency_patterns.md) |
+| Concurrency in Parking/Elevator | [../concurrency_patterns/concurrency_patterns.md](../concurrency_patterns/concurrency_patterns.md) |
 | Distributed scale of these problems | [../../hld/microservices/](../../hld/microservices/microservices.md) |
 | Decorator (LRU Cache thread safety) | [../structural/decorator/](../structural/decorator/decorator.md) |
 | Rate limiting at distributed scale | [../../hld/rate_limiting/](../../hld/rate_limiting/rate_limiting.md) |

@@ -4,9 +4,9 @@ A cross-cutting cheat-sheet for the number every kernel-optimization case study 
 where does this byte live, how many cycles does it cost to touch, and how much bandwidth is
 behind it. Read this before touching shared or global memory in any case study; for the full
 narrative treatment (with diagrams, code, and Q&A) see
-[`../../cuda_memory_model_and_hierarchy/README.md`](../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md),
-[`../../memory_coalescing_and_access_patterns/README.md`](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md),
-and [`../../shared_memory_and_bank_conflicts/README.md`](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md).
+[`../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md`](../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md),
+[`../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md`](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md),
+and [`../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md`](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md).
 
 ---
 
@@ -202,7 +202,7 @@ shifting from "every thread" to "a dedicated copy engine."
 
 ## Related Files
 
-- [`../../cuda_memory_model_and_hierarchy/README.md`](../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) — full narrative treatment of every memory space, with code and Q&A
-- [`../../memory_coalescing_and_access_patterns/README.md`](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) — the global-memory access-pattern deep dive this reference's global-memory row depends on
-- [`../../shared_memory_and_bank_conflicts/README.md`](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) — the shared-memory tiling and bank-conflict deep dive this reference's shared-memory row depends on
+- [`../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md`](../../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) — full narrative treatment of every memory space, with code and Q&A
+- [`../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md`](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) — the global-memory access-pattern deep dive this reference's global-memory row depends on
+- [`../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md`](../../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) — the shared-memory tiling and bank-conflict deep dive this reference's shared-memory row depends on
 - [`roofline_and_arithmetic_intensity.md`](roofline_and_arithmetic_intensity.md) — pairs with this file: memory hierarchy tells you *where* data lives, roofline tells you *whether that placement matters* for your kernel's arithmetic intensity

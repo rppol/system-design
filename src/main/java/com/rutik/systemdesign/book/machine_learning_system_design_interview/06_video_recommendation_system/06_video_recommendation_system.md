@@ -1127,9 +1127,9 @@ A user's watch history is a variable-length list of video IDs, but neural networ
 - [../../../ml/case_studies/design_recommendation_engine.md](../../../ml/case_studies/design_recommendation_engine.md) — a general recommendation-engine case study.
 - [../../../ml/case_studies/design_real_time_personalization.md](../../../ml/case_studies/design_real_time_personalization.md) — real-time personalization serving path.
 - [../../../ml/case_studies/cross_cutting/experimentation_and_online_evaluation.md](../../../ml/case_studies/cross_cutting/experimentation_and_online_evaluation.md) — A/B testing and the offline/online gap (§6.5).
-- [../../../ml/information_retrieval_and_search/README.md](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md) — ANN indexes (FAISS/ScaNN) used for embedding retrieval.
-- [../../system_design_interview_vol_1/14_design_youtube/README.md](../../system_design_interview_vol_1/14_design_youtube/14_design_youtube.md) — the systems (non-ML) side of building YouTube.
-- [../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/README.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md) — retraining cadence, exploration, and testing in production (§6.5, §6.7).
+- [../../../ml/information_retrieval_and_search/information_retrieval_and_search.md](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md) — ANN indexes (FAISS/ScaNN) used for embedding retrieval.
+- [../../system_design_interview_vol_1/14_design_youtube/14_design_youtube.md](../../system_design_interview_vol_1/14_design_youtube/14_design_youtube.md) — the systems (non-ML) side of building YouTube.
+- [../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md) — retraining cadence, exploration, and testing in production (§6.5, §6.7).
 
 Sibling MLSDI chapters (same book): Chapter 4 (YouTube Video Search) shares the two-tower / embedding-
 retrieval machinery for text→video search; Chapter 7 (Event Recommendation) reuses the ranking framing

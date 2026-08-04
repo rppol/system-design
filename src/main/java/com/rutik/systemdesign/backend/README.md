@@ -148,7 +148,7 @@ A different cut, not senior-plus-extras. The Principal Path probes the judgment 
 
 ## Knowledge-Question Map
 
-The highest-frequency backend *knowledge* questions mapped to the module that answers them. For *system design* ("design X") questions, pair these with the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency backend *knowledge* questions mapped to the module that answers them. For *system design* ("design X") questions, pair these with the interview-prep shortcuts in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |---------------------|------------------------|

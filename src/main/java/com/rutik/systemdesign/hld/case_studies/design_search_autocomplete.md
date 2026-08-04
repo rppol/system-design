@@ -997,8 +997,8 @@ A: Deploy regional replica pools (§4.7) and geo-route users to the nearest one 
 
 ## Cross-References
 
-- **Hot-prefix Redis cache, jittered TTLs, and the single-flight stampede-prevention pattern (§4.2, §5, §9 War Story 3)** -> [`../caching/README.md`](../caching/caching.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/database_caching_patterns.md)
-- **Why prefix-based sharding creates hot shards, and the alternative partitioning strategies (§4.2, §9 War Story 4)** -> [`../database_sharding/README.md`](../database_sharding/database_sharding.md)
-- **In-memory data structures and Redis sorted sets as an alternative suggestion index (§5)** -> [`../../database/in_memory_databases/README.md`](../../database/in_memory_databases/in_memory_databases.md)
-- **Elasticsearch Completion Suggester / FST and search-engine indexing internals (§6)** -> [`../../database/search_engines/README.md`](../../database/search_engines/search_engines.md)
-- **Rate-limiting query-log ingestion to prevent trending false positives (§8)** -> [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)
+- **Hot-prefix Redis cache, jittered TTLs, and the single-flight stampede-prevention pattern (§4.2, §5, §9 War Story 3)** -> [`../caching/caching.md`](../caching/caching.md), [`../../database/database_caching_patterns/database_caching_patterns.md`](../../database/database_caching_patterns/database_caching_patterns.md)
+- **Why prefix-based sharding creates hot shards, and the alternative partitioning strategies (§4.2, §9 War Story 4)** -> [`../database_sharding/database_sharding.md`](../database_sharding/database_sharding.md)
+- **In-memory data structures and Redis sorted sets as an alternative suggestion index (§5)** -> [`../../database/in_memory_databases/in_memory_databases.md`](../../database/in_memory_databases/in_memory_databases.md)
+- **Elasticsearch Completion Suggester / FST and search-engine indexing internals (§6)** -> [`../../database/search_engines/search_engines.md`](../../database/search_engines/search_engines.md)
+- **Rate-limiting query-log ingestion to prevent trending false positives (§8)** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)

@@ -2,7 +2,7 @@
 
 ## Purpose & How to Use This Playbook
 
-[dsa_patterns/README.md](dsa_patterns.md) §1 and §9 give you the **compressed**
+[dsa_patterns/dsa_patterns.md](dsa_patterns.md) §1 and §9 give you the **compressed**
 cheat-sheet: the UMPIRE stages, the 5-minute opening ritual, and a quick
 "what to say when stuck" table. This file is the **expanded** version —
 read it once, slowly, before your first mock interview, then return to the
@@ -717,7 +717,7 @@ pattern's Problem Bank).
 
 ## 8. Cross-Links
 
-- [dsa_patterns/README.md](dsa_patterns.md) — §1 (UMPIRE compressed), §3
+- [dsa_patterns/dsa_patterns.md](dsa_patterns.md) — §1 (UMPIRE compressed), §3
   (constraints->complexity table), §4 (cue->pattern table), §9 (quick
   reference); this playbook is the expanded companion
 - [dsa_patterns/study_plans.md](study_plans.md) — once you can execute
@@ -734,7 +734,7 @@ pattern's Problem Bank).
 
 ## 9. Interview Q&A
 
-**What if I genuinely don't recognize the pattern within the first 2
+**Q: What if I genuinely don't recognize the pattern within the first 2
 minutes?** Say so, and start the brute force. "I don't see an immediate
 optimization — let me start with the brute force and look for the
 bottleneck as I implement it" is a completely valid statement, and often the
@@ -771,7 +771,7 @@ result list — that's a one-line list comprehension: `[num for freq, num in
 heap]`." A clearly-described unfinished last step is far better than a
 silent unfinished program — it shows you knew exactly what remained.
 
-**How do I handle a follow-up like "what if the input doesn't fit in
+**Q: How do I handle a follow-up like "what if the input doesn't fit in
 memory" or "what if this needs to run on a stream"?** Treat it as a fresh
 Match step on the SAME problem: "With a stream, I can't build the full
 frequency map upfront. For approximate top-k over a stream, a Count-Min
@@ -781,14 +781,14 @@ Sketch live, but naming it (and why it solves the new constraint) is a
 strong signal. See [hashing_patterns.md](hashing_patterns.md) §6 for related
 approximate-counting structures.
 
-**What if my brute force IS the optimal solution — should I still state
+**Q: What if my brute force IS the optimal solution — should I still state
 it?** State it briefly, then say so explicitly: "The brute force here is
 already O(n), which I believe is optimal since we must examine every
 element at least once — I don't see a sub-linear approach given we need to
 inspect all of `nums`." This shows you considered the question rather than
 skipping it because "obviously" no brute force was needed.
 
-**How important is variable naming and code style during a live
+**Q: How important is variable naming and code style during a live
 interview?** More than it might seem, because it's FREE signal —
 `left`/`right` instead of `i`/`j` for two-pointer code, `freq`/`count`
 instead of `c`, costs zero extra time and immediately tells the interviewer
@@ -811,7 +811,7 @@ fix changes earlier logic too). Finding your own bug during Review, calmly,
 is a POSITIVE signal — it's the testing/verification skill in §2's rubric in
 action.
 
-**What if the interviewer seems unimpressed, gives minimal feedback, or
+**Q: What if the interviewer seems unimpressed, gives minimal feedback, or
 doesn't respond to my narration?** Continue your normal UMPIRE narration
 regardless — many interviewers deliberately give neutral/minimal feedback to
 avoid biasing the candidate (a "poker face" is often standard practice, not

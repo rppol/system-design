@@ -1,6 +1,6 @@
 # Gaussian Mixture Models and the EM Algorithm — Deep Dive
 
-Parent module: [../unsupervised_learning/README.md](unsupervised_learning.md). That module introduces k-means, DBSCAN, and PCA with only passing mentions of GMM and EM. This sub-file is the deep dive: the latent-variable model, the full Expectation-Maximization derivation, and the production concerns (degeneracy, model selection, anomaly scoring).
+Parent module: [../unsupervised_learning/unsupervised_learning.md](unsupervised_learning.md). That module introduces k-means, DBSCAN, and PCA with only passing mentions of GMM and EM. This sub-file is the deep dive: the latent-variable model, the full Expectation-Maximization derivation, and the production concerns (degeneracy, model selection, anomaly scoring).
 
 ---
 

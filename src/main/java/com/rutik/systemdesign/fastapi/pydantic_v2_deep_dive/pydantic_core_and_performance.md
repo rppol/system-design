@@ -1,6 +1,6 @@
 # pydantic-core and Pydantic v2 Performance
-> Deep-dive sub-file for [`pydantic_v2_deep_dive/README.md`](pydantic_v2_deep_dive.md).
-> Cross-links: [`../../the_type_system_and_typing/protocols_and_structural_typing.md`](../../python/the_type_system_and_typing/protocols_and_structural_typing.md) | [`../../asyncio_and_event_loop/README.md`](../../python/asyncio_and_event_loop/asyncio_and_event_loop.md)
+> Deep-dive sub-file for [`pydantic_v2_deep_dive/pydantic_v2_deep_dive.md`](pydantic_v2_deep_dive.md).
+> Cross-links: [`../../the_type_system_and_typing/protocols_and_structural_typing.md`](../../python/the_type_system_and_typing/protocols_and_structural_typing.md) | [`../../asyncio_and_event_loop/asyncio_and_event_loop.md`](../../python/asyncio_and_event_loop/asyncio_and_event_loop.md)
 
 ---
 

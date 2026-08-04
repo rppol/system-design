@@ -216,7 +216,7 @@ A 6-week plan over the Senior Path. cs_fundamentals has no per-topic `case_studi
 
 | Week | Focus | Modules | Practice Companion |
 |------|-------|---------|---------------------|
-| 1 | Complexity & Computation Foundations | complexity_analysis_and_big_o, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns | [dsa_patterns/README.md](dsa_patterns/dsa_patterns.md) (recognition engine + UMPIRE method), [two_pointers.md](dsa_patterns/two_pointers.md), [sliding_window.md](dsa_patterns/sliding_window.md), [bit_manipulation.md](dsa_patterns/bit_manipulation.md) |
+| 1 | Complexity & Computation Foundations | complexity_analysis_and_big_o, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns | [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) (recognition engine + UMPIRE method), [two_pointers.md](dsa_patterns/two_pointers.md), [sliding_window.md](dsa_patterns/sliding_window.md), [bit_manipulation.md](dsa_patterns/bit_manipulation.md) |
 | 2 | Core Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues | [hashing_patterns.md](dsa_patterns/hashing_patterns.md), [fast_and_slow_pointers.md](dsa_patterns/fast_and_slow_pointers.md), [in_place_linked_list_reversal.md](dsa_patterns/in_place_linked_list_reversal.md); [Design LRU Cache](case_studies/design_lru_cache.md) |
 | 3 | Trees, Heaps & Graph Structures | trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures | [tree_bfs.md](dsa_patterns/tree_bfs.md), [tree_dfs.md](dsa_patterns/tree_dfs.md), [two_heaps.md](dsa_patterns/two_heaps.md), [top_k_elements.md](dsa_patterns/top_k_elements.md), [trie_patterns.md](dsa_patterns/trie_patterns.md), [union_find.md](dsa_patterns/union_find.md); [Top-K and Streaming Problems](case_studies/top_k_and_streaming_problems.md) |
 | 4 | Core Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer | [modified_binary_search.md](dsa_patterns/modified_binary_search.md), [dynamic_programming.md](dsa_patterns/dynamic_programming.md), [greedy.md](dsa_patterns/greedy.md); [Dynamic Programming Patterns](case_studies/dynamic_programming_patterns.md) |
@@ -286,11 +286,11 @@ A 6-week plan over the Senior Path. cs_fundamentals has no per-topic `case_studi
 
 > **If your goal is to crack L5 coding interviews**, start here after completing Phases 1–3. This sub-section is the recognition engine: given an unseen problem, it tells you which pattern to apply and why.
 
-The full description, templates, and problem banks live in [dsa_patterns/README.md](dsa_patterns/dsa_patterns.md). Quick summary of what's there:
+The full description, templates, and problem banks live in [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md). Quick summary of what's there:
 
 | File | Purpose |
 |------|---------|
-| [dsa_patterns/README.md](dsa_patterns/dsa_patterns.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (25 patterns) |
+| [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (25 patterns) |
 | [dsa_patterns/interview_execution_playbook.md](dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
 | [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns, with LeetCode links and suggested order |
 | [dsa_patterns/two_pointers.md](dsa_patterns/two_pointers.md) | Two-pointer template, 3Sum walkthrough, 12+ problems |
@@ -503,7 +503,7 @@ Recommended order for interview preparation:
 1. **Week 1 — Foundations + Data Structures**: Phase 1 (Big-O → number systems → recursion patterns), then Phase 2 in order (arrays/hashing → linked lists → trees → heaps → graphs). This builds the vocabulary and structures everything else uses.
 2. **Week 2 — Algorithms**: Phase 3 (sorting/searching → DP → greedy/D&C → graph/string algorithms). Work the case studies alongside: `design_lru_cache` after Phase 2, `dynamic_programming_patterns` and `graph_traversal_and_shortest_path` after Phase 3.
 3. **Week 3 — OS + Systems**: Phases 4 and 5 (OS scheduling/memory/deadlocks, then architecture/networking/DB/crypto). These are conceptual — reinforce by crosslinking to `java/concurrency`, `backend/`, and `database/` for the applied angle.
-4. **Review**: work the remaining case studies (`autocomplete_and_string_search`, `interval_and_scheduling_problems`, `top_k_and_streaming_problems`). See [case_studies/README.md](case_studies/case_studies.md) for the guided path.
-5. **Interview drill**: once Phases 1–3 are internalized, move to [dsa_patterns/README.md](dsa_patterns/dsa_patterns.md) — the recognition engine. Use it to map unseen problems to patterns. Work each pattern playbook's §7 Problem Bank (curated LeetCode sets per pattern) and follow [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) for Blind 75 / NeetCode 150.
+4. **Review**: work the remaining case studies (`autocomplete_and_string_search`, `interval_and_scheduling_problems`, `top_k_and_streaming_problems`). See [case_studies/case_studies.md](case_studies/case_studies.md) for the guided path.
+5. **Interview drill**: once Phases 1–3 are internalized, move to [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) — the recognition engine. Use it to map unseen problems to patterns. Work each pattern playbook's §7 Problem Bank (curated LeetCode sets per pattern) and follow [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) for Blind 75 / NeetCode 150.
 
-Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.
+Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/foundations_and_architecture.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.

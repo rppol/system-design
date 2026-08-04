@@ -1012,7 +1012,7 @@ class QueryFilter:
 | Testable without framework | Yes (`dependency_overrides`) | Requires app context | Requires Django test runner | Yes (manual wiring) |
 | Teardown support | Yes (yield) | No native | No native | Yes (destroy callbacks) |
 
-Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../spring/dependency_injection/README.md`](../../spring/dependency_injection/dependency_injection.md).
+Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../spring/dependency_injection/dependency_injection.md`](../../spring/dependency_injection/dependency_injection.md).
 
 ---
 
@@ -1467,6 +1467,6 @@ flowchart LR
 
 All sub-components are testable in isolation by overriding only the relevant dependency. The route handler contains zero auth logic, zero DB connection management — it is pure business logic.
 
-Cross-reference: For auth dependencies specifically, see [`../authentication_and_security/README.md`](../authentication_and_security/authentication_and_security.md).
+Cross-reference: For auth dependencies specifically, see [`../authentication_and_security/authentication_and_security.md`](../authentication_and_security/authentication_and_security.md).
 
 ---

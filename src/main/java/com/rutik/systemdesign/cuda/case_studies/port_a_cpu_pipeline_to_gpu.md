@@ -78,7 +78,7 @@ cannot beat 20x end-to-end speedup, because the remaining 756 s of serial
 CPU work runs at CPU speed regardless of what happens to the other 95%.
 ```
 
-This one number reframes the whole project: the question is not "how much faster can we make the hot loop" (arbitrarily fast, in principle) but "how close to a 20x overall improvement can the port get, once transfer and overhead are accounted for." See [`../gpu_computing_foundations/README.md`](../gpu_computing_foundations/gpu_computing_foundations.md) for the general throughput-vs-latency and Amdahl/Gustafson treatment this budget builds on.
+This one number reframes the whole project: the question is not "how much faster can we make the hot loop" (arbitrarily fast, in principle) but "how close to a 20x overall improvement can the port get, once transfer and overhead are accounted for." See [`../gpu_computing_foundations/gpu_computing_foundations.md`](../gpu_computing_foundations/gpu_computing_foundations.md) for the general throughput-vs-latency and Amdahl/Gustafson treatment this budget builds on.
 
 ### Data-Movement Analysis: Transfer Time vs. Compute Time
 
@@ -234,7 +234,7 @@ AFTER (GPU-resident for the ported 95%, CPU only for the true serial 5%):
   [write to risk DB, unchanged schema]
 ```
 
-See also: [`./cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for why the "after" kernel sits in compute-bound territory against HBM bandwidth (3 TB/s on H100) once PCIe transfer is out of the picture, and [`../memory_management_and_data_transfer/README.md`](../memory_management_and_data_transfer/memory_management_and_data_transfer.md) for the pinned-vs-pageable mechanics behind the 64 GB/s vs. 9 GB/s gap quantified in §2.
+See also: [`./cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for why the "after" kernel sits in compute-bound territory against HBM bandwidth (3 TB/s on H100) once PCIe transfer is out of the picture, and [`../memory_management_and_data_transfer/memory_management_and_data_transfer.md`](../memory_management_and_data_transfer/memory_management_and_data_transfer.md) for the pinned-vs-pageable mechanics behind the 64 GB/s vs. 9 GB/s gap quantified in §2.
 
 ---
 
@@ -532,7 +532,7 @@ def price_portfolio_gpu_prototype(s0, k, r, sigma, t, num_steps, paths_per_optio
 
 ### 4.5 Sharded Stream Pipeline — Overlap Transfer With Compute
 
-Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for two independent reasons: (1) **resilience** — a mid-run GPU fault (driver reset, ECC error) only costs the ~2 minutes of the current shard, not the whole 12.9-minute run, satisfying the non-functional requirement in §1; and (2) **pipelining** — shard boundaries are the natural place to overlap the next shard's (now small) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute. See [`../streams_events_and_concurrency/README.md`](../streams_events_and_concurrency/streams_events_and_concurrency.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
+Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for two independent reasons: (1) **resilience** — a mid-run GPU fault (driver reset, ECC error) only costs the ~2 minutes of the current shard, not the whole 12.9-minute run, satisfying the non-functional requirement in §1; and (2) **pipelining** — shard boundaries are the natural place to overlap the next shard's (now small) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute. See [`../streams_events_and_concurrency/streams_events_and_concurrency.md`](../streams_events_and_concurrency/streams_events_and_concurrency.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
 
 ```cuda
 // stream_pipeline.cu -- double-buffered, two-stream pipeline across 8 shards.

@@ -4,7 +4,7 @@
 > pieces of other algorithms — Isolation Forest lives in
 > [`../ensemble_methods/random_forests.md`](../ensemble_methods/random_forests.md) (§4.5),
 > One-Class SVM in [`../supervised_learning/support_vector_machines.md`](../supervised_learning/support_vector_machines.md) (§6.3),
-> autoencoder reconstruction in [`../unsupervised_learning/README.md`](../unsupervised_learning/unsupervised_learning.md).
+> autoencoder reconstruction in [`../unsupervised_learning/unsupervised_learning.md`](../unsupervised_learning/unsupervised_learning.md).
 > This module ties those together, adds the missing methods (LOF, EVT/POT, GMM,
 > time-series residuals), and treats the two things every interview probes:
 > **the extreme-imbalance evaluation trap** and **threshold selection**. The full
@@ -52,7 +52,7 @@ The output is almost always a continuous **anomaly score**, not a binary label. 
 3. **Never threshold a raw score.** Convert to a percentile/rank on a reference distribution. A score of 0.63 means nothing until you know it sits at the 99.4th percentile.
 4. **Accuracy is banned; use PR-AUC, precision@k, and recall at a fixed alert budget.** Under extreme imbalance, accuracy and ROC-AUC are both optimistic (§6).
 5. **Define the anomaly type first.** Point, contextual, or collective (§4.1) — each needs a different method. A CPU value of 90% is a point anomaly for a web server, normal-in-context for a nightly batch job, and only a collective anomaly if sustained.
-6. **Thresholds drift; make them adaptive.** A quantile learned last month becomes an alert-storm or a silence after the traffic distribution moves. Use rolling quantiles / EWMA and monitor them — see [`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md).
+6. **Thresholds drift; make them adaptive.** A quantile learned last month becomes an alert-storm or a silence after the traffic distribution moves. Use rolling quantiles / EWMA and monitor them — see [`../monitoring_and_drift_detection/monitoring_and_drift_detection.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md).
 7. **Explainability is often mandatory.** Fraud declines and infra pages need reason codes ("feature 12 was 8σ high"). Prefer methods whose score decomposes per-feature, or wrap black-box scorers with SHAP.
 
 ---
@@ -165,12 +165,12 @@ The `reach-dist` smoothing (taking the max with the neighbor's own k-distance) s
 
 ### 4.7 Reconstruction methods (autoencoder / VAE — see unsupervised_learning/README.md)
 
-Train an autoencoder to reconstruct only-normal data through a bottleneck. At inference, **reconstruction error (MSE) is the anomaly score** — the network has no capacity for patterns it never saw, so anomalies reconstruct poorly. A VAE additionally gives a probabilistic score (ELBO / reconstruction probability). Failure modes (memorization, error dilution across high dimensions) are covered in [`../unsupervised_learning/README.md`](../unsupervised_learning/unsupervised_learning.md); §6 below adds the threshold mechanics.
+Train an autoencoder to reconstruct only-normal data through a bottleneck. At inference, **reconstruction error (MSE) is the anomaly score** — the network has no capacity for patterns it never saw, so anomalies reconstruct poorly. A VAE additionally gives a probabilistic score (ELBO / reconstruction probability). Failure modes (memorization, error dilution across high dimensions) are covered in [`../unsupervised_learning/unsupervised_learning.md`](../unsupervised_learning/unsupervised_learning.md); §6 below adds the threshold mechanics.
 
 ### 4.8 Density-based: GMM and DBSCAN-as-outlier
 
 - **GMM** fits a mixture of `K` Gaussians to normal data; the anomaly score is the **negative log-likelihood** under the mixture. Low-likelihood points are anomalies. Good when normal data is multimodal (several distinct normal regimes) but roughly Gaussian within each mode.
-- **DBSCAN** labels low-density points as noise (`label == -1`) for free — a byproduct of clustering. Cheap when you are already clustering, but `eps`/`min_samples` are brittle and it does not produce a graded score. See [`../unsupervised_learning/README.md`](../unsupervised_learning/unsupervised_learning.md).
+- **DBSCAN** labels low-density points as noise (`label == -1`) for free — a byproduct of clustering. Cheap when you are already clustering, but `eps`/`min_samples` are brittle and it does not produce a graded score. See [`../unsupervised_learning/unsupervised_learning.md`](../unsupervised_learning/unsupervised_learning.md).
 
 ### 4.9 Statistical baselines and EVT (net-new)
 
@@ -512,7 +512,7 @@ def cusum(y: np.ndarray, target: float, k: float, h: float) -> np.ndarray:
     return alarms
 ```
 
-You **decompose or forecast first, then threshold the residual** — thresholding the raw seasonal value flags every legitimate daily peak. See [`../time_series_forecasting/README.md`](../time_series_forecasting/time_series_forecasting.md) for STL, Prophet, and DeepAR whose forecast residuals feed this exact pipeline.
+You **decompose or forecast first, then threshold the residual** — thresholding the raw seasonal value flags every legitimate daily peak. See [`../time_series_forecasting/time_series_forecasting.md`](../time_series_forecasting/time_series_forecasting.md) for STL, Prophet, and DeepAR whose forecast residuals feed this exact pipeline.
 
 ### 6.6 Mahalanobis and GMM (probabilistic scores)
 
@@ -749,11 +749,11 @@ LOF, One-Class SVM, kNN, and Mahalanobis are distance-based. An unscaled `annual
 
 ### Pitfall 3 — Leaking future information in time-series evaluation
 
-Fitting STL/z-score statistics on the *whole* series, including the future, inflates offline metrics. Anomaly detection must use only-past data at each point (expanding or rolling window), exactly like time-series CV. See [`../model_evaluation_and_selection/README.md`](../model_evaluation_and_selection/model_evaluation_and_selection.md) and [`../time_series_forecasting/README.md`](../time_series_forecasting/time_series_forecasting.md).
+Fitting STL/z-score statistics on the *whole* series, including the future, inflates offline metrics. Anomaly detection must use only-past data at each point (expanding or rolling window), exactly like time-series CV. See [`../model_evaluation_and_selection/model_evaluation_and_selection.md`](../model_evaluation_and_selection/model_evaluation_and_selection.md) and [`../time_series_forecasting/time_series_forecasting.md`](../time_series_forecasting/time_series_forecasting.md).
 
 ### Pitfall 4 — A static threshold in a drifting world
 
-A p99.9 threshold learned in January becomes an alert storm in July when traffic doubles, or goes silent when it halves. Use **rolling quantiles or EWMA thresholds** and monitor the flag-rate itself; a flag-rate that suddenly triples is either a real incident or a drifted threshold. Cross-link [`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md) (PSI/KS for the score distribution).
+A p99.9 threshold learned in January becomes an alert storm in July when traffic doubles, or goes silent when it halves. Use **rolling quantiles or EWMA thresholds** and monitor the flag-rate itself; a flag-rate that suddenly triples is either a real incident or a drifted threshold. Cross-link [`../monitoring_and_drift_detection/monitoring_and_drift_detection.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md) (PSI/KS for the score distribution).
 
 ### Pitfall 5 — Reporting ROC-AUC and calling it a day
 
@@ -761,7 +761,7 @@ ROC-AUC of 0.99 on 0.1%-positive data routinely hides 5% precision. A team shipp
 
 ### Pitfall 6 — Error dilution in high-dimensional autoencoders
 
-A single corrupted feature in a 784-dim input barely moves the mean MSE — the anomaly is diluted across 783 normal dimensions. Mitigations: use **per-feature (max, not mean) reconstruction error**, weight features by their normal variance, or reduce the bottleneck so the model cannot trivially copy inputs. See [`../unsupervised_learning/README.md`](../unsupervised_learning/unsupervised_learning.md) §12 for the full failure-mode list.
+A single corrupted feature in a 784-dim input barely moves the mean MSE — the anomaly is diluted across 783 normal dimensions. Mitigations: use **per-feature (max, not mean) reconstruction error**, weight features by their normal variance, or reduce the bottleneck so the model cannot trivially copy inputs. See [`../unsupervised_learning/unsupervised_learning.md`](../unsupervised_learning/unsupervised_learning.md) §12 for the full failure-mode list.
 
 ### Pitfall 7 — Point method on a contextual/collective problem
 
@@ -905,5 +905,5 @@ Isolation Forest and tree-based detectors handle mixed types well after simple e
 
 **Evaluation.** Offline, on a labeled incident replay, the team reports **PR-AUC and precision@k** (k = the daily on-call alert budget), plus recall on amplitude anomalies > 3σ (target > 95%). Accuracy and bare ROC-AUC are explicitly banned from the scorecard — at 0.1% incident rate they read ~0.999 and 0.99 respectively while hiding the true precision. Thresholds are re-fit weekly with online updates for drift, and the flag-rate itself is monitored: a tripling means either a real outage or a drifted threshold.
 
-**Related.** For the fraud analog of the same score-then-threshold, rules+supervised+unsupervised stack, see [`../case_studies/design_fraud_detection.md`](../case_studies/design_fraud_detection.md); for the drift-monitoring machinery that keeps thresholds honest, see [`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md); for the calibration/thresholding primitive shared across classification case studies, see [`../case_studies/cross_cutting/model_calibration_and_thresholding.md`](../case_studies/cross_cutting/model_calibration_and_thresholding.md).
+**Related.** For the fraud analog of the same score-then-threshold, rules+supervised+unsupervised stack, see [`../case_studies/design_fraud_detection.md`](../case_studies/design_fraud_detection.md); for the drift-monitoring machinery that keeps thresholds honest, see [`../monitoring_and_drift_detection/monitoring_and_drift_detection.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md); for the calibration/thresholding primitive shared across classification case studies, see [`../case_studies/cross_cutting/model_calibration_and_thresholding.md`](../case_studies/cross_cutting/model_calibration_and_thresholding.md).
 

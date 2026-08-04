@@ -988,61 +988,61 @@ def bucket_index(hash_code: int, num_buckets: int) -> int:
 
 ## 12. Interview Questions with Answers
 
-**Does hash(a) == hash(b) imply that a == b?**
+**Q: Does hash(a) == hash(b) imply that a == b?**
 No, a hash match only means two keys collided in the hash function's range, not that they are equal. This is a converse fallacy — "equal keys have equal hashes" is the real contract every hash function must satisfy, but the reverse is never guaranteed, and once the key space is larger than the hash's output space, pigeonhole guarantees such collisions occur. Production code must always follow a hash match with a full key-equality check (Java's `hashCode`/`equals` contract, Python's `__hash__`/`__eq__`) — skipping it causes silent wrong-answer bugs, not crashes, which is far more dangerous.
 
-**What's wrong with concluding a hash function is "collision-free" after testing a small sample with no collisions found?**
+**Q: What's wrong with concluding a hash function is "collision-free" after testing a small sample with no collisions found?**
 Absence of observed collisions in a small sample proves nothing, because pigeonhole only guarantees a collision once your sample exceeds the hash's output range. A 64-bit hash has 2^64 ≈ 1.8×10^19 possible outputs, so pigeonhole alone needs that many keys for a guaranteed collision — but the birthday approximation (about 1.1774 × sqrt(N) keys for a 50% chance) puts a coin-flip-odds collision at only around 5 billion keys, and neither number is anywhere close to a 100-key test sample. Reason from the correct tool: pigeonhole for guaranteed existence, the birthday approximation for expected onset, never a small sample's absence of evidence.
 
-**Is E[X * Y] equal to E[X] * E[Y] in general?**
+**Q: Is E[X * Y] equal to E[X] * E[Y] in general?**
 No, E[X·Y] = E[X]·E[Y] only holds when X and Y are independent. For dependent variables the correct identity is E[XY] = E[X]E[Y] + Cov(X,Y) — rolling a die for X and setting Y=1 when X is even gives E[X]=3.5 and E[Y]=0.5, but the true E[XY] is 2.0, not 1.75, because X and Y move together. Linearity of expectation, E[X+Y]=E[X]+E[Y], is the identity that holds unconditionally regardless of dependence, which is why randomized-algorithm analysis decomposes costs into a sum of indicator variables rather than a product.
 
-**Why does `-7 % 3` give different results in Python versus Java or C++?**
+**Q: Why does `-7 % 3` give different results in Python versus Java or C++?**
 Python's `%` implements floored division, where the result takes the sign of the divisor, while Java and C++ implement truncated division, where the result takes the sign of the dividend. Concretely, `-7 % 3` is `2` in Python but `-1` in Java and C++, which silently produces a negative bucket index if used directly to index into an array. Always normalize with `((h % n) + n) % n`, or mask instead of mod when `n` is a power of two (`h & (n - 1)`), which sidesteps sign entirely.
 
-**What is the off-by-one trap in an induction proof, and how do you avoid it?**
+**Q: What is the off-by-one trap in an induction proof, and how do you avoid it?**
 The trap is starting the induction's base case at an index that does not match the code's actual recursion or loop floor. For example, `power_of_two(0)` returning `0` instead of `1` is a real bug, but a "proof" that starts its base case at P(1) and treats P(0) as "obviously fine" by intuition never actually checks the code's true base case, so the bug slips through undetected. Always set the induction's base case to the exact smallest input the code can receive, and verify it directly against the code, not against intuition.
 
-**Is the converse of "if P then Q" logically equivalent to the original statement?**
+**Q: Is the converse of "if P then Q" logically equivalent to the original statement?**
 No, only the contrapositive (not-Q implies not-P) is logically equivalent to the original implication. The converse (Q implies P) and inverse (not-P implies not-Q) are separate claims that can be false even when the original is true — "if it rained, the ground is wet" does not mean "if the ground is wet, it rained" (a sprinkler could be running). This is the same fallacy as assuming a hash match implies key equality, and it is worth double-checking with a truth table whenever an implication's direction matters under pressure.
 
-**Why are hash table sizes often chosen to be prime, or otherwise specially treated?**
+**Q: Why are hash table sizes often chosen to be prime, or otherwise specially treated?**
 A prime table size prevents keys that share a common factor with the modulus from clustering into a small subset of buckets. If the table size is a power of two and keys are, say, all multiples of 4, `key mod size` only ever lands on residues that are themselves multiples of 4 — one quarter of the table, each of those buckets carrying 4x the average load while the other three quarters stay empty. Modern implementations like Java's `HashMap` instead keep power-of-two sizes for fast bitmask indexing and fix clustering with a supplemental spreading step (`h ^ (h >>> 16)`) that mixes high bits into low bits before the mask is applied.
 
-**What are the four parts of a rigorous induction proof?**
+**Q: What are the four parts of a rigorous induction proof?**
 A complete induction proof has a base case, an inductive hypothesis, an inductive step, and a conclusion. The base case verifies P at the smallest input the recursion or loop actually reaches; the hypothesis assumes P(k) is true for some arbitrary k; the inductive step proves P(k+1) follows from that assumption; and the conclusion states P holds for all n at or above the base case. Skipping the explicit hypothesis step is the most common way interview candidates lose points even when their intuition about the algorithm is correct.
 
-**How does induction relate to proving a loop invariant correct?**
+**Q: How does induction relate to proving a loop invariant correct?**
 A loop invariant proof is induction wearing different names: initialization is the base case, maintenance is the inductive step, and termination is the conclusion. Initialization shows the invariant holds before the first iteration; maintenance shows that if it holds before an iteration it still holds after; termination combines the invariant with the loop's exit condition to derive the final correctness claim. This structure is exactly why an iterative algorithm's correctness argument cannot skip the "assume it holds, then show it still holds" step, any more than a recursive proof can.
 
-**When do you need strong induction instead of regular induction?**
+**Q: When do you need strong induction instead of regular induction?**
 Strong induction is required whenever the inductive step needs more than just the immediately preceding case to go through. The classic example is proving every integer amount of 8 or more can be made from 3-cent and 5-cent coins: proving it for k+1 relies on the result for (k+1)-3, which is not always the immediately preceding value k, so the hypothesis must cover all of P(8)...P(k) at once. This exact argument is also the correctness proof behind DP recurrences like `dp[n] = dp[n-3] or dp[n-5]` — strong induction is why the recurrence is allowed to reach back further than one step.
 
-**State the Pigeonhole Principle and give a concrete hashing example.**
+**Q: State the Pigeonhole Principle and give a concrete hashing example.**
 The Pigeonhole Principle says that if more than n items are placed into n containers, at least one container holds more than one item. Concretely, inserting 1,001 keys into a hash table with exactly 1,000 buckets guarantees at least one bucket receives two or more keys, regardless of how good the hash function is — this is a certainty, not a probability. The generalized form is sharper: placing n items into k containers guarantees some container holds at least ceil(n/k) items, which sets the minimum capacity a shard or bucket must be provisioned for.
 
-**What is the difference between the Pigeonhole Principle and the Birthday Paradox?**
+**Q: What is the difference between the Pigeonhole Principle and the Birthday Paradox?**
 Pigeonhole gives a guarantee of existence once you exceed the container count, while the birthday paradox gives a probability of collision far before that point. A 32-bit hash has 2^32 ≈ 4.3 billion possible values, so pigeonhole only guarantees a collision at 4.3 billion plus one keys — but the birthday approximation (about 1.1774 × sqrt(N) keys for a 50% chance) puts a coin-flip-odds collision at only around 77,000 keys. Use pigeonhole to prove something must eventually happen; use the birthday bound to estimate how soon it becomes likely.
 
-**What is Linearity of Expectation, and why does it matter for randomized algorithms?**
+**Q: What is Linearity of Expectation, and why does it matter for randomized algorithms?**
 Linearity of Expectation states that E[X + Y] = E[X] + E[Y] for any random variables, even if they are dependent. This unconditional guarantee lets you decompose a complicated random quantity, like the total number of comparisons in a randomized algorithm, into a sum of simple indicator variables, compute each one's expectation separately, and add them up without ever needing the joint distribution. It is the single most useful tool for analyzing randomized algorithms, from quicksort's expected comparisons to load-balancing schemes.
 
-**How do you prove randomized quicksort runs in expected O(n log n) time?**
+**Q: How do you prove randomized quicksort runs in expected O(n log n) time?**
 Define an indicator variable for every pair of elements that equals 1 if that pair is ever compared, then sum their expectations using linearity of expectation. Two elements at rank distance d are compared only if one of them is chosen as a pivot before any element strictly between them, which happens with probability 2/(d+1); summing this over all pairs collapses into harmonic-number terms and evaluates to 2(n+1)H_n - 4n, which is Theta(n log n). This holds regardless of the input's initial order, which is exactly why randomized quicksort has no adversarial worst-case input, unlike a fixed-pivot version.
 
-**What is an equivalence relation, and what data structure directly implements one?**
+**Q: What is an equivalence relation, and what data structure directly implements one?**
 An equivalence relation is reflexive, symmetric, and transitive, and it partitions a set into disjoint equivalence classes. The Union-Find (Disjoint Set Union) data structure directly implements this: each `find` operation reports which equivalence class an element belongs to, and each `union` merges two classes, with path compression and union-by-rank keeping both operations nearly O(1) amortized. This is exactly the structure Kruskal's MST algorithm and "connected components" interview problems rely on.
 
-**What does Fermat's Little Theorem say, and how is it used in cryptography and hashing?**
+**Q: What does Fermat's Little Theorem say, and how is it used in cryptography and hashing?**
 Fermat's Little Theorem states that a^(p-1) is congruent to 1 modulo p for any prime p and any integer a not divisible by p. It underlies probabilistic primality testing (Fermat/Miller-Rabin) and gives a shortcut for modular inverses when the modulus is prime: since a times a^(p-2) is congruent to 1 mod p, a^(p-2) mod p is a's inverse — this is exactly how RSA-adjacent computations compute modular inverses without the extended Euclidean algorithm. It only applies directly when the modulus is prime; composite moduli need the more general extended Euclidean approach.
 
-**What is the time complexity of modular exponentiation, and why does it matter?**
+**Q: What is the time complexity of modular exponentiation, and why does it matter?**
 Fast modular exponentiation (square-and-multiply) computes a^b mod m in O(log b) multiplications instead of the naive O(b). For an RSA-sized exponent that is a 2048-bit number, square-and-multiply needs on the order of 2,048 iterations instead of an astronomically larger naive multiplication count. Python's built-in three-argument `pow(base, exp, mod)` already uses this algorithm internally.
 
-**What does the Handshake Lemma say about a graph's degree sequence?**
+**Q: What does the Handshake Lemma say about a graph's degree sequence?**
 The Handshake Lemma says the sum of all vertex degrees in a graph equals exactly twice the number of edges. This follows because every edge contributes exactly 1 to the degree count of each of its two endpoints, so summing degrees counts every edge twice; a direct corollary is that the number of odd-degree vertices in any graph is always even. It is a fast sanity check for graph algorithm implementations — if your computed degree sum is odd, or doesn't match 2 times the edge count, edges are being counted or stored incorrectly.
 
-**How do you determine whether a graph is bipartite?**
+**Q: How do you determine whether a graph is bipartite?**
 Run a BFS or DFS that assigns alternating colors to adjacent vertices, and the graph is bipartite if and only if no edge ever connects two same-colored vertices. Start any uncolored vertex with color A, color every neighbor B, every neighbor-of-neighbor A, and so on; if a vertex ever needs to be colored the opposite of its already-assigned color, the graph contains an odd-length cycle and is not bipartite. This 2-coloring check runs in O(V+E) time and is equivalent to the purely combinatorial characterization that a graph is bipartite if and only if it has no odd-length cycle.
 
 ---

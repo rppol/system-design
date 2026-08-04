@@ -890,8 +890,8 @@ About 150 TB of new video per day, before transcoding multiplies it into multipl
 ## Cross-links in this repo
 
 - [hld/case_studies/design_netflix.md — the sibling video-streaming case study (Open Connect, adaptive bitrate, encoding pipeline)](../../../hld/case_studies/design_netflix.md)
-- [hld/cdn/README.md — CDN internals: edge caching, origin pull, the cost model behind the \$150K/day estimate](../../../hld/cdn/cdn.md)
-- [hld/message_queues/README.md — the queue-decoupling pattern used to parallelize every transcoding stage](../../../hld/message_queues/message_queues.md)
+- [hld/cdn/cdn.md — CDN internals: edge caching, origin pull, the cost model behind the \$150K/day estimate](../../../hld/cdn/cdn.md)
+- [hld/message_queues/message_queues.md — the queue-decoupling pattern used to parallelize every transcoding stage](../../../hld/message_queues/message_queues.md)
 - [Ch 1 — Scale From Zero to Millions of Users (CDN + blob storage building blocks)](../01_scale_from_zero_to_millions_of_users/01_scale_from_zero_to_millions_of_users.md)
 - [Ch 10 — Design a Notification System (queue + worker fan-out, same shape as the completion queue/handler)](../10_design_a_notification_system/10_design_a_notification_system.md)
 - [Ch 15 — Design Google Drive (the sibling large-file upload + blob storage chapter)](../15_design_google_drive/15_design_google_drive.md)

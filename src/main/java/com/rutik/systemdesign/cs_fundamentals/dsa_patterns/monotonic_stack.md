@@ -416,8 +416,8 @@ flowchart LR
 - Concept module: [linked_lists_stacks_and_queues](../linked_lists_stacks_and_queues/linked_lists_stacks_and_queues.md) — stack/queue fundamentals, `collections.deque`
 - [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array scanning patterns
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — amortized analysis (push/pop bound)
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `ArrayDeque` as the standard Java stack/deque (avoid legacy `Stack` class, which is synchronized)
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../java/collections_internals/collections_internals.md`](../../java/collections_internals/collections_internals.md) — `ArrayDeque` as the standard Java stack/deque (avoid legacy `Stack` class, which is synchronized)
+- Master index: [dsa_patterns/dsa_patterns.md](dsa_patterns.md)
 
 ---
 

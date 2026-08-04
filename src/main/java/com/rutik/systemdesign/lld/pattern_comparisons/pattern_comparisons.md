@@ -210,7 +210,7 @@ flowchart LR
 
 ## Files in This Directory
 
-- [README.md](pattern_comparisons.md) — This file (master matrix + quick guide)
+- [pattern_comparisons.md](pattern_comparisons.md) — This file (master matrix + quick guide)
 - [Strategy_vs_State.md](Strategy_vs_State.md)
 - [Factory_vs_AbstractFactory_vs_Builder.md](Factory_vs_AbstractFactory_vs_Builder.md)
 - [Adapter_vs_Bridge_vs_Facade.md](Adapter_vs_Bridge_vs_Facade.md)

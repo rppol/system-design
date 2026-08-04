@@ -41,13 +41,13 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Category | Index File | Patterns / Topics |
 |----------|-----------|-------------------|
-| Design Principles | [design_principles/README.md](design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
-| Creational Patterns | [creational/README.md](creational/creational.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
-| Structural Patterns | [structural/README.md](structural/structural.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
-| Behavioral Patterns | [behavioral/README.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
-| Concurrency Patterns | [concurrency_patterns/README.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
-| System Design Problems | [system_design_problems/README.md](system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
-| LLD Case Studies | [case_studies/README.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
+| Design Principles | [design_principles/design_principles.md](design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| Creational Patterns | [creational/creational.md](creational/creational.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
+| Structural Patterns | [structural/structural.md](structural/structural.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
+| Behavioral Patterns | [behavioral/behavioral.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
+| Concurrency Patterns | [concurrency_patterns/concurrency_patterns.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
+| System Design Problems | [system_design_problems/system_design_problems.md](system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
+| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
 
 ---
 
@@ -321,7 +321,7 @@ A different cut, not senior-plus-extras. The Principal Path probes pattern judgm
 
 ## Knowledge-Question Map
 
-The highest-frequency LLD *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency LLD *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
@@ -350,7 +350,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|

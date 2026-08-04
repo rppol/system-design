@@ -171,13 +171,13 @@ Infrastructure patterns referenced by multiple case studies. Read just-in-time w
 | [experimentation_and_online_evaluation.md](case_studies/cross_cutting/experimentation_and_online_evaluation.md) | Experimentation and Online Evaluation | OEC, guardrail/counter-metrics, CUPED, sequential testing (mSPRT), SRM detection, switchback | Churn, ETA, Marketplace, QA |
 | [drift_monitoring_and_retraining.md](case_studies/cross_cutting/drift_monitoring_and_retraining.md) | Drift Monitoring and Retraining | Data/concept drift, PSI thresholds, champion/challenger, label latency, retraining triggers | Fraud, Churn, ETA, Marketplace, Semantic Search, NER, QA |
 
-See [`case_studies/cross_cutting/README.md`](case_studies/cross_cutting/cross_cutting.md) for the full index.
+See [`case_studies/cross_cutting/cross_cutting.md`](case_studies/cross_cutting/cross_cutting.md) for the full index.
 
 ---
 
 ## Case Studies (24)
 
-All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–24 use the 11-section principal template (same format as LLM case studies). See [`case_studies/README.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
+All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–24 use the 11-section principal template (same format as LLM case studies). See [`case_studies/case_studies.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
 
 | # | Case Study | Core ML Concepts | Template | Link |
 |---|-----------|-----------------|----------|------|
@@ -374,7 +374,7 @@ A different cut, not senior-plus-extras. The Principal Path probes what a staff 
 
 ## Knowledge-Question Map
 
-The highest-frequency ML *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
+The highest-frequency ML *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
@@ -444,15 +444,15 @@ The LLM section (`llm/`) covers a separate but complementary body of knowledge. 
 
 Key links to related LLM section modules where a concept is covered in greater depth for the LLM context:
 
-- Transformer architecture and self-attention: [`llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/foundations_and_architecture.md)
-- Tokenization and vocabulary design: [`llm/tokenization_and_embeddings/README.md`](../llm/tokenization_and_embeddings/tokenization_and_embeddings.md)
-- Sentence embeddings and ANN search: [`llm/embeddings_and_similarity_search/README.md`](../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md)
-- Fine-tuning (LoRA, QLoRA, PEFT): [`llm/fine_tuning/README.md`](../llm/fine_tuning/fine_tuning.md)
-- RLHF and alignment: [`llm/alignment_and_rlhf/README.md`](../llm/alignment_and_rlhf/alignment_and_rlhf.md)
-- RAG fundamentals: [`llm/rag_fundamentals/README.md`](../llm/rag_fundamentals/rag_fundamentals.md)
-- LLM inference engines: [`llm/inference_engines/README.md`](../llm/inference_engines/inference_engines.md)
-- LLM-scale distributed training: [`llm/training_infrastructure/README.md`](../llm/training_infrastructure/training_infrastructure.md)
-- LLM quantization and optimization: [`llm/optimization_and_quantization/README.md`](../llm/optimization_and_quantization/optimization_and_quantization.md)
-- LLM observability and monitoring: [`llm/llm_observability_and_monitoring/README.md`](../llm/llm_observability_and_monitoring/llm_observability_and_monitoring.md)
-- Multimodal models and diffusion: [`llm/multimodal_models/README.md`](../llm/multimodal_models/multimodal_models.md)
-- Evaluation and benchmarks: [`llm/evaluation_and_benchmarks/README.md`](../llm/evaluation_and_benchmarks/evaluation_and_benchmarks.md)
+- Transformer architecture and self-attention: [`llm/foundations_and_architecture/foundations_and_architecture.md`](../llm/foundations_and_architecture/foundations_and_architecture.md)
+- Tokenization and vocabulary design: [`llm/tokenization_and_embeddings/tokenization_and_embeddings.md`](../llm/tokenization_and_embeddings/tokenization_and_embeddings.md)
+- Sentence embeddings and ANN search: [`llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md`](../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md)
+- Fine-tuning (LoRA, QLoRA, PEFT): [`llm/fine_tuning/fine_tuning.md`](../llm/fine_tuning/fine_tuning.md)
+- RLHF and alignment: [`llm/alignment_and_rlhf/alignment_and_rlhf.md`](../llm/alignment_and_rlhf/alignment_and_rlhf.md)
+- RAG fundamentals: [`llm/rag_fundamentals/rag_fundamentals.md`](../llm/rag_fundamentals/rag_fundamentals.md)
+- LLM inference engines: [`llm/inference_engines/inference_engines.md`](../llm/inference_engines/inference_engines.md)
+- LLM-scale distributed training: [`llm/training_infrastructure/training_infrastructure.md`](../llm/training_infrastructure/training_infrastructure.md)
+- LLM quantization and optimization: [`llm/optimization_and_quantization/optimization_and_quantization.md`](../llm/optimization_and_quantization/optimization_and_quantization.md)
+- LLM observability and monitoring: [`llm/llm_observability_and_monitoring/llm_observability_and_monitoring.md`](../llm/llm_observability_and_monitoring/llm_observability_and_monitoring.md)
+- Multimodal models and diffusion: [`llm/multimodal_models/multimodal_models.md`](../llm/multimodal_models/multimodal_models.md)
+- Evaluation and benchmarks: [`llm/evaluation_and_benchmarks/evaluation_and_benchmarks.md`](../llm/evaluation_and_benchmarks/evaluation_and_benchmarks.md)

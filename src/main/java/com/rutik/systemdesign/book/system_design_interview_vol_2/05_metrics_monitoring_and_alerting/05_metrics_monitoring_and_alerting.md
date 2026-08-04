@@ -1232,8 +1232,8 @@ Gorilla is an in-memory TSDB that keeps the most recent ~26 hours of data entire
 - [hld/caching/ — the query-service cache for repeated dashboard queries](../../../hld/caching/caching.md)
 - [devops/observability_metrics_prometheus/ — Prometheus/PromQL in production](../../../devops/observability_metrics_prometheus/observability_metrics_prometheus.md)
 - [devops/README.md — DevOps observability section index (metrics, logging, tracing)](../../../devops/README.md)
-- [../04_distributed_message_queue/README.md — the queue this chapter's Kafka buffer builds on](../04_distributed_message_queue/04_distributed_message_queue.md)
-- [../../designing_data_intensive_applications/11_stream_processing/README.md — DDIA on stream windows, late data, and watermarks](../../designing_data_intensive_applications/11_stream_processing/11_stream_processing.md)
+- [../04_distributed_message_queue/04_distributed_message_queue.md — the queue this chapter's Kafka buffer builds on](../04_distributed_message_queue/04_distributed_message_queue.md)
+- [../../designing_data_intensive_applications/11_stream_processing/11_stream_processing.md — DDIA on stream windows, late data, and watermarks](../../designing_data_intensive_applications/11_stream_processing/11_stream_processing.md)
 
 ## Further Reading
 

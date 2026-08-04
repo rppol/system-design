@@ -992,10 +992,10 @@ Multi-stage ranking uses a cheap light retrieval stage (ANN plus the inverted in
   this book chapter summarizes:
   - [ml/case_studies/design_search_ranking.md — retrieve-then-rank, learning-to-rank, fusion](../../../ml/case_studies/design_search_ranking.md)
   - [ml/case_studies/design_semantic_search_engine.md — dual-encoder embedding retrieval, ANN serving](../../../ml/case_studies/design_semantic_search_engine.md)
-- [ml/information_retrieval_and_search/README.md — inverted index, BM25, ANN, ranking metrics](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md)
-- [ml/natural_language_processing/README.md — tokenization, embeddings, transformers, BERT](../../../ml/natural_language_processing/natural_language_processing.md)
-- [ml/self_supervised_and_contrastive_learning/README.md — contrastive loss, in-batch negatives, CLIP](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md)
-- [ml/computer_vision/README.md — ViT, image encoders, frame-level video modeling](../../../ml/computer_vision/computer_vision.md)
+- [ml/information_retrieval_and_search/information_retrieval_and_search.md — inverted index, BM25, ANN, ranking metrics](../../../ml/information_retrieval_and_search/information_retrieval_and_search.md)
+- [ml/natural_language_processing/natural_language_processing.md — tokenization, embeddings, transformers, BERT](../../../ml/natural_language_processing/natural_language_processing.md)
+- [ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md — contrastive loss, in-batch negatives, CLIP](../../../ml/self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md)
+- [ml/computer_vision/computer_vision.md — ViT, image encoders, frame-level video modeling](../../../ml/computer_vision/computer_vision.md)
 - Sibling chapters of this book:
   - [Ch 2: Visual Search System — the image→image ANN retrieval this chapter generalizes](../02_visual_search_system/02_visual_search_system.md)
   - [Ch 6: Video Recommendation System — personalized ranking, the complement to query search](../06_video_recommendation_system/06_video_recommendation_system.md)

@@ -1087,9 +1087,9 @@ They force two decisions directly: with ~1e11 impressions/day, raw training data
   — drift detection and the retraining cadence behind continual learning.
 - [ml/recommender_systems/deep_learning_recommenders.md](../../../ml/recommender_systems/deep_learning_recommenders.md)
   — DeepFM, DCN, Wide & Deep, and embedding-based CTR architectures in depth.
-- [ml/feature_engineering/README.md](../../../ml/feature_engineering/feature_engineering.md)
+- [ml/feature_engineering/feature_engineering.md](../../../ml/feature_engineering/feature_engineering.md)
   — feature crossing, hashing trick, and categorical encoding.
-- [ml/imbalanced_data_and_leakage_traps/README.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md)
+- [ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md)
   — negative downsampling, recalibration, and point-in-time-correctness leakage.
 - [book/system_design_interview_vol_2 · Ch 6 — Ad Click Event Aggregation](../../system_design_interview_vol_2/06_ad_click_event_aggregation/06_ad_click_event_aggregation.md)
   — the data-engineering neighbor: how the click stream that produces these labels is aggregated.

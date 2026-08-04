@@ -1160,6 +1160,6 @@ async def get_current_user(
 ---
 
 *Cross-links:*
-- Dependency patterns: [`../dependency_injection_in_fastapi/README.md`](../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md)
-- Settings management: [`../configuration_and_settings_management/README.md`](../configuration_and_settings_management/configuration_and_settings_management.md)
-- Security hardening: [`../security_hardening_and_owasp/README.md`](../security_hardening_and_owasp/security_hardening_and_owasp.md)
+- Dependency patterns: [`../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`](../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md)
+- Settings management: [`../configuration_and_settings_management/configuration_and_settings_management.md`](../configuration_and_settings_management/configuration_and_settings_management.md)
+- Security hardening: [`../security_hardening_and_owasp/security_hardening_and_owasp.md`](../security_hardening_and_owasp/security_hardening_and_owasp.md)

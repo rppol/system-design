@@ -741,102 +741,102 @@ spring:
 
 ## 12. Interview Questions with Answers
 
-**What's the practical difference between Flyway and Liquibase, and how do you choose between them?**
+**Q: What's the practical difference between Flyway and Liquibase, and how do you choose between them?**
 **Short:** Flyway is SQL-first for one engine; Liquibase is declarative, database-agnostic, with free rollback and preconditions.
 
 Flyway is SQL-first: each migration is a plain SQL file applied in version order and tracked in `flyway_schema_history`. Liquibase is declarative and database-agnostic: changesets describe an intent (XML, YAML, JSON, or formatted SQL) that Liquibase translates into dialect-correct DDL, tracked in `DATABASECHANGELOG`, and it ships built-in rollback and preconditions in its free tier — Flyway Community has neither (undo migrations are Teams-only; preconditions must be hand-written as SQL guards). Choose Flyway when the team is SQL-comfortable and targets one or two database engines; choose Liquibase when one changelog must run against multiple database vendors, or you want rollback/precondition support without a paid license.
 
-**What causes a Flyway "checksum mismatch" error, and how do you fix it correctly?**
+**Q: What causes a Flyway "checksum mismatch" error, and how do you fix it correctly?**
 **Short:** A checksum mismatch means an applied migration file was edited afterward; fix it with a new migration, not a hand edit.
 
 A checksum mismatch means a migration file's content changed after Flyway already recorded its checksum from a prior run. Flyway recomputes a CRC32 checksum of every resolved migration on the classpath each time you call `migrate()` or `validate()`, compares it against the stored value, and refuses to proceed on any difference — a fail-fast guard against silently divergent history between environments. The correct fix is to never hand-edit an applied migration; ship the correction as a new migration, and reserve `flyway repair` (which rewrites stored checksums to match the current files) for reconciling a change you have already reviewed and accepted, not for bypassing the check.
 
-**Why is `spring.jpa.hibernate.ddl-auto=update` dangerous in production, and what should you use instead?**
+**Q: Why is `spring.jpa.hibernate.ddl-auto=update` dangerous in production, and what should you use instead?**
 **Short:** `ddl-auto=update` lets Hibernate silently alter the live schema with no history or rollback; use `validate` in production.
 
 Setting `ddl-auto=update` lets Hibernate inspect your `@Entity` classes and silently ALTER the live schema to match them, with no history, no review, and no rollback path. Two developers running `update` against the same database can each apply conflicting, untracked changes, and Hibernate's diff is conservative about destructive changes, so drift accumulates invisibly until data is silently truncated or a later `validate` run catches it by surprise. In production, set `ddl-auto=validate`: Hibernate compares entity mappings against the actual schema at startup and fails fast on any mismatch, but never mutates the schema itself — Flyway or Liquibase owns every schema change.
 
-**Why can't you edit a migration file after it has already been applied anywhere?**
+**Q: Why can't you edit a migration file after it has already been applied anywhere?**
 **Short:** Editing an applied migration breaks its fixed checksum everywhere it already ran, since migrations are an immutable log.
 
 A migration's checksum is fixed the moment it first runs, so any later edit — even whitespace — produces a checksum-mismatch failure everywhere it already ran. Every `validate()` call recomputes the checksum from the current file and compares it against what is stored in the history table. Migrations are meant to be an immutable, append-only log of exactly what happened to the schema, not a mutable "current state" file, and editing history breaks that guarantee. If a migration was wrong, write a new one that corrects it instead of touching the old file.
 
-**What is Flyway's `baseline` for, and what breaks if you get `baselineVersion` wrong?**
+**Q: What is Flyway's `baseline` for, and what breaks if you get `baselineVersion` wrong?**
 **Short:** `baseline` marks an existing database as already at a given version instead of replaying migrations from scratch.
 
 `baseline` tells Flyway to treat an existing, non-empty database as already being at a given version, inserting a synthetic marker row instead of replaying every migration from scratch. It exists for adopting Flyway on a database that predates it — one already created by DBA scripts or a legacy tool — so you don't hand-write migrations for years of prior history. Get `baselineVersion` wrong and Flyway either silently skips migrations that were never actually applied, leaving the database missing real schema objects, or tries to re-apply changes that already exist and fails on "relation already exists" — always verify the live schema against the migration set before choosing the value.
 
-**What is `DATABASECHANGELOGLOCK`, and what happens when a pod crashes while holding it?**
+**Q: What is `DATABASECHANGELOGLOCK`, and what happens when a pod crashes while holding it?**
 **Short:** It is Liquibase's mutex table; a pod crashing while it holds the lock blocks every future deploy until manually released.
 
 `DATABASECHANGELOGLOCK` is Liquibase's mutex table — every instance must acquire it before applying changesets, preventing two application instances from racing the same changelog concurrently. If the pod holding the lock is killed mid-migration before releasing it, the `LOCKED` flag never clears, and every subsequent deploy fails fast with `LockException: Could not acquire change log lock` — the database is not damaged, but the release pipeline is stuck. Recovery is a manual operator step: confirm the previous attempt did not leave the schema half-applied, then run `liquibase releaseLocks`.
 
-**Why does adding a `NOT NULL` column in one migration break a live rolling deployment, and what fixes it?**
+**Q: Why does adding a `NOT NULL` column in one migration break a live rolling deployment, and what fixes it?**
 **Short:** Old-code pods keep running against the same schema during a rollout, so a single breaking migration crashes them mid-deploy.
 
 A single migration that adds a required column, or renames or drops one, breaks any old-code pod still running against that schema the instant it commits. During a rolling deployment, old-code pods keep running against the same database for the entire rollout window, so the schema must satisfy both versions at once. The fix is the expand-contract pattern: add the column as nullable first (old code unaffected), backfill it in batches, deploy code that writes both old and new columns, cut reads over once the backfill is verified complete, then enforce `NOT NULL` and drop the old column only after nothing references it. Never ship a schema change and a breaking code change as a single atomic step when more than one application version can be live at once.
 
-**Why does `CREATE INDEX CONCURRENTLY` fail inside a Flyway migration, and how do you run it safely?**
+**Q: Why does `CREATE INDEX CONCURRENTLY` fail inside a Flyway migration, and how do you run it safely?**
 **Short:** PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction, but Flyway wraps migrations in one by default.
 
 PostgreSQL refuses to run `CREATE INDEX CONCURRENTLY` inside any transaction block, but Flyway wraps each SQL migration in a transaction by default. The statement fails immediately with a transaction-block error inside a normal versioned migration. The fix takes that specific migration out of Flyway's transaction wrapper: newer Flyway versions support a `-- flyway:executeInTransaction=false` directive as the first line of the script, or `spring.flyway.mixed=true` allows non-transactional statements alongside transactional ones in the same file. Because a non-transactional migration cannot be rolled back automatically on failure, test it against a production-sized clone first and be ready to `DROP INDEX CONCURRENTLY` and retry if it leaves an `INVALID` index behind.
 
-**What is Flyway's `out-of-order` setting, and when do you actually need it?**
+**Q: What is Flyway's `out-of-order` setting, and when do you actually need it?**
 **Short:** It lets Flyway apply a lower-numbered migration after a higher one has already run, needed when parallel branches merge late.
 
 `out-of-order` lets Flyway apply a lower-numbered migration after a higher-numbered one has already run, instead of failing validation because history is not strictly increasing. It matters when two feature branches develop in parallel: branch A merges and ships a higher version number first, and branch B — started earlier but merged later — ships a lower one, which fails outright without this setting. Keep it disabled by default and enable it narrowly, because out-of-order execution means the sequence applied in production is not necessarily the sequence anyone tested end-to-end in CI.
 
-**What is a "repeatable" migration (`R__`), and how does Flyway decide when to re-run it?**
+**Q: What is a "repeatable" migration (`R__`), and how does Flyway decide when to re-run it?**
 **Short:** A repeatable migration re-runs automatically whenever its file's checksum changes, unlike a versioned migration.
 
 A repeatable migration re-runs automatically whenever its file's checksum changes, unlike a versioned migration, which runs exactly once. Repeatable migrations always execute after all pending versioned migrations in a given `migrate()` call, and Flyway detects a change purely by comparing the current file's checksum against the last one recorded in `flyway_schema_history` — editing an `R__` file is expected and safe, unlike editing a `V__` file. Use them for views, stored procedures, and seed data — anything that should always reflect the latest definition rather than one point-in-time change.
 
-**How does Spring Boot guarantee Flyway or Liquibase runs before Hibernate validates the schema?**
+**Q: How does Spring Boot guarantee Flyway or Liquibase runs before Hibernate validates the schema?**
 **Short:** Spring Boot makes the `EntityManagerFactory` bean `@DependsOn` the Flyway or Liquibase bean, forcing migrations first.
 
 Spring Boot registers a `BeanFactoryPostProcessor` that makes the JPA `EntityManagerFactory` bean `@DependsOn` the Flyway or Liquibase bean. That forces the container to run the migration step before it ever builds the `EntityManagerFactory`. This ordering is what makes `ddl-auto=validate` reliable: Hibernate validates against the schema state after migrations ran, never before, so a pending migration can never masquerade as a schema mismatch. Without this wiring — a hand-rolled `DataSource`/`EntityManagerFactory` setup outside Boot's autoconfiguration — you must add the `@DependsOn` relationship yourself or Hibernate can race the migration.
 
-**What's the difference between Liquibase's automatic rollback and a custom `<rollback>` block?**
+**Q: What's the difference between Liquibase's automatic rollback and a custom `<rollback>` block?**
 **Short:** Liquibase auto-generates rollback only for simple reversible changes; data-altering changesets need an explicit rollback block.
 
 Liquibase auto-generates rollback only for simple, reversible change types — `addColumn` reverses to `dropColumn`, `createTable` reverses to `dropTable` — with zero extra authoring. Anything Liquibase cannot infer safely, such as a data migration or a column drop that would lose data, needs an explicit `<rollback>` block with the exact statements that undo the change, because there is no generic way to "un-drop" a column's data. Always author an explicit rollback for any changeset that touches data, not just schema shape, and test the rollback path in CI the same way you test the forward migration.
 
-**What are Liquibase contexts and labels, and how are they different?**
+**Q: What are Liquibase contexts and labels, and how are they different?**
 **Short:** Contexts gate a changeset by environment at runtime, while labels are general-purpose tags for feature or team groupings.
 
 Contexts are boolean tags evaluated at runtime, traditionally used to gate a changeset by deployment environment or purpose, such as excluding test-only seed data from a production run. Labels are a more general-purpose tagging mechanism for cross-cutting groupings — a feature name, a team, a release train — that combine with AND/OR/NOT expressions independent of environment. Use contexts for "should this changeset run in this environment" and labels for "which changesets belong to this feature or workstream," and never rely on either as a substitute for a real access-control boundary.
 
-**What does a Liquibase precondition do, and what's the difference between `onFail` and `onError`?**
+**Q: What does a Liquibase precondition do, and what's the difference between `onFail` and `onError`?**
 **Short:** A precondition guards a changeset on database state; `onFail` handles a false check, `onError` handles a check that errors.
 
 A precondition is a guard — `tableExists`, `columnExists`, `dbms`, or a custom SQL check — evaluated before a changeset runs, letting you skip or halt it based on the database's actual state rather than an assumption. `onFail` controls what happens when the precondition itself evaluates to false; `onError` controls what happens when evaluating the precondition throws an error, such as a permissions problem — both accept `HALT`, `CONTINUE`, `MARK_RAN`, or `WARN`. `MARK_RAN` is the one to use carefully: it records the changeset as applied without running it, correct for "this table already has this column from a legacy script" but dangerous if used to paper over a real failure.
 
-**Why should the database user that runs migrations differ from the one your application uses at runtime?**
+**Q: Why should the database user that runs migrations differ from the one your application uses at runtime?**
 **Short:** The migration user needs DDL privileges, while the runtime application user should only ever have DML privileges.
 
 The migration user needs DDL privileges — `CREATE`, `ALTER`, `DROP` — while the application should only ever need DML privileges to operate on data. Giving the runtime user DDL rights means a SQL-injection bug or a leaked credential can drop tables, not just read or corrupt rows. Spring Boot supports this directly: `spring.flyway.url`/`user`/`password` (or the Liquibase equivalents) can point the migration tool at a privileged connection while `spring.datasource.*` stays scoped to a low-privilege application user. Treat the migration credential like a deployment secret used only during the migration step, not something baked into every running pod's connection pool.
 
-**What actually happens to a migration's history row when it fails halfway through?**
+**Q: What actually happens to a migration's history row when it fails halfway through?**
 **Short:** Flyway records the migration with `success=false` and refuses to run any later migration until that row is resolved.
 
 Flyway inserts a `success=false` row for the failed migration and stops immediately, refusing to proceed to later migrations until that row is resolved. On databases with transactional DDL the failed statement's own changes roll back, but earlier statements already committed within the same script may remain, depending on how the script is structured; recovery means fixing the underlying issue and retrying after removing the failed row (or via `flyway repair`), or manually reverting the partial change and correcting the migration file. This is why migrations should stay small and single-purpose — a 200-line migration that fails on line 150 leaves a far messier partial state than five 40-line migrations would.
 
-**How do you keep a broken migration from ever reaching production?**
+**Q: How do you keep a broken migration from ever reaching production?**
 **Short:** Run the full migration set against a real database engine via Testcontainers as a CI gate on every pull request.
 
 Run the full migration set against a real database engine — the same major version as production — as a CI gate on every pull request. Use Testcontainers, not an in-memory substitute like H2, applying every migration from empty and asserting a clean `validate()`. This catches dialect-specific failures (`CREATE INDEX CONCURRENTLY`, JSON operators, partitioning syntax) that pass silently against H2 but fail against real Postgres or MySQL, plus catches checksum drift before it reaches a shared environment. Treat a red migration-CI job exactly like a failing unit test: it blocks merge, full stop.
 
-**What are Flyway callbacks, and what are they typically used for?**
+**Q: What are Flyway callbacks, and what are they typically used for?**
 **Short:** Callbacks are lifecycle hooks like `beforeMigrate` and `afterMigrate` used for metrics, view refreshes, or validation.
 
 Callbacks are hook points — `beforeMigrate`, `afterMigrate`, `beforeEachMigrate`, and others — in the migration lifecycle. They run custom SQL or Java logic at a specific point, named by convention or implemented via the `Callback` interface for logic too complex for SQL. Common uses are emitting a metric when a migration run starts or finishes, refreshing a materialized view after all versioned migrations complete, or validating an invariant before allowing the run to proceed. Keep callback logic idempotent — it runs on every `migrate()` invocation, including ones where zero migrations were actually pending.
 
-**Why is `flyway clean` disabled by default in Spring Boot, and when would you ever enable it?**
+**Q: Why is `flyway clean` disabled by default in Spring Boot, and when would you ever enable it?**
 **Short:** It drops every Flyway-managed object, so Spring Boot disables it by default to prevent an accidental production wipe.
 
 `flyway clean` drops every object Flyway manages, and Spring Boot disables it by default so a misconfigured or copy-pasted command can never wipe a production database by accident. The only legitimate uses are ephemeral environments — a local dev database, a CI database created fresh for a test run, or a Testcontainers instance discarded regardless of outcome. Never set `clean-disabled=false` on any configuration profile that could plausibly point at a shared or production data source, even temporarily for "just this one fix."
 
-**How do you run schema-per-tenant migrations for a multi-tenant application?**
+**Q: How do you run schema-per-tenant migrations for a multi-tenant application?**
 **Short:** Each tenant gets its own schema, and Flyway targets it via `spring.flyway.schemas`, run once per tenant.
 
 Each tenant gets its own schema, and the same versioned migration set runs once per tenant. You parameterize Flyway's target schema per invocation — `spring.flyway.schemas=tenant_42`, or a runtime loop calling `Flyway.configure().schemas(tenantId).load().migrate()` for each known tenant — with placeholders letting one migration file generate tenant-scoped DDL without duplicating SQL per tenant. The operational cost is real: 500 tenants means 500 independent migration histories to track, and a single migration release becomes 500 sequential or carefully parallelized `migrate()` calls. This pattern only scales cleanly with automation wrapped around it — a manual per-tenant rollout does not.

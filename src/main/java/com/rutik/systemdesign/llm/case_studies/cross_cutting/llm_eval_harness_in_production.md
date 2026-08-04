@@ -10,7 +10,7 @@ Offline unit-test-style evaluation breaks for LLMs for three structural reasons.
 
 The eval harness solves these problems by composing multiple measurement layers: lexical metrics (ROUGE, BLEU, exact match) for cases where ground truth is deterministic; semantic metrics (embedding cosine similarity, BERTScore) for paraphrase-tolerant correctness; LLM-as-judge for subjective quality and reasoning; and human raters as the calibration source for the LLM judge. Each layer has different cost, latency, and reliability characteristics. A production harness runs all layers in the right contexts — not blindly applying the most expensive to every trace.
 
-Related modules: [`../../evaluation_and_benchmarks/README.md`](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md), [`../../llm_testing_strategies/README.md`](../../llm_testing_strategies/llm_testing_strategies.md), [`../../llm_observability_and_monitoring/README.md`](../../llm_observability_and_monitoring/llm_observability_and_monitoring.md), [`../../prompt_management_and_promptops/README.md`](../../prompt_management_and_promptops/prompt_management_and_promptops.md).
+Related modules: [`../../evaluation_and_benchmarks/evaluation_and_benchmarks.md`](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md), [`../../llm_testing_strategies/llm_testing_strategies.md`](../../llm_testing_strategies/llm_testing_strategies.md), [`../../llm_observability_and_monitoring/llm_observability_and_monitoring.md`](../../llm_observability_and_monitoring/llm_observability_and_monitoring.md), [`../../prompt_management_and_promptops/prompt_management_and_promptops.md`](../../prompt_management_and_promptops/prompt_management_and_promptops.md).
 
 ---
 
@@ -799,8 +799,8 @@ The AI code review case study uses SWE-bench as the primary offline eval benchma
 ---
 
 *Related modules:*
-- [`../../evaluation_and_benchmarks/README.md`](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md) — MMLU, HumanEval, Chatbot Arena, benchmark methodology
-- [`../../llm_testing_strategies/README.md`](../../llm_testing_strategies/llm_testing_strategies.md) — golden datasets, regression eval, CI/CD integration strategies
-- [`../../llm_observability_and_monitoring/README.md`](../../llm_observability_and_monitoring/llm_observability_and_monitoring.md) — tracing, quality monitoring, cost attribution
-- [`../../prompt_management_and_promptops/README.md`](../../prompt_management_and_promptops/prompt_management_and_promptops.md) — prompt versioning, eval-gated CI, A/B testing
-- [`../../data_flywheels_and_continuous_learning/README.md`](../../data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) — closing the production feedback loop into training data
+- [`../../evaluation_and_benchmarks/evaluation_and_benchmarks.md`](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md) — MMLU, HumanEval, Chatbot Arena, benchmark methodology
+- [`../../llm_testing_strategies/llm_testing_strategies.md`](../../llm_testing_strategies/llm_testing_strategies.md) — golden datasets, regression eval, CI/CD integration strategies
+- [`../../llm_observability_and_monitoring/llm_observability_and_monitoring.md`](../../llm_observability_and_monitoring/llm_observability_and_monitoring.md) — tracing, quality monitoring, cost attribution
+- [`../../prompt_management_and_promptops/prompt_management_and_promptops.md`](../../prompt_management_and_promptops/prompt_management_and_promptops.md) — prompt versioning, eval-gated CI, A/B testing
+- [`../../data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md`](../../data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) — closing the production feedback loop into training data

@@ -605,7 +605,7 @@ can satisfy all three simultaneously, so a cycle makes topological order
 *undefined*. This is also why both algorithms double as cycle detectors:
 "can't produce a full ordering" == "graph has a cycle."
 
-**Kahn's (BFS) vs. DFS post-order — when would you prefer one over the
+**Q: Kahn's (BFS) vs. DFS post-order — when would you prefer one over the
 other?**
 Kahn's algorithm is usually more intuitive to implement and explain in an
 interview because the in-degree-zero queue directly mirrors "what can I do
@@ -623,7 +623,7 @@ anything only reachable through them) never reach in-degree 0 and are never
 enqueued. At the end, `len(order) < num_nodes` reveals this — the missing
 nodes are exactly those involved in or downstream of a cycle.
 
-**What do the three colors (white/gray/black) mean in DFS-based cycle
+**Q: What do the three colors (white/gray/black) mean in DFS-based cycle
 detection, and why isn't a simple boolean `visited` enough?**
 WHITE = never visited; GRAY = currently on the DFS call stack (an ancestor of
 the current node in the DFS tree); BLACK = fully processed (this node and all
@@ -643,7 +643,7 @@ since everything depends on it. Reversing flips "finished last" into "appears
 first," which is what topological order requires. See the BROKEN->FIX in §8
 for a concrete trace.
 
-**If multiple valid topological orderings exist, how do you produce a
+**Q: If multiple valid topological orderings exist, how do you produce a
 specific one (e.g., the lexicographically smallest)?**
 Replace the FIFO `deque` in Kahn's algorithm with a **min-heap** (`heapq`).
 At each step, instead of popping arbitrary order, pop the smallest-valued node
@@ -651,7 +651,7 @@ currently at in-degree 0. This greedily picks the smallest available choice at
 every step, which produces the lexicographically smallest valid ordering
 overall — a classic greedy-with-topo-sort combination.
 
-**How do you build the graph for Alien Dictionary when you're not given edges
+**Q: How do you build the graph for Alien Dictionary when you're not given edges
 directly?**
 Compare each pair of *adjacent* words in the given (sorted) word list. Find
 the first index where the two words differ — that pair of characters gives
@@ -661,7 +661,7 @@ adjacent pair; characters after that point give no ordering information.
 Special case: if word A is a prefix of word B but A is *longer* than B (e.g.,
 `"abc"` before `"ab"`), no valid ordering exists — return immediately.
 
-**How does topological sort enable "longest path in a DAG" (Parallel
+**Q: How does topological sort enable "longest path in a DAG" (Parallel
 Courses)?**
 Process nodes in topological order, maintaining `dist[node]` = the longest
 path ending at `node`. For each edge `u -> v` processed when you pop `u`,
@@ -670,7 +670,7 @@ update `dist[v] = max(dist[v], dist[u] + 1)`. Because `u` is processed
 order), `dist[u]` is already final by the time it's used to update `dist[v]`
 — this is the key invariant that makes the DP correct in a single pass.
 
-**What's the time/space complexity, and why is it linear despite the nested
+**Q: What's the time/space complexity, and why is it linear despite the nested
 loop structure (for each node, for each neighbor)?**
 O(V + E): the outer loop runs once per node (O(V)), and across *all*
 iterations of the outer loop, the inner loop examines each edge exactly once
@@ -687,7 +687,7 @@ multi-edges (if the input can contain duplicate prerequisite pairs, each
 duplicate must still increment in-degree, or the queue will release a node
 "too early" relative to a duplicate edge that was never decremented).
 
-**How would Sequence Reconstruction (LC 444) differ from Course Schedule II —
+**Q: How would Sequence Reconstruction (LC 444) differ from Course Schedule II —
 both build a graph from pairwise orderings?**
 Course Schedule II just needs *a* valid ordering. Sequence Reconstruction
 needs to verify the *unique* valid ordering equals a specific target sequence.
@@ -696,7 +696,7 @@ contains **exactly one** node with in-degree 0 (if more than one node is ready
 simultaneously, the ordering isn't uniquely determined) — and that the
 resulting order matches the target exactly.
 
-**Why doesn't Union-Find work for detecting cycles in directed graphs the way
+**Q: Why doesn't Union-Find work for detecting cycles in directed graphs the way
 it does for undirected graphs?**
 Union-Find merges two nodes into the same set when an edge connects them,
 treating the edge as bidirectional for connectivity purposes. Because it can't

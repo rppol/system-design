@@ -873,5 +873,5 @@ A: It's an empirically-tuned constant balancing two costs: set it too low, and t
 - **Redis timeline cache + cold-start mitigation** -> [`../../backend/caching_strategies_deep_dive/`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md), [`../../database/database_caching_patterns/`](../../database/database_caching_patterns/database_caching_patterns.md)
 - **Sharding the tweet/social-graph stores** -> [`../../database/sharding_and_partitioning/`](../../database/sharding_and_partitioning/sharding_and_partitioning.md), [`../../hld/consistent_hashing/`](../consistent_hashing/consistent_hashing.md)
 - **Snowflake ID generator implementation** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
-- **Rate-limiting fan-out writes for near-celebrity accounts** -> [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)
+- **Rate-limiting fan-out writes for near-celebrity accounts** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)
 

@@ -694,7 +694,7 @@ the positions where the total isn't a multiple of `k`.
 
 ## 11. Interview Q&A
 
-**Why does `a ^ a = 0` and `a ^ 0 = a`, and why does that make XOR useful for
+**Q: Why does `a ^ a = 0` and `a ^ 0 = a`, and why does that make XOR useful for
 "find the unique element" problems?** XOR compares each bit independently:
 two identical bits XOR to 0 (`0^0=0`, `1^1=0`), and a bit XORed with 0 stays
 unchanged (`0^0=0`, `1^0=1`). Combined with XOR being commutative and
@@ -703,7 +703,7 @@ number of times produces 0 for those values' contribution — leaving only
 values that appear an ODD number of times. "Appears once, others appear
 twice" is the simplest case of this.
 
-**Single Number II says elements appear THREE times except one — why doesn't
+**Q: Single Number II says elements appear THREE times except one — why doesn't
 XOR work, and what's the fix?** XOR only cancels in pairs: three copies of
 `a` reduce to `a` (not 0), corrupting the result. The fix (§8) counts set
 bits at each of the 32 bit positions across all numbers and takes the count
@@ -727,7 +727,7 @@ effect that all bits below the lowest set bit of `n` become 0 in `-n` too,
 and ANDing with `n` leaves only that single bit. This is the core operation in
 Fenwick tree (Binary Indexed Tree) index traversal.
 
-**How do I enumerate all subsets of an `n`-element set using bit
+**Q: How do I enumerate all subsets of an `n`-element set using bit
 manipulation, and what's the complexity?** Iterate `mask` from `0` to
 `2^n - 1`; for each `mask`, bit `j` being set means element `j` is in this
 subset. This is O(2^n) masks, and O(n) to materialize each subset, giving
@@ -736,14 +736,14 @@ O(n * 2^n) total. It's the natural fit when `n <= ~20` (since `2^20 ≈ 10^6`)
 [Dynamic Programming](dynamic_programming.md) or
 [Greedy](greedy.md)/pruned [Backtracking](backtracking.md) instead.
 
-**Why does `dp[i] = dp[i >> 1] + (i & 1)` correctly compute popcount for
+**Q: Why does `dp[i] = dp[i >> 1] + (i & 1)` correctly compute popcount for
 Counting Bits?** `i >> 1` is `i` with its lowest bit dropped (integer
 division by 2) — its popcount, `dp[i >> 1]`, is already computed since
 `i >> 1 < i`. `(i & 1)` is exactly the bit that was dropped (0 or 1). Adding
 them back together gives the popcount of `i`. This is a textbook example of
 DP where the "smaller subproblem" comes from a bit-shift rather than `i-1`.
 
-**What's the difference between `>>` (arithmetic/signed shift) and a logical
+**Q: What's the difference between `>>` (arithmetic/signed shift) and a logical
 shift, and does it matter in Python?** In languages with fixed-width signed
 integers (Java, C++), `>>` preserves the sign bit (fills with 1s for negative
 numbers) while `>>>` (Java-only) fills with 0s regardless of sign. Python
@@ -754,12 +754,12 @@ operator, and bit-manipulation problems that assume 32-bit wraparound (like
 Single Number II's negative-number handling, or Reverse Bits) need explicit
 masking (`& 0xFFFFFFFF`) and sign correction in Python.
 
-**How do I set, clear, toggle, or check a specific bit `i` of an integer
+**Q: How do I set, clear, toggle, or check a specific bit `i` of an integer
 `n`?** Check: `(n >> i) & 1`. Set: `n |= (1 << i)`. Clear: `n &= ~(1 << i)`.
 Toggle: `n ^= (1 << i)`. All four are O(1) and form the vocabulary for almost
 every bitmask problem — memorize them as a unit.
 
-**The XOR-swap trick (`a ^= b; b ^= a; a ^= b`) avoids a temp variable — is
+**Q: The XOR-swap trick (`a ^= b; b ^= a; a ^= b`) avoids a temp variable — is
 this good practice?** It's a neat demonstration of XOR's invertibility, but
 it's discouraged in real code: it fails if `a` and `b` are the SAME memory
 location (XORing a value with itself zeroes it out, so `a` and `b` both
@@ -778,7 +778,7 @@ the opposite-bit child doesn't exist, fall back to the same-bit child. The
 maximum XOR found across all numbers is the answer — O(32n) instead of the
 O(n^2) brute-force pairwise comparison.
 
-**Why does the repo's `cs_fundamentals/number_systems_and_bit_manipulation/`
+**Q: Why does the repo's `cs_fundamentals/number_systems_and_bit_manipulation/`
 module matter beyond these LeetCode tricks?** Because two's complement,
 sign-extension, and bit-masking aren't just interview party tricks — they
 underpin how `HashMap` spreads hash codes into bucket indices

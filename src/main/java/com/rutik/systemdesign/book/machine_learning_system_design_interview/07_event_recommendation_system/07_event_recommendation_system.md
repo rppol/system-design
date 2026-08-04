@@ -632,7 +632,7 @@ pulls ahead.
 - **Class imbalance.** Most impressions do not convert, so positives are a small minority. Remedies:
   **downsample the negatives** (and recalibrate the output probability afterward if calibrated
   probabilities matter), or use a **class-weighted loss** that up-weights the rare positives. See
-  [ml/imbalanced_data_and_leakage_traps/README.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md).
+  [ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md).
 
 ---
 
@@ -813,7 +813,7 @@ candidates. So the system **retrains frequently** — daily or more often — on
 interaction data, using incremental fine-tuning where the model allows it (the NN advantage from
 §7.5). This is the operational payoff of the whole cold-start theme: you cannot rely on item history,
 so you rely on **constant relearning** of the world. See
-[book/designing_machine_learning_systems/09_continual_learning_and_test_in_production/README.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md).
+[book/designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md).
 
 ```mermaid
 flowchart LR
@@ -1130,17 +1130,17 @@ They diverge because offline metrics like mAP are computed on logged data affect
 ## Cross-links in this repo
 
 - [ml/case_studies/design_recommendation_engine.md](../../../ml/case_studies/design_recommendation_engine.md) — the repo's own production-depth recommendation-engine treatment (candidate generation, ranking, cold start); go here for engineering depth beyond the book's framing.
-- [ml/feature_engineering/README.md](../../../ml/feature_engineering/feature_engineering.md) — bucketization, embeddings, crosses, batch-vs-streaming features in depth.
+- [ml/feature_engineering/feature_engineering.md](../../../ml/feature_engineering/feature_engineering.md) — bucketization, embeddings, crosses, batch-vs-streaming features in depth.
 - [ml/case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md](../../../ml/case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md) — the canonical treatment of point-in-time joins and the leakage trap in §7.4.7.
-- [ml/imbalanced_data_and_leakage_traps/README.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) — class imbalance remedies and leakage patterns.
+- [ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md](../../../ml/imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) — class imbalance remedies and leakage patterns.
 - [ml/ml_system_design/feature_store_design.md](../../../ml/ml_system_design/feature_store_design.md) — online vs offline feature stores that back §7.7's serving path.
 - [ml/case_studies/design_search_ranking.md](../../../ml/case_studies/design_search_ranking.md) — a fuller learning-to-rank / ranking-model deep dive.
 - [ml/recommender_systems/retrieval_and_ranking.md](../../../ml/recommender_systems/retrieval_and_ranking.md) — the two-stage retrieval-then-ranking pattern generalized.
 - [ml/ml_system_design/training_pipeline_design.md](../../../ml/ml_system_design/training_pipeline_design.md) — building the retraining pipeline the continual-learning loop needs.
-- [book/machine_learning_system_design_interview/06_video_recommendation_system/README.md](../06_video_recommendation_system/06_video_recommendation_system.md) — the sibling chapter this builds on; contrast video's rich item history with events' permanent cold start.
-- [book/machine_learning_system_design_interview/08_ad_click_prediction_on_social_platforms/README.md](../08_ad_click_prediction_on_social_platforms/08_ad_click_prediction_on_social_platforms.md) — the next chapter; same pointwise/continual-learning spine, plus calibration and feature crossing.
-- [book/designing_machine_learning_systems/05_feature_engineering/README.md](../../designing_machine_learning_systems/05_feature_engineering/05_feature_engineering.md) — Huyen's feature-engineering chapter, complementary depth.
-- [book/designing_machine_learning_systems/09_continual_learning_and_test_in_production/README.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md) — the continual-learning and test-in-production practices behind §7.7's retraining loop.
+- [book/machine_learning_system_design_interview/06_video_recommendation_system/06_video_recommendation_system.md](../06_video_recommendation_system/06_video_recommendation_system.md) — the sibling chapter this builds on; contrast video's rich item history with events' permanent cold start.
+- [book/machine_learning_system_design_interview/08_ad_click_prediction_on_social_platforms/08_ad_click_prediction_on_social_platforms.md](../08_ad_click_prediction_on_social_platforms/08_ad_click_prediction_on_social_platforms.md) — the next chapter; same pointwise/continual-learning spine, plus calibration and feature crossing.
+- [book/designing_machine_learning_systems/05_feature_engineering/05_feature_engineering.md](../../designing_machine_learning_systems/05_feature_engineering/05_feature_engineering.md) — Huyen's feature-engineering chapter, complementary depth.
+- [book/designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md](../../designing_machine_learning_systems/09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md) — the continual-learning and test-in-production practices behind §7.7's retraining loop.
 
 ## Further Reading
 

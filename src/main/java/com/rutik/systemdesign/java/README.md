@@ -311,7 +311,7 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 
 ## Case Studies
 
-For a guided learning path through all 8 case studies, see [case_studies/README.md](case_studies/case_studies.md).
+For a guided learning path through all 8 case studies, see [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Case Study | Core Java Concepts | Difficulty |
 |------------|-------------------|------------|

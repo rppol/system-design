@@ -50,7 +50,7 @@ BF16  (bfloat16, 16 bits):      sign(1) + exponent(8)  + mantissa(7)
 explicit range-vs-precision trade. This is the whole reason BF16 does not need loss scaling: it
 cannot underflow at FP16's magnitudes because it shares FP32's exponent field width.*
 
-See [`../../tensor_cores_and_mixed_precision/README.md`](../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
+See [`../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md`](../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
 for how these formats map onto WMMA fragments, `mma` PTX instructions, and cuBLAS/cuDNN
 Tensor-Core code paths.
 
@@ -85,7 +85,7 @@ not the only one, and often not the dominant one:
   can still show it.
 - **Reduction order differs.** `sum(a[0..N])` on a CPU is typically a strict sequential loop.
   A GPU reduction is a **tree**: pairs are summed in parallel, then pairs-of-pairs, and so on
-  (see [`../../parallel_patterns_reduction_scan_histogram/README.md`](../../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md)).
+  (see [`../../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md`](../../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md)).
   Floating-point addition is **not associative** — `(a+b)+c` is not bit-identical to `a+(b+c)` in
   general — so a tree-order sum and a sequential sum of the *same* N numbers can differ starting
   in low-order bits, growing with N and with the dynamic-range spread of the inputs.
@@ -222,7 +222,7 @@ causes, roughly ordered by how often they bite in practice:
    data race (missing `__syncthreads()`, a read-after-write hazard) produces run-to-run varying
    *garbage*, not just varying rounding — always rule this out with
    `compute-sanitizer --tool racecheck` before assuming a numerics issue is "just floating point."
-   See [`../../debugging_correctness_and_numerics/README.md`](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md).
+   See [`../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md`](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md).
 
 ---
 
@@ -363,6 +363,6 @@ loss); validate the error budget end-to-end before adopting it in a numerically 
 
 ## Cross-References
 
-- [`../../tensor_cores_and_mixed_precision/README.md`](../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) — WMMA/`mma` fragments, cuBLAS/cuDNN Tensor-Core code paths, loss scaling for FP16 training.
-- [`../../synchronization_and_atomics/README.md`](../../synchronization_and_atomics/synchronization_and_atomics.md) — `atomicAdd`/CAS mechanics, memory fences, and the contention costs behind Section 5's nondeterminism sources.
-- [`../../debugging_correctness_and_numerics/README.md`](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) — `compute-sanitizer` (`racecheck`/`initcheck`) for ruling out races before chasing a "precision" bug.
+- [`../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md`](../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) — WMMA/`mma` fragments, cuBLAS/cuDNN Tensor-Core code paths, loss scaling for FP16 training.
+- [`../../synchronization_and_atomics/synchronization_and_atomics.md`](../../synchronization_and_atomics/synchronization_and_atomics.md) — `atomicAdd`/CAS mechanics, memory fences, and the contention costs behind Section 5's nondeterminism sources.
+- [`../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md`](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) — `compute-sanitizer` (`racecheck`/`initcheck`) for ruling out races before chasing a "precision" bug.

@@ -949,102 +949,102 @@ Key API notes:
 
 ## 12. Interview Questions with Answers
 
-**Why does training a speaker verification model with the same speakers in train and test inflate accuracy, and how do you fix it?**
+**Q: Why does training a speaker verification model with the same speakers in train and test inflate accuracy, and how do you fix it?**
 **Short:** Speaker-disjoint splits prevent inflated accuracy caused by memorizing recording artifacts of overlapping speakers.
 
 Overlapping speakers let the model partly memorize per-speaker recording artifacts instead of learning genuinely speaker-discriminative features. If a random utterance-level split places 9 of speaker S042's clips in train and 1 in test, the model can recognize S042's microphone and room acoustics rather than their voice, and the reported metric looks far better than real-world performance. In one production incident this inflated EER from a real 6.4% down to a leaked 0.8% — roughly 8x too optimistic. The fix is a speaker-disjoint split: partition speaker IDs first, then assign every utterance from a given speaker to exactly one split, and assert zero ID overlap between splits before training.
 
-**Why can Word Error Rate (WER) exceed 100%, and how does it differ from classification accuracy?**
+**Q: Why can Word Error Rate (WER) exceed 100%, and how does it differ from classification accuracy?**
 **Short:** WER can exceed 100% because insertions are unbounded, unlike classification accuracy which is capped at one.
 
 WER is a rate — (substitutions + deletions + insertions) divided by the reference word count — and unbounded insertions can push it past 100%. A hallucinating hypothesis that inserts many extra words has no upper limit on insertions, unlike classification accuracy, which is a bounded fraction of correct-vs-total instances in [0,1]. For example, reference "PLEASE SET AN ALARM FOR SEVEN THIRTY IN THE MORNING" (10 words) against hypothesis "OK PLEASE SET AN ALARM FOR SEVEN THIRTEEN THE MORNING" has 1 substitution (THIRTY to THIRTEEN), 1 deletion (IN), and 1 insertion (OK), giving WER = 3/10 = 30%. Always compare WER computed with the same text normalization, since normalization choices alone can shift WER by several points.
 
-**Why does feeding 8 kHz telephone audio into a model trained on 16 kHz audio silently degrade accuracy instead of raising an error?**
+**Q: Why does feeding 8 kHz telephone audio into a model trained on 16 kHz audio silently degrade accuracy instead of raising an error?**
 **Short:** Mismatched sample-rate audio silently degrades accuracy because loaders never validate against the training sample rate.
 
 Audio loaders return whatever sample rate a file has, and an 8 kHz file loads without error even though every frame/hop/mel parameter tuned in samples now spans the wrong real-time duration. A telephone codec has already discarded everything above its 4 kHz Nyquist limit, so fricative consonants like "s" and "f" are gone before the model ever sees the audio, and treating the remaining samples as if they were 16 kHz-spaced further scrambles the mel-filterbank's frequency mapping. In one incident this combination pushed WER from 9% (matched 16 kHz test set) to 41% on live phone traffic with no exception ever thrown. Always assert or resample to the model's training sample rate at the exact boundary where audio enters the pipeline, and log every time a resample actually fires.
 
-**What happens if you forget to collapse repeated characters when greedily decoding CTC output?**
+**Q: What happens if you forget to collapse repeated characters when greedily decoding CTC output?**
 **Short:** Skipping the CTC collapse step turns a clean decode into a transcript with each character repeated per frame.
 
 Each character is naturally held for several consecutive frames, so skipping the collapse step turns a clean argmax path into a garbled transcript with the character repeated once per frame it occupied. "Hello" held over roughly 40 frames decodes as something like "hheeelllllooo" instead of "hello," because dropping blanks alone does nothing to merge the repeated per-frame symbols. The fix is ordering: collapse adjacent repeats first, then drop blanks — reversing the order or skipping collapsing entirely is a classic first-week CTC bug. This is exactly the mechanic the "SEE" alignment diagram in Section 5 visualizes: the blank is what lets a genuinely doubled letter survive the collapse step.
 
-**Why must SpecAugment (or any training-time augmentation) be disabled during evaluation and inference?**
+**Q: Why must SpecAugment (or any training-time augmentation) be disabled during evaluation and inference?**
 **Short:** Training-time augmentation must be disabled at eval, or the reported metric reflects the augmentation, not the model.
 
 Masking real time/frequency content is a training-time regularizer, and applying it during evaluation destroys information the model needs, making the eval metric reflect the augmentation rather than the model. A team that left an `AUGMENT = True` flag active in shared eval/train preprocessing code saw offline validation WER of 11% while true unmasked production WER was actually 9% — a full sprint was lost chasing a phantom regression that was really an artificially harder validation set. Gate any augmentation strictly on the model or dataloader's actual train/eval mode, never on a standalone constant.
 
-**What is the Nyquist theorem, and why do virtually all ASR models standardize on 16 kHz audio?**
+**Q: What is the Nyquist theorem, and why do virtually all ASR models standardize on 16 kHz audio?**
 **Short:** The Nyquist theorem requires sampling above twice the highest frequency, which is why ASR models standardize on 16 kHz.
 
 The Nyquist theorem states a signal must be sampled at more than twice its highest frequency component to be reconstructed without aliasing, so 16 kHz sampling captures frequencies up to its 8 kHz Nyquist limit. Speech intelligibility content lives mostly below 8 kHz, making 16 kHz the sweet spot used by LibriSpeech, wav2vec 2.0, and Whisper alike. By contrast, telephone audio is sampled at 8 kHz (Nyquist 4 kHz), which is exactly why phone calls sound muffled — fricatives like "s" and "f" live partly above 4 kHz and are discarded before transmission. Always confirm a dataset's or API's stated sample rate rather than assuming 16 kHz by default.
 
-**Why do you window and frame audio into short overlapping chunks instead of taking one FFT of the whole signal?**
+**Q: Why do you window and frame audio into short overlapping chunks instead of taking one FFT of the whole signal?**
 **Short:** Audio is framed into short overlapping windows because speech is only quasi-stationary over brief time spans.
 
 Speech is only quasi-stationary over short spans, so a single FFT over a whole utterance would blur together sounds from very different times. Its frequency content changes continuously as the mouth and vocal tract move, which is why framing at 25 ms with a 10 ms hop (400/160 samples at 16 kHz) keeps each frame short enough that its spectral content is approximately stable, while the 60% overlap ensures short-lived events like stop-consonant bursts land fully inside at least one frame. A Hamming or Hann window is applied before the FFT to taper each frame's edges to zero, avoiding the spectral leakage a hard rectangular cut would introduce. Changing win/hop values without retraining is a common bug — feature extraction parameters are effectively part of the model, not a free-standing preprocessing choice.
 
-**What is the mel scale, and why do mel-spectrograms compress the raw FFT bins down to around 80 bins?**
+**Q: What is the mel scale, and why do mel-spectrograms compress the raw FFT bins down to around 80 bins?**
 **Short:** The mel scale compresses FFT bins onto a perceptual pitch axis, concentrating resolution where phonetic content is densest.
 
 The mel scale warps frequency onto a perceptual pitch axis — linear below about 1 kHz, logarithmic above — via `mel(f) = 2595*log10(1+f/700)`, matching how human hearing resolves pitch. It compresses 201 linear FFT bins (from a 400-point FFT) down to roughly 80 mel bins, devoting more resolution to the low frequencies where phonetic information is densest: doubling frequency from 250 Hz to 500 Hz adds about 263 mel units, while doubling from 4000 Hz to 8000 Hz adds only about 694 mel units across a much wider Hz range. This compression is why 80 mel bins is enough for state-of-the-art ASR (Whisper's own default) despite starting from a much higher-dimensional spectrogram. Using linear FFT bins directly instead of mel bins wastes model capacity on high-frequency resolution that contributes little to intelligibility.
 
-**How does MFCC differ from a log-mel-spectrogram, and why do most modern deep ASR models skip the MFCC's DCT step?**
+**Q: How does MFCC differ from a log-mel-spectrogram, and why do most modern deep ASR models skip the MFCC's DCT step?**
 **Short:** Modern deep ASR models skip MFCC's DCT step because neural networks can learn cross-band correlations themselves.
 
 MFCC applies a Discrete Cosine Transform to log-mel-filterbank energies, decorrelating the mel bands into a small number of coefficients. Classically that means 13 coefficients plus delta and delta-delta terms for velocity and acceleration — GMM-HMM systems needed this decorrelation because they modeled features with diagonal-covariance Gaussians that assume independent dimensions. CNN and transformer acoustic models can learn cross-band correlations themselves, so Whisper and wav2vec 2.0 both feed the log-mel-spectrogram directly and skip the DCT; MFCC remains common only for lightweight keyword spotting and some legacy speaker-verification pipelines where compactness matters more than raw information content. Choosing MFCC by default for a modern deep model is usually a step backward, not a safe default.
 
-**How does CTC loss let you train a sequence model without frame-level alignment labels?**
+**Q: How does CTC loss let you train a sequence model without frame-level alignment labels?**
 **Short:** CTC marginalizes over every valid monotonic alignment via dynamic programming, avoiding the need for frame-level labels.
 
 CTC introduces a blank symbol and a forward-backward dynamic-programming recursion that marginalizes over every valid monotonic alignment between the T-frame input and the shorter label sequence. Instead of requiring "frame 37 is phoneme /k/," the loss sums the probability mass over all paths through an expanded label sequence (with blanks inserted) that collapse to the correct output, and backpropagates through that sum. The blank symbol is essential specifically for repeated letters: two adjacent identical labels only survive collapsing if a blank separates them, otherwise they merge into one. This alignment-free property is why CTC became the default loss for training acoustic models directly from spectrograms without any forced-alignment preprocessing step.
 
-**What is RNN-Transducer (RNN-T), and why is it the standard architecture for on-device streaming ASR?**
+**Q: What is RNN-Transducer (RNN-T), and why is it the standard architecture for on-device streaming ASR?**
 **Short:** RNN-T bounds streaming latency to about one frame's computation by advancing labels without waiting for future audio.
 
 RNN-T extends CTC's alignment idea with a prediction network — a label-history language model — plus a joint network combining audio and label state at each lattice cell. Emitting blank advances the audio frame t; emitting a real label advances the label position u without waiting for more audio, so the model can stream out partial hypotheses using only past and current frames. This is exactly why Google ships RNN-T on-device for Gboard voice typing and the Recorder app: no server round-trip is needed, and latency is bounded to roughly one frame's worth of computation rather than the whole utterance. The tradeoff is a heavier, more memory-intensive training loss than plain CTC, computed over a full 2D lattice instead of a 1D one.
 
-**How does an attention-based (LAS) ASR model differ from CTC/RNN-T, and what is its main weakness?**
+**Q: How does an attention-based (LAS) ASR model differ from CTC/RNN-T, and what is its main weakness?**
 **Short:** LAS learns non-monotonic attention alignment for strong offline accuracy but cannot stream since it needs most of the utterance.
 
 LAS (Listen, Attend, Spell) learns a soft, non-monotonic alignment via cross-attention between a pyramidal encoder and an autoregressive decoder. Unlike CTC/RNN-T it makes no conditional-independence assumption between output tokens, but its main weakness is that it needs most of the full utterance before decoding can begin, so it is not naturally streaming, and because nothing enforces monotonic alignment, attention can skip or repeat words on long or noisy audio. It historically achieved the best offline accuracy of the three paradigms precisely because it is not constrained to monotonic alignments. Whisper is in the same architectural family, and inherits the same "needs a full chunk before decoding" limitation, just at a coarser 30-second chunk granularity rather than a whole utterance.
 
-**How does wav2vec 2.0 learn useful speech representations without any labeled data?**
+**Q: How does wav2vec 2.0 learn useful speech representations without any labeled data?**
 **Short:** wav2vec 2.0 learns speech representations via a contrastive task predicting masked latent audio spans among distractors.
 
 wav2vec 2.0 masks spans of a CNN-derived latent audio representation and trains a Transformer to identify the true quantized latent among distractor latents, via a contrastive InfoNCE-style loss. The distractors are sampled from the same utterance, and the feature encoder producing the latents is a stack of seven 1-D convolutional layers over the raw waveform, downsampling 16 kHz audio to about 49 latent frames per second before the Transformer and contrastive loss ever run. Fine-tuning simply attaches a linear CTC head on top of the pretrained Transformer; the original paper reports 4.8/8.2 WER on LibriSpeech test-clean/test-other using just 10 minutes of labeled data on top of 53,000 hours of unlabeled pretraining audio. This makes SSL pretraining the strongest option whenever labeled audio is scarce but raw audio is abundant.
 
-**What is an x-vector, and how is it used for speaker verification?**
+**Q: What is an x-vector, and how is it used for speaker verification?**
 **Short:** An x-vector is a fixed-size speaker embedding from a TDNN, compared by cosine similarity or PLDA for verification.
 
 An x-vector is a fixed-size speaker embedding produced by a TDNN that processes frame-level features, pools statistics across time, and projects the result into a compact vector. The TDNN layers are dilated 1-D convolutions, and statistics pooling — concatenating the mean and standard deviation across time — is the key step that converts a variable-length utterance into a single fixed-size embedding, typically 512-dim, comparable across recordings of any duration. At test time, two x-vectors (an enrollment embedding and a test embedding) are compared with cosine similarity or a PLDA backend, and the score is thresholded to accept or reject. x-vectors replaced the older i-vector/PLDA pipeline as the standard speaker-embedding approach because they train end-to-end on far more data.
 
-**What is Equal Error Rate (EER), and how is it computed?**
+**Q: What is Equal Error Rate (EER), and how is it computed?**
 **Short:** Equal Error Rate is the threshold where a verification system's false accept and false reject rates are equal.
 
 EER is the operating point on a verification system's threshold sweep where the False Accept Rate equals the False Reject Rate, and a lower EER means a better-separated genuine/impostor score distribution. It is computed by sweeping candidate thresholds over genuine-pair and impostor-pair similarity scores, computing FAR and FRR at each threshold, and finding where the two curves cross (interpolating between the nearest thresholds if they never exactly meet). Strong modern x-vector/ECAPA-TDNN systems on VoxCeleb-style benchmarks reach EER around 1-2%, versus roughly 5-8% for legacy i-vector/PLDA systems. EER should always be calibrated on a held-out, speaker-disjoint validation set — never on the test set you report final numbers on.
 
-**How does speaker diarization differ from speaker identification, and what algorithm is typically used?**
+**Q: How does speaker diarization differ from speaker identification, and what algorithm is typically used?**
 **Short:** Diarization clusters unlabeled speaker turns to answer who spoke when, unlike identification against known speakers.
 
 Diarization answers "who spoke when" in multi-speaker audio without necessarily knowing speakers' real identities, while identification assigns each utterance to one of a fixed, known set of N speakers. A typical diarization pipeline runs voice activity detection, segments the audio into short overlapping windows, extracts a speaker embedding (x-vector) per window, clusters the embeddings with agglomerative clustering when the number of speakers is unknown, and then merges adjacent same-cluster segments into speaker turns. The standard evaluation metric is Diarization Error Rate (DER), which combines false-alarm speech, missed speech, and speaker-confusion time. Diarization can be combined with identification by matching each resulting cluster's centroid against enrolled voiceprints, turning "Speaker A/B" labels into real names.
 
-**How does keyword spotting differ architecturally from full ASR, and why does that distinction matter for on-device deployment?**
+**Q: How does keyword spotting differ architecturally from full ASR, and why does that distinction matter for on-device deployment?**
 **Short:** Keyword spotting uses a tiny fixed-vocabulary classifier so an always-on wake detector can run at near-zero power.
 
 Keyword spotting is a small, fixed-vocabulary classifier that only detects one wake phrase, whereas full ASR is an open-vocabulary transcriber needing far more parameters and compute. KWS models often run under a few hundred KB versus orders of magnitude more for full ASR, and this size gap is what makes an always-on listening budget of under a milliwatt feasible on a dedicated DSP: the tiny KWS model runs continuously, and only after it triggers does a much larger ASR model wake up on the main processor or in the cloud. Production systems typically cascade two KWS stages — a very small, high-recall always-on detector followed by a larger confirmation model — trading a higher false-accept rate on the tiny model for near-zero standby power. Running full ASR continuously instead of a dedicated KWS model would be both a power and a privacy non-starter.
 
-**What is SpecAugment, and why does masking outperform additive noise for ASR data augmentation?**
+**Q: What is SpecAugment, and why does masking outperform additive noise for ASR data augmentation?**
 **Short:** SpecAugment's masking forces reliance on redundant context, making it a stronger regularizer than additive noise.
 
 SpecAugment applies time masking and frequency masking directly on the log-mel-spectrogram — zeroing out contiguous time steps or mel channels during training — with no need for any extra audio data. Because masking removes information the model must otherwise reconstruct from surrounding context, it forces the model to rely on redundant cues spread across time and frequency rather than any single fragile region, which is a stronger regularizer than simply adding background noise on top of an otherwise-intact spectrogram. Park et al. (2019) reached state-of-the-art LibriSpeech WER using only this augmentation, with no external language model. It must be disabled at evaluation and inference time, since masking real content there only hurts accuracy (see Common Pitfalls, War Story 4).
 
-**What is the difference between an autoregressive TTS acoustic model (Tacotron 2) and a non-autoregressive one (FastSpeech)?**
+**Q: What is the difference between an autoregressive TTS acoustic model (Tacotron 2) and a non-autoregressive one (FastSpeech)?**
 **Short:** FastSpeech generates mel frames in parallel via a duration predictor, unlike Tacotron 2's sequential attention decoding.
 
 Tacotron 2 generates the mel-spectrogram one frame at a time with attention-based alignment, while FastSpeech generates all frames in parallel using an explicit duration predictor. That predictor drives a length regulator which expands each phoneme embedding to as many frames as its predicted duration, so Tacotron 2 can skip or repeat words on hard inputs since its attention is not constrained to be monotonic, whereas FastSpeech is both faster and more robust to that failure mode, though its output quality is capped by how accurate the duration predictor is. Both still require a separate vocoder — WaveGlow or HiFi-GAN in production — to convert the predicted mel-spectrogram into an audible waveform. Non-autoregressive TTS is the standard choice today for latency-sensitive production systems.
 
-**Why does streaming ASR trade accuracy for latency, and how does RNN-T bound that latency?**
+**Q: Why does streaming ASR trade accuracy for latency, and how does RNN-T bound that latency?**
 **Short:** Streaming ASR trades accuracy for latency since it cannot use the future audio context that offline models exploit.
 
 Streaming forces a model to commit to output using only past and current audio frames, with no lookahead into future context that could disambiguate an unclear sound. A batch/offline model is free to use exactly that future context, which is the accuracy streaming gives up; RNN-T bounds the resulting latency because its joint network only ever needs the current encoder frame and current label history to decide whether to emit a label or advance to the next frame, so it can produce a partial hypothesis within roughly one frame's worth of computation (tens of milliseconds) rather than waiting for endpoint detection on the full utterance. Attention-based models like LAS or Whisper instead need most or all of a chunk before decoding, which is why Whisper's 30-second chunking is "streaming" only at a coarse chunk granularity, not the frame-level streaming RNN-T provides. Choosing between them is a direct latency-vs-accuracy tradeoff decision, not a strictly dominant choice either way.

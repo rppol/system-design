@@ -577,7 +577,7 @@ directions) are different quantities — track them separately.
   `TreeMap`'s red-black tree maintains BST ordering invariants; an inorder
   traversal of `TreeMap`'s internal tree yields sorted key order, mirroring
   `is_valid_bst`'s inorder-sortedness property.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
+- Master recognition engine: [dsa_patterns/dsa_patterns.md](dsa_patterns.md).
 - Sibling pattern: [tree_bfs.md](tree_bfs.md).
 
 ---

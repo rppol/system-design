@@ -35,7 +35,7 @@ flowchart LR
 
 **Why it exists:** at 5 services you can rotate by hand. At 3,000 services across 40 clusters, manual rotation is impossible, shared secrets are inevitable, and a single leaked static credential is an existential breach. The platform makes "rotate everything in 60 minutes" the *default behavior of the system*, not a heroic incident response.
 
-This builds on [`../secrets_management/README.md`](../secrets_management/secrets_management.md) (the concept module) and [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md) (workload identity).
+This builds on [`../secrets_management/secrets_management.md`](../secrets_management/secrets_management.md) (the concept module) and [`../kubernetes_security/kubernetes_security.md`](../kubernetes_security/kubernetes_security.md) (workload identity).
 
 ---
 

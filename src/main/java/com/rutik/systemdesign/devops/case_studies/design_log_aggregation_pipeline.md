@@ -55,7 +55,7 @@
 - SIEM / security analytics on logs — a separate downstream consumer reads from the same Kafka topics.
 - Real-time alerting on log patterns — a Flink job consumes Kafka; its design is a separate doc.
 
-See [`../observability_logging/README.md`](../observability_logging/observability_logging.md) for the single-system logging module this case study composes into a platform.
+See [`../observability_logging/observability_logging.md`](../observability_logging/observability_logging.md) for the single-system logging module this case study composes into a platform.
 
 ---
 

@@ -38,7 +38,7 @@
 - Multi-tenant scheduling, request batching policy, KV-cache paging across requests (owned by [`design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md) and by vLLM's PagedAttention, which is a *scheduling* structure that sits on top of a fast attention kernel like this one).
 - Approximate/sparse attention variants (sliding window, ALiBi decay, linear attention/SSMs) — those trade exactness for asymptotic complexity and are covered in [`../../llm/foundations_and_architecture/attention_mechanisms.md`](../../llm/foundations_and_architecture/attention_mechanisms.md) and [`../../llm/foundations_and_architecture/state_space_models_and_linear_attention.md`](../../llm/foundations_and_architecture/state_space_models_and_linear_attention.md).
 - Quantized (INT8/FP8) attention variants beyond the FP8 mention in FlashAttention-3 — full quantized-kernel treatment lives in `optimize_llm_inference_kernels.md`.
-- The transformer architecture itself (why attention, multi-head projection, positional encoding) — see [`../../llm/foundations_and_architecture/README.md`](../../llm/foundations_and_architecture/foundations_and_architecture.md); this file assumes `softmax(QK^T/sqrt(d))V` is already understood and focuses purely on how to *compute it fast on a GPU*.
+- The transformer architecture itself (why attention, multi-head projection, positional encoding) — see [`../../llm/foundations_and_architecture/foundations_and_architecture.md`](../../llm/foundations_and_architecture/foundations_and_architecture.md); this file assumes `softmax(QK^T/sqrt(d))V` is already understood and focuses purely on how to *compute it fast on a GPU*.
 
 ---
 

@@ -4,7 +4,7 @@
 > baselines (Naive Bayes, logistic regression, linear SVM, fastText), the first neural text model
 > (TextCNN), class imbalance, and multi-label strategies.
 > For the algorithm math (NB derivation, logistic/SVM optimization) see
-> [../supervised_learning/README.md](../supervised_learning/supervised_learning.md),
+> [../supervised_learning/supervised_learning.md](../supervised_learning/supervised_learning.md),
 > [../supervised_learning/linear_models.md](../supervised_learning/linear_models.md), and
 > [../supervised_learning/bayesian_methods.md](../supervised_learning/bayesian_methods.md).
 > For encoder fine-tuning see [bert_and_pretrained_models.md](bert_and_pretrained_models.md).

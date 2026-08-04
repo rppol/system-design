@@ -1,6 +1,6 @@
 # Agent Durability Patterns
 
-Cross-references: [`../../agents_and_tool_use/durable_long_running_agents.md`](../../agents_and_tool_use/durable_long_running_agents.md) | [`../../agentic_frameworks/langgraph.md`](../../agentic_frameworks/langgraph.md) | [`../../agentic_workflow_patterns/README.md`](../../agentic_workflow_patterns/agentic_workflow_patterns.md)
+Cross-references: [`../../agents_and_tool_use/durable_long_running_agents.md`](../../agents_and_tool_use/durable_long_running_agents.md) | [`../../agentic_frameworks/langgraph.md`](../../agentic_frameworks/langgraph.md) | [`../../agentic_workflow_patterns/agentic_workflow_patterns.md`](../../agentic_workflow_patterns/agentic_workflow_patterns.md)
 
 Referenced by: [`../design_autonomous_swe_agent.md`](../design_autonomous_swe_agent.md) | [`../design_browser_research_agent.md`](../design_browser_research_agent.md) | [`../design_computer_use_agent.md`](../design_computer_use_agent.md) | [`../design_ai_data_analyst.md`](../design_ai_data_analyst.md)
 
@@ -705,4 +705,4 @@ A data analyst agent runs exploratory analysis across multi-turn sessions where 
 
 ---
 
-*See also: [`../../agents_and_tool_use/durable_long_running_agents.md`](../../agents_and_tool_use/durable_long_running_agents.md) for the general durability taxonomy | [`../../agentic_frameworks/langgraph.md`](../../agentic_frameworks/langgraph.md) for LangGraph SqliteSaver/PostgresSaver implementation details | [`../../agentic_workflow_patterns/README.md`](../../agentic_workflow_patterns/agentic_workflow_patterns.md) for Anthropic's evaluator-optimizer and orchestrator-worker patterns that compose with durability.*
+*See also: [`../../agents_and_tool_use/durable_long_running_agents.md`](../../agents_and_tool_use/durable_long_running_agents.md) for the general durability taxonomy | [`../../agentic_frameworks/langgraph.md`](../../agentic_frameworks/langgraph.md) for LangGraph SqliteSaver/PostgresSaver implementation details | [`../../agentic_workflow_patterns/agentic_workflow_patterns.md`](../../agentic_workflow_patterns/agentic_workflow_patterns.md) for Anthropic's evaluator-optimizer and orchestrator-worker patterns that compose with durability.*
