@@ -432,37 +432,49 @@ flowchart TD
 ## 11. Interview Q&A
 
 **Q: Why is matrix manipulation a separate pattern from graph traversal if both operate on a grid?**
+**Short:** Graph traversal explores reachability with a frontier and visited set; matrix manipulation rewrites cells at computed coordinates, often in O(1) space.
 Because the *mechanism* differs. Graph traversal explores **adjacency/reachability** and needs a frontier (queue/stack) plus a visited-set; matrix manipulation reads or rewrites cells at **computed coordinates** with no notion of "neighbor reachable from here," frequently in O(1) extra space. "Number of islands" is graph traversal; "rotate the image in place" is matrix manipulation. The giveaway is the O(1)-space follow-up — you cannot do connectivity in O(1) space, but you can rotate, spiral, and zero in O(1) space via coordinate arithmetic.
 
 **Q: How do you rotate an n×n matrix 90° clockwise in place, and why does transpose + reverse work?**
+**Short:** Transpose mirrors across the main diagonal, then reversing each row mirrors horizontally; composing the two yields a 90-degree rotation in O(n^2) time, O(1) space.
 Transpose swaps `a[i][j]` with `a[j][i]`, mirroring across the main diagonal; reversing each row then sends column `j` to column `n-1-j`. Composing a diagonal mirror with a horizontal mirror yields a 90° rotation. For counter-clockwise, transpose then reverse the *order of the rows* (vertical flip) instead. Both are O(n²) time, O(1) space, and avoid the four-way corner-cycle bookkeeping that is easy to get wrong under pressure.
 
 **Q: In "Set Matrix Zeroes," what breaks if you zero rows/columns as you scan, and how do you fix it to O(1) space?**
+**Short:** Zeroing live cascades and over-zeros the matrix, so detect first then apply, using row 0 and column 0 (plus two flags) as O(1)-space markers.
 Zeroing live corrupts cells you haven't read, so the zeros cascade and over-zero the matrix (see §8). The two-pass fix detects first, applies second. To reach O(1) space, use row 0 and column 0 as the marker arrays: a `0` at `(r,c)` sets `matrix[r][0]=0` and `matrix[0][c]=0`. Handle the first row and first column separately (with two boolean flags) because they double as storage and as real data.
 
 **Q: How do you traverse a matrix diagonally, and what's the key indexing fact?**
+**Short:** Cells on the same anti-diagonal share a constant `r + c`, so bucket by that sum and, for a zig-zag, alternate the emission direction between sums.
 All cells on the same anti-diagonal share a constant `r + c` (and main diagonals share constant `r - c`). Bucket cells by `r + c` into groups `0 .. m+n-2`; within each group, emit top-to-bottom or bottom-to-top. For LC 498's zig-zag, reverse every other diagonal — e.g., emit even-sum diagonals upward and odd-sum diagonals downward.
 
 **Q: Explain the 2-bit encoding trick for Game of Life.**
+**Short:** Store the current state in bit 0 and the next state in bit 1, count neighbors from the untouched bit 0, then shift right in a second pass to commit.
 You must compute the next generation from the current one without a second matrix. Reserve bit 0 for the current state and bit 1 for the next state. In pass 1, compute each cell's next state by counting neighbors using only `cell & 1` (the untouched current bit), and write the next state into bit 1 via `cell |= next_state << 1`. In pass 2, do `cell >>= 1` everywhere to commit. This is the in-place answer to the standard follow-up; the general principle is "encode two states per cell when you must read the old while writing the new."
 
 **Q: For a sorted matrix, when do you flatten-and-binary-search versus walk a staircase?**
+**Short:** Flatten-and-binary-search when the whole matrix is fully sorted end-to-end (O(log(m·n))); otherwise walk the staircase from the top-right corner for O(m+n).
 If the matrix is **fully** sorted (each row sorted, and each row's first element greater than the previous row's last — LC 74), treat it as one array of length `m·n` and binary search in O(log(m·n)); map index `k` to `(k // cols, k % cols)`. If it is only **row-and-column sorted** (LC 240), there's no global order, so start at the **top-right** corner: if the value is larger than the target move left, if smaller move down — eliminating a row or column each step for O(m+n).
 
 **Q: Why does the spiral template need those two `if` guards, and what bug do they prevent?**
+**Short:** The guards ensure a shrunk-away row or column still exists before walking it, preventing a single remaining row/column from being emitted twice.
 After walking the top row and right column you shrink `top` and `right`. The guards `if top <= bottom` and `if left <= right` ensure the bottom row and left column still exist before walking them. Without the guards, a single remaining row or column (common in non-square or odd-dimension matrices) gets walked twice and elements are emitted in duplicate. Concretely, for a single-row matrix the bottom-row pass would re-emit the row you already consumed.
 
 **Q: What's the time and space complexity of these problems, and can space always be O(1)?**
+**Short:** Time is O(m·n) since every cell must be touched; extra space hits O(1) for in-place rewrites, though read-only traversals still need an O(m·n) output list.
 Time is O(m·n) — you must touch every cell at least once, so this is optimal. Extra space is O(1) for in-place transforms (rotate, set-zeroes with marker rows, Game of Life), since the grid stores its own bookkeeping. Read-only traversals (spiral, diagonal) are O(1) *auxiliary* but produce an O(m·n) output list, which is required, not overhead. The only time you truly can't hit O(1) extra space is when the problem fundamentally needs a separate structure — but most "rewrite the grid" problems can.
 
 **Q: How do you map a 1D index to 2D coordinates and back, and where does that matter?**
+**Short:** A cell at `(r, c)` maps to linear index `r*cols + c`, inverted as `r = k // cols, c = k % cols` — the same trick maps a Sudoku cell to its 3x3 box id.
 For a matrix with `cols` columns, cell `(r, c)` is linear index `r * cols + c`; inversely, `r = k // cols` and `c = k % cols`. This underpins flatten-and-binary-search (LC 74) and any "treat the grid as a flat array" trick. The analogous decomposition `(r // 3) * 3 + (c // 3)` maps a Sudoku cell to its 3×3 box id — the same index-arithmetic idea applied to sub-blocks.
 
 **Q: How would you rotate the four corners of a layer in a single pass instead of transpose + reverse?**
+**Short:** Cycle the four corner cells directly per layer and offset using one temp variable, touching each cell exactly once, though transpose+reverse is usually easier to write correctly.
 For each layer `l` from `0` to `n//2 - 1`, and each offset `i` within the layer, cycle four cells: `top-left -> top-right -> bottom-right -> bottom-left -> top-left`, using a temp. The index map for clockwise is `a[l][l+i] <- a[n-1-l-i][l] <- a[n-1-l][n-1-l-i] <- a[l+i][n-1-l] <- (saved top-left)`. It's O(1) space like transpose+reverse but touches each cell exactly once; most engineers find transpose+reverse easier to write correctly, so state both and pick the clearer one aloud.
 
 **Q: What's the difference between reflecting across the main diagonal versus the anti-diagonal?**
+**Short:** Main-diagonal reflection swaps `a[i][j]` with `a[j][i]`, anti-diagonal swaps it with `a[n-1-j][n-1-i]`, and pairing each with a row reverse yields opposite rotations.
 Main-diagonal reflection (transpose) swaps `a[i][j]` with `a[j][i]`. Anti-diagonal reflection swaps `a[i][j]` with `a[n-1-j][n-1-i]`. They are different mirror lines, and composing each with a row/column reverse yields different rotations — main-diagonal + row-reverse gives 90° CW, while anti-diagonal + row-reverse gives 90° CCW. Naming the exact mirror prevents the classic "rotated the wrong direction" bug.
 
 **Q: When iterating a large matrix, why can row-major traversal be much faster than column-major even at the same O(m·n)?**
+**Short:** Row-major iteration walks contiguous memory and stays cache-friendly, while column-major jumps `cols` elements each step, causing cache misses despite identical Big-O.
 Memory layout. In row-major storage (C, Python lists of lists approximately, NumPy default), consecutive elements of a row are contiguous, so iterating `for r: for c:` walks memory sequentially and is cache-friendly; iterating `for c: for r:` jumps `cols` elements each step, causing cache misses and TLB pressure. Big-O is identical, but the constant factor can differ by an order of magnitude — see [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md). Mentioning this signals systems awareness beyond raw algorithmic correctness.

@@ -735,7 +735,9 @@ pattern's Problem Bank).
 ## 9. Interview Q&A
 
 **Q: What if I genuinely don't recognize the pattern within the first 2
-minutes?** Say so, and start the brute force. "I don't see an immediate
+minutes?**
+**Short:** Say so out loud and start the brute force — naming the gap and producing a working baseline beats silently searching for the "right" pattern.
+Say so, and start the brute force. "I don't see an immediate
 optimization — let me start with the brute force and look for the
 bottleneck as I implement it" is a completely valid statement, and often the
 brute force itself reveals the optimization (you'll notice you're
@@ -743,13 +745,16 @@ recomputing something). Silence while you privately search for the "right"
 pattern produces zero signal; a stated brute force produces a working
 baseline AND signal.
 
-**How much should I talk while actively typing code?** Enough that the
+**How much should I talk while actively typing code?**
+**Short:** Narrate one sentence per logical step, enough that the interviewer is never unsure what you're doing for more than about 30 seconds.
+Enough that the
 interviewer is never unsure what you're doing for more than ~30 seconds.
 You don't need to narrate every keystroke — narrate at the level of "now I'm
 handling the case where the heap exceeds size k" (one sentence per logical
 step), not "now I'm typing h-e-a-p-q-dot-h-e-a-p-p-u-s-h."
 
 **Q: What if the interviewer's hint contradicts my current approach?**
+**Short:** Repeat the hint back in your own words, state its implication for your approach, and keep your original plan only if you still believe it after reconsidering.
 Repeat the hint back in your own words to confirm you understood it, then
 re-evaluate: "So you're suggesting [restated hint] — that would mean
 [implication for my approach]. Let me reconsider..." If, after
@@ -758,6 +763,7 @@ so with a brief justification — but check first, since most hints are
 intentional redirections toward something the interviewer needs to observe.
 
 **Q: Is it OK to ask the interviewer to confirm my complexity analysis?**
+**Short:** Yes — ask it as a brief confirmation after stating your own justified time/space analysis, not as a substitute for doing the analysis.
 Yes, briefly — "So that's O(n log k) time, O(n) space — does that match
 what you'd expect?" is a good wrap-up question. Don't ask it as "is that
 right?" with no analysis attached; ask it AFTER giving your justified
@@ -765,6 +771,7 @@ analysis, as a final confirmation/segue, not as a substitute for the
 analysis.
 
 **Q: What if I run out of time before finishing the implementation?**
+**Short:** State exactly what's done and what specific step remains — a clearly-described unfinished ending beats a silent unfinished program.
 Say where you are and what's left: "I have the frequency-counting and heap
 logic done; the remaining step is extracting values from the heap into the
 result list — that's a one-line list comprehension: `[num for freq, num in
@@ -772,7 +779,9 @@ heap]`." A clearly-described unfinished last step is far better than a
 silent unfinished program — it shows you knew exactly what remained.
 
 **Q: How do I handle a follow-up like "what if the input doesn't fit in
-memory" or "what if this needs to run on a stream"?** Treat it as a fresh
+memory" or "what if this needs to run on a stream"?**
+**Short:** Treat it as a fresh Match step and name the right approach — like a Count-Min Sketch for streaming top-k — even without implementing it live.
+Treat it as a fresh
 Match step on the SAME problem: "With a stream, I can't build the full
 frequency map upfront. For approximate top-k over a stream, a Count-Min
 Sketch combined with a heap is the standard approach — it trades exact
@@ -782,20 +791,25 @@ strong signal. See [hashing_patterns.md](hashing_patterns.md) §6 for related
 approximate-counting structures.
 
 **Q: What if my brute force IS the optimal solution — should I still state
-it?** State it briefly, then say so explicitly: "The brute force here is
+it?**
+**Short:** State the brute force, then explicitly argue why it's already optimal, such as needing to examine every element at least once.
+State it briefly, then say so explicitly: "The brute force here is
 already O(n), which I believe is optimal since we must examine every
 element at least once — I don't see a sub-linear approach given we need to
 inspect all of `nums`." This shows you considered the question rather than
 skipping it because "obviously" no brute force was needed.
 
 **Q: How important is variable naming and code style during a live
-interview?** More than it might seem, because it's FREE signal —
+interview?**
+**Short:** It matters a lot — descriptive names like `left`/`right` or `freq` cost zero extra time while signaling understanding and avoiding copy-paste bugs.
+More than it might seem, because it's FREE signal —
 `left`/`right` instead of `i`/`j` for two-pointer code, `freq`/`count`
 instead of `c`, costs zero extra time and immediately tells the interviewer
 (and you, six lines later) what each variable represents. It also reduces
 the chance of variable-name collisions and copy-paste bugs.
 
 **Q: What's the right way to test my code at the end, given limited time?**
+**Short:** Hand-trace your 1-2 examples with real variable values first; only write actual test-case code if significant time remains afterward.
 Hand-trace the 1-2 examples from the Understand phase, maintaining actual
 variable values as you go (as in §5's Review step) — this is faster than
 writing `assert` statements and demonstrates the same rigor. If significant
@@ -803,6 +817,7 @@ time remains (see §7 "When You Finish Early"), THEN write 1-2 actual test
 cases as code, especially for edge cases (empty input, single element).
 
 **Q: How do I recover gracefully from a bug found during Review?**
+**Short:** State the specific bug and fix calmly, then re-trace only the affected part of the example rather than restarting from scratch.
 State it calmly and specifically: "I see the issue — on line [X], I'm using
 `<` but this should be `<=` to handle the case where [specific scenario from
 my edge-case example]. Let me fix that." Then re-trace ONLY the part of the
@@ -812,7 +827,9 @@ is a POSITIVE signal — it's the testing/verification skill in §2's rubric in
 action.
 
 **Q: What if the interviewer seems unimpressed, gives minimal feedback, or
-doesn't respond to my narration?** Continue your normal UMPIRE narration
+doesn't respond to my narration?**
+**Short:** Keep narrating exactly as before — neutral interviewer feedback is often a deliberate poker face, not a signal to change your approach.
+Continue your normal UMPIRE narration
 regardless — many interviewers deliberately give neutral/minimal feedback to
 avoid biasing the candidate (a "poker face" is often standard practice, not
 a signal of how you're doing). Do not change your communication style based

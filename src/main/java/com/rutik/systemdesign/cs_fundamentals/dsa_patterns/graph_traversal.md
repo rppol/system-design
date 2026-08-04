@@ -645,6 +645,7 @@ lists.
 ## 11. Interview Q&A
 
 **Q: Why do graph traversals need a `visited` set but tree traversals don't?**
+**Short:** A tree has no cycles so no path revisits a node; a graph or grid can cycle, and without a visited set the traversal loops forever.
 A tree has no cycles and exactly one path from the root to any node, so a
 recursive/BFS walk can never revisit a node. A graph (and a grid, which is
 just a graph) can have cycles — e.g., a 2x2 block of land has 4 cells each
@@ -652,6 +653,7 @@ adjacent to 2 others, forming a cycle. Without marking visited cells, a
 traversal would loop forever, which is exactly the bug in §8.
 
 **Q: When do you use BFS vs. DFS for grid problems?**
+**Short:** Use DFS for counting components or generating a path; use BFS whenever you need the shortest unweighted distance or simultaneous multi-source spread.
 For *counting* connected components (islands) or *generating a path*
 (backtracking-style), DFS is simpler and uses less code. For finding the
 *shortest* path/distance in an unweighted grid, or for "spreads simultaneously
@@ -661,6 +663,7 @@ necessarily the *shortest* one.
 
 **Q: Why seed a multi-source BFS with all sources at once instead of running BFS
 from each source separately?**
+**Short:** Seeding all sources at once computes every cell's distance to its nearest source in one O(rows·cols) pass, instead of O(k·rows·cols) for k separate runs.
 Running BFS once per source and taking the minimum would be correct but
 wasteful — O(k · rows · cols) for k sources. Seeding the queue with all k
 sources at the start means the BFS naturally computes, for every cell, the
@@ -670,6 +673,7 @@ came from.
 
 **Q: In the BROKEN→FIX example, why exactly does marking visited "too late" cause
 infinite recursion, and not just extra work?**
+**Short:** The guard is checked live against unmodified state, so a neighbor can recurse back into the same unmarked cell with no shrinking subproblem, never hitting a base case.
 Because the guard condition `grid[r][c] != "1"` is the *only* thing that stops
 recursion, and it's checked at the *top* of each call using the grid's current
 state. If `grid[r][c]` is still `"1"` when a neighbor recurses back into
@@ -680,6 +684,7 @@ a base case — it's not just slow, it never terminates (until Python's stack
 limit raises `RecursionError`).
 
 **Q: Why does Clone Graph need a hashmap instead of just a `visited` set?**
+**Short:** A visited set only says a node was processed, not which new node it maps to; cycles need a hashmap so a clone can look up and link back to another clone.
 A `visited` set only answers "have I processed this node?" — it doesn't tell
 you *what the corresponding new node is*. When neighbor B's clone needs to
 point back to neighbor A's clone (a cycle), you need to look up "the new node
@@ -689,6 +694,7 @@ into its neighbors is what makes cycles terminate correctly.
 
 **Q: Why does Word Ladder generate neighbors via 26-letter substitution instead
 of comparing every pair of words?**
+**Short:** Trying all 26 letters at each of L positions costs O(n·L·26) with a hash-set lookup, versus O(n^2·L) for comparing every pair of words.
 Comparing every pair of n words to check "differs by one letter" costs
 O(n² · L) where L is word length. Generating neighbors by trying all 26
 letters at each of L positions costs O(L · 26) per word, or O(n · L · 26)
@@ -697,6 +703,7 @@ the dictionary. For n in the thousands, this is the difference between
 roughly 10^7 and 10^10+ operations.
 
 **Q: How do you choose between 4-directional and 8-directional movement?**
+**Short:** Read the problem's adjacency definition — 4-directional is the default unless diagonal connections are explicitly mentioned.
 Read the problem statement's definition of "adjacent" — it will explicitly
 say "horizontally or vertically adjacent" (4-directional, the overwhelming
 majority of problems) or mention diagonal connections (8-directional). When
@@ -705,6 +712,7 @@ directions is a one-line change to the directions list.
 
 **Q: Why is Pacific Atlantic Water Flow solved with two traversals from the
 borders instead of one traversal per cell?**
+**Short:** Two multi-source backward traversals from each ocean's border cost O(rows·cols) each, versus O((rows·cols)^2) for a forward traversal per cell.
 Checking, from each cell, whether water can reach both oceans would require a
 traversal *from* that cell — O(rows · cols) work per cell, O((rows·cols)²)
 total. Instead, run two multi-source traversals *backwards* (uphill) from
@@ -715,6 +723,7 @@ two reachable sets — O(rows · cols) total instead of quadratic.
 
 **Q: What's the difference between Surrounded Regions and Number of Islands —
 both involve counting/marking regions of the same character?**
+**Short:** Border-touching is a global property; the trick is to first mark all border-connected regions safe, then flip everything else instead of checking each region in isolation.
 Number of Islands counts *all* connected regions independently. Surrounded
 Regions requires knowing whether a region touches the border — which is a
 *global* property, not determinable by looking at the region in isolation.
@@ -724,6 +733,7 @@ surrounded) first, mark them safe, then flip everything else.
 
 **Q: Can recursive DFS on a grid cause a stack overflow, and how do you avoid
 it?**
+**Short:** Yes — recursion depth can equal the island's cell count and exceed Python's ~1000 limit; switch to an iterative DFS with an explicit stack or BFS with a deque.
 Yes — Python's default recursion limit is ~1000, and a single long, winding
 island can have a DFS call depth equal to its cell count. A grid as small as
 32x32 (1024 cells) can exceed the limit if fully connected in a snake shape.
@@ -733,6 +743,7 @@ but no call-stack depth limit (bounded only by available memory).
 
 **Q: How would you adapt `num_islands` to also return the size of the largest
 island (Max Area of Island, LC 695)?**
+**Short:** Have `dfs` return `1` plus the recursive sum over the four neighbors instead of a side-effecting None, and track the running max in the outer loop.
 Change `dfs` from a `None`-returning side-effecting function to one that
 *returns* `1 + dfs(up) + dfs(down) + dfs(left) + dfs(right)` (with the same
 "sink before recurse" rule, returning `0` for out-of-bounds/water cells).
@@ -741,6 +752,7 @@ counter.
 
 **Q: In `bfs_shortest_path`, why must you check `(nr, nc) not in visited` *before*
 appending to the queue, rather than when popping?**
+**Short:** Checking visited at enqueue time prevents duplicate queue entries for one cell and guarantees each cell is processed at its true shortest BFS distance.
 If you only check `visited` when popping, the same cell can be appended to the
 queue multiple times by different neighbors *before* any of those copies are
 popped — wasting memory and (for the *first* discovered distance to be

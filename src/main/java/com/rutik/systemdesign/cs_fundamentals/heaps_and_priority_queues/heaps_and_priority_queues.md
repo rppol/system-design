@@ -754,57 +754,75 @@ class LazyHeap:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of building a heap from n elements?**
+**Short:** O(n) — half the nodes are leaves that can't sift at all, and the height-weighted geometric series telescopes to O(n), not O(n log n).
 O(n). Calling heapify (sift-down from every internal node) costs O(n) because a node at height h can fall at most h levels, and only about n/2^(h+1) nodes sit at height h — half the nodes are leaves and do zero work, a quarter can fall at most 1, an eighth at most 2. The series sum(h/2^(h+1)) converges to 1, so the total is bounded by n (CLRS states the same bound loosely as 2n). Inserting n elements one by one is O(n log n) in the worst case. This is one of the most commonly mis-stated complexities.
 
 **Q2: Why does Python's heapq.nlargest(k, arr) use a heap instead of sorting?**
+**Short:** A size-k min-heap costs O(n log k), cheaper than sorting's O(n log n) whenever k is much smaller than n.
 For k << n, maintaining a size-k min-heap costs O(n log k) — you scan all n items but only maintain k items in the heap. Sorting costs O(n log n). When k=1 it is O(n), same as a linear scan. `nlargest` switches internally to `sorted()` when k is close to n.
 
 **Q3: How do you find the median of a streaming dataset efficiently?**
+**Short:** A max-heap for the lower half and a min-heap for the upper half, kept balanced, give O(log n) inserts and O(1) median lookups.
 Maintain two heaps: a max-heap `lower` (lower half) and min-heap `upper` (upper half). Keep sizes balanced (differ by at most 1). After each insertion, the median is either the root of `lower` (odd total) or the average of both roots (even total). Each insert is O(log n), each median query O(1).
 
 **Q4: You need to implement Dijkstra. What heap variant should you choose and why?**
+**Short:** A binary heap is fine generally; a 4-ary heap roughly halves sift-up comparisons for Dijkstra's push-heavy pattern at a costlier sift-down.
 A binary heap gives O((V+E) log V) with simple implementation — good enough for most graphs. A 4-ary heap halves the sift-up comparisons (height log_4 n = log_2 n / 2, one comparison per level), which is the operation Dijkstra does most since it pushes far more often than it pops; the price is 3 comparisons instead of 1 per sift-down level. A Fibonacci heap gives O(E + V log V) theoretically but has huge constants; only worth it for extremely dense graphs where E >> V log V.
 
 **Q5: What is the difference between a heap and a BST?**
+**Short:** A heap only guarantees an extreme root with O(n) arbitrary search; a BST keeps full sorted order with O(log n) search when balanced.
 A heap only guarantees the root is extreme; arbitrary search is O(n). A BST guarantees full sorted order and supports O(log n) search for any key. Heap push/pop is O(log n) and cache-friendly (array). BST insert/find is O(h), which is O(log n) only while the tree stays balanced, and it is pointer-heavy (cache-unfriendly). Choose heap for priority-queue use cases, BST for sorted-set use cases.
 
 **Q6: How does Java's PriorityQueue behave when you iterate it?**
+**Short:** Iteration returns heap-array storage order, not sorted order — you must drain via `poll()` or sort a copy to get sorted output.
 Iteration order is NOT sorted. Java's PriorityQueue is backed by a binary heap array; iterating gives heap-storage order, which is not a sorted traversal. To get sorted output you must drain via poll() or copy to an array and sort. This surprises many Java developers who assume the collection is "sorted."
 
 **Q7: A heap's pop() is O(log n). Can you implement a heap that supports O(1) delete-any-element?**
+**Short:** No — O(1) isn't achievable, but an indexed heap with a value-to-index hashmap gives O(1) lookup plus O(log n) sift to delete any element.
 No — O(1) is not achievable, but O(log n) delete-any is, which is the answer the question is fishing for. In a plain heap, *locating* an arbitrary element is O(n) because heap order tells you nothing about where a non-root value sits. Augment it with a HashMap `{value → index_in_heap_array}` and the lookup becomes O(1); the deletion itself is still logarithmic — swap A[i] with A[last], pop the last, then sift-up *or* sift-down from i, since the replacement may be either too small or too large for that position. This is called an "indexed heap" and is used in Prim's MST and some Dijkstra implementations. The bookkeeping catch: every swap during every sift must also update the map, or the indices go stale and the next delete corrupts the heap.
 
 **Q8: Why is heapsort not used in practice even though it is O(n log n) worst-case?**
+**Short:** Heapsort's parent/child jumps are cache-unfriendly, so quicksort's sequential access pattern runs 2-5x faster despite a worse worst case.
 Cache performance. Heapsort's access pattern jumps between parent and children in a large array — cache-unfriendly. Quicksort has O(n²) worst case but its sequential access pattern produces fewer cache misses in practice, making it 2–5× faster on real hardware. Introsort (used in C++ std::sort) uses quicksort with heapsort as a fallback to avoid the O(n²) case.
 
 **Q9: You have k sorted lists with a total of N elements. What is the merge complexity and why?**
+**Short:** O(N log k) — a size-k min-heap does one pop and one push per output element, each costing O(log k).
 O(N log k). Initialise a min-heap with the first element of each list (k elements). Each of the N pops takes O(log k), and each pop is followed by one push (also O(log k)). Total: 2N operations × O(log k) each = O(N log k). Space is O(k) for the heap, O(N) for the output.
 
 **Q10: What does Python's heapq module push to a heap of tuples when priorities are equal?**
+**Short:** Tuples compare lexicographically and raise TypeError on an uncomparable second element, so a monotonic counter is inserted to break ties.
 Python compares tuples lexicographically — if the first elements tie, it compares the second. If the second element is not comparable (e.g., a custom object without `__lt__`), Python raises TypeError. The standard fix is inserting a monotonically increasing counter as the second element of the tuple, so ties are broken by insertion order without ever reaching the object comparison.
 
 **Q11: Can you use a heap to sort in descending order in O(n log n) with O(1) extra space?**
+**Short:** Yes — build a max-heap in-place in O(n), then repeatedly swap the root to the end and sift-down, giving in-place O(n log n) heapsort.
 Yes — this is heapsort. Build a max-heap in-place in O(n), then repeatedly swap the root (maximum) with the last element and sift-down on the reduced heap. After n swaps, the array is sorted ascending. For descending: build a min-heap instead. Space is O(1) extra (heapify is in-place).
 
 **Q12: What is the meeting rooms II problem and how does a heap solve it?**
+**Short:** Sort by start time and keep a min-heap of active end times; reuse a room when the earliest end time is <= the new start, else open a new one.
 Given intervals [start, end], find the minimum number of conference rooms required. Sort by start time. Use a min-heap of end times (one per active room). For each new meeting: if its start ≥ min end-time in the heap, reuse that room (pop and push new end-time). Else open a new room (push). The heap size at the end = answer. O(n log n).
 
 **Q13: How does Python heapq handle duplicate values?**
+**Short:** Duplicates work fine — pushing 5 twice pops 5 twice, since the heap property compares by value with no deduplication.
 Perfectly fine — Python allows duplicates in a heap and compares by value. The heap property remains consistent. If you push 5 twice, you will pop 5 twice. No deduplication happens.
 
 **Q14: What is the "sliding window maximum" problem and can a heap solve it efficiently?**
+**Short:** A max-heap with lazy deletion of out-of-window indices solves it in O(n log n); a monotonic deque is the preferred O(n) alternative.
 Given array nums and window size k, find the max in every k-size window. A max-heap can solve it in O(n log n) with lazy deletion: push (value, index), when you pop, discard entries with index < window_start. A monotonic deque solves it in O(n) — preferred. The heap approach is simpler to implement in an interview when optimal complexity is not required.
 
 **Q15: Describe the size-k heap pattern for finding the k-th largest element dynamically.**
+**Short:** A single size-k min-heap, not the two-heap median pattern, tracks the k-th largest — its root is the answer after each O(log k) push.
 Maintain a min-heap of size k — note this needs one heap, not the two-heap pattern, which solves the running *median* instead. For each new element: push it. If size > k, pop the minimum. The root of the size-k min-heap is the k-th largest element seen so far. Each operation O(log k). This is the basis for LeetCode 703 "Kth Largest Element in a Stream."
 
 **Q16: What happens internally when you call heapq.heappushpop(heap, item) vs heapq.heapreplace(heap, item)?**
+**Short:** `heappushpop` pushes then pops the minimum; `heapreplace` pops first then pushes, roughly twice as fast but assumes a non-empty heap.
 `heappushpop`: pushes item first, then pops min. Equivalent to push+pop but implemented as one operation (avoids sifting twice when item is already ≤ current min). `heapreplace`: pops min first, then pushes item — assumes heap is non-empty. `heapreplace` is faster than a pop+push pair by roughly a factor of 2. Use `heapreplace` in the k-largest window pattern.
 
 **Q17: In Dijkstra's algorithm, why do we "lazy delete" stale heap entries rather than updating them in place?**
+**Short:** Since `heapq` lacks O(log n) decrease-key, a shorter distance is pushed as a new entry and a popped stale entry is simply skipped.
 Python's `heapq` (and Java's `PriorityQueue`) do not support decrease-key in O(log n) without additional bookkeeping. The lazy approach: simply push a new (shorter_dist, node) entry when you find a shorter path. When you pop an entry, check if the stored distance matches `dist[node]`; if not, skip it (it is stale). This adds at most E entries to the heap (one per edge relaxation) — still O((V+E) log V).
 
 **Q18: What is a d-ary heap and when does increasing d improve performance?**
+**Short:** Larger d shortens sift-up to O(log n/log d), helping push-heavy workloads like sparse-graph Dijkstra, while pop-heavy sift-down favors d=2.
 A d-ary heap gives each node d children. Height = log_d(n) so sift-up takes O(log_d n) = O(log n / log d). Sift-down examines d children per level: O(d × log_d n). Rule of thumb: if the workload is push-heavy (more sift-ups than sift-downs) — e.g., Dijkstra on sparse graphs — a 4-ary heap reduces comparisons by ~50% vs a binary heap. If the workload is pop-heavy (heapsort), stick with d=2 to keep sift-down cheap.
 
 ---

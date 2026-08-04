@@ -600,6 +600,7 @@ pattern that actually fits the shape.
 ## 11. Interview Q&A
 
 **Q: How do I know whether to use `lo <= hi` or `lo < hi` as the loop condition?**
+**Short:** Use `lo <= hi` for exact-match search that can fail; use `lo < hi` for boundary search where the loop exits with `lo == hi` pointing at a valid answer.
 Use `lo <= hi` (with `hi = mid - 1` / `lo = mid + 1`) when you're searching
 for an *exact match* and want to detect "not found" (loop exits with
 `lo > hi`). Use `lo < hi` (with `hi = mid` / `lo = mid + 1`) when you're
@@ -608,6 +609,7 @@ at the boundary, which is always a valid answer (assuming `[lo, hi]` is
 chosen so the answer is guaranteed to exist in range).
 
 **Q: What does "binary search on the answer" actually mean, and how do I spot it?**
+**Short:** You binary search a range of possible output values, whenever a fixed candidate's feasibility is cheap to check and flips monotonically as the candidate grows.
 It means the thing you binary search over is not the input array but a
 *range of possible output values*. The tell is a problem phrased as
 "minimize/maximize X such that some condition on the whole input holds," where
@@ -617,6 +619,7 @@ the condition flips monotonically as X increases. If you can write
 even if `x` was never an index into anything.
 
 **Q: How do you prove a `feasible` function is monotonic before relying on it?**
+**Short:** Argue the underlying quantity moves only one direction as the candidate increases, like eating speed monotonically shrinking total hours in Koko Eating Bananas.
 Argue about the underlying quantity: in Koko Eating Bananas, increasing the
 eating speed `k` can only decrease or keep equal each `ceil(pile/k)` term, so
 total hours is non-increasing in `k` — hence `feasible(k) = (hours <= h)` goes
@@ -625,6 +628,7 @@ kind of "increasing X can only help/hurt, never both" argument, binary search
 on the answer is unsound — look for a DP formulation instead.
 
 **Q: Walk through Search in Rotated Sorted Array — how do you find which half is sorted?**
+**Short:** Whichever half has `arr[lo] <= arr[mid]` is internally sorted, and exactly one half is always guaranteed sorted absent duplicates.
 Compare `arr[lo]` to `arr[mid]`. If `arr[lo] <= arr[mid]`, the left half
 `[lo, mid]` is internally sorted (no rotation point inside it) — check if
 `target` falls in `[arr[lo], arr[mid])`; if so, search left, else search
@@ -634,6 +638,7 @@ check. Exactly one half is always guaranteed sorted (absent duplicates),
 which is what keeps this O(log n).
 
 **Q: Why `mid = lo + (hi - lo) // 2` instead of `(lo + hi) // 2`?**
+**Short:** `lo + (hi - lo) // 2` avoids the integer overflow that `(lo + hi) // 2` risks in fixed-width languages when both bounds are near `INT_MAX`.
 In languages with fixed-width integers (Java, C++), `lo + hi` can overflow if
 both are near `INT_MAX`, wrapping to a negative number and corrupting `mid`.
 `lo + (hi - lo) // 2` never exceeds `hi`, so it can't overflow. Python integers
@@ -642,6 +647,7 @@ it the overflow-safe way is a habit worth keeping since interviewers often
 ask "does this work in Java/C++ too?"
 
 **Q: What's the difference between `bisect_left` and `bisect_right`, and when do I use each?**
+**Short:** `bisect_left` finds the first index with `arr[i] >= x` for "first occurrence," while `bisect_right` finds the first index with `arr[i] > x` for "count of elements <= x."
 `bisect_left(arr, x)` returns the leftmost position where `x` can be inserted
 — i.e., the first index `i` with `arr[i] >= x` (this is `lower_bound`).
 `bisect_right(arr, x)` returns the rightmost such position — the first index
@@ -652,6 +658,7 @@ that places x *after* any duplicates" (useful for maintaining a sorted list of
 non-decreasing values via `insort_right`, the default).
 
 **Q: Binary search on floating-point answers — how do you decide when to stop?**
+**Short:** Prefer a fixed iteration count like 100 halvings, which converges past double precision and sidesteps debating what epsilon counts as small enough.
 Two options: (1) fixed iteration count — `for _ in range(100): mid = (lo+hi)/2; ...`
 (100 iterations of halving a reasonable range converges far past double
 precision, ~`10^-30`); or (2) epsilon termination —
@@ -660,6 +667,7 @@ because it sidesteps debates about what epsilon is "small enough" and always
 terminates in a known number of steps.
 
 **Q: Why is Median of Two Sorted Arrays a binary search problem and not a merge problem?**
+**Short:** The median is defined by an O(1)-checkable partition point, so binary searching that partition in the smaller array gives O(log(min(m,n))) instead of an O(m+n) merge.
 Merging is O(m + n) — correct but not optimal. The O(log(min(m,n)))
 insight is: the median is defined by a *partition* that splits the combined
 array into two halves of equal size where every element on the left is
@@ -670,6 +678,7 @@ comparing four boundary elements — that's what makes it O(log(min(m,n)))
 instead of O(m+n).
 
 **Q: How do you handle Search in Rotated Sorted Array with duplicates (LC 81)?**
+**Short:** When `arr[lo] == arr[mid] == arr[hi]` you can't tell which half is sorted, so shrink the search space by one index, degrading worst case to O(n).
 When `arr[lo] == arr[mid] == arr[hi]`, you cannot tell which half is sorted
 (both could look "flat" while the rotation point hides inside either). The
 standard fix is to shrink the search space by one: `lo += 1` (or `hi -= 1`),
@@ -678,6 +687,7 @@ values with one different element), but average case remains close to
 O(log n).
 
 **Q: Find Peak Element finds *a* peak — why does "go uphill" guarantee correctness for *any* peak, not just the global max?**
+**Short:** If the sequence is still climbing at `mid` there must be a peak further in that direction, guaranteeing correctness even though the rest of the array is skipped.
 The problem only asks for *a* local peak (`arr[i] > arr[i-1]` and
 `arr[i] > arr[i+1]`, with `arr[-1] = arr[n] = -infinity` conceptually). If
 `arr[mid] < arr[mid+1]`, the sequence is "still climbing" at `mid` — there
@@ -687,6 +697,7 @@ Symmetric logic applies leftward. This guarantees *some* peak exists in the
 direction you move, even though you skip over the rest of the array.
 
 **Q: When is binary search the wrong choice even though the array is sorted?**
+**Short:** Binary search fails when you need every element satisfying a non-contiguous condition or a pairwise relationship — reach for two pointers, backtracking, or DP instead.
 When you need to examine *all* elements that satisfy a condition (not just a
 boundary) and that set isn't contiguous, or when the relationship you care
 about is between *pairs* of elements rather than a single threshold (use
@@ -696,6 +707,7 @@ search on a threshold won't capture combinatorial structure — that calls for
 [backtracking](backtracking.md) or [dynamic_programming](dynamic_programming.md).
 
 **Q: What's the complexity tradeoff of "binary search on the answer + O(n) feasibility check" versus "sort + two pointers"?**
+**Short:** Binary search on the answer costs O(n log(range)), while sort-plus-two-pointers costs O(n log n) — prefer sorting when range is far larger than n.
 Binary search on the answer is `O(n * log(range))`. If the same problem can be
 solved by sorting once (`O(n log n)`) and then a single linear pass with two
 pointers (`O(n)`), the sort-based approach is `O(n log n)` total — often

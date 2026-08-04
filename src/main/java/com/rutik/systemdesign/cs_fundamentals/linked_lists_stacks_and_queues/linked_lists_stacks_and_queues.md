@@ -626,48 +626,63 @@ Identical arithmetic to the `pop(0)` trap, arriving from the opposite end of the
 ## 12. Interview Questions with Answers
 
 **Q1: How do you reverse a linked list in O(n) time and O(1) space?**
+**Short:** Three-pointer iteration rewires each node's next to the previous one, saving `curr.next` first before overwriting it.
 Three-pointer iteration: `prev = None`, `curr = head`. Each iteration: save `nxt = curr.next`, set `curr.next = prev`, advance `prev = curr` and `curr = nxt`. Return `prev` (the new head). The key discipline: save `curr.next` before overwriting it — losing this reference is the most common bug.
 
 **Q2: How do you detect a cycle in a linked list?**
+**Short:** Floyd's tortoise and hare — a slow pointer and a 2-step fast pointer meet inside the cycle because fast eventually laps slow.
 Floyd's cycle detection (tortoise and hare). Two pointers start at head; slow moves 1 step, fast moves 2 steps per iteration. If fast reaches null, no cycle. If slow == fast, there is a cycle. O(n) time, O(1) space. The meeting happens because fast "laps" slow inside the cycle; the time to lap is bounded by the cycle length.
 
 **Q3: How do you find the start of the cycle?**
+**Short:** Reset slow to head after the meeting point, advance both one step at a time, and they meet again exactly at the cycle's start node.
 After slow and fast meet (inside the cycle), reset slow to head. Advance both slow and fast one step at a time. They meet at the cycle start. Mathematical proof: let F be the distance from head to the cycle start, C the cycle length, and a the distance from the cycle start to the meeting point. Slow has travelled F + a and fast exactly twice that, and since both sit on the same node, fast's extra distance is a whole number of laps: 2(F + a) - (F + a) = kC, so F + a = kC, hence F = kC - a. Walking F steps from the meeting point therefore advances a + F = kC — an exact multiple of laps — landing back on the cycle start, which is where the pointer restarted from head arrives at the same moment.
 
 **Q4: How do you find the middle of a linked list?**
+**Short:** Fast-slow pointers starting both at head land on the second of two middles on an even-length list; starting fast one node ahead gives the first.
 Fast-slow pointer. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. Which middle you get on an even-length list depends entirely on how you initialise, and this is the detail people state backwards: starting both at head (`slow = fast = head`) lands slow on the **second** of the two middles — node 3 of 1→2→3→4. If you need the first middle, which is what merge sort's split point wants so the left half is never empty, start fast one node ahead (`fast = head.next`) or loop on `while fast.next and fast.next.next`.
 
 **Q5: How do you remove the Nth node from the end of a linked list in one pass?**
+**Short:** Advance a lead pointer n steps ahead, then move both together until the lead hits the end, leaving the trailing pointer just before the target.
 Two pointers with a gap of n. Advance the first pointer n steps ahead. Then advance both one step at a time until the first pointer reaches the end. The second pointer is now at the (N+1)th node from the end — update its `.next` to skip the target. Edge case: use a dummy head to handle removal of the actual head node. O(n) time, O(1) space.
 
 **Q6: What is a monotonic stack and how is it used for "next greater element"?**
+**Short:** Popping smaller elements as a bigger one arrives assigns each popped element its next-greater in O(n) total, since each index is pushed/popped once.
 A stack that maintains elements in monotonically increasing or decreasing order (by value). For "next greater element": iterate left to right; for each element, pop the stack while the top is smaller than the current element — those popped elements have found their next greater element (the current). Push the current index. O(n) total — each element pushed and popped at most once.
 
 **Q7: How do you implement a queue using two stacks?**
+**Short:** Moving elements from the input stack to the output stack only when the output is empty gives amortized O(1) per operation over an element's life.
 Stack1 for enqueue, stack2 for dequeue. On dequeue: if stack2 is empty, move all elements from stack1 to stack2 (reversing order → FIFO). Amortized O(1) per operation: each element is touched exactly four times in its whole life — pushed to stack1, popped from stack1, pushed to stack2, popped from stack2 — so n elements cost at most 4n stack operations. Worst-case single dequeue is O(n) (when stack2 is empty and all elements must be moved).
 
 **Q8: Why is `ArrayDeque` preferred over `LinkedList` in Java for stack/queue usage?**
+**Short:** Its contiguous circular array is 2-5x faster than `LinkedList`'s per-element node allocation and cache-missing pointer chasing.
 `ArrayDeque` uses a circular array — all elements are contiguous in memory, giving excellent cache performance. `LinkedList` allocates a node object per element — each dequeue or enqueue involves object creation/GC and a pointer dereference (cache miss). Benchmarks show `ArrayDeque` is 2–5× faster than `LinkedList` for stack/queue workloads due to cache efficiency and reduced GC pressure.
 
 **Q9: What is the space complexity of DFS using an explicit stack versus recursion?**
+**Short:** Both cost O(h) for the max depth, but an explicit stack avoids Python's recursion limit since each entry is a bare node reference, not a full frame.
 Explicit stack: O(h) where h is the maximum depth (stored in a Python list or deque). Recursion: O(h) call stack frames. Both are O(h). However, the explicit stack avoids CPython's 1000-frame recursion limit and can handle graphs with millions of nodes. Each explicit stack entry is just the node reference; each recursive stack frame includes local variables, return address, and the frame object overhead (~few hundred bytes in Python).
 
 **Q10: How do you merge K sorted linked lists in O(n log k) time?**
+**Short:** A size-k min-heap does n extractions at O(log k) each; pairwise divide-and-conquer merging over log k rounds achieves the same bound.
 Use a min-heap of size k. Initialize with the head of each list. Repeat: extract the minimum, append to result, push that node's successor into the heap. Total: n extractions, each O(log k) → O(n log k). Alternative: divide-and-conquer merge (merge pairs, repeat log k times) — also O(n log k).
 
 **Q11: What is the advantage of a doubly linked list over a singly linked list?**
+**Short:** It deletes a given node in O(1) without traversing for its predecessor, which a singly linked list needs O(n) to find.
 O(1) deletion of a node given a reference to it, without traversing from the head to find the predecessor. In a singly linked list, deleting a node requires knowing the predecessor, which takes O(n) to find (traverse from head). Doubly linked lists are used in LRU caches (`OrderedDict`, `LinkedHashMap`) where O(1) deletion of the least-recently-used node is required.
 
 **Q12: How do you check if a linked list is a palindrome in O(n) time and O(1) space?**
+**Short:** Find the middle, reverse the second half in place, compare it against the first half, then restore — no extra storage is needed.
 Find the middle (fast-slow pointer), reverse the second half in place, compare element-by-element with the first half, then restore the second half. The O(1) space comes from reversing in place — no auxiliary storage for the second half. Carefully restore the list after comparison if the original must be preserved.
 
 **Q13: What is a sentinel/dummy node and why use it?**
+**Short:** A dummy node prepended to the list gives every node a predecessor, eliminating special-case checks for operating on the real head.
 A dummy node is a placeholder node prepended to the list that is never returned as part of the answer. It simplifies code by eliminating special cases for operating on the head: insertions and deletions always have a predecessor (the dummy) so the `if head is None` and `if prev is None` checks disappear. Standard pattern: `dummy = ListNode(0); dummy.next = head; ... return dummy.next`.
 
 **Q14: How does a circular buffer implement a queue with O(1) operations?**
+**Short:** Wrapping head/tail indices modulo capacity gives O(1) enqueue/dequeue with no allocation — unlike `collections.deque`, a linked list of 64-element blocks.
 A fixed array with `head` and `tail` integer indices that wrap around: `tail = (tail + 1) % capacity` for enqueue, `head = (head + 1) % capacity` for dequeue. Full condition: `(tail + 1) % capacity == head`. Empty condition: `head == tail`. All operations are O(1) arithmetic, no allocation. Used in OS kernel ring buffers (network packets, I/O events), audio processing, lock-free SPSC queues, and Java's `ArrayDeque`. A common misattribution to correct: CPython's `collections.deque` is *not* a circular buffer — it is a doubly-linked list of 64-element blocks, which is what lets it grow without a fixed capacity.
 
 **Q15: How do you implement a min-stack (push, pop, top, getMin all in O(1))?**
+**Short:** An auxiliary min-stack pushes alongside the main stack only when a new value is <= its current top, so its top always holds the running minimum.
 Maintain two stacks: the main stack and an auxiliary min-stack. On push: push to main; if the value is ≤ min-stack's top (or min-stack is empty), also push to min-stack. On pop: pop from main; if the popped value equals min-stack's top, also pop from min-stack. `getMin()` returns min-stack's top. The min-stack tracks the minimum at each "level" of the main stack.
 
 ---

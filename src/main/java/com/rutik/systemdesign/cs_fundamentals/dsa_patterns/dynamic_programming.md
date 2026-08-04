@@ -646,6 +646,7 @@ flowchart TD
 ## 11. Interview Q&A
 
 **Q: Top-down (memoization) vs. bottom-up (tabulation) — how do you choose?**
+**Short:** Start top-down to nail the recurrence quickly, then convert to bottom-up when recursion depth or space optimization becomes the concern.
 Top-down (recursion + `@lru_cache` or a dict) is often easier to *write*
 directly from the recurrence — it mirrors the brute-force solution with one
 line added. Bottom-up (iterative table-filling) avoids recursion-depth limits
@@ -656,6 +657,7 @@ about stack depth or space, is a strong demonstration of understanding.
 
 **Q: How do you systematically identify "optimal substructure" and "overlapping
 subproblems" in a new problem?**
+**Short:** Write the brute-force recursion first — the combination step is optimal substructure, and shared arguments across call branches reveal overlapping subproblems.
 Write the brute-force recursive solution first: "to solve for `state X`, what
 smaller states do I need answers to, and how do I combine them?" That
 combination step IS the optimal substructure (the answer to `X` is built from
@@ -667,6 +669,7 @@ that's an overlapping subproblem — memoize on those arguments.
 
 **Q: Walk through why `dp = [0] * (amount+1)` is wrong for Coin Change but
 RIGHT for, say, "number of ways" DP (Coin Change II)?**
+**Short:** The sentinel must match the combining operator — `min`/`max` need `+inf`/`-inf` as "not yet computed," while count/sum DP correctly starts from 0.
 For **minimize** DP (Coin Change), `0` looks like "already the best possible
 value" to `min()`, so nothing can ever improve it — `0` must mean "not yet
 computed," requiring `+infinity`. For **count/sum** DP (Coin Change II,
@@ -677,6 +680,7 @@ combining operator: `min`/`max` need `+inf`/`-inf`; `+=`/`or` need `0`/`False`.
 
 **Q: 0/1 knapsack vs. unbounded knapsack — why does the capacity-loop DIRECTION
 matter when space-optimizing to 1D?**
+**Short:** Iterating capacity downward keeps `dp[t-weight]` as the previous item's value, giving 0/1 behavior; upward reuses the current item, giving unbounded behavior.
 In 2D, `dp[i][t]` (using items `0..i`) depends on `dp[i-1][t - weight]`
 (previous item's row). Collapsing to 1D `dp[t]`, you need `dp[t - weight]` to
 still hold the *previous item's* value when computing the *current* item's
@@ -689,6 +693,7 @@ giving unbounded behavior (item reusable).
 **Q: For LIS, what's the key insight that makes the O(n log n) `tails` array
 approach correct — it doesn't even look like it's tracking actual
 subsequences?**
+**Short:** `tails[k]` is the smallest possible tail among length-`(k+1)` increasing subsequences, and that sortedness is what makes binary search valid.
 `tails[k]` = the **smallest possible tail value** among all increasing
 subsequences of length `k+1` seen so far. Crucially, `tails` is always sorted
 — a longer increasing subsequence's tail can't be smaller than a shorter
@@ -701,6 +706,7 @@ existing subsequence — `len(tails)` at the end is the LIS length, even though
 
 **Q: How do you reconstruct the actual sequence of choices (not just the
 optimal value) from a DP table?**
+**Short:** Either store a parent/choice table alongside `dp` and walk it backward, or re-derive the path by checking which recurrence term matches each `dp` value.
 Either (1) store a `parent`/`choice` table alongside `dp`, recording *which*
 transition achieved `dp[state]`'s value, then walk backward from the final
 state following `parent` pointers; or (2) re-derive it by walking the `dp`
@@ -711,6 +717,7 @@ implies a "match" move diagonally, else move toward whichever of
 
 **Q: State-machine DP for stock problems — how do you derive the recurrence
 without memorizing it?**
+**Short:** Enumerate the states (holding, sold/cooldown, free) and the transitions with their costs and gains, then read the recurrence straight off that diagram.
 Explicitly enumerate the **states** (e.g., "holding a share," "just sold
 [in cooldown]," "not holding, free to buy") and the **transitions** between
 them with their costs/gains. For "Buy/Sell with Cooldown": `held[i] =
@@ -722,6 +729,7 @@ actual state diagram with labeled edges turns "memorize the formula" into
 
 **Q: Interval DP — why must the outer loop iterate over interval LENGTH rather
 than start index?**
+**Short:** Looping by length guarantees every shorter sub-interval a cell depends on is already filled — a start-index-ordered loop cannot guarantee that.
 `dp[i][j]` (interval `[i,j]`) is computed from `dp[i][k]` and `dp[k+1][j]`
 for `i <= k < j` — both of which are **shorter** intervals than `[i,j]`. If
 the outer loop iterated over `i` (start index) with `j` ranging freely, when
@@ -732,6 +740,7 @@ guarantees every dependency (strictly shorter interval) is already filled in.
 
 **Q: When does greedy work where DP would also "work" — how do you decide which
 to reach for first?**
+**Short:** Try an exchange argument proving the greedy choice never makes an optimal solution worse; if it holds use greedy, if you find a counterexample fall back to DP.
 Try to articulate an **exchange argument**: "if an optimal solution did NOT
 make the greedy choice at this step, could I modify it to make the greedy
 choice without making it worse?" If you can prove this for every step, greedy
@@ -745,6 +754,7 @@ fallback."
 **Q: Coin Change (minimize, LC 322) vs. Coin Change II (count combinations, LC
 518) — why does the loop order (coins outer vs. amount outer) matter for the
 LATTER but the former works either way?**
+**Short:** Counting combinations needs coins as the outer loop to avoid double-counting order, while minimize's commutative `min()` gives the same answer with either loop order.
 For **counting combinations** (order doesn't matter — `{1,2}` and `{2,1}`
 are the same combination), the outer loop must be over **coins**: this
 ensures each coin is "added to the mix" before amounts are computed using it,
@@ -758,6 +768,7 @@ problem, [Combination Sum IV (LC 377)](https://leetcode.com/problems/combination
 
 **Q: Bitmask DP — when is `O(2^n * n^2)` actually a reasonable complexity to
 propose, and what's the giveaway in the problem statement?**
+**Short:** Propose it when n is roughly 18-20 and the problem demands visiting all n items with subset/order mattering, using `(mask, last_item)` as the state.
 When `n <= ~18-20` (so `2^20 ~ 10^6`, times `n^2 ~ 400` is `~4*10^8` —
 borderline but often acceptable with simple per-state work), AND the problem
 involves "visit all of these `n` items" with order/subset mattering

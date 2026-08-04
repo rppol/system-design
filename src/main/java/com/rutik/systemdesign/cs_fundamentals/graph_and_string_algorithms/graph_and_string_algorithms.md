@@ -1059,57 +1059,75 @@ def fixed_rabin_karp(text, pattern):
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between BFS and DFS for shortest path? When does BFS give the correct shortest path and DFS does not?**
+**Short:** BFS visits nodes in non-decreasing distance order so the first visit is the shortest hop-count path; DFS can return a longer one.
 BFS gives the correct shortest path in terms of hop count (for unweighted graphs) because it processes nodes in non-decreasing order of distance — the first time a node is reached is via the shortest path. DFS explores one path to its end before backtracking; it may find a path that is not shortest. For weighted graphs, neither BFS nor DFS gives shortest weighted paths — use Dijkstra or Bellman-Ford.
 
 **Q2: Why can't Dijkstra handle negative edge weights? Give a concrete counterexample.**
+**Short:** A negative edge can shorten a path to an already-finalized vertex, but that vertex was popped and its outgoing edges never get re-relaxed.
 Dijkstra's invariant: once a vertex u is extracted from the heap, dist[u] is final. With negative weights, a path through an unvisited vertex might use a negative edge to produce a shorter path to u after u has been finalised. Counterexample: vertices {0,1,2,3}, edges 0->1 (w=1), 0->2 (w=2), 2->1 (w=-2), 1->3 (w=1). Dijkstra pops 1 at distance 1, marks it final, and relaxes 1->3 to give dist[3]=2; popping 2 next improves dist[1] to 0, but 1 is already visited so 1->3 is never re-relaxed and dist[3] stays 2 instead of the true 1. Note that the damage needs the prematurely finalised vertex to have outgoing edges — the toy 3-vertex versions of this counterexample usually still come out right, which is why the bug survives casual testing. Bellman-Ford relaxes every edge on every pass and gets [0, 0, 2, 1].
 
 **Q3: What is the time complexity of Dijkstra with a binary heap and why?**
+**Short:** O((V+E) log V) — V heap extractions cost O(V log V) and E edge relaxations/pushes cost O(E log V).
 O((V + E) log V). Each vertex is extracted from the heap once: V extractions × O(log V) each = O(V log V). Each edge triggers at most one relaxation and heap push: E pushes × O(log V) each = O(E log V). Total: O((V + E) log V). With a Fibonacci heap, decrease-key is O(1) amortised, giving O(V log V + E). In practice, the binary heap version is faster due to better cache behaviour.
 
 **Q4: How does Bellman-Ford detect negative cycles?**
+**Short:** If any edge still relaxes on the V-th pass, a path with V edges exists, which means a negative-weight cycle is reachable from the source.
 After V-1 relaxation passes, all shortest paths (using at most V-1 edges, since shortest paths in a graph without negative cycles have no repeated vertices) have been found. In the V-th pass, if any edge (u, v, w) still satisfies dist[u] + w < dist[v], then a shorter path with V edges exists — which means a cycle of negative total weight is reachable from the source.
 
 **Q5: Explain Kahn's algorithm for topological sort and how it detects cycles.**
+**Short:** Kahn's BFS repeatedly dequeues zero-in-degree vertices; if fewer than V vertices end up in the result, the rest form one or more cycles.
 Kahn's BFS: compute in-degrees of all vertices. Enqueue vertices with in-degree 0. Repeatedly dequeue a vertex u, add it to the result, and decrement in-degrees of u's neighbours. If any neighbour's in-degree becomes 0, enqueue it. After processing, if the result has fewer than V vertices, the remaining vertices form one or more cycles (they were never reached by the 0-in-degree queue). This is the correct, direct cycle detection.
 
 **Q6: What is the KMP failure function and what does fail[i] represent?**
+**Short:** `fail[i]` is the longest proper prefix of pattern[:i+1] that's also its suffix, letting a mismatch jump without rescanning matched text.
 `fail[i]` = length of the longest proper prefix of pattern[:i+1] that is also a suffix of pattern[:i+1]. "Proper" means strictly shorter than the string itself. On mismatch at pattern position k, jump to pattern position fail[k-1] instead of 0 — preserving the longest already-matched prefix. This ensures the text pointer never moves backward. The failure function is computed in O(m) using the same two-pointer technique as the search.
 
 **Q7: What is the Z-array and how is it related to the failure function?**
+**Short:** Z[i] is the length of the longest prefix match starting at s[i] — equivalent information to the KMP failure function with more direct indexing.
 Z[i] = length of the longest substring starting at s[i] that matches a prefix of s. For pattern search, concatenate `pattern + "$" + text`; positions i > len(pattern) where Z[i] == len(pattern) are occurrence starts. The Z-array and failure function contain equivalent information but differ in indexing. Z-algorithm is often preferred for teaching because its semantics are more direct (Z[i] directly says "this many characters match from the start").
 
 **Q8: What is Rabin-Karp's rolling hash and what is its worst-case complexity?**
+**Short:** The hash updates in O(1) per shift, but worst case is O(nm) if every window's hash falsely matches and needs full character verification.
 Rolling hash: the hash of window[i+1..i+m] is derived from the hash of window[i..i+m-1] in O(1): subtract the contribution of the leftmost character, multiply by base, add the new character (all modulo a prime). This makes sliding the window O(1) per step vs O(m) for recomputing. Worst-case O(nm): if every window hash matches the pattern hash (all characters identical), every window requires O(m) character-level verification. Expected O(n + m) with a good hash.
 
 **Q9: How does the Z-algorithm achieve O(n) despite having nested loops?**
+**Short:** Comparisons inside the current Z-box are skipped via Z[i-l], and the box's right edge only ever advances, bounding total work to O(n).
 The Z-algorithm maintains a window [l, r] that is the rightmost Z-box (substring matching a prefix). For i inside the box, Z[i] ≥ Z[i-l], so we skip those characters. For characters at or past r, we extend by comparing — but every comparison that succeeds pushes r rightward, and r can advance at most n times total. Characters outside the box and failed comparisons together account for O(n) work. The amortised analysis is the same as the "two-pointer never moves backward" argument.
 
 **Q10: What is topological sort used for in practice?**
+**Short:** Build systems, course scheduling, spreadsheet evaluation, workflow DAGs, query planning, and package dependency resolution all rely on it.
 Build systems (Bazel, Maven dependency resolution), course prerequisite scheduling, spreadsheet formula evaluation (evaluate cells with no dependencies first, then cells that depend only on evaluated cells), task scheduling in workflow engines (Airflow DAG execution order), database query planning (join order), and package dependency resolution (pip, npm). Any time you have "X must happen before Y" constraints and need an execution order, topological sort applies.
 
 **Q11: How do you detect a cycle in an undirected vs a directed graph using DFS?**
+**Short:** Undirected DFS flags any back edge to a non-parent ancestor; directed DFS needs 3-color marking since only edges to a gray node form a cycle.
 Undirected: during DFS, if a visited neighbour is not the direct parent of the current vertex (i.e., it's a back edge to an ancestor other than the parent), a cycle exists. Use parent tracking in the DFS call. Directed: use 3-colour DFS (white/unvisited, gray/in-stack, black/done). A gray neighbour is a back edge = cycle. Black neighbours are safe (already fully explored). Undirected cycle detection is simpler because any DFS tree back edge creates a cycle; in directed graphs, only back edges (to gray nodes) create directed cycles — cross edges and forward edges do not.
 
 **Q12: When would you use Floyd-Warshall over Dijkstra for shortest paths?**
+**Short:** For all-pairs shortest paths on a small (<=500 vertex) or negative-weight graph — it's O(V^3) versus repeated Dijkstra's cost on dense graphs.
 Floyd-Warshall is O(V³) and computes all-pairs shortest paths (APSP). Use it when: you need APSP and V is small (≤500 — beyond that, 500³ = 1.25×10^8 operations becomes slow); the graph has negative weights but no negative cycles. Dijkstra re-run from each source is O(V(V+E) log V) — much faster than Floyd-Warshall on sparse graphs, but on dense graphs (E ≈ V²) it becomes O(V³ log V), a log factor *slower* than Floyd-Warshall, and it cannot handle negative weights at all. Floyd-Warshall is also trivially simple to implement (three nested loops).
 
 **Q13: Describe 0-1 BFS and when it applies.**
+**Short:** A deque pushes 0-weight edges to the front and 1-weight edges to the back, giving O(V+E) shortest paths on graphs with only two edge weights.
 0-1 BFS: graph where each edge has weight 0 or 1. Use a deque instead of a queue. For weight-0 edges, push the neighbour to the front (it's at the same distance); for weight-1 edges, push to the back. The deque is maintained in non-decreasing distance order. O(V + E) time — faster than Dijkstra's O((V+E) log V) for this special case. Application: minimum number of flips to get from a corrupted binary string to a target (each flip is cost 1; matching characters are cost 0).
 
 **Q14: How is Dijkstra's algorithm related to Prim's MST algorithm?**
+**Short:** Both extract the minimum-key vertex from a heap, but Dijkstra's key is cumulative source distance while Prim's is the local edge weight to the MST.
 Prim's and Dijkstra's use the same greedy structure: maintain a priority queue of (cost, vertex), extract the minimum-cost vertex, relax its edges. The difference: Dijkstra stores the shortest path distance from the source (cumulative). Prim's stores the minimum edge weight to connect the vertex to the current MST (local, non-cumulative). Implementation differs only in the key stored in the heap. Both are O((V+E) log V) with a binary heap.
 
 **Q15: Explain the Aho-Corasick algorithm at a high level.**
+**Short:** A trie of all patterns plus KMP-style failure links lets one text pass find every match in O(n + M + k) total time.
 Aho-Corasick is a multi-pattern search algorithm. Build: construct a trie of all patterns; add failure links (analogous to KMP failure function) that point to the longest proper suffix of the current prefix that is also a prefix in the trie. Search: scan the text once; at each character, follow the failure links to find all matching patterns in O(1) amortised per character. Total: O(n + M + k) where n = text length, M = total pattern length, k = number of matches. Used in Snort IDS, grep -F (multiple fixed strings), and spam filters.
 
 **Q16: What are the time and space trade-offs between adjacency list and adjacency matrix for graph algorithms?**
+**Short:** A matrix gives O(1) edge lookup at O(V^2) space; a list gives O(V+E) space and O(degree) neighbor iteration, better for sparse graphs.
 Adjacency matrix: O(V²) space; O(1) edge lookup (u, v); O(V) to iterate all neighbours of u. Suitable for dense graphs (E ≈ V²) or when edge existence queries are frequent. Adjacency list: O(V + E) space; O(degree) to check edge existence; O(degree) to iterate neighbours. Suitable for sparse graphs (E ≈ O(V)) — most real-world graphs (social networks, road networks). BFS and Dijkstra run in O(V²) with adjacency matrix (all-pairs neighbour scan), but O(V+E) with adjacency list + heap — a critical difference for sparse graphs.
 
 **Q17: How does the Rabin-Karp algorithm extend to 2D pattern matching?**
+**Short:** Row-wise rolling hashes build a hash matrix, then column-wise rolling hashes over it locate 2D pattern matches in O(TR + tr) expected time.
 For a 2D text (T × R matrix) and 2D pattern (t × r matrix): compute rolling hash of each row of the pattern and the rolling hash of r×t sub-blocks. Step 1: for each row in the text, compute the 1D rolling hash of every r-length window → produces a T×(R-r+1) hash matrix. Step 2: treat each column of this hash matrix as a 1D string; apply rolling hash over t-length windows → positions where both row-hash and column-hash match are candidate positions; verify with O(tr) character comparison. Total O(TR + tr) expected.
 
 **Q18: Explain why A* is faster than Dijkstra for grid pathfinding and what makes a heuristic admissible.**
+**Short:** A* orders exploration by dist[v]+h(v) instead of dist[v] alone; an admissible heuristic never overestimates, so the shortest path is still found.
 A* extends Dijkstra by adding a heuristic h(v) that estimates the remaining distance from v to the target. The priority key becomes f(v) = dist[v] + h(v) instead of dist[v]. A* explores nodes in order of estimated total path cost — nodes that are closer to the target on the heuristic get explored first, pruning large regions of the graph. Admissibility: h(v) ≤ true remaining distance. If h ever overestimates, A* may miss the shortest path. Consistency (monotone): h(u) ≤ cost(u,v) + h(v) for all edges (u,v) — ensures each node is finalised at most once (same as Dijkstra's invariant, extended with the heuristic). Manhattan distance on a grid is admissible and consistent.
 
 ---

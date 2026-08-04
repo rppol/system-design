@@ -425,34 +425,45 @@ def reverse_list_fixed(head):
 ## 11. Interview Q&A
 
 **Q: Why is the order of operations in the reversal loop critical — what happens if you swap the order of `curr.next = prev` and `prev = curr`?**
+**Short:** Save `next_temp` first, rewire `curr.next` to `prev`, then advance `prev` to `curr` — advancing `prev` first before rewiring creates a self-loop.
 The order must be: (1) save `next_temp = curr.next`, (2) `curr.next = prev`, (3) `prev = curr`, (4) `curr = next_temp`. If you did `prev = curr` *before* `curr.next = prev`, then `curr.next = prev` would set `curr.next = curr` (self-loop!) since `prev` and `curr` are now the same reference — corrupting the list with a cycle. The save-then-rewire-then-advance order is what prevents this.
 
 **Q: What's the key relinking step in the recursive reversal, and why is `head.next = None` necessary?**
+**Short:** `head.next.next = head` reverses the link into `head`, and `head.next = None` breaks the old forward link that would otherwise leave a two-node cycle.
 The key step is `head.next.next = head` — this makes the node *after* `head` point back to `head`, effectively reversing that one link. `head.next = None` is necessary because, before this line, `head.next` still points *forward* to the node that now points back to `head` — without breaking this forward link, you'd have a 2-cycle (`head <-> head.next`). Setting `head.next = None` makes `head` correctly become the new *tail* of the reversed list (every node's `.next` should point toward the new head, except the new tail, whose `.next` is `None`).
 
 **Q: In "Reverse Linked List II" (reverse a sub-range), why do you need a `dummy` node, and what are the three pointers you must reconnect?**
+**Short:** The dummy node covers `left == 1`; you then reconnect `before` to the reversed segment's new head, the segment's old head to the node after `right`, keeping `before` fixed as the anchor.
 A `dummy` node handles the edge case where `left == 1` (the sub-range includes the original head) — without it, there's no "node before the sub-range" to update. The three reconnections after reversing the sub-range `[left, right]`: (1) `before.next = new_head_of_reversed_segment` (was the `right`-th node), (2) `original_head_of_segment.next = curr` (the now-tail of the reversed segment connects to whatever comes after `right`), and (3) implicitly, `before` itself doesn't move — it's the anchor point for reconnection 1.
 
 **Q: In "Reverse Nodes in k-Group," why do you need to "check if k nodes exist" before reversing?**
+**Short:** Checking that k nodes exist first avoids ever reversing a partial trailing group, since a leftover group must stay in its original order.
 The problem states leftover nodes (fewer than `k`) at the end should remain in their original order, NOT be reversed. If you reversed them and then had no way to "un-reverse" (or if the recursive call structure doesn't allow easy rollback), you'd produce an incorrect result. By checking *before* reversing (traverse `k` nodes first; if you run out, return `head` unchanged), you avoid ever reversing a partial group.
 
 **Q: How would you reverse a linked list using a stack (O(n) space) instead of the pointer-rewiring approach — and why might you mention this in an interview even if you implement the O(1) version?**
+**Short:** Push nodes onto a stack and pop to rebuild the list — O(n) space but simpler, worth mentioning to show you chose O(1) pointer-rewiring deliberately.
 Push every node (or value) onto a stack while traversing, then pop to build the reversed list (or overwrite values in place in reverse order). This is O(n) space but conceptually simpler and less error-prone. Mentioning it shows you understand the *space-time tradeoff explicitly* — you're choosing the O(1)-space pointer-rewiring approach deliberately, not because it's the only option, which is the kind of articulation L5 interviewers look for.
 
 **Q: For "Reorder List" (`L0->L1->...->Ln` becomes `L0->Ln->L1->Ln-1->...`), what are the three sub-routines and in what order are they applied?**
+**Short:** Find the middle with fast/slow pointers, reverse the second half, then zip-merge the two halves alternately — each step O(n)/O(1), composing to O(n) overall.
 (1) **Find the middle** using fast/slow pointers — splits the list into two halves. (2) **Reverse the second half** using the standard `prev/curr/next_temp` triple. (3) **Merge the two halves alternately** — a two-pointer "zip" that interleaves nodes from the first half and the (now-reversed) second half. Each sub-routine is O(n)/O(1), and they compose to O(n) time, O(1) space overall — a great example of pattern composition (see the Pattern Interaction Map in [dsa_patterns](dsa_patterns.md) §8).
 
 **Q: Is recursive linked-list reversal ever preferable to iterative, despite the O(n) space cost?**
+**Short:** Rarely — O(1) iterative is almost always preferred, though recursion helps when reversal is combined with other recursive logic already walking the list.
 In an interview, rarely — O(1) space is almost always preferred when achievable, and the iterative version isn't meaningfully harder to write once memorized. However, recursive reversal can be clearer when reversal is *combined* with other recursive logic already operating on the list (e.g., some tree-to-linked-list conversion algorithms), where the call stack is "already there" for other reasons and adding reversal logic to it avoids a second pass.
 
 **Q: How do you reverse "alternating k-groups" (reverse the 1st group of k, skip the 2nd group of k, reverse the 3rd, ...)?**
+**Short:** Reverse a group of k with the standard triple, then traverse the next k nodes without reversing before recursing again, alternating reverse and skip modes.
 Extend the k-group template: after reversing a group of `k` nodes (using the standard triple), instead of recursing immediately on the next group with another reversal, advance `k` nodes WITHOUT reversing (just traverse), then recurse with reversal again. The "skip" phase still needs to correctly track and return the tail of the skipped segment so it can be attached to the previous reversed group's tail (`head.next = <result of recursive call>` still applies, just the recursive call alternates between "reverse" and "skip" modes).
 
 **Q: What's the time complexity of `reverse_k_group`, and does the recursion affect it?**
+**Short:** Time stays O(n) since each node is visited a constant number of times, but the recursive version costs O(n/k) call-stack space versus O(1) iteratively.
 Time is O(n) regardless — each node is visited a constant number of times (once during the "check k nodes exist" pass, once during the reversal pass). The recursion doesn't add asymptotic time complexity; it's O(n/k) recursive calls, each doing O(k) work, totaling O(n). Space, however, IS affected: O(n/k) call-stack frames for the recursive version, vs O(1) for a fully iterative version (which would use an explicit loop over groups instead of recursive calls).
 
 **Q: Why is "the array equivalent of this problem is trivial" an important framing to bring up?**
+**Short:** Arrays support O(1) random access and index swaps for a trivial reversal, while linked lists only move forward via `.next` and need actual pointer rewiring.
 It demonstrates you understand *why* the pattern exists: arrays support O(1) random access and in-place index swaps (`arr[i], arr[j] = arr[j], arr[i]`), so "reverse" or "reverse a sub-range" is a simple two-pointer swap — no special pattern needed. Linked lists have NO random access — you can only move forward via `.next` — so "reversing" requires actually *rewiring the pointers themselves*, which is a fundamentally different (and more error-prone) operation. Recognizing this distinction signals you're not just pattern-matching syntax, but understanding the underlying data structure constraints.
 
 **Q: Can this pattern be applied to doubly-linked lists? What changes?**
+**Short:** Yes — reversal becomes swapping `.next` and `.prev` on every node, while also swapping the list's head and tail references.
 Yes, and it's *simpler* in one sense (each node already has a `.prev` pointer, so reversal can be done by swapping `.next` and `.prev` for every node) but requires care: you must update BOTH pointers for every node, and the list's `head`/`tail` references must also be swapped. The core "process each node once, rewire its pointers, advance" structure is identical — doubly-linked just means each node has two pointers to rewire instead of one.

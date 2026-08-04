@@ -651,6 +651,7 @@ flowchart TD
 ## 11. Interview Q&A
 
 **Q: How do I prove a greedy algorithm is correct, on the spot, in an interview?**
+**Short:** Assume an optimal solution differing at the first choice, show swapping in the greedy choice never makes it worse, then induct over the remaining subproblem.
 Use the exchange-argument sketch: assume an optimal solution `O` that differs
 from your greedy solution `G` in its first choice. Show that swapping `O`'s
 first choice for `G`'s choice produces a solution that is at least as good.
@@ -659,6 +660,7 @@ rigorous formal proof — interviewers are looking for "I considered whether
 swapping in my choice could ever make things worse, and it can't, because...".
 
 **Q: How do I decide between greedy and DP when a problem could be either?**
+**Short:** Ask whether the locally best choice could ever block the true global optimum later; if you can build one counterexample, use DP instead.
 Ask: "If I make the locally best choice now, could it ever prevent me from
 reaching the *true* global optimum later?" If you can construct even one
 counter-example where it does, you need DP (which considers all choices via
@@ -666,6 +668,7 @@ overlapping subproblems). The canonical split: fractional knapsack (greedy by
 value/weight ratio works) vs. 0/1 knapsack (same greedy fails — DP required).
 
 **Q: Why does Non-overlapping Intervals sort by END time and not START time?**
+**Short:** The interval finishing earliest leaves the most room for future intervals regardless of when it starts, while sorting by start can lock in a long one and force out short ones.
 Because the goal is to keep as many intervals as possible, and the interval
 that *finishes earliest* leaves the maximum remaining timeline for future
 intervals — regardless of when it starts. Sorting by start time can lock in a
@@ -675,6 +678,7 @@ a concrete counter-example.
 
 **Q: Jump Game (LC 55) and Jump Game II (LC 45) both use `nums[i]` as a max
 jump length — why are the algorithms different?**
+**Short:** LC 55 only needs a single farthest-reach check, while LC 45 must track jump "levels" via `current_end`/`jumps` to count the minimum number of jumps.
 LC 55 only asks "can you reach the end?" — a single `farthest` variable
 suffices, and you fail fast if `i > farthest` (a gap you can never cross). LC
 45 asks for the *minimum number of jumps*, which requires tracking jump
@@ -683,6 +687,7 @@ one level's reach is exhausted and the next jump must be counted.
 
 **Q: In the Gas Station problem, why does `total_tank >= 0` guarantee a valid
 starting point exists, without checking every possible start?**
+**Short:** If total gas is at least total cost, some rotation of the prefix sums stays non-negative, so the point where the tank first dips below zero rules out every start up to it in one pass.
 This is a classic greedy/prefix-sum argument: if the total gas across the
 whole circuit is >= total cost, then *some* rotation of the prefix-sum
 sequence is entirely non-negative. The point where the running tank first
@@ -692,6 +697,7 @@ you can safely advance the candidate start past it without losing the true
 answer. This single pass replaces an O(n^2) "try every start" brute force.
 
 **Q: Why does the Candy problem need TWO passes instead of one?**
+**Short:** Each child's requirement depends on both neighbors at once, so a left-to-right pass and a right-to-left pass each enforce one direction, and taking the max satisfies both.
 Each child's required candy count depends on comparisons with BOTH
 neighbors simultaneously, but a single left-to-right (or right-to-left) pass
 can only enforce one direction's constraint at a time. The left-to-right pass
@@ -701,7 +707,9 @@ neighbor. Taking `max(left_pass[i], right_pass[i])` per index satisfies both
 constraints simultaneously without violating the other.
 
 **Q: When would I reach for a heap inside a greedy algorithm (e.g., Task
-Scheduler, Reorganize String)?** When the "best current choice" changes
+Scheduler, Reorganize String)?**
+**Short:** Reach for a heap when the greedy choice keeps changing as items are consumed, since a heap supports O(log n) pop-and-reinsert but a pre-sorted array can't.
+When the "best current choice" changes
 dynamically as you consume items — i.e., the greedy choice is "whichever
 remaining item has the highest frequency/priority *right now*," and that
 ranking shifts after each pick. A pre-sorted array can't represent a ranking
@@ -709,7 +717,9 @@ that changes during the algorithm; a max-heap can pop-and-reinsert in
 O(log n).
 
 **Q: My greedy solution passes the example in the problem statement but fails on
-the submission's hidden tests — what should I check?** Stress-test your
+the submission's hidden tests — what should I check?**
+**Short:** Stress-test the greedy rule against an adversarial small case where two "obviously good" choices compete, before trusting it on hidden tests.
+Stress-test your
 greedy rule against an adversarial small case BEFORE coding: construct an
 input where your sort key or local rule produces two competing "obviously
 good" choices and manually verify which one the greedy picks and whether
@@ -718,6 +728,7 @@ is exactly this kind of subtle failure — both sort keys "look reasonable,"
 but only one survives the adversarial trace.
 
 **Q: Is greedy ever used for "minimum cost" problems with weighted graphs?**
+**Short:** Yes — Kruskal's, Prim's, and Dijkstra's all make a greedy choice at each step, such as the cheapest edge or the closest unvisited node.
 Yes — Kruskal's and Prim's algorithms for Minimum Spanning Tree are greedy
 (always add the cheapest edge that doesn't create a cycle / doesn't already
 connect a visited node), and Dijkstra's shortest-path algorithm is greedy
@@ -726,6 +737,7 @@ connect a visited node), and Dijkstra's shortest-path algorithm is greedy
 uses DSU for cycle detection).
 
 **Q: What's the difference between greedy and "local search" / hill climbing?**
+**Short:** Greedy commits to each choice once in a fixed order with a provable bound, while local search iteratively refines a full solution with no optimality guarantee.
 Greedy makes each choice ONCE, in a fixed order, and never revisits it — the
 algorithm has a clear termination point and a provable bound (when correct).
 Local search/hill climbing iteratively improves a *complete* candidate
@@ -735,6 +747,7 @@ is a single deterministic pass; local search is an iterative refinement loop
 (more common in optimization/heuristics than in coding interviews).
 
 **Q: Huffman coding is described as "greedy" — what's the greedy choice?**
+**Short:** Merge the two least-frequent remaining nodes at each step; the exchange argument shows they can always sit at the tree's maximum depth without increasing total code length.
 At each step, take the two least-frequent remaining nodes/symbols and merge
 them into a new node whose frequency is their sum, inserting it back into a
 min-heap. The exchange argument: the two least-frequent symbols can always be
@@ -743,7 +756,9 @@ weighted code length compared to any other arrangement — so merging them
 first is always safe.
 
 **Q: How do I avoid analysis paralysis between "is this greedy or DP" during a
-45-minute interview?** Default to attempting the greedy approach first IF you
+45-minute interview?**
+**Short:** Spend about two minutes trying to state the greedy rule in one sentence and find a counterexample; if one exists, say so out loud and pivot to DP.
+Default to attempting the greedy approach first IF you
 can state the greedy rule in one sentence AND immediately think of a potential
 counter-example to test. Spend at most ~2 minutes on this gut-check. If you
 construct a counter-example, say so out loud ("greedy by X fails when ...")

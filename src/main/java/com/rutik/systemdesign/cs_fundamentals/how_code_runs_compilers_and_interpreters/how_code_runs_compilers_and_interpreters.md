@@ -936,66 +936,87 @@ A production war story: a container base image is patched to a newer minor versi
 ## 12. Interview Questions with Answers
 
 **Q1: Is an interpreter just a slow compiler?**
+**Short:** No — the difference is when translation happens and who keeps executing, not raw speed; CPython 3.11's specializing interpreter proves the point.
 No — the real difference is when translation happens and who executes the result, not how smart the translator is. A compiler produces a standalone artifact and steps aside; an interpreter's job is to remain the execution engine on every single run. CPython 3.11 got measurably faster by specializing bytecodes in place, without adding a JIT or an AOT step, which shows "slow" is not an inherent property of interpreting at all.
 
 **Q2: What actually causes a linker "undefined reference" / "undefined symbol" error?**
+**Short:** The linker found a call to a symbol that no linked object file or library actually defines, whether from a missing source file or a missing library flag.
 It means the linker found a call to a symbol that no object file or library on the link line actually defines. The front end and back end only need a *declaration* to check argument types and emit a `call` instruction with a placeholder address; only the linker needs a *definition* to patch in a real one. The fix is always some version of "compile and link the file that defines it, or link the library that contains it" — a missing `.c` file and a missing `-lm` produce the identical error message for different reasons.
 
 **Q3: Why does `extern "C"` matter when calling a C library from C++?**
+**Short:** It stops C++ name-mangling so the linker looks for the same plain symbol a C compiler emits, avoiding a failure that looks like a missing definition.
 It stops the C++ compiler from name-mangling the declaration, so the linker looks for the same plain symbol the C compiler actually emitted. C allows no function overloading, so a C compiler exports `add` as literally `add`; C++ allows overloading and must encode parameter types into the symbol (`_Z3addii` for `add(int,int)` under the Itanium ABI) to keep overloads distinct. Without `extern "C"`, the two compilers agree on the function's behavior but disagree on its name, and linking fails with an error that looks identical to a genuinely missing definition.
 
 **Q4: Why does a JIT-compiled program often start out slower than an equivalent AOT binary?**
+**Short:** The JIT burns CPU cycles interpreting and profiling before compiling anything, while an AOT binary's first instruction is already optimized machine code.
 Because the JIT itself runs on the CPU during the program's own execution, spending cycles interpreting and profiling before it has compiled anything worth running natively. An AOT binary pays its entire translation cost once, at build time, so the very first instruction executed is already optimized machine code. This is exactly why GraalVM Native Image and short-lived AOT binaries win the cold-start race, while a JVM or V8 process needs enough total runtime to amortize the warmup before it can catch up or overtake.
 
 **Q5: Is a statically compiled (AOT) language always faster than a JIT-compiled one?**
+**Short:** No — a warmed-up JIT can outperform naive AOT using real runtime data a static compiler never sees; process lifetime, not the language, decides the winner.
 Not necessarily — a warmed-up JIT can match or exceed naive AOT code because it optimizes using real runtime type and branch data that a static compiler never sees at build time. A monomorphic call site the profiler has observed can be devirtualized and inlined by the JIT in a way a purely static analysis could not safely assume. The nuance that survives scrutiny is about process lifetime rather than language: short-lived processes favor AOT because they never live long enough to reach the JIT's peak, while long-lived processes can let the JIT catch up.
 
 **Q6: What is the difference between a syntax error and a semantic error, and which compiler phase catches each?**
+**Short:** The parser catches syntax errors while building the AST; semantic analysis, walking the completed AST with a symbol table, catches type and name errors.
 A syntax error means the token stream does not match the language's grammar, and it is caught by the parser while building the AST. A semantic error means the program is grammatically valid but still meaningless — an undefined variable, a type mismatch like `x + "hello"` — and it is caught by semantic analysis, which walks the completed AST with a symbol table. A parser alone cannot catch semantic errors because it has no concept of types or declared names; it only enforces structure.
 
 **Q7: What is an AST, and why can't the compiler just work directly on the token stream?**
+**Short:** An AST encodes operator precedence and grouping directly in its shape, something a flat token list like `2+3*4` cannot express on its own.
 An AST is a tree that represents the program's structure and operator precedence, something a flat token list cannot express on its own. `2 + 3 * 4` as tokens has no inherent grouping; as an AST, the multiplication is nested one level deeper than the addition, encoding precedence directly in the tree's shape. Every later phase — type checking, IR generation, optimization — operates on this tree rather than re-deriving structure from tokens every time.
 
 **Q8: What is an intermediate representation (IR), and why not compile straight from the AST to machine code?**
+**Short:** A shared IR needs only N front ends plus M back ends instead of N times M translators, and lets optimization passes be written once against it.
 An IR is a representation of the program that is independent of both the source language and the target machine, sitting between the AST and the generated code. Without it, a compiler supporting N source languages and M target architectures would need roughly N times M translators; with a shared IR, it needs only N front ends and M back ends. It is also the representation that optimization passes are written against once, so a pass like dead-code elimination works identically regardless of whether the source was C or Rust.
 
 **Q9: What is SSA (static single assignment) form, and why do optimizing compilers use it?**
+**Short:** Giving every variable exactly one definition turns "what value reaches here" into a direct lookup instead of a control-flow search, simplifying optimizations.
 SSA form gives every variable exactly one definition, creating a fresh version number any time a variable would otherwise be reassigned. This turns "what value could this variable hold here" from a search through the program's control flow into a direct lookup of which single definition reaches this point, which is why dataflow-based optimizations become simpler and more mechanical to implement correctly. LLVM, GCC's internal IRs, the JVM's C2 compiler, and V8's TurboFan all build SSA internally even though no source language exposes it directly.
 
 **Q10: What is constant folding?**
+**Short:** It evaluates an operation at compile time when every operand is already a literal, replacing it with the computed result before the program ever runs.
 Constant folding evaluates an operation at compile time when every one of its operands is already a known literal, replacing the operation with its result. `3 * 4` inside an expression becomes the literal `12` before the program ever runs, so the multiply instruction itself disappears from the generated code. It is one of the cheapest, safest optimizations to implement and is almost always run first because it frequently exposes further dead code for elimination.
 
 **Q11: What is dead-code elimination, and why must it be conservative?**
+**Short:** It must prove a value is truly unreachable, not just apparently unused, since a closure, exception handler, or debugger can still observe it.
 Dead-code elimination removes a computation whose result is never used by anything that follows it. It must be conservative because "never used" has to be *proven*, not guessed — a value that looks unused in straight-line code might still be observable through a closure, an exception handler, or a debugger attached to the running process. A real compiler tracks liveness precisely enough to prove a value is truly unreachable before deleting the instruction that produced it.
 
 **Q12: What does function inlining actually buy you, beyond removing call overhead?**
+**Short:** Inlining exposes the caller's and callee's code to every other optimization pass at once, letting folding and branch elimination cross the old call boundary.
 Inlining replaces a call site with a copy of the callee's body, and its main value is exposing the caller's and callee's code to every other optimization pass simultaneously. A constant argument passed into the inlined body can now be folded straight through what used to be an opaque function boundary, and branches that only ever go one way inside it can become dead code. This is why inlining is often called the mother of all optimizations — it rarely speeds anything up directly, but it unlocks the passes that do.
 
 **Q13: What is register allocation, and what happens when there are more live values than registers?**
+**Short:** Excess live values are spilled to a stack slot and reloaded when needed; assigning registers is NP-complete graph coloring solved by heuristics.
 Register allocation assigns each temporary value produced by the IR to a physical CPU register so the back end can generate real instructions. When more values are live simultaneously than there are available registers, the excess must be spilled — stored to a stack slot instead and reloaded when needed, at the cost of an extra memory access. Because deciding which values can share a register is graph coloring, and general graph coloring is NP-complete, real compilers use heuristics like Chaitin-style iterative coloring rather than an exact solver.
 
 **Q14: What is the difference between static linking and dynamic linking?**
+**Short:** Static linking copies library code into the executable at build time; dynamic linking maps a shared library at load time so processes share one copy.
 Static linking copies a library's code directly into the final executable at build time, while dynamic linking leaves it in a separate shared library that is mapped in and resolved at load time. Static linking produces a larger but self-contained, hermetic binary; dynamic linking produces a smaller binary that can share one physical copy of the library's code across every process using it, and that can be patched by replacing the shared library alone. The tradeoff shows up directly in security patching: a static binary needs a full rebuild and redeploy, while a dynamic one just needs the `.so` replaced.
 
 **Q15: What does the OS loader actually do when you run a program?**
+**Short:** It maps each Program Header segment into the new process's memory and hands control to the dynamic linker named in PT_INTERP before the real entry point.
 The loader reads the executable's Program Header table and maps each segment into the new process's virtual memory with the permissions and file offsets that segment specifies. It sets up the initial stack with `argv`, `envp`, and the auxiliary vector, and, if the binary is dynamically linked, hands control first to the dynamic linker named in the `PT_INTERP` segment so it can map any needed shared libraries before the real entry point runs. Crucially, the loader reads Program Headers, describing segments, not the section headers that tools like linkers and debuggers use — those never factor into how memory gets mapped at run time.
 
 **Q16: What is the ABI, and why is it a stricter contract than a language's API?**
+**Short:** The ABI fixes exactly which registers carry arguments and survive a call, enforced by hardware and the linker rather than a compiler's type checker.
 The ABI is the low-level contract for how a function call passes arguments and returns a value, enforced by hardware and the linker rather than the compiler's type checker. It specifies exactly which registers carry which parameters and which registers must still hold their original values after the call returns. Two functions can have "the same" signature in source code and still be ABI-incompatible if they were compiled with different calling conventions or, in C++, different name-mangling schemes — precisely why calling a C library from C++ requires `extern "C"`, even though the function's C-level signature never changed.
 
 **Q17: How does CPython's `.pyc` bytecode cache change what gets re-executed on every run?**
+**Short:** It skips re-lexing and re-parsing the source but still re-interprets the same bytecode every run, so cached and freshly compiled runs execute equally fast.
 The `.pyc` cache skips re-lexing and re-parsing the source on later runs, since it stores the already-compiled bytecode. It does not skip execution: every run still re-interprets that same bytecode instruction by instruction through the same dispatch loop, which is why a cached `.pyc` runs at the same speed as freshly compiling unchanged source — the cache saves front-end work, not interpretation cost.
 
 **Q18: What is on-stack replacement (OSR) in a JIT compiler, and why is it needed?**
+**Short:** OSR swaps a running interpreted loop for compiled code mid-execution by tracking its own back-edge count, reaching hot loops an invocation counter never would.
 OSR lets a JIT swap a currently running interpreted loop for a compiled version in the middle of execution, instead of waiting for the enclosing method to return and be called again. A method containing one very hot loop might only be called once in the program's entire lifetime, so an invocation counter alone would never trigger compilation of that loop; OSR tracks the loop's own back-edge count directly and can promote it to compiled code mid-flight. Without OSR, exactly the kind of long-running hot loop that benefits most from JIT compilation would be the one case the JIT could never reach.
 
 **Q19: What is deoptimization ("bailout") in a JIT compiler?**
+**Short:** A JIT discards a speculative optimization once its runtime assumption proves false, falling back to the interpreter with a reconstructed equivalent frame.
 Deoptimization is a JIT discarding a speculative optimization once the runtime assumption behind it turns out to be false, and falling back to the interpreter to continue correctly. A call site the JIT devirtualized under the assumption "this is always class Dog" must bail out the moment a Cat reaches the same call site, reconstructing an equivalent interpreter frame from the compiled one. Production JIT diagnostics — HotSpot's `-XX:+TraceDeoptimization`, V8's `--trace-deopt` — exist specifically to catch a method that is deoptimizing repeatedly, since that thrashing can be slower than never having compiled it at all.
 
 **Q20: What does GraalVM Native Image do differently from running the same program on the JVM?**
+**Short:** It ahead-of-time compiles the whole program under a closed-world, build-time reachability analysis instead of a runtime JIT, trading flexibility for fast cold starts.
 It ahead-of-time compiles the entire program under a closed-world assumption, using a build-time static analysis instead of a runtime JIT that compiles hot code while the program executes. The closed-world analysis starts from declared entry points and can only include what it can prove is reachable, so reflection, dynamic proxies, or classpath scanning invisible to that analysis must be explicitly declared via reachability metadata or a tracing agent, or the resulting native binary silently omits them. The payoff is a cold start typically in the tens of milliseconds instead of the hundreds of milliseconds to seconds a framework-heavy JVM app needs to first serve a request.
 
 **Q21: Why can a hand-rolled recursive-descent parser stack-overflow on deeply nested input, and what does that reveal about parsing?**
+**Short:** Its call stack mirrors the grammar's own recursion, so deep nesting can overflow it — a table-driven parser avoids this using an explicit heap stack instead.
 A recursive-descent parser's call stack directly mirrors the grammar's own recursive structure, so a deeply nested expression produces deeply nested native calls. A thousand nested parentheses, for instance, can overflow the parser's own stack before it ever reaches the innermost token. This reveals that "the parse" and "the call stack" are the same data structure viewed two ways in this parsing style, unlike a table-driven (LALR) parser, which represents the same recursion as an explicit stack on the heap and does not share this failure mode; production parsers for languages that must accept arbitrary user input either bound nesting depth explicitly or use a table-driven approach for exactly this reason.
 
 ---

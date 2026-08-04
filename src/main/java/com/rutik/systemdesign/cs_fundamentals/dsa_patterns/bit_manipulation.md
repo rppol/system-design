@@ -695,7 +695,9 @@ the positions where the total isn't a multiple of `k`.
 ## 11. Interview Q&A
 
 **Q: Why does `a ^ a = 0` and `a ^ 0 = a`, and why does that make XOR useful for
-"find the unique element" problems?** XOR compares each bit independently:
+"find the unique element" problems?**
+**Short:** XOR cancels identical bits to zero and leaves a solo bit unchanged, so XOR-ing values that each appear an even number of times isolates the value appearing an odd number of times.
+XOR compares each bit independently:
 two identical bits XOR to 0 (`0^0=0`, `1^1=0`), and a bit XORed with 0 stays
 unchanged (`0^0=0`, `1^0=1`). Combined with XOR being commutative and
 associative, XOR-ing a multiset of numbers where every value appears an EVEN
@@ -704,14 +706,18 @@ values that appear an ODD number of times. "Appears once, others appear
 twice" is the simplest case of this.
 
 **Q: Single Number II says elements appear THREE times except one — why doesn't
-XOR work, and what's the fix?** XOR only cancels in pairs: three copies of
+XOR work, and what's the fix?**
+**Short:** XOR only cancels in pairs, so three copies reduce to the value itself; the fix counts set bits per position across all numbers and takes the count modulo 3.
+XOR only cancels in pairs: three copies of
 `a` reduce to `a` (not 0), corrupting the result. The fix (§8) counts set
 bits at each of the 32 bit positions across all numbers and takes the count
 modulo 3 — for "noise" values appearing 3x, their contribution to every bit
 position's count is a multiple of 3 and vanishes mod 3, leaving only the
 unique element's bits. This generalizes to "appears `k` times" via mod `k`.
 
-**What does `n & (n-1)` do, and what is it used for?** It clears the LOWEST
+**What does `n & (n-1)` do, and what is it used for?**
+**Short:** It clears `n`'s lowest set bit, which tests for a power of two (`n & (n-1) == 0`) and lets Brian Kernighan's algorithm count set bits in O(popcount(n)).
+It clears the LOWEST
 set bit of `n`. Subtracting 1 flips that bit to 0 and flips all lower bits to
 1; ANDing with the original `n` then zeroes out everything from that bit
 downward. Two major uses: (1) `n & (n-1) == 0` (with `n > 0`) tests "is `n` a
@@ -720,6 +726,7 @@ applying it counts set bits in O(popcount(n)) iterations (Brian Kernighan's
 algorithm) instead of O(bit-width).
 
 **Q: What does `n & (-n)` do, and how is it different from `n & (n-1)`?**
+**Short:** `n & (-n)` isolates the lowest set bit while `n & (n-1)` clears it, because `-n` in two's complement zeroes every bit below that lowest set bit.
 `n & (-n)` ISOLATES the lowest set bit (returns a value with only that one bit
 set), whereas `n & (n-1)` CLEARS it (returns `n` with that bit removed). `-n`
 in two's complement is `~n + 1`; this flips all bits and adds 1, which has the
@@ -728,7 +735,9 @@ and ANDing with `n` leaves only that single bit. This is the core operation in
 Fenwick tree (Binary Indexed Tree) index traversal.
 
 **Q: How do I enumerate all subsets of an `n`-element set using bit
-manipulation, and what's the complexity?** Iterate `mask` from `0` to
+manipulation, and what's the complexity?**
+**Short:** Iterate `mask` from 0 to `2^n - 1`, treating bit `j` as membership of element `j`, giving O(n · 2^n) total and staying practical only up to n ≈ 20.
+Iterate `mask` from `0` to
 `2^n - 1`; for each `mask`, bit `j` being set means element `j` is in this
 subset. This is O(2^n) masks, and O(n) to materialize each subset, giving
 O(n * 2^n) total. It's the natural fit when `n <= ~20` (since `2^20 ≈ 10^6`)
@@ -737,14 +746,18 @@ O(n * 2^n) total. It's the natural fit when `n <= ~20` (since `2^20 ≈ 10^6`)
 [Greedy](greedy.md)/pruned [Backtracking](backtracking.md) instead.
 
 **Q: Why does `dp[i] = dp[i >> 1] + (i & 1)` correctly compute popcount for
-Counting Bits?** `i >> 1` is `i` with its lowest bit dropped (integer
+Counting Bits?**
+**Short:** `i >> 1` drops `i`'s lowest bit so its popcount is already computed, and `(i & 1)` adds back exactly the bit that was dropped.
+`i >> 1` is `i` with its lowest bit dropped (integer
 division by 2) — its popcount, `dp[i >> 1]`, is already computed since
 `i >> 1 < i`. `(i & 1)` is exactly the bit that was dropped (0 or 1). Adding
 them back together gives the popcount of `i`. This is a textbook example of
 DP where the "smaller subproblem" comes from a bit-shift rather than `i-1`.
 
 **Q: What's the difference between `>>` (arithmetic/signed shift) and a logical
-shift, and does it matter in Python?** In languages with fixed-width signed
+shift, and does it matter in Python?**
+**Short:** Fixed-width languages sign-extend `>>` but zero-fill `>>>`; Python's arbitrary-precision ints have no separate logical shift, so 32-bit-wraparound problems need explicit masking.
+In languages with fixed-width signed
 integers (Java, C++), `>>` preserves the sign bit (fills with 1s for negative
 numbers) while `>>>` (Java-only) fills with 0s regardless of sign. Python
 integers are arbitrary-precision and conceptually have infinite sign-extended
@@ -755,12 +768,16 @@ Single Number II's negative-number handling, or Reverse Bits) need explicit
 masking (`& 0xFFFFFFFF`) and sign correction in Python.
 
 **Q: How do I set, clear, toggle, or check a specific bit `i` of an integer
-`n`?** Check: `(n >> i) & 1`. Set: `n |= (1 << i)`. Clear: `n &= ~(1 << i)`.
+`n`?**
+**Short:** Check with `(n >> i) & 1`, set with `n |= (1 << i)`, clear with `n &= ~(1 << i)`, toggle with `n ^= (1 << i)` — all four O(1).
+Check: `(n >> i) & 1`. Set: `n |= (1 << i)`. Clear: `n &= ~(1 << i)`.
 Toggle: `n ^= (1 << i)`. All four are O(1) and form the vocabulary for almost
 every bitmask problem — memorize them as a unit.
 
 **Q: The XOR-swap trick (`a ^= b; b ^= a; a ^= b`) avoids a temp variable — is
-this good practice?** It's a neat demonstration of XOR's invertibility, but
+this good practice?**
+**Short:** No — it fails when `a` and `b` alias the same location, reads worse than a temp variable, and isn't even faster on modern CPUs.
+It's a neat demonstration of XOR's invertibility, but
 it's discouraged in real code: it fails if `a` and `b` are the SAME memory
 location (XORing a value with itself zeroes it out, so `a` and `b` both
 become 0), it's harder to read than `a, b = b, a` (or a temp variable), and on
@@ -768,7 +785,9 @@ modern CPUs it's not even faster — register-based swaps with a temp are
 typically just as fast or faster due to instruction-level parallelism. Know it
 for interviews; don't write it in production.
 
-**How does Maximum XOR of Two Numbers (LC 421) use a trie?** Insert every
+**How does Maximum XOR of Two Numbers (LC 421) use a trie?**
+**Short:** Insert every number's bits into a binary trie, then greedily walk toward the opposite bit at each level to maximize XOR — O(32n) instead of O(n^2).
+Insert every
 number into a binary trie, one bit at a time from the most-significant bit
 down (so the trie has depth ~32 and each path represents one number's bit
 pattern). Then, for each number, walk the trie trying at each level to go to
@@ -779,7 +798,9 @@ maximum XOR found across all numbers is the answer — O(32n) instead of the
 O(n^2) brute-force pairwise comparison.
 
 **Q: Why does the repo's `cs_fundamentals/number_systems_and_bit_manipulation/`
-module matter beyond these LeetCode tricks?** Because two's complement,
+module matter beyond these LeetCode tricks?**
+**Short:** Two's complement, sign-extension, and bit-masking underpin HashMap bucket hashing, Bloom filters, and network protocol header packing in real systems code.
+Because two's complement,
 sign-extension, and bit-masking aren't just interview party tricks — they
 underpin how `HashMap` spreads hash codes into bucket indices
 ([`java/collections_internals/`](../../java/collections_internals/collections_internals.md)),

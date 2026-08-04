@@ -1015,57 +1015,75 @@ class FenwickFixed:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between BFS and DFS and when do you choose each?**
+**Short:** BFS (queue) finds shortest paths in unweighted graphs; DFS (stack/recursion) suits cycle detection, topological order, and backtracking.
 BFS explores level by level using a queue — finds the shortest path in unweighted graphs. DFS explores depth-first using a stack (or recursion) — finds any path, detects cycles, and computes topological order. Choose BFS for shortest path / minimum hops. Choose DFS for cycle detection, topological sort, connected components, and backtracking problems.
 
 **Q2: When would you use a trie instead of a hash map?**
+**Short:** A trie answers prefix queries like autocomplete in O(L + results), while a hash map needs a full O(n×L) scan for the same query.
 When you need prefix queries, autocomplete, or longest-prefix match. A hash map gives O(L) exact lookup but O(n×L) for "all words starting with prefix X" (full scan). A trie gives O(L + results) for the same prefix query. Also choose trie when the keyspace is dense (many shared prefixes) — the shared prefix chains save memory vs storing each full key.
 
 **Q3: Explain Union-Find path compression. Why does it make find() nearly O(1)?**
+**Short:** Path compression rewrites every node on the find chain to point straight at the root, making later finds for those nodes O(1).
 Without compression, find(x) walks up a chain to the root: O(depth). Path compression rewrites all nodes on that chain to point directly to the root. Subsequent finds for those same nodes are O(1). Combined with union by rank (which bounds initial depth to O(log n)), the amortised cost per operation becomes O(α(n)) — the inverse Ackermann function, effectively ≤ 4 for any n ≤ 10^80. In practice, treat it as O(1).
 
 **Q4: What is the time complexity of Kruskal's MST algorithm and why?**
+**Short:** O(E log E), dominated by sorting edges by weight — the DSU union/find operations add only O(E × alpha(V)).
 O(E log E) dominated by sorting edges by weight. The DSU operations (V-1 unions + E finds) run in O(E × α(V)) ≈ O(E). Sorting dominates. Space is O(V) for the DSU structure.
 
 **Q5: How do you detect a cycle in a directed graph?**
+**Short:** DFS with white/gray/black states flags a cycle the instant it reaches a gray (in-stack) node via a back edge.
 Use DFS with three node states: WHITE (unvisited), GRAY (in current recursion stack), BLACK (fully processed). If DFS encounters a GRAY node, a back edge exists — cycle detected. This is distinct from undirected cycle detection, where you only track visited/unvisited. O(V+E).
 
 **Q6: What is topological sort and when is it impossible?**
+**Short:** It's impossible exactly when the graph contains a cycle, which Kahn's in-degree BFS also detects when the output is shorter than V.
 Topological sort is a linear ordering of vertices in a DAG such that every directed edge u→v has u before v. Impossible if the graph contains a cycle. Kahn's algorithm (BFS with in-degree tracking) produces a topological order and detects cycles: if the final order has fewer than V nodes, a cycle exists.
 
 **Q7: How does a Bloom filter work and what guarantees does it give?**
+**Short:** It never gives false negatives but can give false positives — a query checks whether all k hashed bits for the element are set.
 A Bloom filter is a bit array of m bits, initialised to 0. To add an element: compute k independent hash functions → set k bits. To query: check if all k bits are 1. Guarantees: (1) No false negatives — if an element is in the set, all its bits are set. (2) Possible false positives — k bits may be set by different elements. FPR ≈ (1 - e^(-kn/m))^k; optimal k = (m/n) ln 2. Cannot delete elements in a standard Bloom filter (use Counting Bloom filter instead).
 
 **Q8: Segment tree vs Fenwick tree — which would you use for range minimum queries with point updates?**
+**Short:** Segment tree, because a Fenwick tree only supports invertible aggregates like sums, and a minimum can't be "un-subtracted."
 Segment tree. A Fenwick tree directly supports prefix sums but NOT range minimum (min is not invertible — you can't un-subtract a minimum). Segment trees support any associative aggregate (sum, min, max, GCD) for range queries with point updates. Use Fenwick when you specifically need prefix sums and want simpler code.
 
 **Q9: What is the space complexity of a trie with n words of average length L?**
+**Short:** O(n×L) with dictionary-based children, since only existing edges are stored instead of a fixed alphabet-sized array per node.
 O(n × L × ALPHABET_SIZE) in the worst case (no shared prefixes, array-based children). With dictionary-based children (only existing edges stored): O(n × L). For English words with shared prefixes, practical space is much lower — roughly O(total unique characters). A 250K-word dictionary uses ~10 MB as a trie.
 
 **Q10: How does a Fenwick tree's i & (-i) operation work?**
+**Short:** `i & (-i)` isolates i's lowest set bit, which encodes the index range i covers and how far each update or query step moves.
 In two's complement, `-i` inverts all bits of `i` and adds 1. `i & (-i)` isolates the lowest set bit. This lowest set bit encodes the range of indices that position i is responsible for in the BIT. For update, adding `i & (-i)` moves to the next ancestor that covers a larger range. For query, subtracting `i & (-i)` moves to the parent responsible for the prefix ending just before i's range.
 
 **Q11: You need to find if there is a path between two nodes in a dynamic graph where edges are added over time. Which data structure do you use?**
+**Short:** Union-Find — each edge addition is a union call and each query is find(u)==find(v), both O(alpha(n)); deletions need link-cut trees instead.
 Union-Find / DSU. For each edge addition (u, v), call `union(u, v)`. To query connectivity: `find(u) == find(v)`. Each operation is O(α(n)) ≈ O(1). If edges were also removed (dynamic connectivity with deletions), DSU cannot be used — you need link-cut trees (significantly more complex).
 
 **Q12: What is the "number of islands" problem and what are the two main approaches?**
+**Short:** BFS/DFS marks each island in O(m×n), or Union-Find merges adjacent land cells and counts components — BFS is the simpler choice.
 Given a 2D grid of '1' (land) and '0' (water), count connected land components. Approach 1: BFS/DFS — for each unvisited '1', do BFS/DFS to mark the entire island. O(m×n). Approach 2: Union-Find — treat each '1' cell as a DSU node, union adjacent land cells, count final components. O(m×n × α(m×n)). BFS is simpler; DSU handles dynamic additions elegantly.
 
 **Q13: How would you implement an autocomplete system using a trie?**
+**Short:** Traverse to the prefix node, then DFS with a per-node max-frequency and a heap to return only the top-k completions in O(L + top-k log k).
 Insert all dictionary words into a trie. For a query prefix: traverse to the prefix's terminal node, then DFS from that node to collect all words. To rank by frequency: augment each trie node with a max-frequency of words in its subtree — then use a heap-based DFS to return only the top-k completions without visiting all words. Query time: O(L + top-k log k) where L = prefix length.
 
 **Q14: What is the time complexity of building a segment tree and why?**
+**Short:** O(n) — each of the 2n-1 nodes does O(1) work exactly once, unlike heapify, whose per-node cost varies with height.
 O(n). Build visits each of the 2n-1 nodes exactly once and does O(1) work at each — a single addition of two already-computed children. 2n-1 nodes times O(1) is O(n), full stop. Do not reach for the heapify argument here: heapify needs a geometric series because its per-node cost *varies* with the node's height, whereas every segment-tree node genuinely costs the same O(1). The two results agree; only one of them needs the series.
 
 **Q15: Can you explain lazy propagation in segment trees?**
+**Short:** A pending delta is stashed on each covered node and pushed down only when a child is later touched, keeping both operations O(log n).
 Lazy propagation handles range updates efficiently. Instead of updating all O(n) leaves for a range-add operation, attach a "pending" delta to each covered segment tree node. When you later query or update a child of that node, you first "push down" the pending delta to both children. This defers work to when it is actually needed — range update and range query both remain O(log n) instead of O(n).
 
 **Q16: What is the difference between Kruskal's and Prim's MST algorithms?**
+**Short:** Kruskal sorts all edges and adds them greedily via DSU (O(E log E), sparse graphs); Prim grows one tree with a min-heap (O(E log V), dense graphs).
 Kruskal: sort all edges by weight, greedily add an edge if it doesn't form a cycle (DSU for cycle detection). Best for sparse graphs: O(E log E). Prim: start from any node, greedily add the cheapest edge crossing the cut between visited and unvisited nodes (min-heap). Best for dense graphs: O(E log V) with a heap, O(V²) with an array. Both produce a valid MST.
 
 **Q17: How does a trie differ from a hash map for IP routing (longest-prefix match)?**
+**Short:** A trie does longest-prefix match in one bit-by-bit traversal; a hash map needs up to 32 exact-match queries to find the same prefix.
 IP addresses have a hierarchical structure (CIDR blocks like 192.168.0.0/16). A trie supports longest-prefix match naturally: traverse bit-by-bit and track the last matching prefix. A hash map can only do exact-match — you'd need to check all 32 possible prefix lengths, querying the map 32 times. Routers use radix/Patricia tries for O(32) = O(1) lookup.
 
 **Q18: Walk through the complexity of the "Course Schedule II" problem (topological sort).**
+**Short:** O(V+E) total — Kahn's BFS enqueues each vertex once and decrements each edge once; fewer than n output nodes means a cycle exists.
 Given n courses and prerequisite pairs, return an ordering or detect impossibility. Build an adjacency list and compute in-degrees: O(V+E). Run Kahn's BFS: each node is enqueued once (O(V)), each edge is processed once to decrement in-degrees (O(E)). Total: O(V+E). If the output length < n, a cycle exists (circular prerequisites) — return empty. Space: O(V+E) for the graph, O(V) for the queue and in-degree array.
 
 ---

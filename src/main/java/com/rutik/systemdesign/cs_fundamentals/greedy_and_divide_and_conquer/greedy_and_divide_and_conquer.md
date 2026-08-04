@@ -827,48 +827,63 @@ def fixed_strip_scan(strip, d):
 ## 12. Interview Questions with Answers
 
 **Q1: What is the exchange argument and how do you apply it to prove greedy correctness?**
+**Short:** Show the greedy choice can replace any optimal solution's choice without making it worse, then induct until the swapped solution equals greedy's.
 The exchange argument proves that the greedy choice can always be swapped into any optimal solution without making it worse. Steps: (1) Assume there is an optimal solution O that differs from the greedy solution G. (2) Find the first point of difference — greedy made choice x, optimal made choice y. (3) Show that swapping y for x in O produces a solution O' that is at least as good as O. (4) By induction, the fully swapped solution equals G and is optimal.
 
 **Q2: Why does earliest-finish-time greedy work for interval scheduling?**
+**Short:** Swapping in the earliest-finishing interval never blocks more future intervals than any other first choice, so greedy matches the optimal count.
 Proof by exchange argument: take any optimal solution O. If O includes a different first interval than greedy, swap in the greedy's first interval (earliest finish time). Because the greedy interval finishes no later, it cannot block more future intervals than the original choice — the number of intervals selected stays the same or increases. Repeat until O equals the greedy solution. Therefore greedy achieves the maximum count.
 
 **Q3: When does greedy fail for knapsack and why?**
+**Short:** With capacity 10 and items (v30,w6), (v20,w5), (v20,w5), the ratio-greedy pick scores 30 while the two ratio-4 items together score 40.
 Greedy by value/weight ratio fails for 0/1 (indivisible items) knapsack. Counterexample: capacity=10, items={(v=30,w=6), (v=20,w=5), (v=20,w=5)}. Ratios are 5.0, 4.0, 4.0, so greedy commits to the ratio-5 item first, leaving capacity 4 — which fits neither of the weight-5 items — for a total of 30. Optimal is the two ratio-4 items together: w=10, v=40. The greedy fails because committing to the highest-ratio item strands capacity that would have combined better with lower-ratio items. Fractional knapsack (items divisible) is solvable by greedy.
 
 **Q4: State the Master theorem and apply it to merge sort and binary search.**
+**Short:** Comparing d to log_b(a) puts both merge sort (a=2,b=2,d=1) and binary search (a=1,b=2,d=0) in Case 2, giving Θ(n log n) and Θ(log n).
 T(n) = aT(n/b) + O(n^d). Compare d vs log_b(a). Merge sort: a=2, b=2, d=1. log_2(2)=1=d → Case 2 → O(n log n). Binary search: a=1, b=2, d=0. log_2(1)=0=d → Case 2 → O(log n). Karatsuba: a=3, b=2, d=1. log_2(3)≈1.585 > 1=d → Case 3 → O(n^1.585).
 
 **Q5: What is Huffman coding and why is it optimal?**
+**Short:** An exchange argument shows the two lowest-frequency symbols must get the longest codes, so the greedy tree minimizes expected code length.
 Huffman assigns shorter bit codes to higher-frequency symbols. It is optimal among prefix-free codes (no code is a prefix of another). Optimality proof: suppose a non-Huffman code is better. The two symbols with lowest frequency must have the longest codes (exchange argument: swapping a longer code to a lower-frequency symbol cannot increase average code length). Huffman always assigns the two lowest-frequency symbols the longest codes (siblings at max depth) — this is the greedy induction step. By induction, the greedy tree minimises expected code length.
 
 **Q6: What is Karatsuba multiplication and why is it faster than the naive O(n²) algorithm?**
+**Short:** It replaces 4 sub-multiplications with 3 via (a+b)(c+d)-ac-bd=ad+bc, giving T(n)=3T(n/2)+O(n) = O(n^1.585) instead of O(n^2).
 Naive multiplication of two n-digit numbers: n² multiply-and-add operations. Karatsuba's insight: break each number into two halves (high and low digits). Instead of 4 multiplications of n/2-digit numbers (still O(n²)), use 3 multiplications via algebraic identity: (a+b)(c+d) - ac - bd = ad + bc. T(n) = 3T(n/2) + O(n) → O(n^log_2(3)) ≈ O(n^1.585). Used in GMP (GNU Multiple Precision) for large integer arithmetic in cryptography.
 
 **Q7: How do you count inversions in an array in O(n log n)?**
+**Short:** Piggyback on merge sort — each time a right-subarray element is placed early, it's inverted with every remaining left element, summed during merge.
 Piggyback on merge sort. An inversion is a pair (i, j) with i < j and arr[i] > arr[j]. During the merge step: when an element from the right subarray is placed before all remaining left subarray elements, the number of inversions is the count of remaining left elements. This can be accumulated during the merge pass. Total inversions = left inversions + right inversions + split inversions (counted during merge). O(n log n) — same as merge sort.
 
 **Q8: What is the closest pair of points problem and why is the divide step non-trivial?**
+**Short:** After splitting by x-coordinate, only points within a 2d-wide strip near the divider need checking, each with at most 7 candidates within distance d.
 Given n points, find the pair with minimum Euclidean distance. Brute force: O(n²). D&C: split points by x-coordinate, find min dist in each half, then check the strip around the dividing line. The key insight is that within the strip of width 2d (where d = min of two halves), each point has at most 7 other points within distance d — a geometric packing argument (points in a d×2d rectangle, each pair ≥ d apart, fit at most 8 points). This makes the strip scan O(n) rather than O(n²).
 
 **Q9: Explain the D&C approach to the maximum subarray problem (Kadane's context).**
+**Short:** The max subarray is fully left, fully right, or crosses the midpoint; the crossing case scans outward in O(n), giving T(n)=2T(n/2)+O(n).
 D&C: split the array at midpoint. Maximum subarray is either fully in the left half, fully in the right half, or crosses the midpoint. The crossing case: find the maximum suffix sum of the left half and the maximum prefix sum of the right half in O(n) by scanning from midpoint outward. Recurrence: T(n) = 2T(n/2) + O(n) → O(n log n). Kadane's algorithm is O(n) (greedy/DP). D&C is useful when the query must be answered for arbitrary sub-ranges (offline segment tree variant).
 
 **Q10: How does the activity selection problem differ from the weighted interval scheduling problem?**
+**Short:** Unweighted activity selection is solved by earliest-finish greedy, but adding weights breaks greedy and requires a sort-plus-binary-search DP.
 Activity selection (unweighted): maximise the count of non-overlapping intervals — solvable by greedy (earliest finish time) in O(n log n). Weighted interval scheduling: each interval has a weight; maximise total weight of non-overlapping intervals. Greedy fails (a high-weight interval may block many medium-weight intervals). Requires DP: sort by finish time, dp[i] = max weight using intervals up to i, with binary search to find the last non-conflicting interval. O(n log n).
 
 **Q11: What is the fractional relaxation of 0/1 knapsack, and why is its LP value an upper bound?**
+**Short:** Fractional knapsack is 0/1 knapsack's LP relaxation, and its value upper-bounds the integer optimum since the LP's feasible set is strictly larger.
 Fractional knapsack allows taking fractions of items, solved greedily by value/weight ratio. This is the linear programming (LP) relaxation of 0/1 knapsack. The LP value ≥ the integer (0/1) optimum because the feasible set of the LP strictly contains the integer feasible set. This is exploited in branch-and-bound algorithms: LP relaxation gives an upper bound at each node; prune branches where the LP bound < current best integer solution.
 
 **Q12: What is the Master theorem's Case 3 (leaves dominate) and give an example?**
+**Short:** When d < log_b(a), leaf-level work dominates — Strassen's a=7,b=2,d=2 has log_2(7)>2, landing it in Case 3 at O(n^2.807).
 Case 3: d < log_b(a) → T(n) = O(n^log_b(a)). The number of leaves dominates — the recursion tree fans out so fast that the work at the leaf level overwhelms all other levels. Example: Strassen's matrix multiplication: a=7, b=2, d=2. log_2(7) ≈ 2.807 > 2 → Case 3 → O(n^2.807). The 7 recursive calls on n/2 sub-matrices (instead of 8 in naive) produce a sub-quadratic algorithm.
 
 **Q13: How does greedy apply to Dijkstra's shortest path algorithm?**
+**Short:** Extracting the minimum-distance unvisited vertex is safe because, with non-negative weights, no later path to it can be shorter.
 Dijkstra's is a greedy algorithm: at each step, extract the unvisited vertex with the minimum known distance (greedy choice), then relax its outgoing edges. The greedy choice property holds because: once a vertex is extracted with distance d, no shorter path can be found to it later — any alternative path through an unvisited vertex must pass through a vertex with distance ≥ d (assuming non-negative weights), so the alternative total path length ≥ d + non-negative = ≥ d. This fails with negative weights, which is why Bellman-Ford (which is not greedy) is required for negative-weight graphs.
 
 **Q14: What is the time complexity of Huffman encoding and why?**
+**Short:** Building the tree is O(n log n) via n-1 heap merge steps; encoding is O(L) per symbol, averaging within 1 bit of source entropy.
 Building the Huffman tree: O(n log n) using a min-heap of size n. Each of the n-1 merge steps requires two heap pops and one push, each O(log n) → total O(n log n). Encoding: O(L) per symbol where L is the code length. The average code length is O(H) where H is the entropy of the source — Huffman achieves within 1 bit of the entropy (Shannon's source coding theorem).
 
 **Q15: Explain divide and conquer in the context of parallel algorithms.**
+**Short:** D&C maps to fork-join parallelism — independent subproblems fork across processors and join to combine, unlike DP's data-dependent states.
 D&C maps directly to fork-join parallelism. Divide the problem, spawn a thread/task per sub-problem (fork), wait for all to finish (join), then combine. Speedup: if each level takes O(n) work and there are log n levels, and we have P processors, the parallel time is O(n/P × log n + combine time). MapReduce is exactly this pattern at cluster scale. The independence of sub-problems is the key property — it is what distinguishes parallelisable D&C from DP (which has data dependencies between states).
 
 ---

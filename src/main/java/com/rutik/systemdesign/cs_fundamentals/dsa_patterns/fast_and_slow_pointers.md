@@ -449,34 +449,45 @@ def has_cycle_fixed(head):
 ## 11. Interview Q&A
 
 **Q: Why must `fast` and `slow` eventually meet if there's a cycle? Could they "skip past" each other?**
+**Short:** The gap between them shrinks by exactly 1 each step once both are in the cycle, so it must hit zero within at most `C` steps.
 Once both pointers are inside the cycle, the *gap* between them (measured in the direction `fast` is moving) shrinks by exactly 1 every step, because `fast` moves 2 and `slow` moves 1 — net gain of 1 for `fast`. A gap that shrinks by exactly 1 each step, starting from some finite positive value and operating modulo the cycle length `C`, must pass through 0 — it cannot jump over 0 because it changes by only 1 at a time. So they are guaranteed to meet within at most `C` steps after both are in the cycle.
 
 **Q: Why does resetting one pointer to `head` and advancing both at speed 1 find the cycle start?**
+**Short:** `L` equals a multiple of the cycle length minus `k`, so walking `L` steps from both `head` and the meeting point lands both pointers at the cycle start.
 This follows from the algebra: at the meeting point, `slow` has traveled `L + k` steps (L = distance from head to cycle start, k = distance from cycle start to meeting point along the cycle), and `fast` has traveled `2(L+k)`. Since `fast` is also `(L+k) + n*C` for some integer `n >= 1` (it lapped the cycle `n` times), setting these equal gives `L = n*C - k`. This means walking `L` steps from `head` lands you at the cycle start, AND walking `L` steps from the *meeting point* (which is `k` steps into the cycle) also lands at the cycle start (since `k + L = k + n*C - k = n*C`, a multiple of the cycle length, i.e., back to the same position). Both pointers, advancing at the same speed, arrive at the cycle start simultaneously after `L` steps.
 
 **Q: For "find the middle of a linked list," which node is returned for an even-length list — and does it matter?**
+**Short:** For a length-`2m` list, `slow` lands on the `(m+1)`-th node — the second middle — which matters for correctly comparing halves in Palindrome Linked List.
 With the standard template (`while fast and fast.next`), for a list of length `2m`, `slow` ends at the `(m+1)`-th node — the *second* of the two middle nodes. This matters for problems like "Palindrome Linked List": if you reverse the second half starting from this middle, the two halves being compared have the correct lengths. If a problem wants the *first* middle for even lengths, change the loop condition to `while fast.next and fast.next.next`.
 
 **Q: How would you find the length of the cycle once you've detected one?**
+**Short:** Freeze one pointer at the meeting point and step the other until it returns to the same node — that step count is the cycle length.
 After `slow` and `fast` meet (any meeting point inside the cycle works), keep `fast` (or either pointer) fixed and advance just one pointer step by step, counting steps, until it returns to the same node. That count is the cycle length `C`. This is a separate, simple loop appended after cycle detection.
 
 **Q: Can fast/slow pointers be applied to something that isn't a linked list?**
+**Short:** Yes — it applies to any domain with an implicit next function that could cycle, such as digit-square-sum sequences or array values used as indices.
 Yes — anything with an implicit "next" function over a domain that *could* cycle. "Happy Number" applies it to the sequence of values produced by `digit_square_sum`. "Find the Duplicate Number" applies it to an array by treating `nums[i]` as "the next index to visit" — this only works because values are constrained to `[1, n]`, guaranteeing the "pointer" `nums[i]` is always a valid index.
 
 **Q: Why is the duplicate found by Floyd's algorithm in "Find the Duplicate Number" guaranteed to be the start of the cycle, and why is the "cycle start" the duplicate?**
+**Short:** The duplicate value is the only functional-graph node with in-degree two or more, making it exactly the cycle's entry point that Floyd's algorithm locates.
 Model the array as a function `f(i) = nums[i]`. Since there are `n+1` numbers in range `[1, n]`, by pigeonhole at least one value repeats. In the functional graph where each index `i` points to `nums[i]`, the duplicate value is the one with **two indices pointing into it** — making it the entry point of a cycle (the only node with in-degree ≥ 2). Floyd's "find cycle start" phase locates exactly this node.
 
 **Q: What's the difference between the "fast moves 2x" pattern and the "fixed gap of k" pattern? Are they the same technique?**
+**Short:** No — "fast moves 2x" uses a relative speed ratio to find cycles or midpoints, while "fixed gap of k" keeps same-speed pointers a constant offset apart.
 They're related (both use two pointers at different "positions" on the same structure) but solve different problems. "Fast moves 2x" exploits a *relative speed difference* to detect periodicity (cycles) or find a midpoint (the 2:1 ratio means when fast finishes, slow is at the halfway point). "Fixed gap of k" uses a *constant offset* — both pointers move at the same speed (1 step), maintaining a gap of exactly `k` — to identify "the node `k` positions before/after another node" without needing to know the list's total length in advance.
 
 **Q: If you're allowed O(n) space, is there ever a reason to still use fast/slow pointers?**
+**Short:** Not for correctness, but it avoids hashing overhead and demonstrates the O(1)-space technique interviewers usually probe for next.
 Generally no for correctness, but it may be *faster in practice* (no hashing overhead, no memory allocation for a set) and it demonstrates the O(1)-space technique, which is often what L5 interviewers are specifically testing. If asked "can you do better on space?", fast/slow is the expected answer for cycle-related linked-list problems.
 
 **Q: How do you handle the edge case of an empty list or single-node list in cycle detection?**
+**Short:** `while fast and fast.next` safely returns False on an empty or non-looping single-node list, and still correctly detects a self-pointing single node.
 The condition `while fast and fast.next` handles both: if `head is None`, `fast = None`, the loop body never executes, `has_cycle` returns `False` correctly. If the list has one node with no self-loop, `fast.next is None` after zero iterations, loop doesn't execute, returns `False`. If the single node *does* point to itself (`node.next = node`), then `fast and fast.next` is true; `slow = slow.next = node`, `fast = fast.next.next = node` — `slow is fast` → `True`, correctly detected.
 
 **Q: In "Remove Nth Node From End of List," why use a dummy head node?**
+**Short:** A dummy head gives even the original head a predecessor, so the same `slow.next = slow.next.next` removal logic works uniformly with no special-casing.
 Without a dummy node, removing the actual head of the list (when `n == length`) requires special-casing — there's no "previous" node to update `.next` on. By prepending a `dummy` node (`dummy.next = head`), the head becomes "just another node with a predecessor," and the same `slow.next = slow.next.next` logic uniformly handles removing any node, including the original head. Return `dummy.next` as the new head.
 
 **Q: Is there a non-Floyd's way to detect a cycle in O(1) space?**
+**Short:** Brent's algorithm also achieves O(1) space via a teleporting slow pointer and can be faster in practice, but Floyd's remains the standard interview answer.
 Floyd's (tortoise and hare) is the canonical O(1)-space approach. An alternative — Brent's algorithm — also achieves O(1) space and can be faster in practice (fewer total pointer movements) by using a "teleporting" slow pointer with periodically doubling step limits, but it's rarely expected at the interview level; mentioning it shows extra depth but Floyd's is sufficient and more commonly recognized.

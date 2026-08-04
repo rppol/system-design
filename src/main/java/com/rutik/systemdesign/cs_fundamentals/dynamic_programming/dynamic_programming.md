@@ -865,57 +865,75 @@ def fixed_dp(n):
 ## 12. Interview Questions with Answers
 
 **Q1: How do you recognise a DP problem?**
+**Short:** An optimal-value or counting ask with decisions affecting later choices, exponential brute force, overlapping subproblems, and optimal substructure.
 Three signals: (1) the problem asks for an optimal value (min/max), count of ways, or feasibility under constraints; (2) there are "decisions at each step" that affect later choices; (3) brute force requires exponential search. Confirm by identifying overlapping subproblems (the same sub-problem recurs in the recursion tree) and optimal substructure (an optimal solution contains optimal sub-solutions).
 
 **Q2: What is the difference between top-down memoisation and bottom-up tabulation?**
+**Short:** Memoisation caches a recursive solution and computes only reachable states; tabulation fills the table iteratively bottom-up with no stack risk.
 Memoisation: write the recursive solution, add a cache (dict or `lru_cache`). Computes only reachable states; natural to code; risks stack overflow for large n. Tabulation: fill a table iteratively in dependency order. Computes all states; no stack risk; amenable to space optimisation (rolling array). Both have the same asymptotic complexity; tabulation usually has better constant factors due to cache-friendly array access vs dict lookup.
 
 **Q3: Explain the 0/1 knapsack problem and its DP recurrence.**
+**Short:** `dp[i][w] = max(dp[i-1][w], dp[i-1][w-w_i]+v_i)` runs in O(n×W) time, O(W) space — pseudo-polynomial in W's numeric value.
 Given n items each with weight w_i and value v_i, and a capacity W, maximise total value with total weight ≤ W. Each item is used at most once. Recurrence: `dp[i][w] = max(dp[i-1][w], dp[i-1][w - w_i] + v_i)` if `w >= w_i`, else `dp[i-1][w]`. Complexity: O(n × W) time, O(W) space with rolling array. This is pseudo-polynomial (depends on W's numeric value, not its bit-length).
 
 **Q4: Why is knapsack NP-hard if it has a polynomial DP solution?**
+**Short:** The O(nW) DP is pseudo-polynomial — polynomial in W's numeric value, not its bit-length — so knapsack is only weakly NP-hard.
 The DP runs in O(nW) which depends on the numeric value of W. If W = 2^30, that's ~10^9 operations — exponential in the bit-length of the input. "Pseudo-polynomial" means polynomial in the input value, not the input size. True polynomial algorithms run in time polynomial in the number of input bits (log W), and no such algorithm is known for knapsack. Be precise about the flavour of hardness: knapsack is only *weakly* NP-hard. The existence of the O(nW) DP is exactly what rules out strong NP-hardness (a strongly NP-hard problem admits no pseudo-polynomial algorithm unless P = NP), and it is also why knapsack has an FPTAS while, say, TSP does not.
 
 **Q5: What is the recurrence for edit distance and what do the three choices represent?**
+**Short:** The three transitions are replace (`dp[i-1][j-1]+cost`), delete from word1 (`dp[i-1][j]+1`), and insert into word1 (`dp[i][j-1]+1`).
 `dp[i][j] = min(dp[i-1][j-1] + cost, dp[i-1][j] + 1, dp[i][j-1] + 1)` where `cost = 0` if `word1[i-1] == word2[j-1]` else 1. Three choices: replace (`dp[i-1][j-1] + cost` — align characters i and j), delete from word1 (`dp[i-1][j] + 1` — consume character i from word1 with a deletion), insert into word1 (`dp[i][j-1] + 1` — consume character j from word2 with an insertion).
 
 **Q6: What is the key difference between LCS and edit distance?**
+**Short:** With only insert/delete, edit distance equals m+n-2×LCS(s1,s2); allowing replace makes the two recurrences diverge.
 LCS finds the length of the longest common subsequence; edit distance (with insert/delete only, no replace) equals `m + n - 2 × LCS(s1, s2)`. With replace allowed, they diverge. LCS uses `dp[i][j] = dp[i-1][j-1] + 1` when characters match; edit distance adds the replace transition. Both are O(mn) time and space.
 
 **Q7: How does the coin change DP differ from 0/1 knapsack?**
+**Short:** Coin change is unbounded knapsack — coins repeat — so its inner loop runs left-to-right instead of the 0/1 knapsack's right-to-left.
 Coin change is unbounded knapsack: each coin can be used unlimited times. The difference in code: the 0/1 knapsack rolls the inner loop right-to-left (so dp[cap - w] refers to the previous item's row — can't use current item again). The unbounded knapsack iterates left-to-right (dp[cap - w] already incorporates the current item — can use it again). The coin change count variant (number of ways) also uses left-to-right iteration.
 
 **Q8: What is patience sorting and how does it give O(n log n) LIS?**
+**Short:** Maintain the smallest tail of every increasing-subsequence length and binary-search each new element's slot, giving O(n log n) LIS overall.
 Maintain an array `tails` where `tails[k]` is the smallest tail element of all increasing subsequences of length `k+1` seen so far. For each new element x: binary search (lower_bound) for its insertion position in `tails`. If past the end, extend `tails` (LIS length increases). Otherwise, replace `tails[pos] = x` (maintain the invariant). The length of `tails` at the end is the LIS length. Each of n elements requires O(log n) binary search → O(n log n) total.
 
 **Q9: How do you reconstruct the actual DP solution (not just the value)?**
+**Short:** Keep a separate choice table recording each transition taken, then trace it back from the final state — a rolling dp row alone can't do this.
 Keep a `choice` table alongside the `dp` table. At each state, record which transition was chosen (e.g., for knapsack: `taken[i][w] = True` if item i was taken). After filling, trace back from `dp[n][W]`: if `taken[i][w]` is True, include item i and move to `(i-1, w - w_i)`, else move to `(i-1, w)`. For rolling-array optimisations, reconstruction requires keeping the full `choice` table — you cannot reconstruct from the rolling dp row alone.
 
 **Q10: What is interval DP and give an example?**
+**Short:** `dp[l][r]` holds the optimal answer for range [l,r], filled by increasing interval length — e.g. matrix chain multiplication in O(n^3).
 Interval DP: `dp[l][r]` = optimal answer for the subproblem on range [l, r]. Fill in order of increasing interval length. Example: Matrix Chain Multiplication — `dp[l][r]` = minimum multiplications to compute matrices l through r. Transition: try every split k in [l, r-1]: `dp[l][r] = min over k of (dp[l][k] + dp[k+1][r] + dims[l-1]*dims[k]*dims[r])`. O(n³) time. Other examples: Burst Balloons (LeetCode 312), Zuma Game, Palindrome Partitioning.
 
 **Q11: When should you use DP vs greedy?**
+**Short:** Use DP when a local choice can miss the global optimum; use greedy only when an exchange argument proves the greedy choice is never worse.
 Use DP when: locally optimal choices may not lead to global optimum (test with a counterexample); backtracking is needed. Use greedy when: an exchange argument proves local = global (the greedy choice never leaves you worse off); e.g., interval scheduling (earliest finish first), Huffman coding (minimum frequency characters merged first). Rule of thumb: try greedy first (simpler), find a counterexample, fall back to DP if one exists.
 
 **Q12: What is bitmask DP and when is it used?**
+**Short:** State encodes a visited subset as a bitmask, used when n<=20, as in TSP's `dp[mask][v]` over O(2^n × n^2) states.
 State includes a bitmask encoding a subset of elements. Used when n ≤ 20 and the state is "which subset has been visited/used." Example: Travelling Salesman Problem — `dp[mask][v]` = minimum cost path visiting exactly the cities in `mask` and ending at `v`. Transition: `dp[mask | (1 << u)][u] = min(..., dp[mask][v] + dist[v][u])`. O(2^n × n²) time, O(2^n × n) space. Bitmask DP is also used for assignment problems and scheduling with state constraints.
 
 **Q13: How do you optimise DP when transitions take O(n) instead of O(1)?**
+**Short:** Precompute prefix/suffix sums, use a segment tree or BIT, a monotone deque, or divide-and-conquer optimisation when the split is monotone.
 Several techniques: (1) prefix/suffix arrays to precompute range sums/mins so the transition becomes O(1); (2) segment tree or BIT to query over a range of previous states in O(log n); (3) monotone deque (sliding window minimum) to optimise "take the best of the last k states" from O(k) to O(1) amortised; (4) divide-and-conquer optimisation when the optimal split point for dp[i] is monotone in i (reduces O(n²) transition to O(n log n)).
 
 **Q14: Explain the relationship between edit distance and version control.**
+**Short:** Git's Myers diff finds the shortest edit script by searching the edit-distance DAG for the shortest D-path, in O(D×n) time.
 Git's diff algorithm (Myers diff) finds the shortest edit script — minimum number of insertions and deletions to transform one file version into another. It works on the edit distance DAG where diagonal moves (matching lines) are free and horizontal/vertical moves (delete/insert) cost 1. Myers algorithm finds the shortest D-path (path using D non-diagonal moves) in O(D × n) time using the "furthest reaching D-path" observation. The human-readable diff output is the path reconstruction.
 
 **Q15: What is the space complexity of edit distance and how can it be improved?**
+**Short:** A rolling array cuts it to O(min(m,n)); Hirschberg's algorithm reconstructs the path in O(mn) time using only O(m+n) space.
 Standard: O(m × n) space (full table). Space-optimised with rolling array: O(min(m, n)) — only keep two rows. For actual path reconstruction with O(m + n) space: Hirschberg's algorithm divides the problem at the midpoint, computes score from both ends (O(n) each), finds the optimal midpoint in O(mn) time, then recurses on two halves of O(n/2) space each — total O(mn) time, O(m + n) space.
 
 **Q16: What are the four DP problem families and their canonical representatives?**
+**Short:** 0/1 knapsack (subset selection), LCS/sequence alignment, unbounded selection, and interval DP are the four canonical DP shapes.
 (1) 0/1 knapsack family: subset selection with constraints (0/1 knapsack, partition equal subset sum, target sum). (2) LCS/sequence alignment family: comparing two sequences character-by-character (LCS, edit distance, regex matching, wildcard matching). (3) Unbounded selection family: unlimited repetition of choices (coin change, perfect squares, climbing stairs). (4) Interval DP family: range-based sub-problems (matrix chain multiplication, burst balloons, palindrome partitioning). Most DP problems in interviews belong to one of these four shapes.
 
 **Q17: Describe a DP problem you can solve greedily by accident and explain the failure.**
+**Short:** Greedy by value-to-weight ratio picks one high-ratio item and can't fit the rest, scoring 8 versus the DP's optimal 10, since items are indivisible.
 0/1 knapsack with the greedy heuristic "take highest value-to-weight ratio first." Example: capacity=10, items={(weight=6,value=8), (weight=5,value=5), (weight=5,value=5)}. Greedy takes the first item (ratio 1.33) and cannot fit either remaining item → value=8. Optimal: take items 2 and 3 → value=10. Greedy fails because picking one item blocks the combination that provides higher total value. The exchange argument breaks down because items are indivisible (0/1) — fractional knapsack (where you can take partial items) is solvable by greedy.
 
 **Q18: How does DP apply in string problems like regex or wildcard matching?**
+**Short:** `dp[i][j]` tracks whether pattern[:j] matches string[:i]; `*` either matches zero times or consumes one more character, in O(mn).
 Regex matching (`.` = any char, `*` = zero or more of previous): `dp[i][j]` = True if pattern[:j] matches string[:i]. Transition for `pattern[j-1] == '*'`: either use zero times (`dp[i][j] = dp[i][j-2]`) or use one more time (`dp[i][j] = dp[i-1][j] if pattern[j-2] matches string[i-1]`). The key insight: `*` can match zero or more — the "zero" case is the base; the "more" case consumes a character from the string. O(mn) time, O(mn) space.
 
 ---
