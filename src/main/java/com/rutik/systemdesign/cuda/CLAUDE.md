@@ -6,17 +6,61 @@ Build manifest / status tracker: `README.md` §8 — check the NEXT UP pointer a
 
 This section teaches GPU programming from the **kernel author's** viewpoint. It deliberately **cross-references** the GPU material in `ml/`, `llm/`, and `devops/` instead of duplicating it — see the non-overlap boundary in `README.md` §2 and the GPU Non-Overlap Boundary below.
 
-## Scope — fully in scope (parking lifted 2026-08-04)
+## Scope — unparked 2026-08-04; the factual audit is COMPLETE
 
-This section was parked 2026-07-29 and re-opened by the owner on 2026-08-04. Every
-improvement pass applies here: the factual audit, the `**Short:**` MCQ-summary migration,
-and modernization. **There is no longer any restriction on dispatching agents here** — but
-read the trap below before touching the audit.
+Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 
-| Work | State at unparking |
-|------|--------------------|
-| Factual-audit units | 14 of 19 outstanding (5 complete) |
-| Q&As awaiting `**Short:**` summaries | 427 (of 427) |
+| Work | State |
+|------|-------|
+| Factual audit | **DONE — all 24 modules**, ~1,000 claims verified, ~145 corrections. Commits `312d0b4`, `ed1400a`, `e984f8c`, `60eed53` |
+| `**Short:**` MCQ summaries | **427 outstanding (of 427)** — runs next, deliberately AFTER the audit |
+| Case studies | **not audited** (6 case studies + `cross_cutting/`) |
+
+### What the audit found here, and why it is not what you would guess
+
+The stale-version findings were real but ordinary. **The expensive defects were explanations
+that had quietly stopped matching the hardware, while the code they justified stayed
+correct** — which makes them invisible to a reader who is checking whether the code works:
+
+- `warp_level_primitives` justified the `_sync` shuffle idioms with "the lanes never leave
+  lockstep". Independent Thread Scheduling ended that in 2017; NVIDIA's wording is that
+  `_sync` "first synchronize[s] the threads if they are not already synchronized". The
+  recipes were right, the mental model was pre-Volta, and a reader who learned the model
+  writes a race. The same file pushed `__activemask()` in six places against NVIDIA's
+  explicit "Don't just use `__activemask()`".
+- `tensor_cores` taught that Tensor Cores engage only on M/N/K multiples of 8 with a silent
+  CUDA-core fallback otherwise. No such restriction has existed since cuBLAS 11.0 outside
+  FP8; what survives is a 16-byte-alignment PERFORMANCE cliff. The padding advice was right
+  for the wrong reason.
+- `cuda_toolkit_and_compilation`'s headline gotcha was inverted: `-arch=sm_80` DOES embed
+  PTX (Shorthand 2 expands to `code=sm_80,compute_80`). The trap belongs to explicit
+  `-gencode ...,code=sm_XX`. It warned readers off the safe form.
+- `multi_gpu_programming_and_nccl` compared NVLink bidirectionally against PCIe
+  per-direction — two conventions in one comparison, overstating the gap by exactly 2x
+  across a table, an xychart, two ASCII diagrams and two Q&As.
+- `gpu_portability` cited "WebCUDA", an NVIDIA proposal that does not exist. The real
+  history is Khronos WebCL and WebGL 2.0 Compute.
+- `dynamic_parallelism` described `cudaLimitDevRuntimeSyncDepth` as the nesting-depth knob
+  in eight places (it is not, does not exist under CDP2, and errors on cc >= 9.0) — and the
+  host code called it.
+
+**Two files came back with ZERO corrections** after ~120 assertions each
+(`parallel_patterns_reduction_scan_histogram`, `profiling_and_performance_analysis`). That
+is a result. Do not re-audit them looking for something.
+
+### Open, needing an owner decision
+
+- **NVIDIA's own two sources disagree on compute capability 12.x** — the Programming Guide
+  says 24 resident blocks/SM and 100 KB shared memory; the Blackwell Tuning Guide says 32
+  and 128 KB. `occupancy_and_launch_configuration` follows the Programming Guide. No side
+  was picked.
+- CC **10.3 and 11.0** are missing from the capability enumerations. Incomplete, not wrong;
+  not filled in because guessing a hardware number is the failure mode this audit prevents.
+- Unverified and deliberately left: the 3-8 us device-side child-launch figure (no NVIDIA
+  source, and §5/§14 arithmetic depend on it) and a K=4095 cuBLAS sweep whose 8x drop
+  likely overstates reality — now labelled illustrative with a re-measure instruction.
+- **The `Q: ` prefix claim in this file was stale and is now settled:** cuda is at 100%.
+  Measured 2026-08-04 across the whole repo; no relabel is needed here.
 
 **THE TRAP IS CLEARED (2026-08-04).** The section was in three states; it is now in two.
 

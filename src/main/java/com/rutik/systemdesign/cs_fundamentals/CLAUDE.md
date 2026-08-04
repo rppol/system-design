@@ -4,16 +4,67 @@ Section root: `src/main/java/com/rutik/systemdesign/cs_fundamentals/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 Build manifest / status tracker: `README.md` §7 — check NEXT UP pointer and per-file status before starting a new module.
 
-## Scope — fully in scope (parking lifted 2026-08-04)
+## Scope — unparked 2026-08-04; the factual audit is COMPLETE
 
-This section was parked 2026-07-29 and re-opened by the owner on 2026-08-04. Every
-improvement pass applies here: the factual audit, the `**Short:**` MCQ-summary migration,
-and modernization. **There is no longer any restriction on dispatching agents here.**
+Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 
-| Work | State at unparking |
-|------|--------------------|
-| Factual-audit units | 24, none started |
-| Q&As awaiting `**Short:**` summaries | 701 (of 701, across 24 modules + 26 `dsa_patterns` files) |
+| Work | State |
+|------|-------|
+| Factual audit | **DONE — all 24 modules + all 26 `dsa_patterns` files**, ~2,500 claims verified, ~170 code blocks hand-executed, ~100 corrections. Commits `640ce22`, `b31a6b0`, `faf44a1`, `1923ffe` |
+| `**Short:**` MCQ summaries | **701 outstanding (of 701)** — runs next, deliberately AFTER the audit |
+| Case studies | **not audited** (6 walkthrough case studies) |
+
+### How this section audits — read before dispatching anything here
+
+Agents were told to expect FEW corrections and to report zero honestly, because this is the
+language-agnostic CS spine: Big-O is Big-O, the halting problem is still unsolved,
+modernization is nearly irrelevant. **Ten of the fifty files came back with zero
+corrections, and that is a result, not a gap** — do not re-audit them hunting for something.
+
+What the pass actually found is that **almost every defect was in a DEMONSTRATION, not in a
+claim.** The prose was overwhelmingly right; the worked examples, traces and "broken" code
+frequently were not. That is the single most useful thing to know about this section:
+
+- **Five "broken -> fixed" pairs whose BROKEN half was correct code**, three of them
+  admitting it in their own comments ("Actually this IS a valid BST"). A reader learns a bug
+  that is not one and misses the bug that is. `graph_and_string_algorithms`' KMP pitfall was
+  byte-for-byte the correct algorithm, verified identical on 2,000 random patterns.
+- **Two Dijkstra "negative weights fail" counterexamples that return the correct answer**
+  when executed — the improved vertex had not been popped yet. A real one had to be
+  constructed. Likewise a greedy-fails-knapsack counterexample where greedy finds the
+  optimum, an exchange-argument walk whose "OPT" was not optimal, and a BROKEN float example
+  that is not broken (`0.1 + 0.4 == 0.5` is `True`).
+- **A teaching HashMap that duplicates keys** (probe stopped at a tombstone), a
+  `critical_path` raising `NameError`, a lock-ordering "FIX" that self-deadlocks on
+  non-reentrant locks, and a quicksort whose `hi=-1` sentinel restarts the whole sort.
+- **A `4n` segment-tree illustration using n=5, which fits in 2n fine.** The smallest
+  failing input is n=6, and the failure is NON-MONOTONIC — it breaks at 6 and 10 but not 5,
+  7 or 9. You cannot find that by testing a few sizes.
+- Statements the wrong way round: shift-by->=width called "Java: undefined" when it is C/C++
+  that is undefined; knapsack called strongly NP-hard; the Bloom filter guarantee inverted;
+  Clock listed as a stack algorithm; Master Theorem Case 3 without its regularity condition;
+  arbitrage on `log(rate)` instead of `-log(rate)`.
+- One Q&A shipped published thinking-out-loud debris: "— wait, let me recalculate: ...".
+
+**The operational lesson: EXECUTE the code and RECOMPUTE the arithmetic.** Reading for
+correctness passes almost everything here. The agents that found the most ran the snippets,
+differential-tested against reference implementations, and checked 242 LeetCode links
+number -> slug -> title -> difficulty against the live API (which is how two stale
+difficulties surfaced).
+
+Where currency DOES apply here, narrowly: named language/library behaviour and OS
+internals. CFS -> EEVDF was corrected across four files; also cgroup v2 names,
+free-threaded Python 3.14, 5-level paging, MGLRU, Apple Silicon's 128 B cache line and
+16 KB pages, and `sys.setrecursionlimit` no longer segfaulting since CPython 3.11/3.12.
+
+### Left open
+
+`heaps_and_priority_queues` has an unnumbered `## Intuition` and duplicate `## 8`/`## 9`
+titles; `graphs_tries_and_advanced_structures` has `## 9. Prerequisite Knowledge` where the
+template's "When to Use" sits, shifting every later heading by one. Both were left untouched
+under the no-restructure rule and want a deliberate decision. Also unverified rather than
+guessed: a 250K-word trie at "~10 MB" (implies ~20 bytes/node) and a hash-set memory model
+sizing a slot at 8 B where CPython's `setentry` is 16 B.
 
 ---
 
