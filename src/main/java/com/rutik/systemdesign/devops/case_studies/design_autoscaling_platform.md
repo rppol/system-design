@@ -125,7 +125,7 @@ These numbers assume average requests are *accurate* — the single biggest sens
 ### Scaling throughput
 
 - HPA sync period: **15s default**. Each loop can change replicas for all HPAs it watches. With `--horizontal-pod-autoscaler-sync-period=15s` and ~4000 HPAs, the controller comfortably evaluates all within one loop on a tuned control plane.
-- 10x spike: 24,000 -> needs ~72,000 pods. HPA computes desired in one sync (15s). Scheduler emits pending pods immediately. **Karpenter provisions a 2xlarge in ~40s**; CAS would take **3–5 min** (ASG warm-up + scale-up + node-not-ready). Karpenter is the difference between hitting and missing the 90s SLO.
+- 10x spike on the affected services (never the whole fleet at once): 24,000 -> ~72,000 pods fleet-wide, the peak figure above. HPA computes desired in one sync (15s). Scheduler emits pending pods immediately. **Karpenter provisions a 2xlarge in ~40s**; CAS would take **3–5 min** (ASG warm-up + scale-up + node-not-ready). Karpenter is the difference between hitting and missing the 90s SLO.
 - Pods scheduled/min during burst: a single Karpenter `NodePool` can launch hundreds of nodes in parallel; binding ~29 pods/node × 200 nodes/min = **~5,800 pods/min** of new capacity.
 
 ### Cost math
@@ -141,14 +141,14 @@ These numbers assume average requests are *accurate* — the single biggest sens
 **Spot mix savings:** put 70% of capacity (interruption-tolerant) on spot:
 
 ```
-On-demand portion:  780 nodes × 0.384 × 730 = $218,649
-Spot portion:      1820 nodes × 0.1152 × 730 = $153,073
-Total mixed:                                   $371,722/mo
+On-demand portion:  780 nodes × 0.384 × 730 = $218,650
+Spot portion:      1820 nodes × 0.1152 × 730 = $153,055
+Total mixed:                                   $371,705/mo
 ```
 
-vs $728,832 all-on-demand -> **additional $357,110/mo (49%) saved** from spot.
+vs $728,832 all-on-demand -> **additional $357,127/mo (49%) saved** from spot.
 
-**Spot interruption rate** ~**5%/hr** observed on m6i family in us-east-1 -> expect ~91 spot nodes reclaimed/hr at 1820 spot nodes; each must drain within the **120s** warning window. Combined elastic + spot beats the static baseline by **>83%**, comfortably clearing the 40% NFR.
+**Spot interruption rate** ~**5%/month** — the trailing-month reclaim frequency AWS's Spot Instance Advisor publishes for the m6i family in us-east-1 -> expect ~91 spot nodes reclaimed/month at 1820 spot nodes; each must drain within the **120s** warning window. Combined elastic + spot beats the static baseline by **~83%**, comfortably clearing the 40% NFR.
 
 ### Scale-to-zero contribution
 
@@ -164,7 +164,7 @@ Modest in raw dollars but it also removes 1,100 idle pods from the scheduler's a
 
 ### Control-plane load
 
-4000 HPAs polling every 15s = **267 metric reads/sec** from the metrics API. prometheus-adapter must serve these without becoming the bottleneck — at p99 < 200ms per query, a single adapter replica handles ~5 concurrent queries comfortably, so we run **4 adapter replicas** behind the aggregation layer. Karpenter watches all Pending pods via a single informer; at peak burst the pending queue can reach **~48,000 pods** (the 24k->72k jump), which Karpenter batches into provisioning decisions in **<5s** of solve time per batch.
+4000 HPAs polling every 15s = **267 metric reads/sec** from the metrics API. prometheus-adapter must serve these without becoming the bottleneck — at p99 < 200ms per query, a single adapter replica holding ~5 queries in flight sustains 5 / 0.2s = **25 queries/sec**, so 267 reads/sec needs ceil(267 / 25) = 11 replicas and we run **12 adapter replicas** behind the aggregation layer for headroom. Karpenter watches all Pending pods via a single informer; at peak burst the pending queue can reach **~48,000 pods** (the 24k->72k jump), which Karpenter batches into provisioning decisions in **<5s** of solve time per batch.
 
 ---
 
@@ -265,7 +265,7 @@ sequenceDiagram
     T->>P: t=0s 10x spike (RPS 50 to 500)
     Note over P: t=2s scrape captures the increase
     P->>H: updated metric
-    H->>H: t=15s desired = ceil(24000 × 500/50)
+    H->>H: t=15s desired = ceil(cur × 500/50)<br/>per spiking service, fleet 24,000 to 72,000
     H->>S: patch replicas (~48,000 new pods)
     S->>S: t=16s binds what fits,<br/>~46,000 pods Pending
     S->>K: pending pods, no capacity
@@ -418,12 +418,12 @@ Asymmetric behavior — **fast up, slow down** — is the single most important 
 ```mermaid
 stateDiagram-v2
     [*] --> Zero
-    Zero --> Active: lag above activationLagThreshold<br/>(12,000 msgs)
+    Zero --> Active: lag above activationLagThreshold<br/>(10 msgs)
     Active --> Idle: lag drains to 0
     Idle --> Active: new lag arrives
     Idle --> Zero: idle exceeds cooldownPeriod (300s)
     note right of Zero: scale to 0 pods, no cost
-    note right of Active: desiredReplicas = ceil(lag/500)<br/>capped at maxReplicaCount (24)
+    note right of Active: desiredReplicas = ceil(lag/500)<br/>capped at maxReplicaCount (50)
 ```
 
 KEDA scales on the *event backlog* directly, and uniquely can scale to **zero** — HPA's floor is 1. For 4000 services, hundreds are async workers idle most of the day; scale-to-zero alone reclaims significant cost.
@@ -464,10 +464,10 @@ minReplicaCount: 0
 cooldownPeriod: 30           # BUG: 30s, and no activationLagThreshold
 triggers:
   - type: kafka
-    metadata: { lagThreshold: "500" }   # activation defaults to same as lagThreshold
+    metadata: { lagThreshold: "500" }   # activationLagThreshold defaults to 0 -> any lag wakes it
 ```
 
-A trickle of 5–15 messages/min arrived all day. Each message spiked lag above the activation default, KEDA scaled 0->1, the pod drained the handful of messages in 4s, lag hit 0, and 30s later it scaled back to 0 — then the next message arrived and repeated. The worker **cold-started ~340 times/hour**, each pull-and-start costing ~6s of latency on those messages and churning the scheduler. Downstream consumers saw p99 message-processing latency of **8.2s** instead of the expected sub-second.
+A trickle of 5–15 messages/min arrived all day. Each message pushed lag above the activation default of 0, KEDA scaled 0->1, the pod drained the handful of messages in 4s, lag hit 0, and 30s later it scaled back to 0 — then the next message arrived and repeated. The worker **cold-started ~340 times/hour**, each pull-and-start costing ~6s of latency on those messages and churning the scheduler. Downstream consumers saw p99 message-processing latency of **8.2s** instead of the expected sub-second.
 
 **Fix.** Set `activationLagThreshold` low (wake on real backlog, not a single message) and lengthen the cooldown so a steady trickle keeps one warm replica:
 
@@ -669,7 +669,7 @@ spec:
         maxAllowed: { cpu: 2,    memory: 4Gi }
 ```
 
-We run VPA in `updateMode: "Off"` so it *recommends* but never evicts — eviction would collide with HPA. A controller reads `status.recommendation` and applies it at the next deploy. Across 4000 services, correcting a fleet-wide 28% CPU over-request directly translates to **~24% fewer nodes** for the same workload — the single largest packing lever, larger than any consolidation tuning. The discipline: requests must reflect reality, or both HPA's per-pod target math and Karpenter's bin-pack solve operate on fiction.
+We run VPA in `updateMode: "Off"` so it *recommends* but never evicts — eviction would collide with HPA. A controller reads `status.recommendation` and applies it at the next deploy. Across 4000 services, correcting a fleet-wide 28% CPU over-request lifts density from 29 to 36 pods/node, which is **~19% fewer nodes** (29/36) for the same workload — the single largest packing lever, larger than any consolidation tuning. The discipline: requests must reflect reality, or both HPA's per-pod target math and Karpenter's bin-pack solve operate on fiction.
 
 ---
 
@@ -723,7 +723,7 @@ spec:
         threshold: "50"
 ```
 
-KEDA takes the **max** of all triggers, so the cron sets a pre-warm floor while the Prometheus trigger still handles unexpected magnitude. The cost of pre-warming wrong is bounded: ~114 extra pods for ~6 minutes before the peak ramps = **~$0.40/day/service** of idle compute — a rounding error against the latency and node-provision savings. The rule: predictive *raises the floor*, reactive *owns the ceiling*; never let prediction be the only signal, or a novel Black-Friday-scale spike that the forecast didn't see will under-provision.
+KEDA takes the **max** of all triggers, so the cron sets a pre-warm floor while the Prometheus trigger still handles unexpected magnitude. The cost of pre-warming wrong is bounded: ~114 extra pods for ~6 minutes before the peak ramps is 28.5 vCPU = 4 extra nodes for 0.1 h = **~$0.15/day/service** of idle compute at the on-demand rate — a rounding error against the latency and node-provision savings. The rule: predictive *raises the floor*, reactive *owns the ceiling*; never let prediction be the only signal, or a novel Black-Friday-scale spike that the forecast didn't see will under-provision.
 
 ---
 
@@ -741,7 +741,7 @@ Every decision below trades cost against safety or simplicity. The unifying prin
 
 ### 5.3 Spot vs On-Demand Mix
 
-**Decision:** 70% spot for stateless/interruption-tolerant, 30% on-demand for stateful/critical, with on-demand fallback when spot capacity is unavailable. **Alternatives:** 100% on-demand (safe, +$357k/mo); 100% spot (cheap, risky). **Rationale:** spot is ~70% cheaper but interrupts at ~5%/hr; pinning critical workloads to on-demand bounds blast radius. **Consequences:** must run a robust interruption handler and over-provision spot diversity (many instance types) to avoid correlated reclaim.
+**Decision:** 70% spot for stateless/interruption-tolerant, 30% on-demand for stateful/critical, with on-demand fallback when spot capacity is unavailable. **Alternatives:** 100% on-demand (safe, +$357k/mo); 100% spot (cheap, risky). **Rationale:** spot is ~70% cheaper but carries a ~5%/month reclaim frequency and can be pulled in correlated waves; pinning critical workloads to on-demand bounds blast radius. **Consequences:** must run a robust interruption handler and over-provision spot diversity (many instance types) to avoid correlated reclaim.
 
 ### 5.4 Reactive vs Predictive Scaling
 
@@ -817,20 +817,24 @@ Operating autoscaling at 4000-service scale is mostly about *preventing* bad con
 
 Every HPA/ScaledObject/NodePool change passes a CI gate before merge:
 
-```yaml
-# OPA/Conftest policy snippet (Rego-style intent)
-deny[msg] {
+```rego
+# OPA/Conftest policy snippet (OPA v1 Rego: `contains` + `if` are mandatory)
+package autoscaling
+
+deny contains msg if {
   input.kind == "HorizontalPodAutoscaler"
   input.spec.behavior.scaleDown.stabilizationWindowSeconds < 60
   msg := "scaleDown stabilization must be >= 60s to prevent thrash"
 }
-deny[msg] {
+
+deny contains msg if {
   input.kind == "HorizontalPodAutoscaler"
   input.spec.maxReplicas > 500
   not input.metadata.annotations["cost-approved"]
   msg := "maxReplicas > 500 requires cost approval"
 }
-deny[msg] {
+
+deny contains msg if {
   input.kind == "Deployment"
   not has_pdb(input)
   msg := "workload must declare a PodDisruptionBudget"
@@ -994,9 +998,9 @@ effectiveNodes = ceil( nodesNeeded / targetUtilization )             # add headr
 
 **Spot/on-demand split given an interruption tolerance:**
 ```
-onDemandFloor = ceil( criticalReplicas / minAvailableFraction )      # never on spot
+onDemandNodes = ceil( criticalPodCPU / nodeAllocatableCPU )          # critical pods never on spot
 spotNodes     = totalNodes − onDemandNodes
-expectedReclaims/hr = spotNodes × spotInterruptionRate(0.05)
+expectedReclaims/month = spotNodes × spotInterruptionRate(0.05)
 ```
 
 ### Worked example
@@ -1015,12 +1019,12 @@ At 65% target util:  effectiveNodes = ceil(822 / 0.65) = 1265 nodes
 Cost at the 70/30 spot mix:
 
 ```
-On-demand 30% = 380 nodes × $0.384 × 730 = $106,521/mo
-Spot      70% = 885 nodes × $0.1152 × 730 = $74,438/mo
-Total                                       $180,959/mo
+On-demand 30% = 380 nodes × $0.384 × 730 = $106,522/mo
+Spot      70% = 885 nodes × $0.1152 × 730 = $74,425/mo
+Total                                       $180,947/mo
 ```
 
-vs all-on-demand at this tier (1265 × $0.384 × 730 = **$354,604/mo**) -> **$173,645/mo (49%) saved** from the spot mix, on top of the elasticity savings from not static-provisioning for peak. Expected spot reclaims: 885 × 0.05 = **~44 nodes/hr**, each drained PDB-safely inside 120s.
+vs all-on-demand at this tier (1265 × $0.384 × 730 = **$354,605/mo**) -> **$173,658/mo (49%) saved** from the spot mix, on top of the elasticity savings from not static-provisioning for peak. Expected spot reclaims: 885 × 0.05 = **~44 nodes/month**, each drained PDB-safely inside 120s.
 
 ### Burst buffer (overprovisioning) sizing
 
@@ -1067,7 +1071,7 @@ When the scaling signal is an external event backlog (Kafka lag, SQS depth, cron
 Three controls: a mandatory PodDisruptionBudget on every workload (the Eviction API enforces it server-side so a drain can't breach `minAvailable`), a Karpenter disruption budget capping concurrent disruptions (e.g., 10% of nodes), and a consolidation freeze during peak windows and active rollouts (`do-not-disrupt`). Missing the PDB is the classic cause of consolidation-induced downtime.
 
 **Q: What's the right spot/on-demand mix and how do you keep spot safe?**
-Roughly 70% spot for interruption-tolerant stateless workloads, 30% on-demand for stateful/critical, with on-demand fallback. Safety comes from diversification — at least 6 instance types across 3 AZs — so a capacity reclaim in one type doesn't take a correlated chunk of the fleet. Each spot node must drain PDB-safely inside the 120s warning, which means `terminationGracePeriodSeconds <= 90s`.
+Roughly 70% spot for interruption-tolerant stateless workloads, 30% on-demand for stateful/critical, with on-demand fallback. Safety comes from diversification — at least 8 instance types across 3 AZs — so a capacity reclaim in one type doesn't take a correlated chunk of the fleet. Each spot node must drain PDB-safely inside the 120s warning, which means `terminationGracePeriodSeconds <= 90s`.
 
 **Q: Why do VPA and HPA conflict, and how do you run them together?**
 If both act on CPU they fight: VPA raises per-pod requests while HPA adds replicas, so per-pod utilization never reaches target and the Deployment over-scales. The fix is to separate dimensions — HPA on a custom RPS metric, VPA on memory or in recommendation-only mode — so each owns a distinct lever. Never let both auto-act on the same resource.

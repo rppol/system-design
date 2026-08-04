@@ -69,7 +69,7 @@ These map 1:1 to the OCI Distribution Spec; anything not in this table (web UI, 
 
 ### Out of Scope
 
-- Building images (CI/Buildkit/Kaniko handled upstream — see [`../ci_cd_fundamentals/ci_cd_fundamentals.md`](../ci_cd_fundamentals/ci_cd_fundamentals.md)).
+- Building images (CI with rootless BuildKit or Buildah, handled upstream — see [`../ci_cd_fundamentals/ci_cd_fundamentals.md`](../ci_cd_fundamentals/ci_cd_fundamentals.md)).
 - Helm chart hosting beyond OCI artifacts (registry stores OCI artifacts generically; Helm-specific UX excluded).
 - A full SBOM database/query engine (we store SBOM as an OCI referrer; querying it at fleet scale is a separate system).
 - Multi-tenant billing/metering (assumed internal single-org).
@@ -114,23 +114,23 @@ The cache is not optional — it is the difference between 29 GB/s and 0.58 GB/s
 ```
 Distinct images:        20,000 repos × 50 retained tags = 1,000,000 manifests
 Avg manifest size:      8 KB → 1M × 8 KB = 8 GB manifest metadata
-Raw layer bytes (no dedup): 1M images × 200 MB = 200 PB  ← if naive
+Raw layer bytes (no dedup): 1M images × 200 MB = 200,000,000 MB = 200 TB  ← if naive
 Dedup ratio (measured industry norm): 4:1 to 10:1 (shared base images dominate).
-  Assume 5:1 → effective blob storage = 200 PB / 5 = 40 PB
+  Assume 5:1 → effective blob storage = 200 TB / 5 = 40 TB
 
-Realistic working set (hot + 90-day retention) ≈ 4 PB after GC of stale tags.
+Realistic working set (hot + 90-day retention) ≈ 4 TB after GC of stale tags.
 ```
 
-S3 Standard at $0.023/GB-month → 4 PB = 4,194,304 GB × $0.023 = **$96,468/month** for hot blobs. Tiering 70% to S3-IA ($0.0125/GB) and 20% to Glacier IR drops this to ~$55,000/month.
+S3 Standard at $0.023/GB-month → 4 TB = 4,096 GB × $0.023 = **$94/month** for hot blobs. Tiering 70% to S3-IA ($0.0125/GB) and 20% to Glacier IR ($0.004/GB) drops this to ~$49/month.
 
 ```mermaid
-pie showData title Hot Blob Storage Tier Mix - 4 PB Working Set
+pie showData title Hot Blob Storage Tier Mix - 4 TB Working Set
     "S3 Standard - 10%" : 10
     "S3-IA - 70%" : 70
     "Glacier IR - 20%" : 20
 ```
 
-The tier mix, not raw capacity, drives the bill: shifting 90% of the 4 PB working set off S3 Standard turns a flat $96,468/month into a blended ~$55,000/month.
+Tiering roughly halves an already-trivial line item: shifting 90% of the 4 TB working set off S3 Standard takes $94/month to a blended ~$49/month. That is the point of the pie chart — dedup collapses 200 TB of raw layers into a few terabytes, so **storage is a rounding error and egress is the actual bill**.
 
 ### Egress cost
 
@@ -149,8 +149,9 @@ Pull-path origin egress (cache misses), 0.58 GB/s peak, ~0.06 GB/s avg:
 ```
 12,000 pushes/day → 12,000 scans/day = 0.14 scans/sec avg, ~1.4/sec peak.
 Trivy on a 200 MB image: ~20-40 s wall (layer extraction + vuln DB match).
-At 1.4/sec peak × 30 s = 42 concurrent scans needed → fleet of ~50 scan workers
-(8 vCPU each) with headroom. Vuln DB (~200 MB) cached locally, refreshed every 6 h.
+At 1.4/sec peak × 30 s = 42 concurrent scans needed; at 4 concurrent scans per
+8-vCPU worker that is ~15 worker pods (HPA cap 25 for headroom) — see §10.
+Vuln DB cached locally, refreshed every 6 h.
 ```
 
 ---
@@ -264,8 +265,8 @@ stateDiagram-v2
 
     [*] --> Pushed
     Pushed --> Scanning: async Trivy scan
-    Scanning --> ScanFailed: CRITICAL/HIGH unfixed
-    Scanning --> ScanPassed: no CRITICAL unfixed
+    Scanning --> ScanFailed: fixable CRITICAL present
+    Scanning --> ScanPassed: no fixable CRITICAL
     ScanFailed --> [*]: blocked in dev
     ScanPassed --> Signed: cosign keyless + Rekor log
     Signed --> PromotionGate: scan pass AND signature present
@@ -429,7 +430,7 @@ flowchart LR
     B --> C("Trivy worker pool")
     C --> D("scan_results<br/>Postgres")
     D --> E{"promotion gate:<br/>query scan_status"}
-    E -.->|"fail: CRITICAL/HIGH<br/>unfixed present"| F("promotion blocked")
+    E -.->|"fail: fixable<br/>CRITICAL present"| F("promotion blocked")
 
     class A io
     class C train
@@ -438,7 +439,7 @@ flowchart LR
     class F lossN
 ```
 
-Every push triggers an async scan; the gate reads `scan_status` at promotion time and blocks any digest with an unresolved CRITICAL or HIGH finding.
+Every push triggers an async scan; the gate reads `scan_status` at promotion time and blocks any digest carrying a CRITICAL finding **that has a fix available**. `--ignore-unfixed` is what makes that distinction: it drops vulnerabilities with no upstream patch, so the gate never wedges a release on something no one can act on. HIGH counts are recorded alongside but do not block.
 
 Trivy worker (Bash, runs in the worker container):
 
@@ -447,7 +448,8 @@ Trivy worker (Bash, runs in the worker container):
 set -euo pipefail
 IMAGE="$1"   # e.g. registry.internal/myapp@sha256:abc...
 
-# Pull-and-scan; --exit-code 0 so we capture findings rather than failing the worker.
+# Pull-and-scan. No --exit-code: trivy exits 0 on findings by default, so the worker
+# captures the report and lets the gate decide, rather than failing the scan job.
 trivy image \
   --severity CRITICAL,HIGH \
   --ignore-unfixed \
@@ -496,8 +498,8 @@ Keyless signing in CI binds the signature to the workflow's OIDC identity and re
 
 ```bash
 # Sign in CI (keyless: Fulcio issues a short-lived cert for the OIDC identity).
-COSIGN_EXPERIMENTAL=1 cosign sign --yes \
-  "${REGISTRY}/myapp@${DIGEST}"
+# Keyless is the default since cosign v2 — no COSIGN_EXPERIMENTAL flag needed.
+cosign sign --yes "${REGISTRY}/myapp@${DIGEST}"
 # Signature stored as an OCI referrer; entry appended to the Rekor transparency log.
 ```
 
@@ -656,7 +658,7 @@ Two non-negotiables: (1) GC is **two-phase** — mark everything across all tags
 
 - **Alternatives**: S3 object store vs EBS/local-disk filesystem driver.
 - **Rationale**: S3 gives 11-nines durability, infinite scale, and decouples blobs from registry compute (stateless API pods). Filesystem requires replicated block storage and couples capacity to node disks.
-- **Consequences**: Slightly higher per-GET latency (mitigated by regional cache + Redis manifest cache); lifecycle tiering reduces cost. Filesystem would be faster cold but operationally heavier at 4 PB.
+- **Consequences**: Slightly higher per-GET latency (mitigated by regional cache + Redis manifest cache); lifecycle tiering reduces cost. Filesystem would be faster cold but operationally heavier once a multi-terabyte working set has to stay visible to every stateless API pod.
 
 ### Decision 3: Synchronous vs asynchronous scanning
 
@@ -667,7 +669,7 @@ Two non-negotiables: (1) GC is **two-phase** — mark everything across all tags
 ### Decision 4: Pull-through cache vs full mirror replication
 
 - **Alternatives**: Lazy regional pull-through cache (fetch on miss) vs eager full mirror (replicate every image to every region).
-- **Rationale**: Pull-through for the long tail (cache only what's pulled); eager replication only for prod-critical images that must be locally present before a regional failover. Full mirroring 40 PB to 3 regions = 120 PB and huge egress.
+- **Rationale**: Pull-through for the long tail (cache only what's pulled); eager replication only for prod-critical images that must be locally present before a regional failover. Full mirroring 40 TB to 3 regions = 120 TB and huge egress.
 - **Consequences**: First pull of a rarely used image in a region pays a cross-region miss (~hundreds of ms). Acceptable for 2% of pulls; prod-critical images are pre-warmed via eager replication.
 
 ### Decision 5: GC strategy — online mark-and-sweep vs offline maintenance window
@@ -828,7 +830,7 @@ OTel span hierarchy for a pull: `pull → resolve_tag → get_manifest (Redis/Po
 
 **5. Scan backlog blocked all releases for 3 hours.** The Trivy vuln-DB refresh job failed silently for 18 hours; scans slowed to a crawl and the SQS queue grew to 4,000. Every promotion stalled because `scan_status` stayed `pending`. ~25 release pipelines were blocked. Fix: alert on vuln-DB age + queue depth, HPA on queue depth.
 
-**6. Replication egress bill spiked to $9,000/month.** Eager full-mirroring of every dev image (including ephemeral PR builds) to 3 regions generated 450 GB/day cross-region. Most of those images were pulled zero times in the other regions. Switching to pull-through for dev and eager-only for prod cut replication egress 92% to ~$720/month. Lesson: replicate on demand, not on hope.
+**6. Replication egress bill spiked to $9,000/month.** Eager full-mirroring of every dev image (including ephemeral PR builds) to 3 regions generated ~15 TB/day cross-region. Most of those images were pulled zero times in the other regions. Switching to pull-through for dev and eager-only for prod cut replication egress 92% to ~$720/month. Lesson: replicate on demand, not on hope.
 
 ---
 
@@ -849,13 +851,14 @@ Replication bandwidth    = pushes/day × new_bytes_per_push × (regions − 1) /
 ```
 Blob storage:
   images = 1,000,000 ; avg_image_size = 200 MB ; dedup_ratio = 5
-  = (1,000,000 × 200 MB) / 5 = 40,000,000 MB = 40 PB raw
-  After tiered lifecycle + 90-day retention GC, hot working set ≈ 4 PB.
+  = (1,000,000 × 200 MB) / 5 = 40,000,000 MB = 40 TB raw
+  After tiered lifecycle + 90-day retention GC, hot working set ≈ 4 TB.
 
-  Cost (4 PB hot S3 Standard): 4,194,304 GB × $0.023 = $96,468/mo
+  Cost (4 TB hot S3 Standard): 4,096 GB × $0.023 = $94/mo
   Tiered (70% IA, 20% Glacier-IR, 10% Std):
-     Std  0.4 PB × $0.023 = $9,647
-     IA   2.8 PB × $0.0125 = $36,700... → blended ≈ $55,000/mo
+     Std  409.6 GB × $0.023  = $9.42
+     IA   2,867 GB × $0.0125 = $35.84
+     GIR  819 GB   × $0.004  = $3.28   → blended ≈ $49/mo
 
 Manifest metadata:
   1,000,000 × 8 KB = 8 GB Postgres (trivial; index size dominates, ~3 GB).
@@ -876,7 +879,7 @@ Replication bandwidth:
   Egress: 12,000 × 50 MB × 2 = 1,200 GB/day × $0.02 = $24/day = $720/mo
 ```
 
-**Total infra estimate**: ~$55k storage + $3.1k pull egress + $0.7k replication + compute (registry API ~20 pods, 15 scan workers, Redis, Postgres HA) ≈ **$62-70k/month**. Routing and regional placement detailed in [`cross_cutting/multi_cluster_networking.md`](cross_cutting/multi_cluster_networking.md).
+**Total infra estimate**: ~$0.05k storage + $3.1k pull egress + $0.7k replication + compute (registry API ~20 pods, 15 scan workers at 8 vCPU, Redis, Postgres HA — roughly 210 vCPU at ~$35/vCPU-month ≈ $7.4k) ≈ **$11-12k/month**. Note what dominates: compute and egress, with storage two orders of magnitude below either. Routing and regional placement detailed in [`cross_cutting/multi_cluster_networking.md`](cross_cutting/multi_cluster_networking.md).
 
 When pull volume 10x's to 50M/day, the bottleneck is **not storage** (grows slowly) but **origin egress and manifest QPS** — scale by adding regional caches (push cache_hit toward 0.99) and Redis manifest-cache capacity, which is far cheaper than scaling origin bandwidth.
 
@@ -891,7 +894,7 @@ Because blobs are named by the SHA-256 of their content, identical layers are ph
 Serve manifests from a Redis cache fronting Postgres, since manifests are tiny (1-30 KB) and immutable by digest, so cache TTL can be long (10 min) with no staleness risk for digest lookups. Tags are mutable, so tag→digest resolution is cached separately with shorter TTL and invalidated on push. Postgres carries a read replica for the resolution queries; the actual manifest body is keyed by immutable digest and rarely misses cache.
 
 **Q: Where does the cross-region egress cost actually come from, and how do you minimize it?**
-From blob GETs that cross a region boundary at $0.02/GB; at naive scale this is 29 GB/s of origin egress. A regional pull-through cache at 98% hit ratio cuts origin egress 50x to ~0.58 GB/s because each blob crosses a region once and then serves locally forever. You replicate eagerly only for prod-critical images (failover readiness) and lazily (pull-through) for the long tail — eager-mirroring everything would balloon both storage (120 PB) and egress.
+From blob GETs that cross a region boundary at $0.02/GB; at naive scale this is 29 GB/s of origin egress. A regional pull-through cache at 98% hit ratio cuts origin egress 50x to ~0.58 GB/s because each blob crosses a region once and then serves locally forever. You replicate eagerly only for prod-critical images (failover readiness) and lazily (pull-through) for the long tail — eager-mirroring everything would balloon both storage (120 TB across the three regions) and egress.
 
 **Q: Why scan asynchronously instead of blocking the push?**
 Because Trivy takes 20-40 s and pushes must complete in seconds; blocking would add 30 s to every CI push and couple push availability to scan-worker availability. The real enforcement point is the promotion gate and the admission controller, which refuse to move or run an image whose digest hasn't passed scan. A vulnerable image may exist briefly in dev, but it can never reach prod — defense is at the gate, not the push.
@@ -906,7 +909,7 @@ With two-phase mark-and-sweep: first accumulate the full live set across all tag
 Per-principal token-bucket rate limiting in Redis: anonymous (100/6h), authenticated (5,000/6h), service accounts (metered, high). This is exactly Docker Hub's model and prevents a runaway CI loop or a single noisy tenant from consuming all origin bandwidth. The limits live at the auth layer so they apply before any blob bytes move, and CI is configured to authenticate (never pull anonymously) and to use a regional cache.
 
 **Q: Why store blobs in S3 instead of a filesystem, and what's the cost?**
-S3 gives 11-nines durability, effectively infinite capacity, and lets registry API pods stay stateless (blobs aren't on node disks). The cost is higher per-GET latency than local disk, which you erase with a Redis manifest cache and a regional blob pull-through cache. A filesystem driver is faster cold but requires replicated block storage and couples capacity to nodes — untenable at 4 PB hot working set.
+S3 gives 11-nines durability, effectively infinite capacity, and lets registry API pods stay stateless (blobs aren't on node disks). The cost is higher per-GET latency than local disk, which you erase with a Redis manifest cache and a regional blob pull-through cache. A filesystem driver is faster cold but requires replicated block storage and couples capacity to nodes — awkward once a multi-terabyte hot working set has to be visible to every API replica.
 
 **Q: How do you promote an image from dev to prod without re-uploading gigabytes?**
 Promotion is a manifest copy by digest (`crane copy dev/app@sha256:... prod/app@sha256:...`); since blobs are content-addressed and already present, only the small manifest moves and the layers are deduped. The copy is gated: the exact digest must have a passing Trivy scan and a valid cosign signature with pinned issuer/subject. Keying on the immutable digest (not the tag) prevents a re-pushed tag from sneaking an unscanned image past the gate.

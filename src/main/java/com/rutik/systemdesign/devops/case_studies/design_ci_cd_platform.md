@@ -124,7 +124,7 @@ Artifacts/job retained:      ~50 MB avg, 90-day retention
 Artifact writes/day:         800,000 × 50 MB        = 40 TB/day
 90-day artifact footprint:   40 TB × 90 × 0.4 (dedup/churn) ≈ 1.44 PB
                              (S3 Intelligent-Tiering; ~85% in IA/Glacier IR after 30d)
-Log storage (30d):           800,000 × 22 × 30 × 200 KB ≈ 105 TB
+Log storage (30d ≈ 1 month): 800,000 × 22 × 200 KB       ≈ 3.5 TB
 ```
 
 ### Cost per job (rough)
@@ -179,7 +179,7 @@ flowchart LR
         rds@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
         s3art@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
         s3cache("S3/EFS<br/>cache 6 TB")
-        logs("Loki/S3<br/>logs 105 TB")
+        logs("Loki/S3<br/>logs 3.5 TB")
         vault@{ icon: "logos:vault", form: "square", label: "Vault", pos: "b", h: 44 }
     end
 
@@ -341,21 +341,27 @@ func (s *Scheduler) dispatchTick(ctx context.Context) error {
     return nil
 }
 
-// nextRunnable returns the highest-priority job whose DAG deps are all DONE.
+// nextRunnable atomically CLAIMS the highest-priority job whose DAG deps are all DONE.
 func (s *Scheduler) nextRunnable(ctx context.Context, tenant string) (Job, bool) {
-    // SELECT ... FOR UPDATE SKIP LOCKED keeps multiple scheduler replicas
-    // from grabbing the same job — critical for HA control plane.
+    // The row lock from FOR UPDATE SKIP LOCKED only lives as long as the
+    // transaction, so a bare SELECT issued on the pool releases it the instant
+    // the implicit txn commits and two replicas can still claim the same row.
+    // Wrapping the select inside an UPDATE ... RETURNING flips the state in the
+    // same statement, which is what actually prevents double-dispatch.
     row := s.db.QueryRow(ctx, `
-        SELECT id, tenant_id, dag_node, priority
-        FROM jobs j
-        WHERE tenant_id = $1 AND state = 'pending'
-          AND NOT EXISTS (
-            SELECT 1 FROM job_deps d
-            JOIN jobs u ON u.id = d.upstream_id
-            WHERE d.job_id = j.id AND u.state != 'done')
-        ORDER BY priority DESC, created_at ASC
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1`, tenant)
+        UPDATE jobs SET state = 'dispatched'
+        WHERE id = (
+            SELECT j.id
+            FROM jobs j
+            WHERE j.tenant_id = $1 AND j.state = 'pending'
+              AND NOT EXISTS (
+                SELECT 1 FROM job_deps d
+                JOIN jobs u ON u.id = d.upstream_id
+                WHERE d.job_id = j.id AND u.state != 'done')
+            ORDER BY j.priority DESC, j.created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1)
+        RETURNING id, tenant_id, dag_node, priority`, tenant)
     var j Job
     if err := row.Scan(&j.ID, &j.TenantID, &j.DAGNode, &j.Priority); err != nil {
         return Job{}, false
@@ -364,7 +370,7 @@ func (s *Scheduler) nextRunnable(ctx context.Context, tenant string) (Job, bool)
 }
 ```
 
-`FOR UPDATE SKIP LOCKED` is the load-bearing detail: it lets 5 scheduler replicas run concurrently for HA without double-dispatching a job.
+`FOR UPDATE SKIP LOCKED` inside an `UPDATE ... RETURNING` is the load-bearing detail: the lock and the state change land in one atomic statement, so 5 scheduler replicas can run concurrently for HA without double-dispatching a job.
 
 ---
 
@@ -407,12 +413,13 @@ run_loop_broken() {
 # is destroyed and a fresh one is booted from an immutable image.
 run_once_fixed() {
   # JIT (just-in-time) registration token, single-use, 60s TTL.
-  ./config.sh --url "$CI_URL" --token "$JIT_TOKEN" \
+  ./config.sh --url "$CI_URL" --token "$JIT_TOKEN" --unattended \
               --name "$(hostname)" --ephemeral --disableupdate
 
-  # Run exactly one job; --once + --ephemeral guarantees the runner
-  # deregisters and exits after one job.
-  ./run.sh --once
+  # --ephemeral is the mechanism: the control plane deregisters the runner
+  # after exactly one job and run.sh exits. (The old --run-once/--once flag
+  # is deprecated; --ephemeral supersedes it.)
+  ./run.sh
 
   # Belt-and-suspenders: scrub anything sensitive before the kernel
   # reclaims the microVM (defense in depth; VM teardown is the real boundary).
@@ -438,7 +445,7 @@ spec:
   automountServiceAccountToken: false
   containers:
   - name: runner
-    image: registry.internal/runner:immutable-2026.06.01  # pinned digest, read-only base
+    image: registry.internal/runner@sha256:9f2c...   # pinned by digest, read-only base
     env:
     - { name: CI_URL, value: "https://ci.internal" }
     - { name: JIT_TOKEN, valueFrom: { secretKeyRef: { name: jit-tok, key: token } } }
@@ -583,8 +590,10 @@ func (b *SecretsBroker) mintJobToken(ctx context.Context, job Job) (string, erro
     if err != nil {
         return "", err
     }
-    // Vault role "ci-job" binds: bound_claims.tenant + bound_claims.env → policy
-    // path "secret/data/{tenant}/{env}/*". Tenant A can NEVER read tenant B's path.
+    // Vault role "ci-job" uses claim_mappings to copy the verified `tenant` and
+    // `env` claims into alias metadata, which the templated policy path
+    // "secret/data/{tenant}/{env}/*" then resolves against; bound_claims
+    // separately restricts who may log in. Tenant A can NEVER read tenant B's path.
     resp, err := b.vault.Logical().WriteWithContext(ctx, "auth/jwt/login", map[string]any{
         "role": "ci-job", "jwt": signed,
     })
@@ -708,7 +717,7 @@ flowchart LR
 
 Logs have two consumers with opposite needs: the UI wants a sub-2-second live tail; storage wants large batched objects, not millions of tiny writes. The pipeline forks.
 
-```yaml
+```toml
 # vector.toml — runner log sidecar config (executable-shaped).
 [sources.runner_logs]
 type = "file"
@@ -719,6 +728,7 @@ include = ["/var/log/ci/job-*.log"]
 type = "http"
 inputs = ["runner_logs"]
 uri = "http://log-gateway.ci.svc/ingest"
+encoding.codec = "text"        # required; the sink refuses to boot without it
 batch.max_events = 50          # flush every 50 lines OR...
 batch.timeout_secs = 1         # ...every 1s, whichever first → <2s tail latency
 
@@ -727,7 +737,9 @@ batch.timeout_secs = 1         # ...every 1s, whichever first → <2s tail laten
 type = "aws_s3"
 inputs = ["runner_logs"]
 bucket = "ci-logs"
+region = "us-east-1"
 key_prefix = "{{ tenant }}/{{ job_id }}/"
+encoding.codec = "text"
 compression = "gzip"
 batch.max_bytes = 10485760     # 10 MiB objects, not per-line PUTs (cost control)
 batch.timeout_secs = 60
@@ -777,8 +789,8 @@ At 800k jobs/day × ~200 KB logs, per-line S3 PUTs would be ~hundreds of million
 ### Decision 6 — Spot vs on-demand fleet
 
 - **Decision**: 80% Spot, 20% on-demand baseline, with interruption-aware draining.
-- **Alternatives**: 100% on-demand (predictable, 3× cost); 100% Spot (cheap, interruption risk).
-- **Rationale**: Jobs are short (4 min) and retryable; Spot interruption (2-min notice) is tolerable with checkpoint-and-requeue. Saves ~$1.8M/year vs on-demand at this scale.
+- **Alternatives**: 100% on-demand (predictable, ~2.2× cost); 100% Spot (cheap, interruption risk).
+- **Rationale**: Jobs are short (4 min) and retryable; Spot interruption (2-min notice) is tolerable with checkpoint-and-requeue. Saves ~$1.25M/year vs on-demand at this scale (§10).
 - **Consequences**: ~1.5% of jobs hit interruption → automatic requeue; on-demand floor guarantees the control-plane-adjacent jobs.
 
 ### Decision 7 — Per-tenant fair-share vs strict FIFO
@@ -819,7 +831,7 @@ gVisor lands in the sweet spot for the 85% of trusted jobs; Firecracker trades a
 
 ## 6. Real-World Implementations
 
-**GitHub Actions — actions-runner-controller (ARC)**. GitHub's self-hosted runner story is the Kubernetes operator `actions-runner-controller`. It uses **just-in-time (JIT) ephemeral registration tokens** so each runner registers, runs exactly one job (`--ephemeral`), and deregisters — no reuse. The newer `gha-runner-scale-set` mode listens to GitHub's Actions service via a long-poll **listener** and scales runner pods on assigned-job count rather than CPU, giving sub-30 s starts. GitHub itself runs hosted runners as fresh VMs per job on Azure, booting from a pre-baked image with ~7,000 pre-installed tools to avoid per-job install latency.
+**GitHub Actions — actions-runner-controller (ARC)**. GitHub's self-hosted runner story is the Kubernetes operator `actions-runner-controller`. It uses **just-in-time (JIT) ephemeral registration tokens** so each runner registers, runs exactly one job (`--ephemeral`), and deregisters — no reuse. The newer `gha-runner-scale-set` mode listens to GitHub's Actions service via a long-poll **listener** and scales runner pods on assigned-job count rather than CPU, giving sub-30 s starts. GitHub itself runs hosted runners as fresh VMs per job on Azure, booting from a pre-baked image carrying a large pre-installed toolchain so jobs do not pay per-job install latency.
 
 **GitLab — autoscaling executors (Docker Machine → custom)**. GitLab CI's runner historically used the `docker+machine` executor to provision ephemeral cloud VMs per job and tear them down after, with an `IdleCount` warm pool to absorb bursts. GitLab.com runs the majority of CI on GCP, and published that they process well over **2 million CI/CD jobs per day**, leaning on autoscaling and aggressive caching keyed by `cache:key:files` (lockfile-hashed) to keep hit rates high. They moved off Docker Machine to a custom autoscaler (`gitlab-runner` Next Runner Auto-scaling / Taskscaler + Fleeting) for finer Spot-aware control.
 
@@ -981,7 +993,7 @@ xychart-beta
 
 The 80/20 Spot blend cuts monthly runner compute from about $192k to about $88k — the roughly $104k/month (about $1.25M/year) gap is Decision 6's single biggest cost lever.
 
-Add ~$20k/month for cache/artifact/log storage + egress + control plane → **~$108k/month all-in**, matching the §2 per-job estimate. Node-level hardening (taints, PodDisruptionBudgets, topology spread for the runner ASG) follows [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md). FinOps levers (right-sizing, Savings Plans on the on-demand floor) are in [../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
+Add the §2 non-compute lines — ($0.0020 + $0.0008)/job × 17.6M = **~$49k/month** for cache/artifact/log storage, egress, and the control plane → **~$137k/month all-in**, within 6% of the §2 per-job estimate of ~$130k/month (§10 prices compute through the blended instance rate at U=0.75 rather than §2's flat Spot vCPU-hour, which is the whole gap). Node-level hardening (taints, PodDisruptionBudgets, topology spread for the runner ASG) follows [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md). FinOps levers (right-sizing, Savings Plans on the on-demand floor) are in [../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
 ### Autoscaler tuning
 
