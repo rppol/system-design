@@ -31,7 +31,7 @@ collisions explicitly in the module's intro — e.g. `nvidia_triton_inference_se
 (OpenAI Triton, the GPU kernel DSL). Same word, unrelated products; both files must
 say so on first mention.
 
-**Three disambiguation precedents, all by extending the slug rather than adding a marker:**
+**Four disambiguation precedents, all by extending the slug rather than adding a marker:**
 
 1. *Vendor differs from a same-named product* — spell out the full product descriptor.
    `nvidia_triton_inference_server` (2026-07) took this route rather than
@@ -59,18 +59,39 @@ say so on first mention.
    LLM translation example — but a one-token slug would be the section's first break of
    the two-token shape. The product's own name, used by its domain (`envoyproxy.io`), its
    GitHub org and its docs title, resolves all three: **`envoy_proxy`**.
+4. *Vendor and product are distinct words and the convention resolves cleanly* — just apply
+   it. `hashicorp_vault` (2026-08-04) is recorded as a precedent **because the corporate
+   owner changed without the engineering name changing**, which is the only reason it was
+   ever in doubt. IBM closed its $6.4B acquisition of HashiCorp on **2026-02-27** and the
+   product's brand is now "IBM Vault (formerly HashiCorp Vault)", with IBM named as the BUSL
+   Licensor — so `ibm_vault` is arguably the *current* name. It is still the wrong slug.
+   The repository is `hashicorp/vault`, the Go module is `github.com/hashicorp/vault`, the
+   docs domain, the Helm chart and the Terraform provider all say hashicorp, all ~20 existing
+   citations across this repo write "HashiCorp Vault", and — decisively — **the tech-bank
+   join key is the DISPLAY name** (`### HashiCorp Vault`), so renaming the slug would either
+   orphan that record or require a homonym entry for no gain. The vendor prefix also does
+   real disambiguation work here, against Azure Key Vault, Ansible Vault and
+   `spring-cloud-vault-config`, all three of which are indexed. **The rule to carry forward:
+   follow the ENGINEERING name — repo, module path, package, docs domain — not the
+   marketing or corporate-ownership name. Put the ownership fact in §1 instead**, which
+   `hashicorp_vault.md` does under `### Vendor, licence and governance`.
 
 ---
 
-## Module List — 5 Modules
+## Module List — 6 Modules
 
 Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
 and then the two serving modules as contrast pairs, with `envoy_proxy` **appended** at
 position 5. Both existing pairs share a property Envoy does not — they *run your
 workload*, while Envoy *moves traffic to* it — so inserting it anywhere in positions 1–4
-would split a pair for no gain. Appending keeps both pairs intact and **opens the third
-pair slot**: if the next technology page is another traffic/edge technology, it belongs
-at position 6, adjacent, forming the "edge and data plane" pair. Do not append blindly.
+would split a pair for no gain.
+
+`hashicorp_vault` is **appended at position 6**, and it did *not* take the "edge and data
+plane" pair slot that was being held open for another traffic technology — Vault is a
+control-plane dependency of everything, not a traffic component, so it starts a third
+domain rather than completing the second pair. That slot is therefore **still open**: a
+future traffic/edge page belongs adjacent to `envoy_proxy`, which now means inserting at
+position 6 and pushing Vault to 7, not appending at 7. Do not append blindly.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
@@ -79,6 +100,7 @@ at position 6, adjacent, forming the "edge and data plane" pair. Do not append b
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
 | [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
 | [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.39.0 |
+| [`hashicorp_vault/`](hashicorp_vault/hashicorp_vault.md) | Secrets management / identity broker | Barrier and the four-layer key hierarchy, seal/unseal and why recovery keys are not unseal keys, Integrated Storage, every secrets-engine family, the KV v2 policy trap, **leases and the lease-count arithmetic** (halving the TTL changes nothing and doubles issuance), auth methods and secret-zero, `bound_claims` vs `claim_mappings`, policies and identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, and the OpenBao delta | Vault 2.0.3, OpenBao 2.6.1 |
 
 ---
 
@@ -126,7 +148,7 @@ when that happens.
 
 **16 Q&As minimum per module** — the repo floor is 15 (root `CLAUDE.md`); this section
 standardizes one above the floor, and flagship modules go well past it when the
-technology's surface demands it (the launch modules carry 22 and 30). Format from the start: `**Q: <question>?**` bolded
+technology's surface demands it (the flagship modules carry 22, 30 and 32). Format from the start: `**Q: <question>?**` bolded
 question prefixed `Q: `, plain-text answer, first sentence a self-contained direct
 answer 15–220 characters (see root `CLAUDE.md` Interview Q&A Rules and the Game/Reader
 Q&A extraction contract — the length window and bold-question rule are load-bearing
@@ -156,10 +178,12 @@ section), so this is a deliberate omission, not a gap.
 
 **Status 2026-08-04 (owner-set):** the section reached **4 modules** with
 `temporal_durable_execution`, crossing the threshold below, and **5 modules** with
-`envoy_proxy` the same day — and the tier decision was
+`envoy_proxy` and **6 modules** with `hashicorp_vault`, all the same day — and the tier
+decision was
 **deliberately deferred** to a separate change once all four planned technology pages
-have landed. The deferral **still stands** at 5 modules; `envoy_proxy` deliberately
-carries no `<!-- study-paths -->` block. Do not read the un-tiered state as an oversight, and do not add a
+have landed. The deferral **still stands** at 6 modules; `envoy_proxy` and
+`hashicorp_vault` both deliberately
+carry no `<!-- study-paths -->` block. Do not read the un-tiered state as an oversight, and do not add a
 `<!-- study-paths -->` block to one module on its own: tiering is a section-wide
 decision plus a one-time `README.md` marker-pair setup, and doing it piecemeal produces
 a Senior path that silently advertises a partial section.

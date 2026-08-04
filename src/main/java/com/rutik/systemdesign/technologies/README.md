@@ -35,12 +35,20 @@ This section covers:
   load-balancing and locality-aware routing, outlier detection and circuit breaking as
   resource ceilings, the stats and access-log subsystems, Wasm/Lua/ext_authz/ext_proc
   extensibility, and the ecosystem of control planes built on it.
+- **Secrets Management** — HashiCorp Vault (and OpenBao): the barrier and the four-layer
+  key hierarchy, seal and unseal, Integrated Storage, every secrets-engine family, leases
+  and the arithmetic that makes a shorter TTL cost more and change nothing, auth methods
+  and the secret-zero problem, policies and identity, response wrapping, audit devices
+  that refuse rather than drop, the four Kubernetes delivery mechanisms, and the OpenBao
+  fork.
 
 **Primary stack:** Apache Airflow 3.3.0; Temporal Server 1.31.2 (with Go 1.47.0,
 Java 1.37.0, Python 1.31.0 and TypeScript 1.21.1 SDKs, and `temporal` CLI 1.8.2);
 NVIDIA Triton Inference Server (version tagged per NGC container release inside the
 module); Intel OpenVINO 2026.2 (API 2.0 `ov::` era); Envoy 1.39.0 (with Envoy Gateway
-1.8.3, Istio 1.30.3 and Gateway API 1.6.1). See each module's §1 for the exact
+1.8.3, Istio 1.30.3 and Gateway API 1.6.1); HashiCorp Vault 2.0.3 and OpenBao 2.6.1
+(with Vault Secrets Operator 1.5.0, vault-k8s 1.7.5, vault-csi-provider 1.7.3 and
+External Secrets Operator 2.8.0). See each module's §1 for the exact
 version studied and inline tags for version-specific features.
 
 See [`CLAUDE.md`](CLAUDE.md) for the scope & non-overlap boundary (why Kafka and vLLM
@@ -57,15 +65,16 @@ are *not* here), the module template, and how to add a new technology.
 | 3 | [nvidia_triton_inference_server](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU Model Serving | Advanced | Model repository + `config.pbtxt`, backends, dynamic batching, ensembles/BLS, `perf_analyzer` |
 | 4 | [intel_openvino](intel_openvino/intel_openvino.md) | CPU/Edge Inference & Optimization | Advanced | IR + `ovc`/`convert_model`, device plugins (CPU/GPU/NPU), AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, OVMS, `openvino-genai` |
 | 5 | [envoy_proxy](envoy_proxy/envoy_proxy.md) | L7 Proxy & Service-Mesh Data Plane | Advanced | Listener/filter-chain/route/cluster/endpoint model, xDS + ADS ordering, LB policies and locality/priority/panic mode, the `enforcing_*` outlier trap, circuit breaking as five ceilings, retry budgets, the seven-layer timeout stack, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc |
+| 6 | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | Secrets Management | Advanced | Barrier + four-layer key hierarchy, seal/unseal and why recovery keys cannot unseal, Integrated Storage, every secrets engine, the KV v2 `data/` policy trap, leases and the lease-count arithmetic, secret-zero and auth methods, `bound_claims` vs `claim_mappings`, policies + identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, the OpenBao delta |
 
 ---
 
 ## 3. Learning Path
 
-The five modules are **independent** — none depends on the others, so study order is a
+The six modules are **independent** — none depends on the others, so study order is a
 matter of which domain you need first, not a hard prerequisite chain. Four of them read
 best as **two contrast pairs**, and `STUDY_ORDER.technologies` is arranged that way, with
-the fifth appended because it has no partner in the section yet:
+the last two appended because neither has a partner in the section yet:
 
 - **Orchestration pair — apache_airflow ↔ temporal_durable_execution.** Both are called
   "orchestrators" and are constantly confused in interviews. Airflow schedules
@@ -76,11 +85,17 @@ the fifth appended because it has no partner in the section yet:
 - **Serving pair — nvidia_triton_inference_server ↔ intel_openvino.** GPU model serving
   against CPU/edge inference and model optimization, sharing a vocabulary (batching,
   instances, throughput/latency knees) with opposite hardware assumptions.
-- **The third pair slot, currently half-empty — envoy_proxy.** Both pairs above share a
+- **The third pair slot, still half-empty — envoy_proxy.** Both pairs above share a
   property Envoy does not: they *run your workload*. Envoy *moves traffic to* it, which
   is a third domain, so it is appended rather than inserted. If the next technology page
-  is another traffic or edge technology, it belongs at position 6, adjacent, completing
+  is another traffic or edge technology, it belongs immediately after Envoy, completing
   an "edge and data plane" pair.
+- **A fourth domain, appended — hashicorp_vault.** Vault neither runs your workload nor
+  moves traffic to it: it is the control-plane dependency that lets both start at all.
+  It did not take the edge slot, which stays open. The most useful pairing for Vault is
+  outside this section — read it against
+  [devops/secrets_management](../devops/secrets_management/secrets_management.md), which
+  owns the discipline while this module owns the product.
 
 ```
 apache_airflow  (batch orchestration: DAG runs per data interval)
@@ -96,13 +111,16 @@ intel_openvino  (CPU/edge inference & model optimization)
        |
        v  (independent — the traffic layer, not a workload runner)
 envoy_proxy  (L7 proxy / service-mesh data plane)
+       |
+       v  (independent — the credential layer everything else depends on)
+hashicorp_vault  (secrets management / identity broker)
 ```
 
 ---
 
 ## Learning Paths
 
-This section is small by design — 5 modules, each already scoped to what a senior
+This section is small by design — 6 modules, each already scoped to what a senior
 engineer needs to operate the technology in production. There is **no Senior/Principal
 tier toggle yet**: the browser learning game's Study view only shows tier tabs for
 sections present in the derived `paths.json`, and while this section has now crossed
@@ -111,16 +129,18 @@ the remaining planned technology pages land. See
 [`CLAUDE.md`](CLAUDE.md) "Learning Paths (Full-only — tiers deliberately deferred past
 the threshold)" for the reasoning and the mechanics.
 
-### Full Path (5 modules)
+### Full Path (6 modules)
 
 The complete curriculum in the order above — see [Learning Path](#3-learning-path).
-All four modules in full: every layer of Airflow's scheduler and executor internals,
+All six modules in full: every layer of Airflow's scheduler and executor internals,
 every layer of Temporal's event history, determinism constraint, timeout and failure
 taxonomy, versioning strategies and shard sizing, every layer of Triton's model
 repository, backend, and batching internals, every layer of OpenVINO's Runtime,
-device plugins, hints/streams model, and NNCF quantization, and every layer of Envoy's
+device plugins, hints/streams model, and NNCF quantization, every layer of Envoy's
 object model, xDS delivery, load-balancing and health machinery, timeout stack,
-observability subsystems and extension surfaces.
+observability subsystems and extension surfaces, and every layer of Vault's barrier and
+key hierarchy, seal mechanics, secrets engines, lease economics, auth and policy model,
+delivery mechanisms and operational playbook.
 
 ---
 
@@ -154,12 +174,18 @@ that answers them.
 | Your upstream takes 30 seconds and Envoy kills it at 15 — which timeout did that? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
 | You set a local rate limit of 100 rps and it is admitting roughly 800 — why? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
 | Is Envoy a service mesh, and which of Istio, Envoy Gateway, Contour and Consul are control planes over the same data plane? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
+| Your Vault policy grants read on `secret/app/db` and every pod still gets permission denied — why? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
+| You cut the dynamic credential TTL from 1h to 5m. What happens to Vault's lease count and its load? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
+| Vault is unsealed and healthy but returning 500 to everything — what do you check first? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
+| Someone deleted the KMS key your auto-unseal depends on. What is your recovery path? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
+| What is the difference between `vault operator rekey` and `vault operator rotate`? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
+| When would you choose OpenBao over Vault, and what actually breaks on migration? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
 
 ---
 
 ## Study Plan
 
-A 5-week plan. Each week pairs the module with related concept-section material to
+A 6-week plan. Each week pairs the module with related concept-section material to
 rehearse how the technology fits into a broader system design answer.
 
 | Week | Focus | Module | Rehearse with |
@@ -169,6 +195,7 @@ rehearse how the technology fits into a broader system design answer.
 | 3 | GPU Serving | [nvidia_triton_inference_server](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | [llm/inference_engines](../llm/inference_engines/inference_engines.md) (Triton vs vLLM/TGI-style serving stacks), [devops/ml_platform_and_gpu_infrastructure](../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) (the GPU platform Triton runs on) |
 | 4 | CPU/Edge Serving & Optimization | [intel_openvino](intel_openvino/intel_openvino.md) | [llm/optimization_and_quantization](../llm/optimization_and_quantization/optimization_and_quantization.md) (the quantization concepts NNCF implements), [ml/gpu_and_hardware_optimization](../ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) (VNNI/AMX/XMX vs Tensor Cores), [llm/vllm_deep_dive](../llm/vllm_deep_dive/vllm_deep_dive.md) (the GPU LLM-serving contrast to OpenVINO's CPU/edge LLM path) |
 | 5 | Traffic Layer & Data Plane | [envoy_proxy](envoy_proxy/envoy_proxy.md) | [backend/service_mesh_and_service_discovery](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) (the mesh pattern and Istio's CRD surface over this data plane), [backend/api_gateway_patterns](../backend/api_gateway_patterns/api_gateway_patterns.md) (the gateway pattern Envoy implements), [devops/kubernetes_networking](../devops/kubernetes_networking/kubernetes_networking.md) (Gateway API, whose implementations are mostly Envoy), [hld/load_balancing](../hld/load_balancing/load_balancing.md) (the algorithms behind Envoy's LB policies) |
+| 6 | Secrets & Credential Brokering | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | [devops/secrets_management](../devops/secrets_management/secrets_management.md) (the discipline this module's product implements — read it first, and note the deliberate non-overlap table in §1), [devops/kubernetes_security](../devops/kubernetes_security/kubernetes_security.md) (RBAC and etcd encryption, which is what VSO's native Secrets depend on), [backend/auth_and_authorization_systems](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) (the OIDC and JWT mechanics behind Vault's `jwt` auth), [devops/infrastructure_as_code_terraform](../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (how mounts, roles and policies should actually be managed) |
 
 ---
 
@@ -181,6 +208,9 @@ rehearse how the technology fits into a broader system design answer.
 | NVIDIA Triton Inference Server | Tagged per NGC container release inline (e.g. `24.05-py3`) | Triton does not gate features by simple semver — the module tags each version-specific flag/default against the NGC release it shipped in |
 | Intel OpenVINO | 2026.2 | API 2.0 (`ov::` / top-level `openvino` package) — the legacy `InferenceEngine::` API was removed in 2024.0 and the Model Optimizer (`mo`) CLI in 2025.0; NPU plugin is 2023.2+, `openvino-genai` 2024.2+. Features are tagged inline against the release they landed in |
 | Envoy | 1.39.0 (2026-07-14) | Apache 2.0, CNCF graduated. Quarterly releases on the 15th with roughly 12 months of support per line, so 1.39, 1.38, 1.37 and 1.36 are current; 1.40.0 is due 2026-10-13. Dynamic Modules landed `[1.34]` and expanded substantially in `[1.39]`. Ecosystem versions studied: Gateway API 1.6.1, Istio 1.30.3 (ambient GA in `[Istio 1.24]`), Envoy Gateway 1.8.3, Contour 1.33.5, Envoy AI Gateway 1.0 |
+| HashiCorp Vault | 2.0.3 (2026-06-17), on the 2.0 line GA'd 2026-04-14 | **BUSL 1.1**, source-available, with the Licensor now **International Business Machines Corporation (IBM)** after the $6.4B acquisition closed 2026-02-27 — the brand is "IBM Vault (formerly HashiCorp Vault)" while the repo, Go module, docs domain, Helm chart and Terraform provider all still say hashicorp. Change Date +4 years, Change License MPL 2.0. Supported lines: 2.0.x, 1.21.x, 1.20.x, 1.19.x. `[2.0]` made `sys/rekey`, `sys/generate-root` and the DR operation-token endpoint **authenticated**, made `LIST` with a trailing slash respect a more-specific deny, prohibited globs in rendered identity-template output, and rejected non-canonical paths |
+| OpenBao | 2.6.1 (2026-07-22) | **MPL 2.0**, Linux Foundation. API-compatible at the fork point and diverging on operational surface: `[OpenBao 2.6]` removed `stored_shares` from `sys/init` and `sys/rekey/init`, runs containers as the unprivileged `openbao` user rather than root, deprecated the built-in `awskms`/`azurekeyvault`/`gcpckms`/`pkcs11` seals for removal in 2.7.0, and deprecated `file` storage. No Enterprise features at all — no namespaces, replication, HSM seals, Seal HA, performance standbys or lease-count quotas |
+| Vault Kubernetes ecosystem | VSO 1.5.0, vault-k8s 1.7.5, vault-csi-provider 1.7.3, ESO 2.8.0 | The four delivery mechanisms are compared in `hashicorp_vault` §4.9, §6.19–§6.20 and §8.5. ESO 2.8.0 serves `external-secrets.io/v1`; `[ESO 0.17]` stopped serving `v1beta1` |
 
 ---
 
@@ -217,4 +247,6 @@ see [`CLAUDE.md`](CLAUDE.md) for the record contract.
 - [`backend/service_mesh_and_service_discovery`](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) and [`backend/api_gateway_patterns`](../backend/api_gateway_patterns/api_gateway_patterns.md) — the mesh and gateway *patterns*, plus Istio's CRD authoring surface. `envoy_proxy` owns the data plane underneath both: the object model, the xDS protocol, the configuration defaults and the failure modes. If a `VirtualService` block ever appears in `envoy_proxy.md`, the boundary has been crossed.
 - [`hld/load_balancing`](../hld/load_balancing/load_balancing.md), [`hld/consistent_hashing`](../hld/consistent_hashing/consistent_hashing.md) and [`backend/fault_tolerance_patterns`](../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) — load-balancing algorithms and circuit-breaker theory; `envoy_proxy` owns only Envoy's knobs on them (`choice_count`, the 65537-entry Maglev table, the five circuit-breaker ceilings).
 - [`devops/kubernetes_networking`](../devops/kubernetes_networking/kubernetes_networking.md) — Ingress, Gateway API, CNI and kube-proxy; `envoy_proxy` explains why nearly every Gateway API implementation is the same binary underneath.
+- [`devops/secrets_management`](../devops/secrets_management/secrets_management.md) — the secrets-management *discipline*: the four questions, static vs dynamic as a concept, the Kubernetes delivery patterns as patterns (including `kubeseal` and `sops`), the exposure-window arithmetic, secret scanning, secrets in Terraform state, and IRSA as the general secret-zero answer. `hashicorp_vault` owns the inside of the product and re-derives none of it; the non-overlap table is in that module's §1. If an exposure-window formula or a `kubeseal` command ever appears in `hashicorp_vault.md`, the boundary has been crossed.
+- [`devops/kubernetes_security`](../devops/kubernetes_security/kubernetes_security.md) and [`backend/auth_and_authorization_systems`](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) — RBAC and etcd encryption-at-rest (what a VSO-written native Secret actually rests on), and the OIDC/JWT mechanics underneath Vault's `jwt` auth method.
 - [`backend/kafka_deep_dive`](../backend/kafka_deep_dive/kafka_deep_dive.md) — an example of a technology already owned by a concept section (why it isn't duplicated here).

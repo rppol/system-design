@@ -58,7 +58,7 @@ In Kubernetes specifically, native `Secret` objects are only **base64-encoded (n
 
 | Tool | Dynamic secrets | Rotation | K8s integration | Notable |
 |------|-----------------|----------|-----------------|---------|
-| HashiCorp Vault | Yes (DB, AWS, PKI, SSH) | Lease-based + rotation | Vault Agent / CSI / ESO | Most powerful; self-hosted ops cost; BUSL source-available |
+| HashiCorp Vault | Yes (DB, AWS, PKI, SSH) | Lease-based + rotation | Vault Agent / CSI / ESO | Most powerful; self-hosted ops cost; BUSL source-available — internals in [technologies/hashicorp_vault](../../technologies/hashicorp_vault/hashicorp_vault.md) |
 | OpenBao | Yes (same engines as the fork point) | Lease-based + rotation | Vault Agent / CSI / ESO | Linux Foundation fork of Vault under MPL 2.0; API-compatible |
 | AWS Secrets Manager | No (rotation via Lambda) | Built-in (RDS rotation) | ESO / Secrets Store CSI | Native AWS, $0.40/secret/mo + $0.05 per 10k API calls |
 | GCP Secret Manager | No | Manual/scheduled | ESO / CSI | Versioned, IAM-scoped |
@@ -189,6 +189,8 @@ The overlap state is the whole trick: key_v2 is provisioned and traffic migrates
 ## 6. How It Works — Detailed Mechanics
 
 ### Vault dynamic database secrets (mint-on-demand, auto-revoke)
+
+*Vault's own internals — the barrier and seal, every secrets engine, leases and the lease-count arithmetic, auth methods, policies, identity, Agent/VSO/CSI and the OpenBao fork — live in [technologies/hashicorp_vault](../../technologies/hashicorp_vault/hashicorp_vault.md). What follows is the pattern, not the product.*
 
 ```bash
 # 1) Configure the database secrets engine once (admin)
@@ -446,7 +448,7 @@ spec:
 
 | Tool | Purpose |
 |------|---------|
-| HashiCorp Vault | Central secrets, dynamic secrets, PKI, transit encryption |
+| HashiCorp Vault | Central secrets, dynamic secrets, PKI, transit encryption — internals in [technologies/hashicorp_vault](../../technologies/hashicorp_vault/hashicorp_vault.md) |
 | OpenBao | MPL-2.0 Linux Foundation fork of Vault; API-compatible drop-in |
 | AWS Secrets Manager | Managed AWS secret store with built-in rotation |
 | GCP Secret Manager / Azure Key Vault | Cloud-native managers (GCP/Azure) |
@@ -643,4 +645,4 @@ The fix shrank the blast radius twelvefold: the old shared password compromised 
 
 ---
 
-**Cross-references:** [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (keeping secrets out of state), [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md) (ESO/Sealed Secrets/SOPS in GitOps), [configuration_management](../configuration_management/configuration_management.md) (secrets in playbooks vs runtime fetch), [kubernetes_security](../kubernetes_security/kubernetes_security.md) (RBAC, etcd encryption for Secrets), [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) (secret scanning in the pipeline), [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (IAM roles / IRSA as the auth anchor).
+**Cross-references:** [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (keeping secrets out of state), [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md) (ESO/Sealed Secrets/SOPS in GitOps), [configuration_management](../configuration_management/configuration_management.md) (secrets in playbooks vs runtime fetch), [kubernetes_security](../kubernetes_security/kubernetes_security.md) (RBAC, etcd encryption for Secrets), [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) (secret scanning in the pipeline), [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (IAM roles / IRSA as the auth anchor), [technologies/hashicorp_vault](../../technologies/hashicorp_vault/hashicorp_vault.md) (the product deep dive — barrier and seal, every secrets engine, leases and the lease-count arithmetic, policies and identity, Agent/VSO/CSI, and the OpenBao fork).

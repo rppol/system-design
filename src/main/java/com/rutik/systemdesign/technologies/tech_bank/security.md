@@ -1985,6 +1985,16 @@ It is organized as secrets engines rather than one flat store: KV for static sec
 
 Reach for it when credentials must be short-lived and centrally revocable instead of long-lived environment variables copied between systems; the dynamic-credential model means a leaked secret expires on its own. The costs are that unsealing, key rotation, and storage backend health become your problem, and that Vault sits on the critical path of everything that needs a credential — which is why it is run highly available.
 
+### Vault Agent
+**Short:** Client-side Vault daemon that authenticates for your app, caches tokens and leases, and renders secrets into files.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, platform-delivery/kubernetes-and-orchestration @2
+
+It does three separable jobs. Auto-auth logs in with a platform identity — a Kubernetes service-account token, a cloud instance identity, an AppRole `secret_id` — keeps the resulting token renewed and writes it to a sink file, so the application never implements a login flow. Caching proxies the Vault API from `localhost` and shares one upstream connection across every process on the host. Templating renders secrets into files through the `consul-template` language and renews the underlying leases as they age.
+
+Reach for it to put existing applications on Vault with no code change, on virtual machines as readily as in a pod, and set `exit_after_auth` to run it as an init container that fetches once and exits. The trap to plan around is that re-rendering a file does not restart the process holding the old value, so use the template stanza's `command` field to reload or signal the application. Vault Proxy is the same auto-auth and caching without the templating engine, when that is all you need.
+
 ### Vault Agent Injector
 **Short:** Kubernetes mutating webhook that adds a Vault Agent init/sidecar to pods so secrets land as files, not env vars.
 **Kind:** tech
@@ -1994,6 +2004,16 @@ Reach for it when credentials must be short-lived and centrally revocable instea
 The injector is a mutating admission webhook watching for agent-inject annotations on a pod. When it sees them it rewrites the pod spec to add a Vault Agent init container that fetches secrets before the application starts and a sidecar that keeps them fresh, authenticating with the pod's Kubernetes service-account token. The agent renders values through a template into a shared in-memory volume under `/vault/secrets`, so the application reads a file and needs no Vault client library at all.
 
 Reach for it to bring existing applications onto Vault without code changes, and for dynamic credentials where the sidecar renews the lease. Weigh the costs: an extra container in every pod, an annotation-driven templating language that becomes its own configuration surface, and the fact that a re-rendered file does not restart the process, so the application must reread it or you must trigger a rollout. The Secrets Store CSI driver with the Vault provider is lighter when you only need static values mounted.
+
+### Vault Secrets Operator
+**Short:** Kubernetes controller that syncs Vault secrets into native Secrets via CRDs, with no sidecar in your pods.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, platform-delivery/kubernetes-and-orchestration @2
+
+It replaces the per-pod sidecar with one cluster controller and a set of custom resources: `VaultAuth` says how to authenticate, and `VaultStaticSecret`, `VaultDynamicSecret` and `VaultPKISecret` name what to fetch and which Kubernetes Secret to write. The controller renews leases on the workload's behalf and, through `rolloutRestartTargets`, restarts the consuming Deployment when a value changes — which is the piece the sidecar approach leaves to the application.
+
+Reach for it as the default for new Kubernetes deployments on Vault: a declarative Kubernetes-shaped API, no extra container in every pod, and an answer to the rotation problem that does not assume the application rereads its configuration files. The cost is that the value lands in a native Secret and therefore in etcd, so it is only as protected as your RBAC and encryption at rest — the injector and the CSI provider deliberately avoid creating one.
 
 ### Vec2Text
 **Short:** Embedding-inversion toolkit that reconstructs source text from vectors, used to red-team vector stores.
