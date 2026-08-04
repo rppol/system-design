@@ -134,7 +134,7 @@ live K8s objects/app ≈ 12 (Deploy, Svc, Ingress, HPA, CM, Secret, SA, 2×RBAC,
 total live objects   = 2,000 × 12 = 24,000 objects under management
 ```
 
-We round NFR2 to "~25,000 managed objects." That's the number the controller's informer caches must hold in memory and re-diff each interval.
+We round the reconcile-coverage NFR to "~25,000 managed objects." That's the number the controller's informer caches must hold in memory and re-diff each interval.
 
 ### Reconcile throughput
 
@@ -166,13 +166,13 @@ This is why repo-server caching and shallow clones matter — a cold `git clone`
 ```
 deployments/day        = 500 apps × ~0.6 deploys/day = ~300 deploys/day
 prod deploys/day       ≈ 100 (the rest are dev/staging)
-canary steps           = 5% → 25% → 50% → 75% → 100% (5 steps)
-analysis window/step   = 5 min (need enough requests for stable metrics)
-total canary duration  = 5 steps × 5 min = 25 min/prod release
-concurrent prod canaries = 100/day over ~10 active hours ≈ 10/hr → ~4 in-flight on average
+canary weights         = 5% → 25% → 50% → 100% (3 analysis pauses between them)
+analysis window/pause  = 5 min (need enough requests for stable metrics)
+total canary duration  = 3 pauses × 5 min = 15 min/prod release
+concurrent prod canaries = 100/day over ~10 active hours ≈ 10/hr × 0.25 hr ≈ 2.5 in-flight
 ```
 
-Metric stability sanity check: at 5% traffic, a service doing 2,000 req/s sends **100 req/s to the canary**. Over a 5-min window that's **30,000 requests** — enough for a stable error-rate estimate (95% CI width ≈ ±0.25% at p=1% error). At 50 req/s a service, 5% = 2.5 req/s → only 750 requests/window → noisy; such low-traffic apps need longer windows or synthetic load (see §8 promotion math).
+Metric stability sanity check: at 5% traffic, a service doing 2,000 req/s sends **100 req/s to the canary**. Over a 5-min window that's **30,000 requests** — enough for a stable error-rate estimate (95% CI half-width ≈ ±0.11% at p=1% error). A 50 req/s service at 5% weight gets 2.5 req/s → only 750 requests/window → noisy; such low-traffic apps need longer windows or synthetic load (see §8 promotion math).
 
 ### Webhook vs. poll
 
@@ -305,7 +305,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Root(Root Application<br/>app-of-apps) -->|"syncs a directory of"| AppSet{"ApplicationSet<br/>payments"}
-    AppSet -->|"matrix generator:<br/>clusters × overlays"| Dev(Application<br/>payments-dev)
+    AppSet -->|"matrix: overlay dirs<br/>× clusters with that env"| Dev(Application<br/>payments-dev)
     AppSet --> Staging(Application<br/>payments-staging)
     AppSet --> ProdUS(Application<br/>payments-prod-us)
     AppSet --> ProdEU(Application<br/>payments-prod-eu)
@@ -329,25 +329,29 @@ spec:
   generators:
     - matrix:
         generators:
-          # Generator A: every cluster labelled env=prod or env=staging
+          # Generator A: one entry per overlay directory that exists in the repo
+          - git:
+              repoURL: https://git.internal/platform/apps.git
+              revision: main
+              directories:
+                - path: 'apps/payments/overlays/*'
+          # Generator B: only clusters whose env label matches that overlay.
+          # A matrix interpolates A's parameters into B, so this is a filter,
+          # not a full cross-product — dev overlays never land on prod clusters.
           - clusters:
               selector:
-                matchLabels: { managed-by: argocd }
-          # Generator B: the overlay paths inside the repo
-          - list:
-              elements:
-                - overlay: dev
-                - overlay: staging
-                - overlay: prod
+                matchLabels:
+                  managed-by: argocd
+                  env: '{{.path.basename}}'
   template:
     metadata:
-      name: 'payments-{{.values.overlay}}-{{.name}}'   # name + cluster name
+      name: 'payments-{{.path.basename}}-{{.name}}'   # overlay + cluster name
     spec:
       project: payments
       source:
         repoURL: https://git.internal/platform/apps.git
         targetRevision: main
-        path: 'apps/payments/overlays/{{.values.overlay}}'
+        path: '{{.path.path}}'
       destination:
         server: '{{.server}}'
         namespace: payments
@@ -401,6 +405,8 @@ metadata:
 
 ArgoCD blocks wave N+1 until every resource in wave N is `Healthy`. A failed PreSync migration Job aborts the whole sync — the new Deployment never rolls against an unmigrated schema.
 
+Waves order resources *within* a phase, not across phases: ArgoCD runs all PreSync hooks to completion, then the Sync phase, then PostSync. So the wave `-1` migration Job above actually executes **before** the wave `-2` CRD, because a PreSync hook outranks any Sync-phase wave. If the CRD must exist before the migration runs, make the CRD a PreSync hook too and order the two with waves inside that phase.
+
 ### 4.3 Argo Rollouts canary with AnalysisTemplate — BROKEN → FIX
 
 This is where most teams get burned. Here is a canary that **looks** safe but silently promotes broken releases.
@@ -440,7 +446,7 @@ spec:
 
 Two defects:
 1. The canary uses **time-based `pause` only** — it never references the analysis at all, so even a template with a failure condition would be ignored.
-2. The `AnalysisTemplate` defines a query but **no `successCondition` and no `failureCondition`**, so Argo Rollouts has no rule to evaluate against; an `AnalysisRun` with measurements but no condition is treated as `Successful`. A release returning 100% HTTP 500s promotes to 100% traffic. Real outage shape: 4 minutes of total payment failure before someone notices.
+2. The `AnalysisTemplate` defines a query but **no `successCondition` and no `failureCondition`**, so Argo Rollouts has no rule to evaluate against; a measurement with neither condition set is recorded as `Successful` unless the provider itself errors. A release returning 100% HTTP 500s promotes to 100% traffic. Real outage shape: two 60s pauses put the broken build on **100% of payment traffic 2 minutes after the sync**, where it stays until a human notices (the §9 war story: 8 minutes end to end).
 
 **FIX:**
 
@@ -468,9 +474,13 @@ spec:
         - setWeight: 50
         - pause: { duration: 5m }
         - setWeight: 100
+      canaryService: payments-canary   # required whenever trafficRouting is set
+      stableService: payments-stable
       trafficRouting:
         istio:
-          virtualService: { name: payments-vs }
+          virtualService:
+            name: payments-vs
+            routes: [primary]
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
@@ -480,11 +490,11 @@ spec:
     - name: service
   metrics:
     - name: success-rate
-      interval: 30s
-      count: 8                        # 8 measurements over the step window
+      interval: 30s                   # no count: a background run measures for the
+                                      # whole rollout, not just one step
       successCondition: result[0] >= 0.99      # FIX: explicit pass rule
       failureCondition: result[0] <  0.95      # FIX: explicit hard fail
-      failureLimit: 2                 # 2 consecutive failures → abort the rollout
+      failureLimit: 2                 # tolerate 2 failed measurements; the 3rd aborts
       provider:
         prometheus:
           address: http://prometheus.monitoring:9090
@@ -493,7 +503,6 @@ spec:
             / sum(rate(http_requests_total{job="{{args.service}}"}[2m]))
     - name: p99-latency
       interval: 30s
-      count: 8
       successCondition: result[0] <= 0.300     # 300ms p99 ceiling
       failureCondition: result[0] >  0.500
       failureLimit: 2
@@ -506,7 +515,7 @@ spec:
               by (le))
 ```
 
-Now the rollout is metric-gated: two consecutive measurements below 95% success **or** above 500ms p99 abort the rollout, scale the canary to 0, and route 100% back to stable — all without human action, satisfying NFR6 (< 2 min rollback). The `failureLimit: 2` prevents a single noisy scrape from aborting a healthy release.
+Now the rollout is metric-gated: the background `AnalysisRun` measures every 30s for the life of the rollout, and the **third** measurement below 95% success **or** above 500ms p99 fails the metric (`failureLimit: 2` tolerates two), aborting the rollout, scaling the canary to 0, and routing 100% back to stable — all without human action. Worst case that is three 30s intervals ≈ 90s from first breach to abort, inside NFR6's 2-minute rollback. Note `failureLimit` counts failures *cumulatively* across the run, not consecutively, so a flapping metric still trips it; `consecutiveErrorLimit` is the separate knob for provider errors (Prometheus unreachable).
 
 ```mermaid
 stateDiagram-v2
@@ -527,11 +536,11 @@ stateDiagram-v2
     state "Healthy<br/>Synced" as Healthy
 
     Weight5 --> Weight25: pass, 5m window
-    Weight5 --> Aborted: fail x2 running
+    Weight5 --> Aborted: 3rd failed measurement
     Weight25 --> Weight50: pass, 5m window
-    Weight25 --> Aborted: fail x2 running
+    Weight25 --> Aborted: 3rd failed measurement
     Weight50 --> Weight100: pass, 5m window
-    Weight50 --> Aborted: fail x2 running
+    Weight50 --> Aborted: 3rd failed measurement
     Weight100 --> Healthy: promote
 
     Healthy --> [*]
@@ -542,13 +551,13 @@ stateDiagram-v2
     class Aborted lossN
 ```
 
-*The FIX turns each canary step into a gated state transition: two consecutive `failureCondition` breaches at any weight abort to the untouched stable ReplicaSet in under 2 minutes (NFR6), while the BROKEN version had no such gate and could only ever reach Healthy.*
+*The FIX turns each canary step into a gated state transition: the third `failureCondition` breach at any weight aborts to the untouched stable ReplicaSet in under 2 minutes (NFR6), while the BROKEN version had no such gate and could only ever reach Healthy.*
 
 ### 4.4 Drift detection & self-heal — BROKEN → FIX (the PVC-deleting prune)
 
 Self-heal reverts manual changes; prune deletes objects no longer in Git. Combined carelessly they can **delete stateful data**.
 
-**BROKEN:** an app sets `prune: true, selfHeal: true` and the team manually creates a PVC via `kubectl` during an incident (to attach a debug volume). On the next reconcile, ArgoCD sees the PVC is not in Git and **prunes it** — taking the bound PV and its data with it if the StorageClass `reclaimPolicy: Delete`.
+**BROKEN:** an app sets `prune: true, selfHeal: true` and during an incident the team hand-applies a PVC copied from the app's own claim manifest — so it carries the `app.kubernetes.io/instance` tracking label. On the next reconcile ArgoCD sees an object it believes it owns that is **not** in Git, marks it extraneous, and **prunes it** — taking the bound PV and its data with it if the StorageClass has `reclaimPolicy: Delete`. The tracking label is the whole mechanism: a PVC created from scratch with no tracking label is invisible to the app and never pruned, which is exactly why the copy-paste is the dangerous move. The same trap fires without any human when a chart bump *renames* a claim — the old name leaves Git and prune collects it.
 
 ```yaml
 syncPolicy:
@@ -655,7 +664,7 @@ func (c *Controller) reconcile(app *Application) {
 | Model | Central control plane + UI | Per-cluster CRDs, no UI | Pipeline engine, heavy |
 | Multi-cluster fan-out | ApplicationSet (strong) | Kustomize + cluster API (manual) | Native but complex |
 | Drift detection | First-class | First-class | Weak |
-| Progressive delivery | Argo Rollouts | Flagger | Built-in (deck) |
+| Progressive delivery | Argo Rollouts | Flagger | Kayenta (automated canary analysis) |
 | Operational weight | Medium | Light | Heavy |
 | Best fit here | **Primary** | Edge/per-cluster | Legacy multi-cloud |
 
@@ -678,7 +687,7 @@ func (c *Controller) reconcile(app *Application) {
 
 - **Red Hat OpenShift GitOps.** Ships ArgoCD as a supported Operator (OpenShift GitOps), giving enterprises a vendor-backed control plane with RBAC integrated into OpenShift SSO. This is how many regulated shops adopt ArgoCD without self-operating it.
 
-- **Weaveworks / Flux.** Weaveworks coined "GitOps" (2017) and built Flux + Flagger. Flagger pioneered the Flagger-style canary with automated metric analysis and webhooks for load testing during analysis windows — the conceptual ancestor of the AnalysisTemplate in §4.3. Flux is now CNCF-graduated and runs the per-cluster GitOps model at organizations preferring no central UI.
+- **Weaveworks / Flux.** Weaveworks coined "GitOps" (2017) and built Flux and Flagger. Flagger pioneered the fully declarative canary — automated metric analysis plus webhooks that drive load tests during the analysis window — the conceptual ancestor of the AnalysisTemplate in §4.3. Weaveworks itself wound down in 2024; both projects continue under the CNCF (Flux graduated in 2022), maintained by the community, and Flux still runs the per-cluster GitOps model at organizations preferring no central UI.
 
 - **Codefresh (now Octopus).** Built a commercial ArgoCD distribution (GitOps Cloud) adding dashboards across many ArgoCD instances, runtime metrics, and a hosted control plane — addressing the "single control plane is a blast radius" concern from Decision 1 by federating multiple ArgoCD installs.
 
@@ -744,18 +753,18 @@ flowchart LR
     Span(("analysis_run.start<br/>span")) --> Step(("payments<br/>canary step=5%"))
     Step --> M1(success-rate<br/>sum 2xx/3xx / total)
     Step --> M2(p99-latency<br/>histogram_quantile over le)
-    Step --> M3(rollout_phase<br/>Progressing/Paused/Degraded/Healthy)
+    Step --> M3(rollout_info phase label<br/>Progressing/Paused/Degraded/Healthy)
 
     class Span io
     class Step mathOp
     class M1,M2,M3 base
 ```
 
-*Each AnalysisRun step emits one span with three child metrics — success-rate and p99-latency gate promotion, while rollout_phase reports controller state for alerting.*
+*Each AnalysisRun step emits one span with three child metrics — success-rate and p99-latency gate promotion, while the `rollout_info` phase label reports controller state for alerting.*
 
 Required labels: `app`, `version` (stable vs. canary — this is the dimension the query splits on), `cluster`, `rollout_step`. **Watch cardinality:** `version` is a per-release churning label; if you also add `pod`, `commit_sha`, and `replicaset`, the series count for one app explodes to thousands and Prometheus OOMs across 500 apps. Keep canary-comparison labels to `{app, version, cluster}` and drop high-churn ones at scrape time — the cardinality budget and relabeling rules are in [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
 
-Export Argo Rollouts' own `/metrics`: `rollout_info`, `rollout_phase`, `analysis_run_metric_phase` — alert on `analysis_run_metric_phase{phase="Error"}` (the analysis itself failing, e.g. Prometheus unreachable, which would otherwise stall a rollout).
+Export Argo Rollouts' own `/metrics`: `rollout_info` (carries the `phase` label), `rollout_info_replicas_available`, `analysis_run_metric_phase` — alert on `analysis_run_metric_phase{phase="Error"}` (the analysis itself failing, e.g. Prometheus unreachable, which would otherwise stall a rollout).
 
 ### (c) Runbooks
 
@@ -787,9 +796,9 @@ Export Argo Rollouts' own `/metrics`: `rollout_info`, `rollout_phase`, `analysis
 
 ## 9. Common Pitfalls & War Stories
 
-1. **The non-failing canary (anonymized fintech, ~$180k).** A team shipped the §4.3 BROKEN config — analysis template with no `failureCondition`. A release that returned 100% HTTP 500 on the payments path promoted straight to 100% over 8 minutes of time-based pauses. **Impact:** ~8 min of total payment-API outage, ~$180k in failed transactions and ~6,000 affected checkouts. Root cause: AnalysisRun always `Successful` with no condition. Fix: mandatory `failureCondition` lint in CI; added `failureLimit: 2`.
+1. **The non-failing canary (anonymized fintech, ~$180k).** A team shipped the §4.3 BROKEN config — analysis template with no `failureCondition`. A release that returned 100% HTTP 500 on the payments path walked its two 60s time-based pauses to 100% traffic in 2 minutes and sat there for another 6 while on-call diagnosed it. **Impact:** ~8 min of total payment-API outage, ~$180k in failed transactions and ~6,000 affected checkouts. Root cause: AnalysisRun always `Successful` with no condition. Fix: mandatory `failureCondition` lint in CI; added `failureLimit: 2`.
 
-2. **Prune ate the database (anonymized SaaS, 90 min downtime).** `prune: true` plus a hand-created PVC during an incident; next reconcile pruned the PVC with `reclaimPolicy: Delete`, destroying a 40 GB Postgres volume. **Impact:** 90 min restore from snapshot, ~12,000 users degraded. Fix: `Prune=false` annotation on all PVCs + `reclaimPolicy: Retain` (see §4.4).
+2. **Prune ate the database (anonymized SaaS, 90 min downtime).** `prune: true` plus a PVC hand-applied during an incident from a copy of the app's own manifest — so it carried the tracking label and counted as extraneous; the next reconcile pruned it with `reclaimPolicy: Delete`, destroying a 40 GB Postgres volume. **Impact:** 90 min restore from snapshot, ~12,000 users degraded. Fix: `Prune=false` annotation on all PVCs + `reclaimPolicy: Retain` (see §4.4).
 
 3. **Reconcile thundering herd (platform team, 30 min control-plane down).** A single ArgoCD application-controller managed 1,800 apps; a Redis cache flush forced full re-render of every app at once, pegging repo-server CPU and stalling all syncs for 30 min. **Impact:** no deploys org-wide for half an hour during a release freeze deadline. Fix: shard to 10 controllers (§10), size Redis for the full manifest set, stagger reconciles.
 
@@ -863,7 +872,7 @@ ApplicationSet with generators. A matrix generator crosses a `clusters` generato
 The metric gate. Shifting 5% → 100% with time-based pauses alone promotes broken releases on schedule (the §4.3 BROKEN case). Safety comes from an AnalysisTemplate with explicit `successCondition` *and* `failureCondition`, a `failureLimit` to ignore single noisy scrapes, enough requests per window for statistical significance, and traffic routing wired so abort actually resets weights. Without the failure condition the AnalysisRun can never fail.
 
 **Q4. How fast can you roll back, and what triggers it?**
-Sub-2-minute automated rollback. During canary, an AnalysisRun queries Prometheus every 30s; two consecutive measurements past `failureCondition` (e.g. <95% success or >500ms p99) abort the rollout — scale canary to 0 and route 100% to the untouched stable ReplicaSet. Because stable was never removed, rollback is just a traffic-weight reset, not a redeploy, so it completes in seconds.
+Sub-2-minute automated rollback. During canary, an AnalysisRun queries Prometheus every 30s; with `failureLimit: 2` the third measurement past `failureCondition` (e.g. <95% success or >500ms p99) fails the metric and aborts the rollout — scale canary to 0 and route 100% to the untouched stable ReplicaSet. That is ≈90s of measurements in the worst case. Because stable was never removed, rollback is just a traffic-weight reset, not a redeploy, so it completes in seconds.
 
 **Q5. Self-heal: when do you turn it off?**
 On for stateless prod apps (it enforces Git as truth and kills config drift). Off — or alert-only — for stateful resources, HPA-managed replica counts, and break-glass namespaces. Two classic failures: self-heal fighting the HPA over `spec.replicas` (fix with `ignoreDifferences`), and self-heal + prune deleting a hand-created PVC's data. Always pair prune with `Prune=false` annotations on stateful objects and `reclaimPolicy: Retain`.

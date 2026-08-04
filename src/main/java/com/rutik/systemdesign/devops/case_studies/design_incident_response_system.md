@@ -19,7 +19,7 @@
 3. **Route & page** — map an incident to an on-call schedule, find who is on call *right now*, and deliver via push → SMS → voice with escalation if unacked.
 4. **Coordinate & learn** — open a ChatOps incident channel, assign an Incident Commander, track timeline, and feed a blameless postmortem with MTTD/MTTR analytics.
 
-**Why this system exists.** Without it, a 2000-engineer org drowns. A single bad deploy fires 8,000 alerts in 3 minutes; engineers get paged 50 times for one root cause; the right expert is asleep and nobody escalates; and three weeks later nobody can reconstruct what happened. The IR platform exists to (a) protect human attention (alert fatigue is the #1 cause of missed real pages), (b) guarantee a deterministic, audited path from "something broke" to "the right human is awake and acting," and (c) turn every incident into measurable learning (MTTD, MTTR, error-budget burn). It is the connective tissue between observability (which produces signal) and humans (who fix things). The organizational practices that wrap this platform — severity taxonomy, IC roles, blameless culture — are covered in `../incident_management_and_oncall/README.md`; this case study designs the *platform* those practices run on, and the alert-generation layer it consumes is covered in `../visualization_and_alerting/README.md`.
+**Why this system exists.** Without it, a 2000-engineer org drowns. A single bad deploy fires 8,000 alerts in 3 minutes; engineers get paged 50 times for one root cause; the right expert is asleep and nobody escalates; and three weeks later nobody can reconstruct what happened. The IR platform exists to (a) protect human attention (alert fatigue is the #1 cause of missed real pages), (b) guarantee a deterministic, audited path from "something broke" to "the right human is awake and acting," and (c) turn every incident into measurable learning (MTTD, MTTR, error-budget burn). It is the connective tissue between observability (which produces signal) and humans (who fix things). The organizational practices that wrap this platform — severity taxonomy, IC roles, blameless culture — are covered in `../incident_management_and_oncall/incident_management_and_oncall.md`; this case study designs the *platform* those practices run on, and the alert-generation layer it consumes is covered in `../visualization_and_alerting/visualization_and_alerting.md`.
 
 **The three properties that make it hard.** (1) *Independence* — it must survive the failure of everything it watches, which forces a physically separate delivery plane. (2) *Precision under load* — it must stay quiet on noise and loud on real incidents, and the cost of getting this wrong is asymmetric: one missed page can cost more than a thousand spurious ones, yet a thousand spurious pages cause the missed one. (3) *Determinism* — every page, ack, and escalation must be auditable and reproducible, because incidents are litigated (internally in postmortems, sometimes externally with regulators). A system that is merely "usually reliable" is unacceptable here; reliability is the product.
 
@@ -32,7 +32,7 @@
 | # | Requirement | Concrete behavior |
 |---|-------------|-------------------|
 | F1 | Alert ingestion | Accept alerts from Prometheus Alertmanager, Datadog, CloudWatch, custom webhooks; normalize to a common event schema. |
-| F2 | Dedup & grouping | Collapse 10,000 raw alerts/hour into a small set of actionable incidents (target ≤50 pages/hour); group by `alertname + cluster + service`. |
+| F2 | Dedup & grouping | Collapse 10,000 raw alerts/day into a small set of actionable incidents (target ≤50 pages/day); group by `alertname + cluster + service`. |
 | F3 | Inhibition / correlation | Suppress dependent alerts (node-down should inhibit the 40 pod-down alerts on that node). |
 | F4 | On-call schedules | Support 300 rotations with daily/weekly handoffs, overrides, follow-the-sun, holiday calendars. |
 | F5 | Escalation policies | If a page is unacked within a configurable window (default 5 min), escalate to L2, then L3, then the manager. |
@@ -49,7 +49,7 @@
 |---|-------------|-------------------|
 | N1 | Page latency | Critical alert firing → first notification delivered in **< 60s** at p99 (Alertmanager group_wait 30s + routing/notify ≤ 30s). |
 | N2 | Paging-path availability | **99.99%** (≤ 52.6 min downtime/year) for the ingest→route→notify path — higher than the 99.9% of monitored services. |
-| N3 | Dedup throughput | Sustain **10,000 alerts/hour** ingest (peak 8,000 in 3 min during a major incident) and reduce to ≤ 50 actionable incidents/hour. |
+| N3 | Dedup throughput | Sustain **10,000 alerts/day** (≈417/hr) ingest with a burst of **8,000 in 3 min** (44/s) during a major incident, and reduce to ≤ 50 actionable pages/day. |
 | N4 | Escalation timeliness | Unacked page escalates within **5 min** (± 5s jitter); zero missed escalations. |
 | N5 | Notification durability | Every accepted page is delivered or escalated; **no silent drops** — at-least-once with idempotent dedup keys. |
 | N6 | Audit completeness | 100% of paging events persisted with ≤ 1s write lag; 18-month retention. |
@@ -57,7 +57,7 @@
 
 ### Out of Scope
 
-- The monitoring/metric-collection layer itself (Prometheus scrape, Datadog agents) — see `../visualization_and_alerting/README.md`.
+- The monitoring/metric-collection layer itself (Prometheus scrape, Datadog agents) — see `../visualization_and_alerting/visualization_and_alerting.md`.
 - Log aggregation pipeline — see the companion `design_log_aggregation_pipeline.md`.
 - Auto-remediation engines beyond simple ChatOps runbooks (full closed-loop remediation is a separate platform).
 - Status-page / customer comms (Statuspage.io) — mentioned but not designed here.
@@ -88,8 +88,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["10,000 raw<br/>alerts/day"]) -->|"group by alertname<br/>+ cluster + service<br/>~200:1 collapse"| B(["~50 alert<br/>groups/day"])
-    B -->|"inhibition<br/>-30%"| C(["~35 groups<br/>/day"])
+    A(["10,000 raw<br/>alerts/day"]) -->|"group by alertname<br/>+ cluster + service<br/>~40:1 collapse"| B(["~250 alert<br/>groups/day"])
+    B -->|"inhibition<br/>-30%"| C(["~175 groups<br/>/day"])
     C -->|"route: 70% ticket<br/>30% page"| D(["~50 pages<br/>/day"])
     D -->|"spread across<br/>300 rotations"| E(["1 page per rotation<br/>per ~6 days"])
 
@@ -99,9 +99,9 @@ flowchart LR
     class E io
 ```
 
-Each stage strips roughly an order of magnitude of noise; the ~50 pages/day that survive grouping, inhibition, and routing spread across 300 rotations to about one page per rotation every six days — the sustainable on-call target this pipeline is built to hit.
+Grouping does most of the work (40:1), inhibition and severity routing do the rest, for **200:1 end to end**; the ~50 pages/day that survive spread across 300 rotations to about one page per rotation every six days — the sustainable on-call target this pipeline is built to hit.
 
-A healthy target is **< 2 pages per on-call shift per week**. Above that, alert fatigue sets in and real pages get missed (PagerDuty's own research: responders ignoring > 5 pages/day miss ~25% of subsequent real pages).
+A healthy target is **≤ 2 pages per on-call shift** (Google's bar, §6). Above that, alert fatigue sets in: responders start triaging by pattern rather than by content, and the real page arrives in a queue that has already trained them to skim.
 
 ### Notification fan-out
 
@@ -110,7 +110,7 @@ Per page, worst case (full escalation through 4 levels):
 - L1: push + (if unacked 2 min) SMS + (if unacked 4 min) voice = 3 messages.
 - L2, L3, manager: same → up to 4 × 3 = **12 notification sends per fully-escalated page**.
 - 50 pages/day, assume 20% escalate one level → ~50×(3) + 10×(3) ≈ **180 notification sends/day** steady-state.
-- During a major incident: 1 incident, but a "fan-out broadcast" to a 30-person response team = 30 × 3 = 90 sends in 60s. Notification subsystem sized for **100 sends/sec peak**.
+- During a major incident: 1 incident, but a "fan-out broadcast" to a 30-person response team = 30 × 3 = 90 sends in 60s = **1.5 sends/sec**. The subsystem is nonetheless sized for **100 sends/sec** so a fleet-wide event broadcasting to dozens of teams at once still clears inside the delivery window (§10).
 
 ### Storage
 
@@ -122,7 +122,7 @@ Per page, worst case (full escalation through 4 levels):
 | Postmortems | 50/day × 200KB | 7 yr | ~26 GB |
 | Schedule/escalation config | 300 rotations × 10KB | live | ~3 MB |
 
-Total hot+warm storage ≈ **45 GB** — trivially small; this is a *latency and availability* problem, not a storage problem.
+Total hot+warm storage ≈ **42 GB** — trivially small; this is a *latency and availability* problem, not a storage problem.
 
 ### Latency budget (the 60s SLA, decomposed)
 
@@ -141,7 +141,7 @@ The `group_wait` of 30s dominates and is intentional — it trades 30s of latenc
 ### Compute sizing
 
 - **Alertmanager**: 8 clusters × 3 HA replicas = 24 pods, each evaluating notification dedup over ~8,000 peak active alerts (~16 MB RAM). CPU is bursty during storms; 500m steady, 1 vCPU limit.
-- **Ingest API**: 100 alerts/sec peak (storm) × ~2ms per normalize = trivial; sized for HA (3 pods × 2 vCPU) not throughput.
+- **Ingest API**: 44 alerts/sec storm peak × ~2ms per normalize = trivial; provisioned to 100/sec for headroom and sized for HA (3 pods × 2 vCPU), not throughput.
 - **Incident Engine**: 50 incidents/day, each ~20 state transitions = 1,000 writes/day to Postgres — a single `db.r6g.large` with a read replica is 100x over-provisioned, chosen for availability not load.
 - **Notification Dispatcher**: 16 workers (derived in §10) for 100 sends/sec broadcast peak.
 - **Analytics (ClickHouse)**: 10k events/day ingest, sub-second MTTx aggregation queries — single 8-vCPU node.
@@ -373,15 +373,15 @@ Static-threshold alerts ("error rate > 1% for 5 min") are the #2 cause of pager 
 - alert: ErrorBudgetSlowBurn
   expr: |
     (
-      job:slo_error_ratio:rate6h{service="checkout"} > (1 * 0.001)
+      job:slo_error_ratio:rate3d{service="checkout"} > (1 * 0.001)
       and
-      job:slo_error_ratio:rate30m{service="checkout"} > (1 * 0.001)
+      job:slo_error_ratio:rate6h{service="checkout"} > (1 * 0.001)
     )
   for: 15m
   labels: { severity: warning, slo_burn: slow }   # ticket, not a page
 ```
 
-The long window (1h) prevents flapping; the short window (5m) ensures the problem is still active before paging. A 14.4x burn rate means: at this rate, you'll exhaust a month's error budget in ~2 hours — that warrants waking someone. A 1x slow burn is a tomorrow-morning ticket.
+The long window prevents flapping; the short window ensures the problem is still active before paging. Each burn rate pairs with its own window pair — 14.4x with 1h/5m, 1x with 3d/6h — which is the SRE Workbook's recommended set. A 14.4x burn rate means 2% of the month's budget per hour, so the whole 30-day budget is gone in **30/14.4 ≈ 50 hours (about two days)** — that warrants waking someone. A 1x slow burn takes the full 30 days and is a tomorrow-morning ticket.
 
 ```mermaid
 flowchart LR
@@ -547,17 +547,17 @@ func (d *Dispatcher) sendSMS(ctx context.Context, n Notification) error {
 }
 ```
 
-Health checks ping each provider every 15s; 3 consecutive failures open the circuit and route 100% to the failover provider in **< 10s** (N7). The dispatcher's own failures emit a meta-alert routed to a *different* paging path (e.g., a dead-man's-switch — see §8).
+Failover is in-band first, and that is what buys the **< 10s** of N7: a send that errors or blows its 8s timeout is retried on the next provider in the ring immediately, so the page still lands inside the budget even on the very first request that hits a dead provider. Health probes every 15s with 3 consecutive failures then open the circuit (~45s), after which sends skip the dead provider outright and stop paying the 8s penalty. The dispatcher's own failures emit a meta-alert routed to a *different* paging path (e.g., a dead-man's-switch — see §8).
 
 ---
 
 ## 5. Design Decisions & Tradeoffs
 
-### D1 — Build vs buy (PagerDuty/Opsgenie)
+### D1 — Build vs buy (PagerDuty / Jira Service Management)
 
-**Decision:** Buy a managed paging core (PagerDuty/Opsgenie) for the delivery plane; build thin in-house glue (Alertmanager config, ChatOps bot, analytics) on top.
-**Alternatives:** Fully build (Grafana OnCall / incident.io self-host); fully buy (everything in PagerDuty).
-**Rationale:** The 99.99% multi-region notification fabric (telco peering for SMS/voice, push infra, on-call resolver) is brutally hard to build and operate; PagerDuty has 13+ years of telco redundancy. Building it in-house means *you* own the pager outage at 3am.
+**Decision:** Buy a managed paging core (PagerDuty, or Jira Service Management's Operations product in an Atlassian shop) for the delivery plane; build thin in-house glue (Alertmanager config, ChatOps bot, analytics) on top.
+**Alternatives:** Fully build (Alertmanager plus an in-house notifier and direct carrier integrations); fully buy (everything in PagerDuty, including coordination and postmortems).
+**Rationale:** The 99.99% multi-region notification fabric (telco peering for SMS/voice, push infra, on-call resolver) is brutally hard to build and operate; PagerDuty has been running one since 2009. Building it in-house means *you* own the pager outage at 3am.
 **Consequences:** Vendor cost (~$21–41/user/month) and lock-in on schedules/escalation; you still own alert quality (Alertmanager) and analytics. For a 2000-eng org, ~$500k–1M/yr — far cheaper than a 6-engineer team building telco failover.
 
 ### D2 — Symptom-based vs cause-based alerting
@@ -572,7 +572,7 @@ Health checks ping each provider every 15s; 3 consecutive failures open the circ
 **Decision:** Multi-window multi-burn-rate on error budget (see §4.2).
 **Alternatives:** Static `> 1% for 5m`; single-window burn rate.
 **Rationale:** Static thresholds force a bad tradeoff between flapping and slow detection; multi-burn-rate gives fast detection for fast burns and patient detection for slow leaks, with a short confirmation window to kill flaps.
-**Consequences:** More complex rules (4 alerts per SLO instead of 1) and requires recording rules for multiple windows. Higher Prometheus rule cardinality — see `cross_cutting/prometheus_cardinality_and_scale.md`.
+**Consequences:** More complex rules (3 burn-rate alerts per SLO instead of 1 — two paging tiers and a ticket) and requires recording rules for multiple windows. Higher Prometheus rule cardinality — see `cross_cutting/prometheus_cardinality_and_scale.md`.
 
 ### D4 — ChatOps vs ticket-first coordination
 
@@ -634,8 +634,8 @@ Health checks ping each provider every 15s; 3 consecutive failures open the circ
 |------|------|-----------|------------|----------|
 | **Prometheus Alertmanager** | OSS dedup/route/inhibit | Free, gossip HA, powerful inhibition, native PromQL | No on-call/escalation/UI; config is YAML-heavy | Signal-plane dedup/grouping in front of any pager |
 | **PagerDuty** | SaaS paging | Telco-grade reliability, mature escalation, huge integration catalog, analytics | $21–41/user/mo; can be pricey at 2000 users | Enterprise delivery plane, 99.99% paging |
-| **Opsgenie (Atlassian)** | SaaS paging | Tight Jira/Atlassian integration, flexible routing rules, cheaper | Roadmap uncertainty post-acquisition; fewer telco regions | Atlassian-shop orgs |
-| **Grafana OnCall** | OSS/SaaS paging | Free OSS, integrates with Grafana alerting, escalation chains | Younger; self-host telco redundancy is on you; OSS being de-prioritized | Grafana-centric, cost-sensitive |
+| **Jira Service Management (Operations)** | SaaS paging | Tight Jira/Atlassian integration, flexible routing rules, on-call bundled with JSM licensing | Paging is a feature of a broader ITSM suite; fewer telco regions than PD; Opsgenie tenants must migrate onto it before Opsgenie support ends in April 2027 | Atlassian-shop orgs |
+| **Grafana IRM** | SaaS paging (Grafana Cloud) | Native Grafana alerting integration, escalation chains, IRM bundles on-call with incident response | Grafana Cloud-centric — there is no supported self-hosted OSS build since Grafana OnCall OSS was archived | Grafana-centric shops already on Grafana Cloud |
 | **incident.io** | SaaS IR/coordination | Excellent Slack-native incident lifecycle, postmortems, on-call (newer) | Coordination-first; paging is newer than PD's | Slack-first incident coordination + postmortems |
 | **FireHydrant** | SaaS IR/coordination | Strong runbooks, retrospectives, ServiceNow integration | Coordination-first, pairs with a pager | Process/compliance-heavy orgs |
 
@@ -669,7 +669,7 @@ alert_lint:
 The paging path is monitored by an **independent** system — you cannot monitor the pager with the pager.
 
 - **Dead-man's switch**: a synthetic `Watchdog` alert fires *always* (every 30s) and is expected to reach a heartbeat endpoint (e.g., healthchecks.io / Grafana Cloud). If the heartbeat *stops*, an external service pages — this catches a fully-dead Alertmanager.
-- **OTel spans** across the paging path: `ingest → incident.open → schedule.resolve → escalation.arm → dispatch → provider.send → ack`. SLI: p99 `ingest→provider.send` < 45s.
+- **OTel spans** across the paging path: `ingest → incident.open → schedule.resolve → escalation.arm → dispatch → provider.send → ack`. SLI: p99 `ingest→provider.send` **< 25s** — the 60s N1 budget minus the 30s `group_wait` that Alertmanager spends before ingest, with a few seconds of headroom.
 - **Prometheus SLIs** for the paging path: `alertmanager_notifications_failed_total`, `dispatcher_provider_failover_total`, `escalation_fallback_total`, `paging_path_end_to_end_seconds`. Keep cardinality bounded — see `cross_cutting/prometheus_cardinality_and_scale.md` (don't label by `incident_id`).
 - **Error-budget for the pager**: the paging path has its own 99.99% SLO with its own burn-rate alerting — math in `cross_cutting/slo_error_budget_math.md`.
 
@@ -695,7 +695,7 @@ Symptom: `dispatcher_provider_failover_total` spiking, SMS/voice delivery failin
 
 **P2 — Pager storm: 41 pages for one dead node.** A node failed; with no inhibition rule, `NodeDown` plus 40 `KubePodNotReady` alerts each paged. The on-call silenced their phone in frustration and **missed the next, unrelated SEV1** 20 minutes later — a checkout outage that ran **18 minutes** undetected at an estimated **$140k** in lost transactions ($7.8k/min). Root cause: missing `inhibit_rules`. Fix: §4.1 inhibition + group_by; per-shift page cap alerting.
 
-**P3 — Static threshold slow-leak.** A 0.4% error rate from a bad config crept in just under a static `> 1%` page threshold. It never paged; the error budget bled out over **6 days** until a 99.95% SLO was breached for the quarter, blocking a launch tied to the error budget. Root cause: single static threshold can't catch slow burns. Fix: multi-window slow-burn warning (§4.2) that tickets at 1x burn.
+**P3 — Static threshold slow-leak.** A 0.4% error rate from a bad config crept in just under a static `> 1%` page threshold. It never paged; against a 99.95% SLO (0.05% budget) that is an 8x burn, so the entire quarterly budget drained in **11 days** and the SLO was breached for the quarter, blocking a launch tied to the error budget. Root cause: single static threshold can't catch slow burns. Fix: multi-window slow-burn warning (§4.2) that tickets at 1x burn.
 
 **P4 — Stale on-call after handoff.** An escalation resolved the on-call target *at page creation time*, but the rotation handed off 4 minutes later. The L2 escalation paged the *previous* on-call (now asleep), delaying response by **11 minutes** on a SEV1 — enough to breach the customer-facing 99.9% availability SLA and trigger a contractual credit of **$25k**. Root cause: on-call resolved once, not fresh per escalation. Fix: resolve on-call at each escalation step (§4.3).
 
@@ -725,7 +725,7 @@ avg provider latency = 8s (SMS), inflight per worker = 50
 worker_count = ceil(100 × 8 / 50) = 16 dispatcher workers
 ```
 
-16 dispatcher workers (Go, ~50 in-flight each) on 4 × `c6i.large` (2 vCPU, 4 GB) handle 100 sends/sec with 2x headroom. Across 3 AZs for HA.
+16 dispatcher workers (Go, ~50 in-flight each) on 4 × `c6i.large` (2 vCPU, 4 GB) sustain exactly the 100 sends/sec design target — 800 in-flight sends divided by an 8s provider latency. The headroom is in the target itself: 100/sec is ~65x the 1.5 sends/sec a 30-person broadcast actually needs. Spread across 3 AZs for HA.
 
 ### Alertmanager HA gossip sizing
 
@@ -748,9 +748,9 @@ Gossip bandwidth is negligible; the constraint is **memory** (active alerts + si
 |------|------|---------|
 | Alertmanager HA (8 clusters × 3 pods) | 24 × (0.5 vCPU, 1Gi) | ~$350 |
 | Delivery plane (16 dispatcher + engine + DB) | ~12 × c6i.large + RDS | ~$2,800 |
-| PagerDuty (managed delivery) | 2000 users @ ~$25/user (Business) | ~$50,000 |
+| PagerDuty (managed delivery) | 2000 users @ ~$25/user (Business lists at $41; volume-discounted) | ~$50,000 |
 | SMS/voice (Twilio + Bandwidth) | ~180 sends/day + storms | ~$400 |
-| ClickHouse analytics + S3 audit | 45 GB hot + object-lock | ~$300 |
+| ClickHouse analytics + S3 audit | 42 GB hot + object-lock | ~$300 |
 | **Total** | | **~$54,000/mo (~$650k/yr)** |
 
 PagerDuty dominates cost. The build-vs-buy break-even (D1): an in-house telco-grade delivery plane needs ~6 senior engineers (~$1.8M/yr fully loaded) plus carrier contracts — so buying is ~3x cheaper *and* lower risk for this org size.
@@ -763,7 +763,7 @@ PagerDuty dominates cost. The build-vs-buy break-even (D1): an in-house telco-gr
 Because a pager that shares fate with production goes silent during the exact outage it must report. If your alerting stack runs in the same cluster/region/account as production and that cluster dies, no page is sent (war story P1: 47-min undetected outage). The delivery plane therefore runs in a separate cloud account and region with independent DNS, database, and on-call, targeting 99.99% vs production's 99.9% — and is backstopped by a dead-man's-switch heartbeat so a fully-dead alerting stack still triggers an external page.
 
 **Q: How do you reduce 10,000 raw alerts/day to ~50 actionable pages without dropping real incidents?**
-Three stacked reductions: grouping (`group_by: [alertname, cluster, service]` with a 30s `group_wait` collapses correlated alerts ~200:1), inhibition (a `NodeDown` rule suppresses the 40 dependent pod-down alerts → 1 page instead of 41), and routing by severity (warnings go to Slack/tickets, only symptom-based criticals page). The key is symptom-based alerting (page on what users feel) plus multi-burn-rate SLO alerts so you page on real budget burn, not on transient blips. Dependent alerts are still recorded in the incident timeline — they're suppressed from paging, not deleted.
+Three stacked reductions that multiply to 200:1 end to end: grouping (`group_by: [alertname, cluster, service]` with a 30s `group_wait` collapses correlated alerts ~40:1, the bulk of the win), inhibition (a `NodeDown` rule suppresses the 40 dependent pod-down alerts → 1 page instead of 41), and routing by severity (warnings go to Slack/tickets, only symptom-based criticals page). The key is symptom-based alerting (page on what users feel) plus multi-burn-rate SLO alerts so you page on real budget burn, not on transient blips. Dependent alerts are still recorded in the incident timeline — they're suppressed from paging, not deleted.
 
 **Q: Explain multi-window multi-burn-rate alerting and why it beats a static threshold.**
 A static `error rate > 1% for 5m` forces a bad tradeoff: tight enough to catch problems means it flaps on 90-second blips; loose enough to avoid flaps means slow leaks bleed your budget for days. Multi-burn-rate fires when the error-budget burn rate exceeds a multiple of normal — a fast 14.4x burn (2% of a 30-day budget in 1 hour) pages immediately, while a 1x slow burn tickets. The "multi-window" part requires BOTH a long window (1h, prevents flapping) and a short window (5m, confirms it's still happening) to fire, killing false alarms. Full math: `cross_cutting/slo_error_budget_math.md`.
@@ -775,7 +775,7 @@ Timers are persisted durably (Temporal workflows or SQS delayed messages), never
 Symptoms are what users experience (latency, error rate, availability/SLO violations); causes are internal states (CPU 90%, disk filling, pod restarts). You page on symptoms and ticket on causes. Cause-based paging produces ~10x more pages, most non-actionable (high CPU users never notice), which drives alert fatigue and missed real pages. The risk — a novel cause with no symptom yet — is covered by slow-burn warning tickets that surface degradation before it becomes user-visible.
 
 **Q: How do you handle a notification-provider (Twilio) outage?**
-A multi-provider ring per channel with automatic failover in < 10s: health probes ping each provider every 15s, and 3 consecutive failures trip a circuit breaker routing 100% to the failover provider (e.g., Bandwidth). Each send carries an idempotency key (`hash(incidentID, target, channel, attempt)`) so retries across providers never double-page. War story P5 ($90k in SLA credits from an 18-min delay) is exactly the single-provider failure this prevents. The dispatcher's own failures emit a meta-alert on a *separate* paging path.
+A multi-provider ring per channel. Failover happens in-band on the very first affected send: an error or an 8s timeout immediately retries the next provider in the ring, which is what keeps a page inside the < 10s budget. Health probes every 15s with 3 consecutive failures then trip a circuit breaker (~45s) so subsequent sends skip the dead provider (e.g., Bandwidth takes over) rather than paying the timeout each time. Each send carries an idempotency key (`hash(incidentID, target, channel, attempt)`) so retries across providers never double-page. War story P5 ($90k in SLA credits from an 18-min delay) is exactly the single-provider failure this prevents. The dispatcher's own failures emit a meta-alert on a *separate* paging path.
 
 **Q: Why ChatOps-first instead of ticket-first incident coordination?**
 Incidents need real-time, low-friction coordination and chat is where engineers already work; a bot can auto-create a war-room channel, run one-click runbook commands, and capture the timeline automatically — ticketing systems are too high-latency for SEV1. The ticket still exists behind the scenes as the durable record. The pitfall is losing decisions in scrollback and conflating chat retention (often 90 days) with audit retention (18 months, war story P6) — solved by persisting the full timeline to an independent object-locked store.
@@ -784,7 +784,7 @@ Incidents need real-time, low-friction coordination and chat is where engineers 
 Default to human-in-the-loop with one-click suggested runbook actions from chat, not full autonomy, because misfiring automation can amplify an incident (an auto-rollback that reverts the actual fix). Graduate only the safest, highest-frequency, well-understood runbooks to fully automatic over time, each behind a circuit breaker. The slight MTTR cost versus full automation is worth the safety; keep a human accountable until a runbook has proven itself across many incidents.
 
 **Q: How do you keep page latency under 60 seconds?**
-Decompose the budget: `group_wait` 30s (the dominant, intentional cost — batches correlated alerts), routing/on-call resolution ~2s, dispatch queue ~1s, and provider delivery 5–15s → ~48s p99. SEV1 fast-burn routes drop `group_wait` to 5s to trade noise for speed. The whole path is traced with OpenTelemetry (`ingest → schedule.resolve → dispatch → provider.send`) with an SLI of p99 < 45s, and it has its own error budget and burn-rate alert.
+Decompose the budget: `group_wait` 30s (the dominant, intentional cost — batches correlated alerts), routing/on-call resolution ~2s, dispatch queue ~1s, and provider delivery 5–15s → ~48s p99. SEV1 fast-burn routes drop `group_wait` to 5s to trade noise for speed. The whole path is traced with OpenTelemetry (`ingest → schedule.resolve → dispatch → provider.send`) with an SLI of p99 < 25s on the post-`group_wait` segment, and it has its own error budget and burn-rate alert.
 
 **Q: How do you measure whether your alerting is actually good?**
 Treat alerts as code with a CI eval gate: page precision (pages that led to action / total pages, target ≥ 70%; auto-demote rules below 50%), mandatory runbook annotations (CI fails the PR without one), a 30-day backtest rejecting rules that would fire > 20×/day or flap > 5×/day, and a self-resolve rate (alerts resolving in < 2 min without human action are noise). Operationally, track MTTD/MTTA/MTTR and per-shift page volume, capping on-call at ≤ 2 incidents per 12-hour shift (Google's bar) and triggering a reliability investment when exceeded.

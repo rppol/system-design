@@ -13,8 +13,8 @@
 **Mental model.** Three planes stacked on each other:
 
 1. **Discovery plane** — the software catalog: a graph of every service, API, resource, team, and dependency (4000 entities). Answers "what exists and who owns it."
-2. **Creation plane** — the scaffolder: golden-path templates that emit a Git repo, CI pipeline, infra claim, and catalog registration in one transaction. Answers "make me a new thing the right way."
-3. **Provisioning plane** — the infra control plane (Crossplane): declarative claims reconciled into live cloud resources. Answers "give me a database / queue / bucket without a ticket."
+2. **Creation plane** — the scaffolder: golden-path templates that emit a Git repo, CI pipeline, infra XR, and catalog registration in one transaction. Answers "make me a new thing the right way."
+3. **Provisioning plane** — the infra control plane (Crossplane): declarative composite resources (XRs) reconciled into live cloud resources. Answers "give me a database / queue / bucket without a ticket."
 
 The portal (Backstage) is the windshield over all three. If you only build the windshield, you have a wiki. The engineering is in the reconciliation underneath.
 
@@ -27,7 +27,7 @@ The portal (Backstage) is the windshield over all three. If you only build the w
 ### Functional Requirements
 
 - **Software catalog**: ingest and index 4000 entities (Components, APIs, Resources, Systems, Domains, Groups, Users). Surface ownership, dependencies, lifecycle, docs, and runtime links per entity.
-- **Golden-path scaffolding**: self-service templates that generate a new service (repo + CI + Helm chart + infra claim + catalog registration) end-to-end. Target: a new service is live in CI in **under 25 minutes** vs the pre-IDP baseline of **6–9 business days**.
+- **Golden-path scaffolding**: self-service templates that generate a new service (repo + CI + Helm chart + infra XR + catalog registration) end-to-end. Target: a new service is live in CI in **under 25 minutes** vs the pre-IDP baseline of **6–9 business days**.
 - **Self-service infrastructure**: developers request infra (Postgres, S3 bucket, SQS queue, Redis, K8s namespace) through the portal; resources provisioned in **under 10 minutes** without a platform-team ticket.
 - **TechDocs**: docs-as-code rendered per entity from Markdown in the service repo, searchable, always co-located with the code.
 - **RBAC & ownership**: every entity has a required owner (a `Group`); actions (provision DB, delete service) gated by team membership and policy.
@@ -39,13 +39,13 @@ The portal (Backstage) is the windshield over all three. If you only build the w
 | Dimension | Target |
 |-----------|--------|
 | New-service onboarding (intent → CI green) | < 25 min (p90) |
-| Self-service infra provision (claim → Ready) | < 10 min (p90) for standard DB/bucket/queue |
+| Self-service infra provision (XR → Ready) | < 10 min (p90) for standard DB/bucket/queue |
 | Portal page p95 latency | < 500 ms |
 | Catalog search p95 | < 1 s |
 | Catalog freshness (Git change → catalog updated) | < 15 min |
 | Portal availability | 99.9% (43.2 min/month error budget) |
-| Provisioning success rate | > 99.5% of claims reconcile without manual intervention |
-| DORA (platform-served services) | Deploy frequency: on-demand (multiple/day); Lead time for change: < 1 day; Change failure rate: < 15%; MTTR: < 1 hour — **elite** band |
+| Provisioning success rate | > 99.5% of XRs reconcile without manual intervention |
+| DORA (platform-served services) | Deployment frequency, change lead time, change fail rate, failed deployment recovery time, and deployment rework rate all trending better on-platform than off-platform. Targets are set locally (this org: on-demand deploys, lead time < 1 day, change fail rate < 15%, recovery < 1 hr) — DORA no longer publishes performance bands to grade against |
 
 ### Out of Scope
 
@@ -64,14 +64,14 @@ The portal (Backstage) is the windshield over all three. If you only build the w
 
 ```
 Components (services/libs/websites)  ~2600   (65%)
-APIs (OpenAPI/gRPC/async)             ~700   (17.5%)
+APIs (OpenAPI/gRPC/async)             ~600   (15%)
 Resources (DBs/buckets/queues)       ~450   (11.25%)
-Systems                              ~150
-Domains                               ~20
-Groups (teams)                       ~200
-Users                                ~2000  (separate identity entities)
+Systems                              ~130   (3.25%)
+Domains                               ~20   (0.5%)
+Groups (teams)                       ~200   (5%)
 --------------------------------------------------
-Catalog total (modeled entities)     ~4000  (excl. user mirrors)
+Catalog total (modeled entities)     ~4000  (100%)
+Users                                ~2000  (separate identity entities, excluded above)
 ```
 
 **Catalog refresh load.** Backstage refreshes each entity on a schedule (default 100s loop; we set 600s for stability at scale). With 4000 entities and a 10-minute target freshness:
@@ -83,9 +83,9 @@ At p95 ~300 ms/processing -> ~2 concurrent processors sustain it.
 We provision 7 processing threads for headroom + burst (mass re-ingest).
 ```
 
-A full re-ingest (e.g., after a processor bug fix) must drain 4000 entities. At 7 threads × ~3 entities/sec/thread = 21/sec → **~3.2 min** to fully reconcile the catalog. Acceptable.
+A full re-ingest (e.g., after a processor bug fix) must drain 4000 entities. At 7 threads × ~3.3 entities/sec/thread = 23/sec → **~2.9 min** to fully reconcile the catalog. Acceptable.
 
-**Scaffolder runs.** Empirically ~1 new service per engineer per quarter for active builders, plus library/infra scaffolds:
+**Scaffolder runs.** Empirically about one new service per engineer every two years across the whole population — active builders do several a year, most engineers none — plus library/infra scaffolds:
 
 ```
 New services/year       ~2000 engineers x 0.5 services/yr ~= 1000/yr
@@ -95,12 +95,12 @@ Total scaffolder runs    ~5000/yr -> ~20/business day -> ~2-3/hr peak
 
 Bursty (Monday mornings, new-quarter ramp): plan for **10 concurrent scaffolder tasks**. Each task runs 30s–4min (Git create + template render + CI bootstrap). The scaffolder is *not* the hot path; the catalog and provisioning are.
 
-**Infra claims/day.** Standing infra is stable; new claims track scaffolds + ad-hoc:
+**Infra requests/day.** Standing infra is stable; new XRs track scaffolds + ad-hoc:
 
 ```
-Claims/day      ~30-50 (new DBs, buckets, queues, namespaces)
+XRs/day         ~30-50 (new DBs, buckets, queues, namespaces)
 Reconcile churn ~450 existing Resources x periodic drift-check
-Crossplane managed resources (MRs)  ~450 claims x avg 4 MRs/claim = ~1800 MRs
+Crossplane managed resources (MRs)  ~450 XRs x avg 4 MRs/XR = ~1800 MRs
 Reconcile interval 1 min (default) -> 1800 MRs / 60s = 30 reconciles/sec steady-state
 ```
 
@@ -127,7 +127,9 @@ Tiny. A `db.r6g.large` (2 vCPU / 16 GB) is overprovisioned — the constraint is
 DAU         ~2000 eng x 40% daily portal touch = ~800 DAU
 Sessions    ~800 x 3 sessions/day              = 2400 sessions/day
 Page views  ~2400 x 8 views                    = ~19k views/day
-Peak RPS    ~19k / (8 active hrs x 3600) x 5 burst factor = ~3-4 RPS sustained, ~30 RPS burst
+API calls   ~19k views x ~10 backend calls     = ~190k calls/day
+Peak RPS    ~190k / (8 active hrs x 3600)      = ~6.6 RPS sustained
+            x 5 burst factor                   = ~33 RPS burst
 ```
 
 Low RPS — the portal is a *low-traffic, high-leverage* system. You do not scale it for QPS; you scale it for *catalog graph size* and *reconcile throughput*.
@@ -183,8 +185,8 @@ flowchart TD
 
     git -- "push" --> ci
     ci --> reg
-    ci -- "commits Claim" --> gitops
-    gitops -- "kubectl apply Claim" --> xplane
+    ci -- "commits XR" --> gitops
+    gitops -- "kubectl apply XR" --> xplane
     xplane -- "reconcile loop (1 min)" --> mrs
     mrs -- "provider-aws / provider-gcp" --> cloud
 
@@ -201,7 +203,7 @@ flowchart TD
     class mrs train
 ```
 
-Three planes stack top-to-bottom: the portal fields the engineer's request, Git is the source of truth for both code and infra Claims, and Crossplane's 1-minute reconcile loop continuously converges Managed Resources against the cloud. Observability threads back through every layer (portal RED, catalog refresh, reconcile lag), and the whole path from engineer intent to CI green targets under 25 minutes.
+Three planes stack top-to-bottom: the portal fields the engineer's request, Git is the source of truth for both code and infra XRs, and Crossplane's 1-minute reconcile loop continuously converges Managed Resources against the cloud. Observability threads back through every layer (portal RED, catalog refresh, reconcile lag), and the whole path from engineer intent to CI green targets under 25 minutes.
 
 ### Component Inventory
 
@@ -212,9 +214,9 @@ Three planes stack top-to-bottom: the portal fields the engineer's request, Git 
 | Scaffolder backend | Template execution (fetch → render → publish → register) | Backstage `scaffolder-backend` |
 | TechDocs backend | Docs-as-code build + serve | Backstage `techdocs-backend` + S3 |
 | Permission/RBAC | Authorize actions against ownership/policy | Backstage permission framework + OPA |
-| Git provider | Source of truth for code + catalog-info + infra claims | GitHub Enterprise / GitLab |
-| GitOps controller | Apply infra Claims to control plane | Argo CD / Flux |
-| Crossplane control plane | Reconcile Claims → cloud resources | Crossplane + provider-aws |
+| Git provider | Source of truth for code + catalog-info + infra XRs | GitHub Enterprise / GitLab |
+| GitOps controller | Apply infra XRs to control plane | Argo CD / Flux |
+| Crossplane control plane | Reconcile XRs → cloud resources | Crossplane + provider-aws |
 | Observability | RED metrics, reconcile lag, traces | Prometheus, Grafana, Tempo |
 
 ### Data Flow Narratives
@@ -222,15 +224,15 @@ Three planes stack top-to-bottom: the portal fields the engineer's request, Git 
 **A. Onboard a new service (creation plane).**
 1. Engineer opens scaffolder, picks "Golden Path: Go HTTP Service," fills name (`checkout`), owner (`team-payments`), wants a Postgres.
 2. Scaffolder validates input (DNS-1123 name, owner must be a real `Group`), renders the template skeleton.
-3. Publishes a new Git repo with: source skeleton, CI workflow, Helm chart, `catalog-info.yaml`, and a Crossplane `Claim` YAML committed to the GitOps infra-claims repo.
+3. Publishes a new Git repo with: source skeleton, CI workflow, Helm chart, `catalog-info.yaml`, and a Crossplane XR manifest committed to the GitOps infra repo.
 4. Registers the new entity into the catalog (immediate, so it appears without waiting for refresh).
-5. CI runs on first push; GitOps applies the Claim; Crossplane provisions Postgres; service deploys. Total: under 25 minutes.
+5. CI runs on first push; GitOps applies the XR; Crossplane provisions Postgres; service deploys. Total: under 25 minutes.
 
 **B. Catalog stays fresh (discovery plane).**
 The catalog backend runs a *pull* refresh loop: every 600s it re-fetches each entity's source `catalog-info.yaml` from Git, re-parses, rebuilds relations, upserts the DB. GitHub org-scan discovery finds new `catalog-info.yaml` files automatically.
 
 **C. Self-service infra (provisioning plane).**
-A `Claim` (e.g., `XPostgresInstance`) lands in the GitOps repo → Argo applies it → Crossplane's composition fans it out into managed resources (RDS instance, subnet group, security group, connection secret) → reconcile loop converges → secret injected into the app namespace.
+A namespaced XR (e.g., `PostgresInstance`) lands in the GitOps repo → Argo applies it → Crossplane's Composition fans it out into managed resources (RDS instance, subnet group, security group, connection secret) → reconcile loop converges → the connection secret materializes in the XR's own namespace.
 
 ---
 
@@ -394,14 +396,14 @@ spec:
         gitAuthorName: backstage-scaffolder
 
     - id: provision-db
-      name: Commit infra claim
+      name: Commit infra XR
       if: ${{ parameters.withDatabase }}
       action: publish:github:pull-request
       input:
-        repoUrl: github.com?owner=acme&repo=infra-claims
-        branchName: claim-${{ parameters.name }}
+        repoUrl: github.com?owner=acme&repo=infra
+        branchName: xr-${{ parameters.name }}
         title: "infra: Postgres for ${{ parameters.name }}"
-        targetPath: claims/${{ parameters.name }}.yaml
+        targetPath: infra/${{ parameters.name }}.yaml
 
     - id: register
       name: Register in catalog
@@ -429,11 +431,14 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate catalog-info.yaml
         run: |
-          # 1. schema-valid against Backstage entity schema
-          npx @backstage/cli@latest repo lint || true
+          # 1. schema-valid against the running catalog's entity schema (fail closed)
+          curl -sf -X POST "$BACKSTAGE_URL/api/catalog/validate-entity" \
+            -H 'Content-Type: application/json' \
+            --data "$(yq -o=json '{"entity": ., "location": "url:local"}' catalog-info.yaml)" \
+            || { echo "::error::catalog-info.yaml failed entity validation"; exit 1; }
           # 2. owner MUST be a known group (fail closed)
           OWNER=$(yq '.spec.owner' catalog-info.yaml)
           if [ -z "$OWNER" ] || [ "$OWNER" = "null" ]; then
@@ -451,7 +456,7 @@ Now a service cannot exist without a valid name and a real owning team. The fix 
 
 ### 4.3 Crossplane Composite Resources — Self-Service Infra
 
-Self-service infra is the difference between an IDP and a glorified wiki. The contract is: developer writes a tiny *Claim*; the platform team's *Composition* expands it into the real, policy-compliant cloud topology.
+Self-service infra is the difference between an IDP and a glorified wiki. The contract is: the developer writes a tiny *composite resource* (XR) in their own namespace; the platform team's *Composition* expands it into the real, policy-compliant cloud topology. Because the XR is namespaced, ordinary Kubernetes RBAC decides who may ask for what — there is no separate cluster-scoped-XR-plus-namespaced-Claim pair to keep in sync.
 
 ```mermaid
 flowchart LR
@@ -463,8 +468,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    claim(["Developer's Claim<br/>size: small · storageGB: 20"])
-    xrd{{"XRD<br/>binds"}}
+    claim(["Developer's namespaced XR<br/>size: small · storageGB: 20"])
+    xrd{{"XRD<br/>defines the API"}}
 
     subgraph comp["Platform's Composition"]
         direction LR
@@ -498,14 +503,14 @@ flowchart LR
 The XRD (CompositeResourceDefinition) — the API the platform offers:
 
 ```yaml
-apiVersion: apiextensions.crossplane.io/v1
+apiVersion: apiextensions.crossplane.io/v2
 kind: CompositeResourceDefinition
 metadata:
-  name: xpostgresinstances.platform.acme.io
+  name: postgresinstances.platform.acme.io
 spec:
+  scope: Namespaced        # the XR lives in the team's namespace; K8s RBAC governs it
   group: platform.acme.io
-  names: { kind: XPostgresInstance, plural: xpostgresinstances }
-  claimNames: { kind: PostgresInstance, plural: postgresinstances }
+  names: { kind: PostgresInstance, plural: postgresinstances }
   versions:
     - name: v1alpha1
       served: true
@@ -516,79 +521,96 @@ spec:
           properties:
             spec:
               type: object
-              required: [size, storageGB, owner]
               properties:
-                size:
-                  type: string
-                  enum: [small, medium, large]   # paved-road tiers only — no arbitrary instance class
-                storageGB: { type: integer, minimum: 20, maximum: 1000 }
-                owner: { type: string }            # propagated to cost-allocation tags
+                parameters:
+                  type: object
+                  required: [size, storageGB, owner]
+                  properties:
+                    size:
+                      type: string
+                      enum: [small, medium, large]   # paved-road tiers only — no arbitrary instance class
+                    storageGB: { type: integer, minimum: 20, maximum: 1000 }
+                    owner: { type: string }          # propagated to cost-allocation tags
 ```
 
-The developer's Claim is trivial — that is the point:
+The developer's XR is trivial — that is the point:
 
 ```yaml
-# claims/checkout-db.yaml  (committed by the scaffolder, applied via GitOps)
+# infra/checkout-db.yaml  (committed by the scaffolder, applied via GitOps)
 apiVersion: platform.acme.io/v1alpha1
 kind: PostgresInstance
 metadata:
   name: checkout-db
   namespace: payments
 spec:
-  size: small
-  storageGB: 20
-  owner: team-payments
-  writeConnectionSecretToRef:
-    name: checkout-db-conn         # secret lands in the app namespace for the service to consume
+  parameters:
+    size: small
+    storageGB: 20
+    owner: team-payments
+  crossplane:                    # platform machinery, ignorable by the developer
+    compositionSelector:
+      matchLabels: { provider: aws, tier: prod }
 ```
 
-The Composition translates `size: small` into real, governed AWS resources (abbreviated; in practice authored with a Composition Function in Go for logic):
+The Composition writes the connection `Secret` into the XR's own namespace, so the service consumes it as an ordinary namespaced secret with no cross-namespace plumbing.
+
+The Composition translates `size: small` into real, governed AWS resources. Compositions are function pipelines — there is no built-in patch-and-transform mode any more, so even plain patching runs through `function-patch-and-transform`:
 
 ```yaml
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
   name: xpostgres.aws.small
+  labels: { provider: aws, tier: prod }
 spec:
   compositeTypeRef:
     apiVersion: platform.acme.io/v1alpha1
-    kind: XPostgresInstance
-  resources:
-    - name: rds-instance
-      base:
-        apiVersion: rds.aws.upbound.io/v1beta1
-        kind: Instance
-        spec:
-          forProvider:
-            engine: postgres
-            engineVersion: "15.5"
-            instanceClass: db.t4g.small      # 'small' tier pinned by platform, not the dev
-            allocatedStorage: 20
-            storageEncrypted: true           # paved road = encrypted by default
-            backupRetentionPeriod: 7
-            multiAz: false
-            autoMinorVersionUpgrade: true
-            region: us-east-1
-      patches:
-        - fromFieldPath: spec.storageGB
-          toFieldPath: spec.forProvider.allocatedStorage
-        - fromFieldPath: spec.owner          # cost tag for FinOps
-          toFieldPath: spec.forProvider.tags.owner
-      connectionDetails:
-        - name: endpoint
-          fromConnectionSecretKey: endpoint
+    kind: PostgresInstance
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef: { name: function-patch-and-transform }
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: rds-instance
+            base:
+              apiVersion: rds.aws.upbound.io/v1beta1
+              kind: Instance
+              spec:
+                forProvider:
+                  engine: postgres
+                  engineVersion: "17"        # major only; minors ride autoMinorVersionUpgrade
+                  instanceClass: db.t4g.small  # 'small' tier pinned by platform, not the dev
+                  allocatedStorage: 20
+                  storageEncrypted: true     # paved road = encrypted by default
+                  backupRetentionPeriod: 7
+                  multiAz: false
+                  autoMinorVersionUpgrade: true
+                  region: us-east-1
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.storageGB
+                toFieldPath: spec.forProvider.allocatedStorage
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.owner   # cost tag for FinOps
+                toFieldPath: spec.forProvider.tags.owner
+            connectionDetails:
+              - name: endpoint
+                type: FromConnectionSecretKey
+                fromConnectionSecretKey: endpoint
 ```
 
-A Composition Function (Go) for logic the patch DSL cannot express — e.g., deriving `instanceClass` from `size` and enforcing a CIDR allowlist:
+A second pipeline step — a custom Composition Function in Go — carries the logic the patch DSL cannot express, e.g. deriving `instanceClass` from `size` and pinning safety defaults:
 
 ```go
-// fn.go -- a Crossplane composition function (KCL/Go), runs in the reconcile pipeline
+// fn.go -- a Crossplane composition function, runs as a step in the composition pipeline
 func RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
     rsp := response.To(req, response.DefaultTTL)
     xr, _ := request.GetObservedCompositeResource(req)
 
-    var size string
-    _ = xr.Resource.GetValueInto("spec.size", &size)
+    size, _ := xr.Resource.GetString("spec.parameters.size")
 
     classBySize := map[string]string{
         "small":  "db.t4g.small",
@@ -657,33 +679,35 @@ sequenceDiagram
 # authz.rego — only the owning team (or platform admins) may mutate an entity
 package backstage.authz
 
-default allow = false
+import rego.v1
+
+default allow := false
 
 # read is open to all authenticated users
-allow {
+allow if {
   input.action == "catalog.entity.read"
 }
 
 # mutate (delete/unregister/provision) requires owning-team membership
-allow {
+allow if {
   input.action == "catalog.entity.delete"
-  some g
-  g := input.identity.ownershipEntityRefs[_]
+  some g in input.identity.ownershipEntityRefs
   g == input.resource.spec.owner            # caller belongs to the owning group
 }
 
 # platform-team override
-allow {
-  "group:default/platform-team" == input.identity.ownershipEntityRefs[_]
+allow if {
+  "group:default/platform-team" in input.identity.ownershipEntityRefs
 }
 
 # provisioning expensive infra (large tier) requires a senior approver group
-allow {
+allow if {
   input.action == "scaffolder.action.execute"
   input.resource.template == "go-service"
   not large_db_requested
 }
-large_db_requested {
+
+large_db_requested if {
   input.resource.parameters.size == "large"
 }
 ```
@@ -696,7 +720,7 @@ Coupling RBAC to the catalog's `spec.owner` field is why §4.2's ownership gate 
 
 ### Decision 1 — Backstage vs build-your-own portal
 
-- **Decision**: Adopt Backstage (CNCF graduated) rather than building a bespoke portal.
+- **Decision**: Adopt Backstage (CNCF incubating) rather than building a bespoke portal.
 - **Alternatives**: Build-your-own React app; buy a SaaS portal (Port/Cortex).
 - **Rationale**: Backstage gives the catalog, scaffolder, TechDocs, and a plugin SDK out of the box, plus a huge plugin ecosystem (CI, K8s, PagerDuty, cost). At 2000 engineers, a custom portal is a 5–8 engineer standing team forever.
 - **Consequences**: You inherit Backstage's operational complexity — it is a *framework you fork and run*, not a product. Upgrades (monthly releases, plugin API churn) are real toil. You need 2–3 platform engineers who know TypeScript and React.
@@ -705,7 +729,7 @@ Coupling RBAC to the catalog's `spec.owner` field is why §4.2's ownership gate 
 
 - **Decision**: Crossplane control plane for self-service infra; Terraform for foundational/one-off infra (VPCs, org accounts).
 - **Alternatives**: Wrap Terraform modules behind the scaffolder and run `terraform apply` in CI per request.
-- **Rationale**: Crossplane *continuously reconciles* — drift self-heals, the API surface (Claims) is narrow and validated by an XRD schema, and it is K8s-native (RBAC, GitOps, audit for free). Terraform-in-CI reconciles only on demand; state-file locking and concurrent applies become a coordination nightmare at 30–50 claims/day across 200 teams.
+- **Rationale**: Crossplane *continuously reconciles* — drift self-heals, the API surface (namespaced XRs) is narrow and validated by an XRD schema, and it is K8s-native (RBAC, GitOps, audit for free). Terraform-in-CI reconciles only on demand; state-file locking and concurrent applies become a coordination nightmare at 30–50 infra requests/day across 200 teams.
 - **Consequences**: Crossplane is a newer paradigm with a steeper learning curve; provider coverage occasionally lags Terraform; composition authoring (functions) is a specialized skill. Terraform's module ecosystem is broader and more battle-tested.
 
 ### Decision 3 — Golden paths vs full flexibility
@@ -757,7 +781,7 @@ Coupling RBAC to the catalog's `spec.owner` field is why §4.2's ownership gate 
 
 ## 6. Real-World Implementations
 
-**Spotify (Backstage origin).** Backstage was built at Spotify to tame ~2000 engineers and thousands of microservices; they reported new engineers shipping to production in days instead of weeks, and onboarding a service dropping from ~weeks to a self-service flow. Spotify open-sourced it in 2020; it became a CNCF project and graduated in 2024. Their internal version (Spotify Portal / premium plugins) adds Soundcheck (tech health scorecards) and Skill Exchange — concrete proof that the *scorecard* layer (not just the catalog) drives standardization. The key lesson Spotify publicizes: the catalog's value compounds only when ownership is mandatory and enforced — orphaned services are treated as bugs.
+**Spotify (Backstage origin).** Backstage was built at Spotify to tame ~2000 engineers and thousands of microservices; they reported new engineers shipping to production in days instead of weeks, and onboarding a service dropping from ~weeks to a self-service flow. Spotify open-sourced it in 2020 and donated it to the CNCF, where it is an incubating project. Their internal version (Spotify Portal / premium plugins) adds Soundcheck (tech health scorecards) and Skill Exchange — concrete proof that the *scorecard* layer (not just the catalog) drives standardization. The key lesson Spotify publicizes: the catalog's value compounds only when ownership is mandatory and enforced — orphaned services are treated as bugs.
 
 **American Airlines.** Publicly described (KubeCon talks, Backstage blog) building a Backstage IDP integrated with their cloud platform, exposing self-service environment provisioning and golden-path templates to thousands of developers. They emphasized using Backstage scaffolder templates to standardize how teams stamp out new services with built-in compliance (security scanning, observability wired in by default) — paved roads where compliance is the default, not an afterthought.
 
@@ -779,15 +803,15 @@ Coupling RBAC to the catalog's `spec.owner` field is why §4.2's ownership gate 
 | **Port** | SaaS, no-code | Flexible blueprints | Self-service actions | Action automations | Managed | Fast adoption, low ops, config-driven |
 | **Cortex** | SaaS | Catalog + scorecards | Scaffolder | Workflows | Managed | Scorecard-driven engineering excellence |
 | **OpsLevel** | SaaS | Catalog + maturity | Templates | Actions | Managed | Service maturity/standards enforcement |
-| **Humanitec** | Platform orchestrator | Resource graph | Score workloads | First-class (PDC) | Self-host/managed | Infra-centric IDP, dynamic env config |
+| **Humanitec** | Platform orchestrator | Resource graph | Score workloads | First-class (Platform Orchestrator) | Self-host/managed | Infra-centric IDP, dynamic env config |
 | **Build-your-own** | Bespoke | Custom | Custom | Custom | Self-host | Hyperscale orgs with unique needs |
 
 | Provisioning engine | Reconciliation | API surface | K8s-native | Drift heal | Maturity |
 |---------------------|----------------|-------------|-----------|-----------|----------|
-| **Crossplane** | Continuous (1 min) | XRD/Claim (typed) | Yes | Yes | Mature, CNCF |
+| **Crossplane** | Continuous (1 min) | XRD/XR (typed) | Yes | Yes | Mature, CNCF |
 | **Terraform (in CI)** | On-demand apply | HCL modules | No | No | Very mature |
 | **Pulumi** | On-demand apply | Real languages | No | No | Mature |
-| **Humanitec PDC** | Continuous | Score spec | Partial | Yes | Mature commercial |
+| **Humanitec Platform Orchestrator** | Continuous | Score spec | Partial | Yes | Mature commercial |
 
 ---
 
@@ -809,9 +833,9 @@ flowchart LR
 
     pr(["Template PR"])
     smoke["Smoke-scaffold<br/>in sandbox org"]
-    assertN["Assert:<br/>CI green ≤25 min · owner resolves<br/>infra claim Ready · SBOM present"]
-    dora["Capture rolling DORA<br/>deploy freq · lead time<br/>change-fail rate · MTTR"]
-    gate{"Change-failure rate<br/>of template's services<br/>over 15%?"}
+    assertN["Assert:<br/>CI green ≤25 min · owner resolves<br/>infra XR Ready · SBOM present"]
+    dora["Capture rolling DORA<br/>deploy freq · change lead time<br/>change fail rate · recovery time<br/>deployment rework rate"]
+    gate{"Change fail rate<br/>of template's services<br/>over the local 15% target?"}
     block["Block promotion"]
     promote(["Promote template"])
 
@@ -825,7 +849,7 @@ flowchart LR
     class promote train
 ```
 
-DORA targets (elite band): deploy on-demand, lead time < 1 day, change-failure < 15%, MTTR < 1 hr. The error-budget math that turns these into ship/hold decisions is in [`cross_cutting/slo_error_budget_math.md`](cross_cutting/slo_error_budget_math.md).
+DORA's five metrics are change lead time, deployment frequency, failed deployment recovery time, change fail rate, and deployment rework rate. Grade a template against **its own trend and against off-platform teams**, not against a published band — DORA stopped ranking teams into Elite/High/Medium/Low. The thresholds in the gate above (on-demand deploys, lead time < 1 day, change fail rate < 15%, recovery < 1 hr) are this org's own targets, chosen and owned locally. The error-budget math that turns these into ship/hold decisions is in [`cross_cutting/slo_error_budget_math.md`](cross_cutting/slo_error_budget_math.md).
 
 ### (b) Observability
 
@@ -844,7 +868,7 @@ Scaffolder:
   scaffolder_task_count{template,status}
   scaffolder_task_duration_seconds{template}       # < 25 min onboarding SLI
 Provisioning (Crossplane):
-  crossplane_managed_resource_ready{kind}          # 0 = stuck claim
+  crossplane_managed_resource_ready{kind}          # 0 = stuck XR
   crossplane_reconcile_duration_seconds
   upbound_provider_aws_api_errors_total            # throttle/quota signal
 ```
@@ -871,8 +895,8 @@ sum(rate(scaffolder_task_duration_seconds_count{status="completed"}[1d]))
 - *Mitigation*: Rotate/renew the Git App credentials; roll back the last template change; if Groups missing, fix Group ingestion first (scaffolder depends on catalog).
 - *Resolution*: Add a pre-flight check in the scaffolder validating Git auth + Group availability before accepting the task; alert on token expiry 7 days out.
 
-**Runbook 3 — Crossplane provision stuck (claim never Ready).**
-- *Symptom*: `crossplane_managed_resource_ready{kind="Instance"} == 0` for a claim for > 15 min; developer's DB never appears.
+**Runbook 3 — Crossplane provision stuck (XR never Ready).**
+- *Symptom*: `crossplane_managed_resource_ready{kind="Instance"} == 0` for an XR for > 15 min; developer's DB never appears.
 - *Diagnosis*: `kubectl describe` the managed resource → AWS error in `status.conditions`: quota exceeded, IAM permission missing, subnet exhaustion, or invalid parameter from a Composition bug.
 - *Mitigation*: For quota → request increase / point Composition at another AZ; for IAM → patch the provider role; for a bad Composition → roll back the Composition revision (Crossplane keeps revisions).
 - *Resolution*: Add AWS quota dashboards + alerts; validate Composition changes against a sandbox account in the eval gate (§8a) before promotion.
@@ -887,7 +911,7 @@ sum(rate(scaffolder_task_duration_seconds_count{status="completed"}[1d]))
 
 ## 9. Common Pitfalls & War Stories
 
-**1. The orphaned-service epidemic ($430k/yr in misrouted incidents).** A team shipped the BROKEN template from §4.2 — free-text owner, optional. Within 8 months, **310 of ~2600 services (12%)** had unresolvable owners. When `ledger-api` went down at 02:40, the dependency page showed three downstream services with no owner; the incident bounced across three teams for 90 minutes before someone with tribal knowledge intervened. Aggregated across the year: an estimated **2 extra hours MTTR on ~40 incidents involving orphaned services × ~3 responders × $90/hr blended ≈ $43k direct**, plus an internal post-incident review pegged customer-facing downtime cost at roughly **$430k/yr**. Fix: the §4.2 `OwnerPicker` + CI ownership gate; a one-time backfill campaign (catalog query for `spec.owner == null`) re-homed all 310.
+**1. The orphaned-service epidemic ($430k/yr in misrouted incidents).** A team shipped the BROKEN template from §4.2 — free-text owner, optional. Within 8 months, **310 of ~2600 services (12%)** had unresolvable owners. When `ledger-api` went down at 02:40, the dependency page showed three downstream services with no owner; the incident bounced across three teams for 90 minutes before someone with tribal knowledge intervened. Aggregated across the year: an estimated **2 extra hours of recovery time on ~40 incidents involving orphaned services × ~3 responders × $90/hr blended ≈ $22k direct**, plus an internal post-incident review pegged customer-facing downtime cost at roughly **$430k/yr**. Fix: the §4.2 `OwnerPicker` + CI ownership gate; a one-time backfill campaign (catalog query for `spec.owner == null`) re-homed all 310.
 
 **2. The catalog refresh meltdown (4-hour platform-wide stall).** A team added a custom entity provider that called an internal HR API synchronously to enrich `Group` entities. The HR API got slow (800 ms → 12 s). With the default processing concurrency, the slow provider consumed all processing threads; the *entire* catalog stopped refreshing for everyone. For **~4 hours**, every team's catalog was stale — scaffolder `OwnerPicker`s went empty, blocking ~12 in-flight onboards. Lost: **~12 engineers × ~3 hrs blocked ≈ 36 engineer-hours (~$3.2k)** plus a credibility hit. Fix: timeout + circuit-breaker around custom providers; per-source isolation (Runbook 1). Supply-chain hardening for plugin code is covered in [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md).
 
@@ -895,7 +919,7 @@ sum(rate(scaffolder_task_duration_seconds_count{status="completed"}[1d]))
 
 **4. Plugin bundle bloat (portal TTI from 1.8s to 9s, 22% adoption drop).** Over two quarters the portal accumulated 34 frontend plugins, all eagerly loaded. Time-to-interactive ballooned to **~9 s**; a survey showed weekly active portal users **dropped ~22%** because "it's faster to just ask in Slack." The platform's entire value (self-service) was being eroded by its own UI. Fix: code-split plugins with lazy routes, a CI bundle-size budget (fail if main chunk > 2 MB gzipped), CDN caching of static assets. TTI recovered to ~2.2 s and weekly actives rebounded.
 
-**5. The golden path with no escape hatch (a team forked the whole platform).** The paved road only offered `db.t4g.small/medium/large` Postgres. A data-intensive team needed an Aurora cluster with specific parameter groups; the platform said "not supported, file a request." Frustrated, they stood up their own Terraform + their own mini-portal, fragmenting tooling and ownership for **~6 months**. Lost: duplicated platform effort and a service tree the central catalog couldn't see. Fix: an explicit "off-road" Claim path (slower, requires platform review, but exists) so power users stay inside the catalog graph.
+**5. The golden path with no escape hatch (a team forked the whole platform).** The paved road only offered `db.t4g.small/medium/large` Postgres. A data-intensive team needed an Aurora cluster with specific parameter groups; the platform said "not supported, file a request." Frustrated, they stood up their own Terraform + their own mini-portal, fragmenting tooling and ownership for **~6 months**. Lost: duplicated platform effort and a service tree the central catalog couldn't see. Fix: an explicit "off-road" XR path (slower, requires platform review, but exists) so power users stay inside the catalog graph.
 
 **6. Search index corruption after an upgrade (catalog "looked empty").** A Backstage minor upgrade changed the search backend schema; the index wasn't rebuilt post-migration, so search returned near-zero results even though the catalog DB was intact. Engineers concluded "the catalog lost everything" and stopped trusting it for a week. Real impact: **~1 week of degraded trust**, measurable as a dip in catalog page views. Fix: search-index rebuild as a mandatory post-upgrade step in the runbook; a synthetic check asserting "search for `checkout` returns ≥1 result" gates the upgrade.
 
@@ -926,7 +950,7 @@ Memory: the entity graph + processing buffers fit in **~2–4 GB**; allocate 4 G
 ### Crossplane reconcile throughput
 
 ```
-managed_resources (MRs) = claims x MRs_per_claim = 450 x 4 = 1800 MRs
+managed_resources (MRs) = XRs x MRs_per_XR = 450 x 4 = 1800 MRs
 reconciles_per_sec = MRs / reconcile_interval = 1800 / 60 = 30 reconciles/sec
 
 worker_capacity: provider concurrency (MaxConcurrentReconciles) default 10/provider.
@@ -949,14 +973,14 @@ Worker capacity (3000/min) comfortably clears the steady-state need (1800/min) �
 
 | Component | Instance / config | Qty | Monthly cost |
 |-----------|-------------------|-----|--------------|
-| Backstage backend pods | 2 vCPU / 4 GB (on EKS, ~0.06 vCPU-hr) | 2 | ~$70 |
+| Backstage backend pods | 2 vCPU / 4 GB (Graviton EKS, ~$0.039/vCPU-hr) | 2 | ~$115 |
 | Catalog Postgres | `db.r6g.large` (2 vCPU/16 GB), Multi-AZ | 1 | ~$340 |
 | Search (optional ES) or PG search | reuse PG or `t3.medium.search` x2 | — | ~$120 |
 | Crossplane control-plane cluster | EKS, 3 × `m6g.large` nodes | 3 | ~$310 |
 | TechDocs S3 + CloudFront | ~50 GB + egress | — | ~$25 |
 | GitOps (Argo CD) | shares control-plane cluster | — | ~$0 (co-located) |
 | Observability (Prometheus/Grafana/Tempo) | `m6g.large` x2 + storage | — | ~$220 |
-| **Platform infra subtotal** | | | **~$1,085/mo** |
+| **Platform infra subtotal** | | | **~$1,130/mo** |
 | Platform engineering team | 3 engineers (fully loaded ~$200k/yr) | 3 | ~$50,000/mo |
 
 The infra is a **rounding error (~$1.1k/mo) against the team cost (~$50k/mo)** — which reinforces the thesis: an IDP is justified by *engineer-time saved across 2000 people*, not infra efficiency. If the IDP saves each of 2000 engineers just 30 min/week (onboarding, finding owners, provisioning), that is 1000 engineer-hours/week ≈ **$90k/week of recovered productivity** against a ~$51k/mo all-in cost — a ~7x return.
@@ -966,13 +990,13 @@ The infra is a **rounding error (~$1.1k/mo) against the team cost (~$50k/mo)** �
 ## 11. Interview Discussion Points
 
 **Q: Why is an IDP a control plane and not just a portal?**
-Because the durable engineering value is the reconciliation loop, not the UI. A portal that only displays links is a wiki that rots; a control plane takes a declarative intent (a Claim, a `catalog-info.yaml`) and *continuously converges* real-world state to match it — self-healing drift, re-deriving the catalog from Git, re-provisioning lost resources. The UI is the cheap, replaceable layer; if you remove the reconciliation underneath, you have a directory, not a platform.
+Because the durable engineering value is the reconciliation loop, not the UI. A portal that only displays links is a wiki that rots; a control plane takes a declarative intent (an XR, a `catalog-info.yaml`) and *continuously converges* real-world state to match it — self-healing drift, re-deriving the catalog from Git, re-provisioning lost resources. The UI is the cheap, replaceable layer; if you remove the reconciliation underneath, you have a directory, not a platform.
 
 **Q: How do you onboard a new service in under 25 minutes when it used to take 6–9 days?**
-You collapse a multi-team handoff chain into one declarative transaction. The scaffolder template emits, in one run, the repo + CI pipeline + Helm chart + infra Claim + catalog registration — all the artifacts a human used to chase across teams. The old 6–9 days was *coordination latency* (tickets, Slack, waiting on the platform team), not work time; encoding the "right way" once into a template removes the humans from the critical path. The remaining ~25 min is just CI building and Crossplane provisioning.
+You collapse a multi-team handoff chain into one declarative transaction. The scaffolder template emits, in one run, the repo + CI pipeline + Helm chart + infra XR + catalog registration — all the artifacts a human used to chase across teams. The old 6–9 days was *coordination latency* (tickets, Slack, waiting on the platform team), not work time; encoding the "right way" once into a template removes the humans from the critical path. The remaining ~25 min is just CI building and Crossplane provisioning.
 
 **Q: Why Crossplane over wrapping Terraform behind the portal?**
-Continuous reconciliation and a typed, narrow API. Terraform-in-CI applies only when triggered, so drift (someone changing a resource in the console) persists until the next apply, and concurrent applies across 200 teams turn state-file locking into a coordination bottleneck. Crossplane reconciles every minute, self-heals drift, and exposes infra as a validated K8s API (XRD/Claim) with RBAC, GitOps, and audit for free. Terraform still wins for foundational one-off infra (VPCs, accounts) where reconciliation churn isn't wanted — so use both.
+Continuous reconciliation and a typed, narrow API. Terraform-in-CI applies only when triggered, so drift (someone changing a resource in the console) persists until the next apply, and concurrent applies across 200 teams turn state-file locking into a coordination bottleneck. Crossplane reconciles every minute, self-heals drift, and exposes infra as a validated K8s API (XRD plus a namespaced XR) with RBAC, GitOps, and audit for free. Terraform still wins for foundational one-off infra (VPCs, accounts) where reconciliation churn isn't wanted — so use both.
 
 **Q: What makes the software catalog more valuable than a spreadsheet of services?**
 The materialized relation graph. The catalog stores typed edges (`ownedBy`, `dependsOn`, `providesApi`, `consumesApi`) built at ingest time, so blast-radius questions ("who breaks if `ledger-api` fails?") are millisecond graph traversals, not manual archaeology. A spreadsheet has no edges and goes stale instantly; the catalog pulls truth from `catalog-info.yaml` next to the code, so it stays fresh and is the authorization substrate for RBAC.
@@ -981,7 +1005,7 @@ The materialized relation graph. The catalog stores typed edges (`ownedBy`, `dep
 Defense in depth at three layers: the scaffolder uses an `OwnerPicker` bound to actual `Group` entities (you literally cannot type a fake team), required so it can't be skipped; repo creation enforces branch protection and CODEOWNERS; and a CI ownership gate fails closed if `spec.owner` is missing or doesn't resolve to a registered group. Ownership is the auth boundary (RBAC keys off `spec.owner`), so garbage owners mean garbage authorization — which is why it's enforced redundantly. Plus a periodic catalog query for `spec.owner == null` catches any leakage.
 
 **Q: Golden paths constrain choices — how do you avoid the platform becoming a blocker?**
-Provide an explicit, slower escape hatch. The paved road covers ~80% of cases at maximum speed; for the genuine 20% (an Aurora cluster, an exotic framework), offer an off-road Claim path that still goes through the catalog and platform review — slower and explicitly owned, but supported. Without an escape hatch, frustrated power-user teams fork the platform (war story #5), fragmenting tooling and creating services the catalog can't see. The path of least resistance should be the golden path, but it must not be the *only* path.
+Provide an explicit, slower escape hatch. The paved road covers ~80% of cases at maximum speed; for the genuine 20% (an Aurora cluster, an exotic framework), offer an off-road XR path that still goes through the catalog and platform review — slower and explicitly owned, but supported. Without an escape hatch, frustrated power-user teams fork the platform (war story #5), fragmenting tooling and creating services the catalog can't see. The path of least resistance should be the golden path, but it must not be the *only* path.
 
 **Q: Mono-catalog or federated — and what's the failure mode?**
 Mono-catalog at this scale (4000 entities, ≤1.5 GB) because the value is cross-team relations and federation breaks the dependency graph. The failure mode is a shared refresh loop: one slow/broken entity provider can starve processing for everyone (war story #2 — a 4-hour stall). You mitigate with processing concurrency, per-source error isolation, and timeouts/circuit-breakers around custom providers, not by federating the catalog and losing the graph.
@@ -996,7 +1020,7 @@ Treat the frontend bundle and catalog queries as the two latency budgets. Plugin
 Cloud-provider API rate limits, not Crossplane CPU. With ~1800 managed resources reconciling every 60s you generate ~1800 describe calls/min, which exceeds default AWS per-account throttles. You fix it by raising the reconcile interval for stable resources (5 min), sharding providers across multiple AWS accounts (which doubles as tenant isolation), and honoring throttle backoff. Crossplane's own worker concurrency (~50 reconciles/sec available vs 30 needed) has headroom; the external API is the wall.
 
 **Q: How do you measure whether the IDP is actually working?**
-DORA metrics on services served by the platform plus adoption signals. Track deploy frequency, lead time for change (< 1 day), change-failure rate (< 15%), and MTTR (< 1 hr) for services born from golden paths, gating template promotion on these (an eval gate). Pair that with adoption (weekly active portal users, % services onboarded self-service) and the onboarding-time SLI (< 25 min p90). A platform with great DORA numbers but falling adoption is failing — engineers routing around it (back to Slack) is the canary.
+DORA metrics on services served by the platform plus adoption signals. Track all five — deployment frequency, change lead time, change fail rate, failed deployment recovery time, and deployment rework rate — for services born from golden paths, gating template promotion on locally-set targets (this org: on-demand deploys, lead time < 1 day, change fail rate < 15%, recovery < 1 hr). Compare on-platform against off-platform teams and against the template's own trend rather than a published band, since DORA no longer ranks teams into Elite/High/Medium/Low tiers. Pair that with adoption (weekly active portal users, % services onboarded self-service) and the onboarding-time SLI (< 25 min p90). A platform with great DORA numbers but falling adoption is failing — engineers routing around it (back to Slack) is the canary.
 
 **Q: How do you justify the IDP's cost to leadership?**
 On recovered engineer-time, not infra savings. The infra is ~$1.1k/mo and the platform team ~$50k/mo; that's negligible against 2000 engineers. If the IDP saves each engineer just 30 min/week (faster onboarding, instant owner lookup, self-service infra), that's ~1000 engineer-hours/week ≈ ~$90k/week of recovered productivity — roughly a 7x return on the all-in cost. You frame it as cognitive-load amortization: encode the "right way" once, 2000 people consume it cheaply, and the platform team scales sub-linearly with the org.
