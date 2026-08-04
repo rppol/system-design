@@ -267,7 +267,7 @@ Resolution can take minutes — the node must be confirmed dead before the volum
 spec:
   containers:
     - name: postgres
-      image: postgres:16
+      image: postgres:18
       volumeMounts: [{name: pgdata, mountPath: /var/lib/postgresql/data}]
   volumes: [{name: pgdata, emptyDir: {}}]      # gone the moment the Pod is rescheduled
 ```

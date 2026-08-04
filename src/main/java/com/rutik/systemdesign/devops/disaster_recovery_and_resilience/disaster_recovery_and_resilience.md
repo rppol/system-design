@@ -12,7 +12,7 @@ DR is governed by two numbers. **RTO (Recovery Time Objective)** is the maximum 
 
 AWS codifies four DR strategies that trade cost against RTO/RPO: **Backup & Restore** (cheapest, RTO hours, RPO hours), **Pilot Light** (RTO 10–30 min, RPO minutes), **Warm Standby** (RTO minutes, RPO seconds), and **Multi-Site Active/Active** (RTO seconds, RPO near zero, highest cost). The engineering job is to map each workload to the cheapest tier that still meets its business-mandated RTO/RPO — not to over-build active/active for a reporting service, nor under-build backup-restore for a payments ledger.
 
-This module cross-references [`../../../database/backup_recovery_and_disaster_recovery`](../../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) for database-level replication and PITR detail, and [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for the DNS and CDN failover plumbing. Chaos engineering — deliberately injecting failure to validate resilience — is covered generically here and ties into the backend chaos-engineering practices.
+This module cross-references [backup_recovery_and_disaster_recovery](../../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) for database-level replication and PITR detail, and [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for the DNS and CDN failover plumbing. Chaos engineering — deliberately injecting failure to validate resilience — is covered generically here and ties into the backend chaos-engineering practices.
 
 ---
 
@@ -194,14 +194,14 @@ sequenceDiagram
 
 ## 6. How It Works — Detailed Mechanics
 
-**Aurora Global Database** is the backbone of low-RPO multi-region DR. A primary region holds the writer; up to 5 secondary regions hold read-only replicas. Replication uses a dedicated, purpose-built storage-layer replication (not binlog), achieving typical RPO <1s and cross-region replica lag under 1s. Managed planned failover promotes a secondary to writer in under 1 minute; unplanned ("detach and promote") is a manual or automated API call.
+**Aurora Global Database** is the backbone of low-RPO multi-region DR. A primary region holds the writer; up to 5 secondary regions hold read-only replicas. Replication uses a dedicated, purpose-built storage-layer replication (not binlog), achieving typical RPO <1s and cross-region replica lag under 1s. Recovery comes in three forms. A **switchover** (`switchover-global-cluster`) is the planned path: Aurora fully synchronizes the target secondary before promoting it, so RPO is 0 — this is also how you fail *back* after a real outage. A **managed failover** (`failover-global-cluster --allow-data-loss`) is the unplanned path: it promotes immediately without waiting for replication to catch up, so RPO is the lag at the instant of failure and RTO is typically a few minutes; Aurora attempts write-fencing on the old primary and re-attaches it as a secondary once the region recovers. A **manual failover** (detach the chosen secondary, then rebuild the topology) is the fallback when the clusters are on incompatible engine versions.
 
 ```hcl
 # Aurora Global Database: primary in us-east-1, secondary in us-west-2
 resource "aws_rds_global_cluster" "global" {
   global_cluster_identifier = "app-global"
   engine                    = "aurora-postgresql"
-  engine_version            = "15.4"
+  engine_version            = "17.9"
 }
 
 resource "aws_rds_cluster" "primary" {
@@ -302,11 +302,11 @@ stateDiagram-v2
 
 ## 7. Real-World Examples
 
-- **Netflix** runs active/active across 3 AWS regions. Their Chaos Kong exercise deliberately fails an entire region; Route53 and Zuul reroute traffic so members never notice. They evacuate a region in under 7 minutes routinely, validated continuously rather than annually.
+- **Netflix** runs active/active across 3 AWS regions. Their Chaos Kong exercise deliberately fails an entire region; Route53 and Zuul reroute traffic so members never notice. Project Nimble cut region evacuation from roughly 50 minutes to about 7, by keeping a hot-standby instance pool per microservice that is injected into the clusters at failover time. They rehearse the evacuation monthly rather than annually.
 
 - **GitLab (2017 postmortem)** accidentally `rm -rf`'d the primary PostgreSQL data directory and discovered all 5 backup/replication methods were broken or stale. They restored from a 6-hour-old staging snapshot, losing 6 hours of issues, merge requests, and comments. The lesson became industry canon: untested backups are not backups.
 
-- **AWS US-EAST-1 outages (2020, 2021)** repeatedly demonstrated why even single-cloud shops with global ambitions multi-region: Kinesis and then the network control plane in us-east-1 cascaded into dozens of dependent services. Workloads pinned to a single region went dark; those with warm standby in us-west-2 stayed up.
+- **AWS US-EAST-1 outages (2020, 2021, 2025)** repeatedly demonstrated why even single-cloud shops with global ambitions multi-region: Kinesis in 2020, the network control plane in 2021, and in October 2025 a race condition in DynamoDB's automated DNS management that left the regional endpoint record empty. Each cascaded into dozens of dependent services — the 2025 event ran roughly 15 hours and took down consumer apps, payment platforms, and enterprise SaaS worldwide. Workloads pinned to a single region went dark; those with warm standby elsewhere stayed up.
 
 - **Salesforce / Hyperforce** uses active/active across availability zones with synchronous database replication for RPO 0 on transactional data, plus async cross-region for regional DR, sized to a sub-4-hour RTO contractual commitment.
 
@@ -402,8 +402,8 @@ resource "aws_route53_record" "primary" {
 
 | Tool | Layer | RPO capability | RTO capability | Notes |
 |---|---|---|---|---|
-| Aurora Global Database | Database | <1s | <1 min (managed failover) | Storage-layer replication, up to 5 secondaries |
-| RDS cross-region read replica | Database | seconds–minutes | 10–30 min (promote) | Binlog-based, manual promote |
+| Aurora Global Database | Database | <1s unplanned, 0 on planned switchover | minutes (managed failover) | Storage-layer replication, up to 5 secondaries |
+| RDS cross-region read replica | Database | seconds–minutes | 10–30 min (promote) | Engine-log shipping (binlog on MySQL, WAL on PostgreSQL), manual promote |
 | DynamoDB Global Tables | Database | sub-second | seconds | Multi-active, last-writer-wins |
 | AWS Route53 health checks | DNS failover | n/a | 60–90s detection + TTL | 30s/10s intervals, failover routing |
 | S3 CRR + RTC | Object storage | <15 min p99.99 | n/a (always available) | Object lock for ransomware protection |
@@ -428,7 +428,7 @@ Route53 attaches a health check (probing an endpoint every 30s standard or 10s f
 A successful backup job only proves bytes were written, not that they are restorable, complete, or that your runbook works. GitLab in 2017 had five backup methods all silently broken and lost 6 hours of data. Run scheduled restore drills (game days) that restore from cold into a clean environment and measure the actual wall-clock RTO and the data gap (RPO).
 
 **Q: What RPO does Aurora Global Database provide and how?**
-Typically under 1 second, via dedicated storage-layer replication (not binlog) that ships changes from the primary region's storage volume to secondary regions with sub-second lag. Managed planned failover promotes a secondary to writer in under a minute; unplanned failover is an API call. Monitor `AuroraGlobalDBReplicationLag` and alert if it exceeds your RPO budget.
+Typically under 1 second, via dedicated storage-layer replication (not binlog) that ships changes from the primary region's storage volume to secondary regions with sub-second lag. A planned switchover synchronizes the target secondary before promoting it, so its RPO is 0; an unplanned managed failover promotes immediately and leaves you with whatever lag existed at the instant of failure — seconds — for an RTO of a few minutes. Monitor `AuroraGlobalDBRPOLag` (the lag metric for Aurora PostgreSQL-based global databases) and alert if it exceeds your RPO budget. Aurora PostgreSQL can also enforce the target with the `rds.global_db_rpo` parameter, which blocks commits on the primary when every secondary is lagging past the RPO.
 
 **Q: What is the difference between synchronous and asynchronous replication for DR?**
 Synchronous replication acknowledges a write only after the replica has it, giving RPO 0 but adding the cross-region round-trip (10–80 ms) to every write and coupling availability to the remote site. Asynchronous replication acknowledges locally and ships changes in the background, keeping write latency low but making RPO equal to the replication lag at failure. Use sync within a region (multi-AZ) and async across regions.
@@ -460,8 +460,8 @@ AWS DRS operates at the block/host level, continuously replicating an entire ser
 **Q: Is S3 Cross-Region Replication's RPO actually "near zero"?**
 No — S3 CRR is asynchronous, and even with Replication Time Control (RTC) enabled, AWS's contractual SLA only guarantees 99.99% of objects replicate within 15 minutes, not instantly. An object written to the primary bucket seconds before a regional outage may not have replicated yet, so the real RPO for S3-backed data is "up to 15 minutes for the vast majority of objects," not zero. Treat S3 CRR as a strong but bounded-lag safety net and enable Object Lock on the destination bucket so the replicated copies also survive a ransomware or fat-finger delete.
 
-**Q: What lesson did the 2020/2021 AWS us-east-1 outages teach about single-region architectures?**
-They showed that even workloads entirely built on managed AWS services are not automatically resilient to a regional outage. A control-plane or dependency failure — Kinesis, then the network control plane — cascaded into dozens of services that other teams' applications depended on transitively, and teams pinned to us-east-1 alone went fully dark regardless of how well-architected their own application was, while teams with a warm standby in us-west-2 stayed up by failing over. The takeaway is that multi-region DR is insurance against your cloud provider's regional blast radius, which no amount of single-region multi-AZ redundancy can substitute for.
+**Q: What lesson did the AWS us-east-1 outages of 2020, 2021, and 2025 teach about single-region architectures?**
+They showed that even workloads entirely built on managed AWS services are not automatically resilient to a regional outage. A control-plane or dependency failure — Kinesis in 2020, the network control plane in 2021, a DNS-automation race condition that emptied the DynamoDB regional endpoint record in October 2025 — cascaded into dozens of services that other teams' applications depended on transitively, and teams pinned to us-east-1 alone went fully dark regardless of how well-architected their own application was, while teams with a warm standby in another region stayed up by failing over. The 2025 event also showed the second-order trap: an application can be multi-region and still be pinned to us-east-1 through a global control-plane dependency it never audited. The takeaway is that multi-region DR is insurance against your cloud provider's regional blast radius, which no amount of single-region multi-AZ redundancy can substitute for — and it only pays out if every dependency in the request path is genuinely regional.
 
 ---
 

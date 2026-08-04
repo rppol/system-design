@@ -478,14 +478,14 @@ kubectl rollout undo deployment/payments      # service restored in ~30s
 | Tool | Purpose |
 |------|---------|
 | PagerDuty | On-call scheduling, escalation, incident workflow |
-| OpsGenie | On-call/escalation (Atlassian) |
-| Grafana OnCall / Incident | Open-source on-call + incident management |
+| Jira Service Management Operations | Atlassian's on-call scheduling, alerting, and escalation |
+| Grafana IRM | On-call scheduling + incident response wired to Grafana alerting |
 | incident.io / FireHydrant / Rootly | Incident lifecycle automation (declare, roles, comms, retro) |
 | Slack / Microsoft Teams | War room / incident channel + bots |
-| Statuspage / Atlassian Statuspage | External status communication |
+| Atlassian Statuspage | External status communication |
 | Jira / Linear | Track postmortem action items |
-| Runbook tooling (Confluence, runbooks-as-code) | Diagnosis/mitigation guides linked from alerts |
-| Blameless / Jeli | Postmortem authoring + learning analytics |
+| Confluence / runbooks-as-code in Git | Diagnosis/mitigation guides linked from alerts |
+| PagerDuty Post-Incident Reviews | Postmortem authoring + learning analytics |
 | Alertmanager | Feeds alerts into the on-call/escalation flow (see [visualization_and_alerting](../visualization_and_alerting/visualization_and_alerting.md)) |
 
 ---

@@ -92,13 +92,15 @@ flowchart TD
 
 ### Service types
 
+There are exactly four values of the `type` field. Headless is not a fifth type — it is a ClusterIP Service with `clusterIP: None`, listed here because it behaves so differently.
+
 | Type | Exposure | Use |
 |------|----------|-----|
 | ClusterIP (default) | Internal virtual IP | Service-to-service |
 | NodePort | Port on every node | Dev, behind external LB |
 | LoadBalancer | Cloud LB + external IP | Internet-facing (one per Service) |
-| Headless (`clusterIP: None`) | DNS to individual pod IPs | StatefulSets, direct pod addressing |
 | ExternalName | CNAME to external DNS | Aliasing external services |
+| *(variant)* Headless — ClusterIP with `clusterIP: None` | DNS to individual pod IPs | StatefulSets, direct pod addressing |
 
 ### Probe types
 
@@ -383,7 +385,7 @@ kubectl get endpointslices -l kubernetes.io/service-name=web    # should list po
 | `kubectl` | Apply/inspect/rollout objects |
 | Helm / Kustomize | Template/overlay manifests (see [helm_and_package_management](../helm_and_package_management/helm_and_package_management.md)) |
 | `kubectl rollout` | `status`, `undo`, `restart`, `history` |
-| ingress-nginx / Gateway API | L7 routing (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)) |
+| Gateway API (Envoy Gateway, Traefik, NGINX Gateway Fabric) | L7 routing (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)) |
 | External Secrets Operator | Sync secrets from Vault/cloud (see [secrets_management](../secrets_management/secrets_management.md)) |
 | stakater/Reloader | Restart on ConfigMap/Secret change |
 | metrics-server | Powers `kubectl top` and HPA |
@@ -431,8 +433,8 @@ A headless Service (`clusterIP: None`) returns the individual Pod IPs via DNS in
 **Q13: Why does the case study need a `preStop` hook in addition to a readiness probe and SIGTERM handling?**
 A `preStop` hook bridges the gap between a Pod being marked Terminating and kube-proxy actually removing it from Service endpoints, which is not instantaneous. Without it, the moment a Pod receives SIGTERM it can stop accepting connections while some nodes haven't yet propagated its removal from the EndpointSlice, so a few in-flight requests get routed to a Pod that's already shutting down and are dropped. The module's fix runs `preStop: sleep 10` to hold the container alive and still finishing requests for 10 seconds after Terminating while endpoint removal propagates, inside a `terminationGracePeriodSeconds: 45` window sized longer than the app's slowest in-flight request. Readiness probes only gate new Pods joining traffic and do nothing for a Pod that's leaving, so always pair a `preStop` drain delay with an app that traps SIGTERM and finishes in-flight work rather than relying on either mechanism alone.
 
-**Q14: What are the five Kubernetes Service types and how does each expose Pods?**
-ClusterIP (the default) gives an internal-only virtual IP for service-to-service calls, and the other four types build outward from there for different exposure needs. NodePort opens the same port on every node for simple external access, usually behind an external load balancer; LoadBalancer provisions one cloud load balancer with an external IP per Service; a headless Service (`clusterIP: None`) skips the virtual IP entirely and returns individual Pod IPs via DNS, which is what StatefulSets use for stable per-Pod addressing; and ExternalName is just a DNS CNAME to an external hostname with no proxying at all. In production, ClusterIP handles internal traffic, an Ingress fronting ClusterIP (or occasionally LoadBalancer directly) handles internet-facing traffic, and NodePort is mostly a dev/debug tool since it exposes a high port on every node. Pick headless only when clients genuinely need to address a specific Pod rather than any ready replica.
+**Q14: What are the Kubernetes Service types and how does each expose Pods?**
+There are four values of the `type` field — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, which is a ClusterIP Service with `clusterIP: None` rather than a type of its own. ClusterIP (the default) gives an internal-only virtual IP for service-to-service calls, and the rest build outward from there for different exposure needs. NodePort opens the same port on every node for simple external access, usually behind an external load balancer; LoadBalancer provisions one cloud load balancer with an external IP per Service; a headless Service skips the virtual IP entirely and returns individual Pod IPs via DNS, which is what StatefulSets use for stable per-Pod addressing; and ExternalName is just a DNS CNAME to an external hostname with no proxying at all. In production, ClusterIP handles internal traffic, an Ingress fronting ClusterIP (or occasionally LoadBalancer directly) handles internet-facing traffic, and NodePort is mostly a dev/debug tool since it exposes a high port on every node. Pick headless only when clients genuinely need to address a specific Pod rather than any ready replica.
 
 **Q15: Why prefer an Ingress over giving every Service its own LoadBalancer?**
 A cloud LoadBalancer Service provisions one external load balancer per Service, while an Ingress shares a single L7 load balancer and controller across many Services' host and path rules. Ten services fronted by ten `LoadBalancer` Services means ten cloud load balancers billed and managed separately, while the same ten services behind one Ingress controller share a single load balancer and route by hostname or URL path, cutting both cost and the number of moving parts to monitor. Ingress also provides L7 features a plain Service can't: path-based routing, host-based virtual hosting, TLS termination, and header-based rules, all configured declaratively per Ingress object. The tradeoff is an extra layer — the ingress controller itself — to operate and secure, so default to Ingress for HTTP(S) services and reserve raw `LoadBalancer` Services for internet-facing TCP/UDP workloads an Ingress controller can't route.

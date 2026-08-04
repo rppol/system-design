@@ -67,7 +67,7 @@ This is the **operator pattern**: domain expertise (how to safely back up/upgrad
 |------|-------|
 | Kubebuilder / controller-runtime (Go) | Most common; informers, workqueues, reconcilers |
 | Operator SDK | Wraps Kubebuilder; also Ansible/Helm operators |
-| Metacontroller / kopf (Python) | Lower-barrier operators |
+| kopf (Python) / Metacontroller | Lower-barrier operators; Metacontroller calls your logic as a webhook, so the controller can be written in any language |
 
 ---
 
@@ -342,7 +342,7 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj); retu
 | OperatorHub.io | Discover community operators |
 | Prometheus Operator / cert-manager / CloudNativePG | Reference production operators |
 | Crossplane | Provision cloud infra via CRDs |
-| OLM (Operator Lifecycle Manager) | Install/upgrade operators (OpenShift) |
+| OLM v1 (operator-controller) | Install/upgrade operators declaratively via the `ClusterExtension` API; upstream project, also shipped in OpenShift |
 
 ---
 
@@ -382,7 +382,7 @@ By updating the CR's `status` subresource (e.g., `status.phase: Ready`, conditio
 When you run multiple operator replicas for availability, only one should actively reconcile at a time — otherwise two controllers fight over the same resources. Leader election (via a Lease object) ensures exactly one replica is the active leader; the others stand by and take over if the leader fails. controller-runtime provides this out of the box; forgetting it causes duplicate, conflicting actions.
 
 **Q12: How do CRDs get schema validation, and why use it?**
-A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime.
+A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. In `apiextensions.k8s.io/v1` that schema is mandatory and must be *structural* — every object and array item carries a non-empty `type`, and unknown fields are pruned rather than persisted. Constraints OpenAPI can't express — cross-field rules, or "this field is immutable once set" — go in `x-kubernetes-validations` as CEL expressions, which the API server type-checks when the CRD is created and evaluates on every write. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime.
 
 **Q13: What do OwnerReferences give you that finalizers don't?**
 OwnerReferences let Kubernetes' built-in garbage collector automatically delete child objects when their owner is deleted. A finalizer instead blocks and gates deletion of the *owner itself* until custom cleanup logic runs, so setting `controllerutil.SetControllerReference(&cr, cj, r.Scheme)` on a created CronJob means deleting the parent `Database` CR cascades to delete that CronJob for free with no reconcile code required, while a finalizer handles cleanup the garbage collector cannot do, like deprovisioning an external S3 bucket. In practice you use both: OwnerReferences for in-cluster children, finalizers for anything that lives outside the cluster's own garbage collection.

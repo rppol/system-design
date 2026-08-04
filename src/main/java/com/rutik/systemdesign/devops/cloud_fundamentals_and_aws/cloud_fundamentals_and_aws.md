@@ -137,10 +137,10 @@ Each added nine divides downtime by 10, which is why the cost of an SLA rises so
 
 | Type | Baseline | Max | Use case |
 |------|----------|-----|----------|
-| gp3 (SSD) | 3000 IOPS, 125 MB/s | 16000 IOPS, 1000 MB/s | Default general purpose |
-| io2 Block Express (SSD) | Provisioned | 256000 IOPS | Critical DBs |
-| st1 (HDD) | Throughput | 500 MB/s | Big sequential (logs, data lakes) |
-| sc1 (HDD) | Cold | Lowest cost | Infrequent |
+| gp3 (SSD) | 3000 IOPS, 125 MiB/s | 80,000 IOPS, 2,000 MiB/s | Default general purpose |
+| io2 Block Express (SSD) | Provisioned | 256,000 IOPS, 4,000 MiB/s | Critical DBs (sub-500us latency, 99.999% durability) |
+| st1 (HDD) | Throughput | 500 MiB/s | Big sequential (logs, data lakes) |
+| sc1 (HDD) | Cold | 250 MiB/s, lowest cost | Infrequent |
 
 ### Load balancers
 
@@ -300,7 +300,12 @@ resource "aws_security_group" "app" {
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
-  egress { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 ```
 
@@ -410,7 +415,11 @@ resource "aws_route53_record" "api" {
   set_identifier = "primary"
   failover_routing_policy { type = "PRIMARY" }
   health_check_id = aws_route53_health_check.primary.id
-  alias { name = aws_lb.primary.dns_name; zone_id = aws_lb.primary.zone_id; evaluate_target_health = true }
+  alias {
+    name                   = aws_lb.primary.dns_name
+    zone_id                = aws_lb.primary.zone_id
+    evaluate_target_health = true
+  }
 }
 ```
 
@@ -592,7 +601,7 @@ An explicit Deny in any evaluated policy always wins, overriding any Allow; if n
 Match the family to the resource the workload is bound by: compute-optimized (c) for CPU-bound jobs, memory-optimized (r/x) for in-memory databases, and accelerated (p/g/inf) for GPU workloads. General purpose (m, t) covers balanced web/app servers — t3.micro is burstable for spiky-but-light traffic, while m7i.large suits steady balanced load. Storage-optimized (i, d) instances like i4i.large add local NVMe for high local IOPS workloads such as caches or scratch space. Graviton (ARM, e.g. c7g.xlarge) variants of most families give better price-performance for workloads that don't need x86-specific binaries. Default to general purpose until profiling shows you're actually CPU-, memory-, or IOPS-bound, then move to the matching specialized family.
 
 **Q15: When would you choose io2 Block Express over the default gp3 EBS volume?**
-Choose io2 Block Express for the most demanding, latency-sensitive databases that need provisioned IOPS beyond gp3's ceiling, since it scales up to 256,000 IOPS versus gp3's maximum of 16,000. gp3 is the default general-purpose SSD, baselined at 3000 IOPS and 125 MB/s and scalable up to 16,000 IOPS — more than enough for most application volumes. io2 Block Express is provisioned IOPS storage reserved for critical databases where you pay for guaranteed throughput rather than accepting a shared baseline. For big sequential workloads like log ingestion or a data lake, st1 (HDD, up to 500 MB/s throughput) is cheaper than either SSD type since sequential throughput, not IOPS, is the bottleneck. Start every volume on gp3 and only move to io2 Block Express once a specific database's measured IOPS requirement exceeds what gp3 can provision.
+Choose io2 Block Express when you need more than gp3's 80,000 IOPS ceiling, consistently sub-500-microsecond latency, 99.999% volume durability, or Multi-Attach — not merely "high IOPS," because gp3 now covers most of that range. gp3 is the default general-purpose SSD, baselined at 3000 IOPS and 125 MiB/s, and you provision beyond that up to 80,000 IOPS (500 IOPS per GiB, so 160 GiB or larger) and 2,000 MiB/s independently of capacity. io2 Block Express scales to 256,000 IOPS and 4,000 MiB/s per volume, and its durability is two orders of magnitude better than gp3's 99.8-99.9% — that durability difference, not raw IOPS, is often the real reason a critical database sits on io2. For big sequential workloads like log ingestion or a data lake, st1 (HDD, up to 500 MiB/s throughput) is cheaper than either SSD type since sequential throughput, not IOPS, is the bottleneck. Start every volume on gp3 and only move to io2 Block Express once a measured requirement — IOPS above 80,000, tail latency, or durability — actually exceeds what gp3 provides.
 
 **Q16: What's the tradeoff between On-Demand, Spot, and Savings Plans pricing on EC2?**
 On-Demand offers full flexibility at the highest price, Savings Plans cut cost via a 1- or 3-year commitment, and Spot can save up to 90% but may be reclaimed with little notice. On-Demand has no commitment and no discount — the baseline for unpredictable or short-lived workloads. Savings Plans (and Reserved Instances) trade a 1- or 3-year commitment for a lower effective hourly rate on steady-state, predictable capacity. Spot instances bid on AWS's unused capacity for up to 90% off On-Demand, but AWS can reclaim them with a two-minute interruption warning, so they suit fault-tolerant, stateless, or checkpointable workloads like batch jobs and CI runners, not a primary database. Mix all three in one fleet — Savings Plans for the steady baseline, Spot for elastic burst capacity, and On-Demand as the fallback when Spot is unavailable.

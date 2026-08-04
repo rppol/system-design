@@ -59,7 +59,7 @@ Key mechanics: **artifacts** (the built, versioned, immutable output — e.g., a
 
 **Mental model**: Think of the pipeline as a function from commit → (verified artifact → environments). The artifact is produced once and is immutable; environments differ only in *configuration*, not in the binary. Each stage is a gate that either passes the change forward or stops it with clear feedback. Speed (cache, parallelism) and isolation (ephemeral runners) determine whether the loop is tight enough that developers trust and use it.
 
-**Why it matters**: Deployment frequency and lead time for changes are the DORA metrics that correlate with high-performing teams. Slow, flaky, or manual pipelines push teams toward big-bang releases — which are riskier and harder to debug. A fast, reliable pipeline makes small, frequent, low-risk deploys the path of least resistance.
+**Why it matters**: Deployment frequency and change lead time are the DORA metrics that correlate with high-performing teams. Slow, flaky, or manual pipelines push teams toward big-bang releases — which are riskier and harder to debug. A fast, reliable pipeline makes small, frequent, low-risk deploys the path of least resistance.
 
 **Key insight**: "Build once, promote the same artifact" is the principle that prevents an entire class of "works in staging, breaks in prod" bugs. If you rebuild per environment, the prod artifact was never the thing you tested. Inject environment differences as *configuration at deploy time*, not by recompiling.
 
@@ -184,9 +184,9 @@ jobs:
   test:
     runs-on: ubuntu-latest          # ephemeral runner: fresh VM per job
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: 20, cache: npm}    # dependency cache -> faster installs
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with: {node-version: 24, cache: npm}    # dependency cache -> faster installs
       - run: |
           set -euo pipefail          # fail fast (see shell module)
           npm ci
@@ -196,8 +196,8 @@ jobs:
     needs: test                      # gate: only build if tests pass
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v5
+      - uses: docker/build-push-action@v7
         with:
           push: true
           tags: registry/app:${{ github.sha }}   # tag by commit SHA -> traceable, immutable
@@ -210,7 +210,7 @@ jobs:
       - run: deploy.sh staging registry/app:${{ github.sha }}   # promote THIS artifact
   deploy-prod:
     needs: deploy-staging
-    environment: production          # requires approval (Continuous Delivery gate)
+    environment: production          # required reviewers on the environment = the Delivery gate
     runs-on: ubuntu-latest
     steps:
       - run: deploy.sh prod registry/app:${{ github.sha }}      # SAME artifact, prod config
@@ -270,7 +270,7 @@ The 8x is a ratio, so it is unaffected by which step dominates; the 342s is what
 
 ```yaml
 # Never echo secrets; use the platform's secret store + OIDC to the cloud (no static keys).
-- uses: aws-actions/configure-aws-credentials@v4
+- uses: aws-actions/configure-aws-credentials@v6
   with: {role-to-assume: arn:aws:iam::...:role/ci-deploy, aws-region: us-east-1}
   # OIDC: the runner exchanges a short-lived token for the role -> no long-lived AWS keys in CI.
 ```
@@ -297,7 +297,7 @@ sequenceDiagram
 
 ## 7. Real-World Examples
 
-- **DORA / "Accelerate" research**: elite performers deploy on-demand (many times/day) with lead times under an hour and change-failure rates under 15% — enabled by fast, automated pipelines.
+- **DORA research**: top performers deploy on demand, keep change lead time short, hold change fail rate low, and recover from a failed deployment quickly — all enabled by fast, automated pipelines.
 - **Monorepo affected-target CI** (Google/Meta with Bazel; Nx/Turborepo): only build/test the projects a commit actually affects, keeping CI fast at huge scale (see [version_control_and_git_workflows](../version_control_and_git_workflows/version_control_and_git_workflows.md)).
 - **OIDC to cloud** (GitHub Actions → AWS/GCP): replaced long-lived CI cloud keys with short-lived federated tokens, eliminating the most-leaked secret class.
 - **Build once, promote**: shipping the identical container digest from CI through staging to prod is the standard at virtually every container-native org.
@@ -355,7 +355,7 @@ deploy-prod:    {needs: deploy-staging, steps: [{run: deploy prod registry/app:$
 |------|---------|
 | GitHub Actions / GitLab CI / Jenkins | Pipeline orchestration (see [ci_cd_platforms](../ci_cd_platforms/ci_cd_platforms.md)) |
 | Argo Workflows / Tekton | Kubernetes-native pipelines |
-| Docker buildx / Kaniko | Image builds (with cache) |
+| Docker buildx / rootless BuildKit | Image builds (with cache) |
 | Artifact registries (ECR, GAR, Artifactory) | Store/promote artifacts (see [artifact_and_registry_management](../artifact_and_registry_management/artifact_and_registry_management.md)) |
 | Trivy / SonarQube / Semgrep | Scanning, SAST, quality gates |
 | OIDC (cloud federation) | Keyless cloud auth from CI |
@@ -397,7 +397,7 @@ Use affected-target detection (Bazel, Nx, Turborepo) to build and test only the 
 An immutable, versioned artifact — typically a container image — built once and identified by content (the image digest) or commit SHA, not a mutable tag like `latest`. This gives full traceability (which commit is in prod), reproducibility (the digest is exact bits), and supply-chain integrity (you can sign/scan that specific artifact and gate on it — see [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)).
 
 **Q11: What are the DORA metrics and how do they relate to CI/CD?**
-The four DORA metrics are deployment frequency, lead time for changes, change failure rate, and time to restore service. High performers score well on all four, and a fast, reliable, automated CI/CD pipeline is the primary enabler: it shortens lead time, raises deployment frequency, and (with good tests + fast rollback) lowers change failure rate and restore time. They're the standard way to measure delivery performance.
+DORA measures software delivery performance with five metrics: change lead time, deployment frequency, failed deployment recovery time, change fail rate, and deployment rework rate. High performers score well across all of them, and a fast, reliable, automated CI/CD pipeline is the primary enabler: it shortens change lead time, raises deployment frequency, and (with good tests + fast rollback) lowers change fail rate, rework, and recovery time. They're the standard way to measure delivery performance.
 
 **Q12: How does CI/CD relate to GitOps?**
 CI produces and verifies the artifact (build, test, scan, push image). CD can be push-based (the pipeline runs `kubectl apply`) or pull-based GitOps (CI updates a manifests repo, and an in-cluster agent like ArgoCD reconciles). GitOps separates "build/verify" (CI) from "deploy" (Git-driven reconciliation), giving auditability and drift detection (see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md)). CI/CD fundamentals underpin both models.
@@ -461,19 +461,22 @@ sequenceDiagram
 ```yaml
 # FIX: single build, immutable digest, promoted unchanged; deps locked.
 build:
+  outputs:
+    digest: ${{ steps.push.outputs.digest }}                 # job output: visible to later jobs
   steps:
-    - run: |
+    - id: push
+      run: |
         docker build -t registry/app:${{ github.sha }} .
         docker push registry/app:${{ github.sha }}
-        # capture the immutable digest for promotion
-        echo "DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' registry/app:${{ github.sha }})" >> $GITHUB_ENV
+        # capture the immutable digest for promotion ($GITHUB_ENV is job-scoped; outputs cross jobs)
+        echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' registry/app:${{ github.sha }})" >> $GITHUB_OUTPUT
 deploy-staging:
   needs: build
-  steps: [{run: "deploy.sh staging ${{ env.DIGEST }}"}]      # exact digest
+  steps: [{run: "deploy.sh staging ${{ needs.build.outputs.digest }}"}]      # exact digest
 deploy-prod:
-  needs: deploy-staging
+  needs: [build, deploy-staging]
   environment: production                                    # human approval (Delivery)
-  steps: [{run: "deploy.sh prod ${{ env.DIGEST }}"}]         # SAME digest tested in staging
+  steps: [{run: "deploy.sh prod ${{ needs.build.outputs.digest }}"}]         # SAME digest tested in staging
 # Plus: lockfiles committed (package-lock.json) so dependency versions are pinned and reproducible.
 ```
 

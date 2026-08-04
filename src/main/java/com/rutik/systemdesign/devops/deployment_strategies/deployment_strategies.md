@@ -268,7 +268,7 @@ canary_requests_per_window = rps x traffic_weight x window_seconds
   third         50%         500               60,000                         600
 ```
 
-6,000 requests is plenty to resolve a 1%-vs-0.1% error rate. Halve the traffic to 100 rps and
+6,000 requests is plenty to resolve a 1%-vs-0.1% error rate. Drop the traffic to 100 rps and
 the same step observes 600 requests with ~6 errors, where one unlucky client retry storm flips
 the ratio past 0.99 and aborts a healthy release. That is why low-traffic services need longer
 pauses or wider weights: the `failureLimit: 2` exists precisely to absorb a single noisy
@@ -326,7 +326,8 @@ flowchart LR
 
 ## 7. Real-World Examples
 
-- **Netflix/Argo Rollouts/Flagger**: automated canaries gated on real-time error-rate and latency from Prometheus, promoting or rolling back without human intervention — the progressive-delivery standard.
+- **Netflix (Kayenta on Spinnaker)**: Netflix pioneered automated canary analysis and open-sourced it with Google as Kayenta, which runs as a Spinnaker pipeline stage and scores a canary statistically (Mann-Whitney U over canary-vs-baseline metrics) rather than against a fixed threshold.
+- **Argo Rollouts / Flagger**: the Kubernetes-native equivalents — automated canaries gated on real-time error-rate and latency from Prometheus, promoting or rolling back without human intervention. This is the progressive-delivery standard on Kubernetes today.
 - **Feature flags at scale** (LaunchDarkly, Flagsmith, Unleash): companies deploy dozens of times a day with risky changes shipped dark and rolled out per cohort, decoupling deploy cadence from release decisions.
 - **Blue-green for databases/stateful cutovers**: teams run a parallel green environment, smoke-test it, then switch DNS/router — with the blue kept warm for instant rollback.
 - **Kubernetes rolling updates**: the default for stateless services; with readiness probes and `maxUnavailable: 0` it's zero-downtime out of the box (see [kubernetes_workloads_and_objects](../kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md)).
@@ -387,7 +388,8 @@ ALTER TABLE orders DROP COLUMN total;
 | Flagger | Progressive delivery (mesh/ingress-driven) |
 | Kubernetes Deployment | Native rolling updates |
 | LaunchDarkly / Unleash / Flagsmith | Feature flag management |
-| Istio / Linkerd / ingress | Traffic weighting for canaries (see [`../../backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md)) |
+| OpenFeature | Vendor-neutral flag-evaluation API (CNCF); swap flag vendors behind one provider interface |
+| Gateway API (Envoy Gateway, Istio, Traefik, NGINX Gateway Fabric) / Linkerd | Traffic weighting for canaries — `HTTPRoute` `backendRefs[].weight` is the portable form (see [`../../backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md)) |
 | Prometheus | Metric source for canary analysis (see [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md)) |
 | Spinnaker | Multi-cloud deployment pipelines |
 
@@ -411,7 +413,7 @@ Blue-green keeps the entire previous version (blue) running and warm; rollback i
 During any rolling/canary/blue-green transition, v1 and v2 run at once and may share a database, so a backward-incompatible schema change breaks the version that doesn't expect it (500s, data corruption). Use expand-contract: first expand (additive, nullable changes both versions tolerate), deploy code using the new shape, then contract (remove old columns) only after all old pods are gone — never in the same release.
 
 **Q6: How does an automated canary decide to promote or roll back?**
-A controller shifts a small traffic weight to the canary and, during pauses, queries metric providers (e.g., Prometheus) for success conditions — error rate ≥ 99%, p95 latency < threshold, or business KPIs. If the conditions hold across the analysis, it advances the weight; if they fail (beyond a failure limit), it shifts traffic back to stable and halts, alerting. The gates are codified (AnalysisTemplate), not a human eyeballing dashboards.
+A controller shifts a small traffic weight to the canary and, during pauses, queries metric providers (e.g., Prometheus) for success conditions — success rate ≥ 99%, p95 latency < threshold, or business KPIs. If the conditions hold across the analysis, it advances the weight; if they fail (beyond a failure limit), it shifts traffic back to stable and halts, alerting. The gates are codified (AnalysisTemplate), not a human eyeballing dashboards.
 
 **Q7: When is blue-green the wrong choice?**
 When you can't afford ~2x resources during cutover, when the workload is huge (doubling is prohibitively expensive), or when database/state can't support both versions writing — the instant switch still exposes 100% of users at once, so a bad-but-passing-smoke-test version hits everyone. In those cases canary (gradual exposure) limits blast radius better, and rolling is cheaper.
@@ -420,7 +422,7 @@ When you can't afford ~2x resources during cutover, when the workload is huge (d
 Stale flags become permanent dead code paths and a source of "why is prod behaving differently" confusion; a forgotten flag with a wrong default can cause an outage; and flag logic sprinkled everywhere increases complexity. Manage them as inventory: each flag has an owner, a purpose, and an expiry; remove flags once a feature is fully rolled out; and centralize evaluation through a flag service with audit/targeting.
 
 **Q9: How does a service mesh or ingress enable canaries?**
-They provide weighted traffic routing: the mesh/ingress can send, say, 5% of requests to the canary Service and 95% to stable, and adjust the weights as the rollout progresses. Argo Rollouts/Flagger drive these weights via the mesh (Istio/Linkerd) or ingress API. Without traffic-splitting capability, "canary" degrades to replica-ratio approximations, which are coarser and less precise.
+They provide weighted traffic routing: the mesh/ingress can send, say, 5% of requests to the canary Service and 95% to stable, and adjust the weights as the rollout progresses. Argo Rollouts and Flagger drive these weights through whichever router is in front of the workload — the Gateway API's `HTTPRoute` (`backendRefs[].weight`, the portable option that works across Envoy Gateway, Istio, NGINX Gateway Fabric and the rest), or a mesh's own API (Istio `VirtualService`, Linkerd). The Ingress API is feature-frozen and never gained weighted routing, so annotation-based "canary" support was always a per-controller extension — Gateway API is where weighted splitting is actually specified. Without traffic-splitting capability, "canary" degrades to replica-ratio approximations, which are coarser and less precise.
 
 **Q10: What's a complete rollback strategy, and why isn't "redeploy the old version" always enough?**
 A complete strategy has a *fast, tested* path to the previous good state: blue-green switch-back, canary shift-to-zero, or feature-flag toggle — ideally automated and exercised regularly. "Redeploy the old version" can be slow (image pulls, restarts), and if the bad release made an incompatible schema change, redeploying old code may not even work. Rollback must account for data/schema and be proven, not assumed.

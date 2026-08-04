@@ -67,7 +67,7 @@ The two leading tools: **ArgoCD** (UI-centric, `Application` CRD, app-of-apps, s
 | Interface | Rich UI + CLI + `Application` CRD | CLI + CRDs (GitOps Toolkit) |
 | Multi-app | App-of-apps, ApplicationSets | Kustomization/HelmRelease CRs |
 | Visualization | Strong (sync status, diff, topology) | Minimal (CLI/3rd-party) |
-| Multi-tenancy | Projects, RBAC | Namespaced controllers |
+| Multi-tenancy | Projects, RBAC | Tenant namespaces + service-account impersonation (`--default-service-account`, `--no-cross-namespace-refs`) |
 | Progressive delivery | + Argo Rollouts | + Flagger |
 | Style | App-centric, GUI-friendly | Composable controllers, GitOps-native |
 
@@ -129,7 +129,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Root(Root Application<br/>points at /apps) --> Ingress(Application:<br/>ingress-nginx)
+    Root(Root Application<br/>points at /apps) --> Ingress(Application:<br/>envoy-gateway)
     Root --> Monitoring(Application:<br/>monitoring)
     Root --> TeamA(Application:<br/>team-a/*)
 
@@ -298,8 +298,8 @@ You can't commit plaintext secrets to Git. Options:
 
 ## 7. Real-World Examples
 
-- **ArgoCD app-of-apps for platform bootstrapping**: a single root Application installs ingress, monitoring, cert-manager, and all team apps — `git commit` onboards an entire cluster's workloads declaratively.
-- **Flux + image automation**: CI builds an image; Flux's image-update controller detects the new tag, commits the bump to Git, and reconciles — closing the loop with Git as the record.
+- **ArgoCD app-of-apps for platform bootstrapping**: a single root Application installs the gateway controller, monitoring, cert-manager, and all team apps — `git commit` onboards an entire cluster's workloads declaratively.
+- **Flux + image automation**: CI builds an image; Flux's image-reflector-controller scans the registry and records the new tag, the image-automation-controller commits the bump to Git, and the Kustomize controller reconciles it — closing the loop with Git as the record.
 - **Fleet management (ApplicationSets / Flux)**: companies manage hundreds of clusters by templating Applications across them from one repo, with per-cluster overlays.
 - **Disaster recovery via Git**: because the entire desired state is in Git, rebuilding a cluster is "point a fresh ArgoCD/Flux at the repo and let it reconcile" — the cluster is reproducible (see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md)).
 
@@ -381,13 +381,13 @@ The GitOps agent continuously diffs the desired state (Git) against the actual c
 Because Git, not the cluster, is the source of truth. A manual `kubectl` change is drift that the agent (with self-heal) reverts on the next sync — so your fix is undone, often reigniting the incident. The correct action is to change the Git repo (commit the fix), which the agent then applies durably. For emergencies you can temporarily pause auto-sync, but you must reconcile Git promptly.
 
 **Q6: ArgoCD vs Flux — how do they differ?**
-ArgoCD is app-centric with a rich web UI, the `Application` CRD, app-of-apps and ApplicationSets, and strong visualization/diffing — popular where teams want a GUI and clear sync status. Flux is a set of composable GitOps Toolkit controllers (Source, Kustomize, Helm, Image automation) driven via CRDs/CLI, favoring a more GitOps-native, automation-first style with minimal UI. Both implement the same pull-based reconciliation; choice is largely workflow/UI preference.
+ArgoCD is app-centric with a rich web UI, the `Application` CRD, app-of-apps and ApplicationSets, and strong visualization/diffing — popular where teams want a GUI and clear sync status. Flux is a set of composable GitOps Toolkit controllers (source, kustomize, helm, notification, and the two image-automation controllers) driven via CRDs/CLI, favoring a more GitOps-native, automation-first style with minimal UI. Both implement the same pull-based reconciliation; choice is largely workflow/UI preference.
 
 **Q7: How do you handle secrets in GitOps if everything is in Git?**
 You never commit plaintext secrets. Options: SOPS-encrypted manifests (the agent decrypts via a KMS key), Sealed Secrets (encrypted to a cluster-specific key only the in-cluster controller can decrypt), or the External Secrets Operator (commit a *reference*; ESO fetches the real value from Vault/cloud at runtime). The Git repo holds ciphertext or references, never the secret value itself.
 
 **Q8: What is the app-of-apps pattern?**
-An ArgoCD pattern where a single root `Application` points at a directory of child `Application` definitions, so one Application manages many. Committing to that directory onboards or removes entire applications declaratively — used to bootstrap a whole cluster (ingress, monitoring, cert-manager, team apps) from one root. ApplicationSets generalize this further with templating across clusters/environments.
+An ArgoCD pattern where a single root `Application` points at a directory of child `Application` definitions, so one Application manages many. Committing to that directory onboards or removes entire applications declaratively — used to bootstrap a whole cluster (gateway controller, monitoring, cert-manager, team apps) from one root. ApplicationSets generalize this further with templating across clusters/environments.
 
 **Q9: How does CI hand off to GitOps CD?**
 CI builds and pushes the artifact (image), then updates the *config* repo — either by committing a new image tag into the manifests, or via an image-update controller (Argo CD Image Updater / Flux image automation) that watches the registry and commits the bump automatically. The GitOps agent then reconciles the config repo and deploys. Crucially, CI never touches the cluster — it only writes to Git.

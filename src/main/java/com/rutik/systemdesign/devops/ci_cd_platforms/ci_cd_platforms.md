@@ -18,7 +18,7 @@ The major families:
 - **SCM-integrated SaaS** — GitHub Actions, GitLab CI. Pipeline lives next to code; tight VCS integration; managed runners (plus self-hosted option).
 - **Standalone server** — Jenkins. Self-hosted, infinitely extensible via plugins, language-agnostic; you operate it.
 - **Kubernetes-native** — Tekton, Argo Workflows. Pipelines are Kubernetes CRDs; each step is a Pod; ideal when your platform *is* Kubernetes.
-- **Other SaaS** — CircleCI, Buildkite, Drone, etc.
+- **Other SaaS** — CircleCI, Buildkite, Harness, etc.
 
 The choice hinges on: where your code lives, whether you want to operate the system, how much extensibility/customization you need, and whether you want pipelines running as first-class Kubernetes workloads.
 
@@ -153,8 +153,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {id-token: write, contents: read}   # OIDC for keyless cloud auth
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v5
+      - uses: docker/build-push-action@v7
         with: {push: true, tags: "${{ inputs.image }}:${{ github.sha }}", cache-from: type=gha, cache-to: "type=gha,mode=max"}
 ---
 # caller repo workflow:
@@ -197,9 +197,9 @@ kind: Pipeline
 metadata: {name: build-deploy}
 spec:
   tasks:
-    - name: test  ; taskRef: {name: npm-test}        # reusable Task
-    - name: build ; runAfter: [test] ; taskRef: {name: kaniko-build}   # in-cluster image build
-    - name: deploy; runAfter: [build]; taskRef: {name: kubectl-apply}
+    - {name: test,   taskRef: {name: npm-test}}                                # reusable Task
+    - {name: build,  runAfter: [test],  taskRef: {name: buildkit-build}}       # in-cluster image build
+    - {name: deploy, runAfter: [build], taskRef: {name: kubectl-apply}}
 # A PipelineRun executes this; each Task runs as a Pod with cluster RBAC/secrets.
 ```
 
@@ -339,8 +339,9 @@ runs-on: self-hosted        # static, persistent VM shared across many repos/job
 
 ```yaml
 # FIX: ephemeral runners (one job per runner, then destroyed), e.g., ARC on Kubernetes.
-runs-on: [self-hosted, ephemeral]    # ARC provisions a fresh Pod per job, deletes after
-# Each job gets a clean filesystem; no cross-job secret/state leakage.
+runs-on: arc-runner-set              # the ARC scale set's installation name, not a label
+# ARC registers each runner just-in-time, runs one job in it, then deletes the Pod:
+# every job gets a clean filesystem, so there is no cross-job secret/state leakage.
 ```
 
 **Pitfall 2 — Copy-pasted pipelines across dozens of repos.** A change to the build process means editing N repos, and they drift. FIX: reusable workflows (Actions), `include`/`extends` (GitLab), or shared libraries (Jenkins) — define once, reference everywhere (see the DRY mechanisms in §4).

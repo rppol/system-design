@@ -2,7 +2,7 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Intermediate
 
-Where [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) provisions the *boxes* (VMs, networks, load balancers), configuration management decides **what goes inside them** — packages, files, services, users, kernel settings — and keeps that state correct over time. Tools like **Ansible, Chef, Puppet, and SaltStack** declare the desired in-host state and converge each machine to it **idempotently**: run the same playbook twice and the second run changes nothing. The modern counter-philosophy is **immutable infrastructure** — don't reconfigure a running server, bake a golden image with **Packer** and replace the server entirely.
+Where [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) provisions the *boxes* (VMs, networks, load balancers), configuration management decides **what goes inside them** — packages, files, services, users, kernel settings — and keeps that state correct over time. Tools like **Ansible, Chef, Puppet, and Salt** declare the desired in-host state and converge each machine to it **idempotently**: run the same playbook twice and the second run changes nothing. The modern counter-philosophy is **immutable infrastructure** — don't reconfigure a running server, bake a golden image with **Packer** and replace the server entirely.
 
 ---
 
@@ -10,13 +10,25 @@ Where [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/inf
 
 Configuration management (CM) automates the in-host layer that provisioning leaves blank. Its model:
 
-1. **Declare desired state** — "nginx 1.24 installed, `/etc/nginx/nginx.conf` from this template, service running and enabled."
+1. **Declare desired state** — "nginx 1.30 installed, `/etc/nginx/nginx.conf` from this template, service running and enabled."
 2. **Converge** — the CM tool inspects the host, computes the gap, and applies only the missing changes.
 3. **Idempotency** — re-running converges to the same state and reports zero changes; this is the defining property.
 
 Two axes separate the tools:
 
 - **Push vs pull.** **Ansible** is *push* (a control node SSHes out and runs tasks; agentless). **Puppet/Chef/Salt** are classically *pull* (an agent on each node periodically fetches its catalog/recipes from a master and self-converges), though Salt and Chef also support push-style runs.
+
+**Who owns these tools, and on what licence.** This materially affects tool choice, so it belongs
+next to the feature comparison rather than in a footnote. **Ansible** is Red Hat's, with
+`ansible-core` plus the Galaxy collections free and open source and the commercial Ansible
+Automation Platform layered on top. **Puppet** belongs to Perforce, which moved development
+behind a private repository and a EULA: Puppet's own binaries are a commercial product beyond a
+small free node allowance, and the community answer is **OpenVox**, the Vox Pupuli soft-fork that
+tracks Puppet release-for-release and stays freely redistributable. **Chef** belongs to Progress
+and is likewise commercially licensed — Chef Infra Client obtained outside an official Progress
+distribution requires a runtime licence key — with **Cinc** as the licence-free community rebuild
+of the same source. **Salt** is Apache 2.0 and remains genuinely open, sponsored by Broadcom
+(via the VMware acquisition), with the paid Tanzu Salt product built on it.
 - **Mutable vs immutable.** Classic CM *mutates* long-lived servers in place. Immutable infrastructure says servers are disposable: **Packer** bakes a versioned machine image (AMI) with everything pre-installed, and you deploy by launching new instances and terminating old ones — no in-place drift possible.
 
 The big shift over the last decade: CM moved from "carefully tend pet servers" toward "bake an image, replace the cattle." Packer-baked AMIs deployed via [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) auto-scaling groups, plus container images (see [containers_and_docker](../containers_and_docker/containers_and_docker.md)), have absorbed much of what Puppet/Chef once did — but CM is still essential for image-baking steps, bootstrap, on-prem fleets, and compliance enforcement.
@@ -56,7 +68,7 @@ The big shift over the last decade: CM moved from "carefully tend pet servers" t
 | Ansible | YAML (playbooks) + Python | Push (SSH) | Agentless | Procedural (top-to-bottom tasks) |
 | Puppet | Puppet DSL (Ruby-like) | Pull (agent ↔ master) | Agent | Declarative (graph; explicit deps) |
 | Chef | Ruby (recipes/cookbooks) | Pull (agent ↔ server) | Agent | Procedural (resource order) |
-| SaltStack | YAML + Jinja (states) | Push or pull (ZeroMQ) | Agent (minion) or agentless | Declarative (with `require`/`order`) |
+| Salt | YAML + Jinja (states) | Push or pull (ZeroMQ) | Agent (minion) or agentless | Declarative (with `require`/`order`) |
 
 ### Push vs pull
 
@@ -202,7 +214,7 @@ This operationalizes Section 9's guidance into a single path: containerized work
   hosts: web
   become: true                       # sudo
   vars:
-    nginx_version: "1.24.*"
+    nginx_version: "1.30.*"
   tasks:
     - name: Install nginx               # idempotent: "ensure present", not "apt-get install"
       ansible.builtin.apt:
@@ -240,7 +252,7 @@ web-02.prod.internal
 ```puppet
 # nginx.pp -- agent fetches this catalog from master and self-converges
 class profile::nginx {
-  package { 'nginx': ensure => '1.24.0-1' }
+  package { 'nginx': ensure => '1.30.0-1' }
 
   file { '/etc/nginx/nginx.conf':
     ensure  => file,
@@ -284,7 +296,10 @@ build {
 data "aws_ami" "web" {
   most_recent = true
   owners      = ["self"]
-  filter { name = "name", values = ["web-*"] }   # latest baked image
+  filter {
+    name   = "name"
+    values = ["web-*"]                           # latest baked image
+  }
 }
 # launch template uses data.aws_ami.web.id; a new AMI rolls the ASG, replacing instances
 ```
@@ -302,10 +317,10 @@ molecule test                                           # test an Ansible role i
 
 ## 7. Real-World Examples
 
-- **Packer + Ansible golden images at scale**: Netflix popularized "immutable AMIs" — bake everything with their Aminator/Packer pipeline, deploy via auto-scaling groups, never SSH to fix. A "patch" is a new image and a rolling ASG replacement.
+- **Packer + Ansible golden images at scale**: Netflix popularized "immutable AMIs" with its own Aminator baking tool and later Spinnaker's Rosco bakery, which drives Packer under the hood — bake everything, deploy via auto-scaling groups, never SSH to fix. A "patch" is a new image and a rolling ASG replacement.
 - **Ansible for orchestration and bootstrap**: agentless push fits CI-driven runs and one-off fleet tasks (rotate a cert across 200 hosts, apply a CVE patch) without installing agents.
 - **Puppet/Chef for large pull fleets**: enterprises with thousands of long-lived servers use agents polling a master every ~30 minutes for continuous drift correction and compliance enforcement.
-- **SaltStack for high fan-out**: its ZeroMQ transport pushes commands to tens of thousands of minions in seconds, used for real-time fleet operations.
+- **Salt for high fan-out**: its ZeroMQ transport pushes commands to tens of thousands of minions in seconds, used for real-time fleet operations.
 - **CM inside container builds**: some teams run Ansible during `docker build` to assemble images, then ship immutable containers (see [containers_and_docker](../containers_and_docker/containers_and_docker.md)).
 
 ---
@@ -367,10 +382,10 @@ molecule test                                           # test an Ansible role i
 | Tool | Purpose |
 |------|---------|
 | Ansible | Agentless push CM/orchestration (YAML playbooks) |
-| Ansible AWX / Tower | Web UI, scheduling, RBAC, scale for Ansible |
-| Puppet | Agent/pull declarative CM (Puppet DSL) |
-| Chef | Agent/pull procedural CM (Ruby cookbooks) |
-| SaltStack | High-fan-out push/pull CM (YAML + Jinja) |
+| AWX / Ansible Automation Platform | Web UI, scheduling, RBAC, scale for Ansible — AWX is the free upstream, automation controller is its supported downstream |
+| Puppet / OpenVox | Agent/pull declarative CM (Puppet DSL); OpenVox is the freely redistributable community build |
+| Chef / Cinc | Agent/pull procedural CM (Ruby cookbooks); Cinc is the licence-free community rebuild |
+| Salt | High-fan-out push/pull CM (YAML + Jinja), Apache 2.0 |
 | Packer | Bake versioned, immutable machine images |
 | Ansible Vault | Encrypt secrets in playbooks at rest |
 | ansible-lint | Catch non-idempotent / anti-pattern tasks |
@@ -492,7 +507,7 @@ The engineer's manual SSH fix and the cron-driven script are two independent con
     db_pass: "{{ lookup('community.hashi_vault.vault_kv2_get', 'app/db').secret.password }}"
   tasks:
     - name: Pin nginx version
-      ansible.builtin.apt: { name: "nginx=1.24.*", state: present }
+      ansible.builtin.apt: { name: "nginx=1.30.*", state: present }
 
     - name: Render nginx config (idempotent template)
       ansible.builtin.template:

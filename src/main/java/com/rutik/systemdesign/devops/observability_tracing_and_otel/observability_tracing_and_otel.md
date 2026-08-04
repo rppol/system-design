@@ -17,7 +17,7 @@ A **trace** represents one request's end-to-end journey. It's a tree of **spans*
 - **trace_id** (16 bytes / 32 hex) — identifies the whole request, propagated across every hop.
 - **span_id** (8 bytes / 16 hex) — identifies one span; a child span's `parent_span_id` points at its caller.
 - **Context propagation** — the trace context travels across service boundaries via headers, standardized by **W3C Trace Context** (`traceparent: 00-<trace_id>-<span_id>-<flags>`).
-- **Attributes / events / status** — key/value metadata (`http.method`, `db.statement`), timestamped events, and OK/ERROR status.
+- **Attributes / events / status** — key/value metadata (`http.request.method`, `db.query.text`), timestamped events, and OK/ERROR status.
 
 **OpenTelemetry** unifies what used to be fragmented (OpenTracing + OpenCensus). It provides: language **SDKs** that produce spans, an **API** to instrument code, the **OTLP** wire protocol (gRPC/HTTP), automatic instrumentation for common libraries, and the **Collector** — a standalone process that receives telemetry, transforms/samples it, and exports to one or many backends. The Collector decouples your apps from any specific backend: apps speak OTLP; the Collector fans out to Jaeger, Tempo, vendor SaaS, etc.
 
@@ -72,10 +72,10 @@ The defining cost problem in tracing is **volume**: capturing every span on ever
 
 | Backend | Storage | Notes |
 |---------|---------|-------|
-| Jaeger | Cassandra/Elasticsearch/Badger | Mature, rich UI, CNCF |
+| Jaeger | Cassandra / Elasticsearch / OpenSearch / ClickHouse / Badger | Mature, rich UI, CNCF; v2 is built on the OTel Collector framework and ingests OTLP natively |
 | Grafana Tempo | Object storage (S3/GCS) | Cheap (no index beyond trace_id), TraceQL, Grafana-native |
 | Zipkin | Cassandra/ES/MySQL | Older, simple |
-| Vendor SaaS | managed | Datadog, Honeycomb, Lightstep, New Relic, AWS X-Ray |
+| Vendor SaaS | managed | Datadog, Honeycomb, New Relic, Grafana Cloud Traces, Splunk Observability, AWS X-Ray |
 
 ---
 
@@ -202,8 +202,10 @@ processors:
         probabilistic: { sampling_percentage: 5 }
 
 exporters:
-  otlp/tempo: { endpoint: tempo:4317, tls: { insecure: true } }
-  jaeger:     { endpoint: jaeger-collector:4317 }
+  otlp/tempo:  { endpoint: tempo:4317, tls: { insecure: true } }
+  otlp/jaeger: { endpoint: jaeger-collector:4317, tls: { insecure: true } }
+  # Jaeger ingests OTLP natively, so there is no Jaeger-specific exporter — it is
+  # a second otlp exporter pointed at Jaeger's OTLP/gRPC port.
 
 service:
   pipelines:
@@ -309,7 +311,7 @@ processors:
 connectors:
   spanmetrics:
     histogram: { explicit: { buckets: [100ms, 300ms, 1s, 3s] } }
-    dimensions: [ { name: http.method }, { name: service.name } ]
+    dimensions: [ { name: http.request.method }, { name: service.name } ]
 # exported as a metric the Prometheus pipeline scrapes -> p99 per service from traces.
 ```
 
@@ -344,7 +346,7 @@ This three-pillar pivot is the payoff of putting `trace_id` in logs (see [observ
 - **Google Dapper**: the 2010 paper that originated production distributed tracing; OpenTelemetry's span model descends from it and from Twitter's Zipkin / Uber's Jaeger lineage.
 - **Uber Jaeger**: built to trace requests across thousands of microservices; the canonical open-source tracing backend, donated to CNCF.
 - **Grafana Tempo**: stores traces in object storage indexed only by `trace_id` (plus TraceQL search), making trace retention cheap at massive scale — adopters keep far more traces for far less money than index-heavy backends.
-- **OpenTelemetry adoption**: the second most active CNCF project after Kubernetes; major vendors (Datadog, Honeycomb, AWS, Splunk) accept OTLP, so teams instrument once and switch backends without re-instrumenting.
+- **OpenTelemetry adoption**: a graduated CNCF project and the second most active after Kubernetes; major vendors (Datadog, Honeycomb, AWS, Splunk) accept OTLP, so teams instrument once and switch backends without re-instrumenting.
 - **Tail sampling at high-traffic shops**: companies serving millions of req/s run gateway Collectors with `trace_id`-aware load balancing so all spans of a trace reach the same collector, then tail-sample to keep all errors and ~1–5% of successes.
 
 ---
@@ -406,12 +408,12 @@ resp = http_client.post(downstream_url, json=payload, headers=headers)
 | OpenTelemetry SDK/API | Generate spans/metrics/logs; auto + manual instrumentation |
 | OTLP | Vendor-neutral wire protocol (gRPC/HTTP) for telemetry |
 | OpenTelemetry Collector | Receive/process/sample/export; gateway + agent tiers |
-| Jaeger | Trace backend + UI (Cassandra/ES storage) |
+| Jaeger | Trace backend + UI; v2 runs on the OTel Collector framework, storage in Cassandra/Elasticsearch/OpenSearch/ClickHouse |
 | Grafana Tempo | Object-storage trace backend, TraceQL, cheap retention |
 | Zipkin | Older trace backend |
 | W3C Trace Context | Standard propagation headers (`traceparent`/`tracestate`) |
 | spanmetrics connector | Derive RED metrics from spans |
-| AWS X-Ray / Datadog / Honeycomb / Lightstep | Managed tracing backends (OTLP-compatible) |
+| AWS X-Ray / Datadog / Honeycomb / Grafana Cloud | Managed tracing backends (OTLP-compatible) |
 | Grafana | Unified trace/metric/log correlation UI |
 
 ---
@@ -443,7 +445,7 @@ The Collector is a standalone process with a receivers → processors → export
 Inject the `trace_id` into every log line so you can jump from a span to the exact logs that request emitted, and attach exemplars to latency histograms so a metric spike links to a representative trace. The workflow is: a metric alert points at a service, you open a representative trace to find the slow/failing span, then query logs by that `trace_id` for the precise error and payload. This three-pillar pivot is the core value of unified observability.
 
 **Q9: What are OTel semantic conventions and why follow them?**
-Semantic conventions are OpenTelemetry's standardized attribute names and structures — `http.request.method`, `db.system`, `db.statement`, `service.name` — so telemetry is consistent regardless of language or library. Following them means backends, dashboards, and queries are portable and auto-instrumentation produces uniform data you can build generic alerts and span-metrics on. Inventing your own attribute names fragments your data and breaks vendor/tooling integrations.
+Semantic conventions are OpenTelemetry's standardized attribute names and structures — `http.request.method`, `db.system.name`, `db.query.text`, `service.name` — so telemetry is consistent regardless of language or library. Following them means backends, dashboards, and queries are portable and auto-instrumentation produces uniform data you can build generic alerts and span-metrics on. Inventing your own attribute names fragments your data and breaks vendor/tooling integrations.
 
 **Q10: How can you get latency metrics without instrumenting metrics separately?**
 The Collector's spanmetrics connector derives RED metrics (Rate, Errors, Duration histograms) from the spans flowing through it, dimensioned by service and operation. You then scrape those as Prometheus metrics, getting per-service p50/p99 latency and error rates "for free" from your traces with one fewer instrumentation path to maintain. The tradeoff is the metrics are only as complete as your sampled spans, so combine with head/tail sampling awareness or use a pre-sampling tap.

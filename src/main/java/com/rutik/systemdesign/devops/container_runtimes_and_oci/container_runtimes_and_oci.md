@@ -12,7 +12,7 @@ The runtime stack has three layers, standardized by the **OCI (Open Container In
 
 1. **High-level runtime (CRI)** — `containerd`, `CRI-O`. Manages images, snapshots, the container lifecycle, and implements Kubernetes' **Container Runtime Interface (CRI)** gRPC API the kubelet calls.
 2. **Low-level/OCI runtime** — `runc` (default), `crun`, `gVisor (runsc)`, `Kata`. Given an OCI bundle (rootfs + `config.json`), it creates the namespaces/cgroups and starts the process.
-3. **Shim** — a small per-container process that keeps the container running independently of the runtime daemon (so restarting containerd doesn't kill pods).
+3. **Shim** — a small process that keeps containers running independently of the runtime daemon (so restarting containerd doesn't kill pods). containerd's `runc.v2` shim groups on the CRI sandbox id, so under Kubernetes one shim serves every container in a pod.
 
 The **OCI specs** define three things: the **image spec** (layered image format), the **runtime spec** (the `config.json` bundle a runtime consumes), and the **distribution spec** (registry pull/push API). Because these are open standards, an image built by Docker runs on containerd, and runc can be swapped for gVisor transparently.
 
@@ -49,7 +49,7 @@ The **OCI specs** define three things: the **image spec** (layered image format)
 |-------|----------|------|
 | Orchestrator | kubelet | Schedules pods, calls CRI |
 | CRI runtime | containerd, CRI-O | Image mgmt, snapshots, lifecycle, CRI server |
-| Shim | `containerd-shim-runc-v2` | Keeps container alive independent of daemon |
+| Shim | `containerd-shim-runc-v2` | Keeps a pod's containers alive independent of daemon |
 | OCI runtime | runc, crun, runsc (gVisor), kata | Creates namespaces/cgroups, starts process |
 
 ### Isolation models
@@ -107,7 +107,7 @@ flowchart LR
     class runsc frozen
 ```
 
-*The kubelet never talks to runc directly — it speaks CRI gRPC to containerd, which pulls and unpacks the image via a snapshotter, then hands off to a per-container shim that invokes runc. Swapping runc for runsc (gVisor) changes only the isolation layer below the shim; every layer above is unchanged.*
+*The kubelet never talks to runc directly — it speaks CRI gRPC to containerd, which pulls and unpacks the image via a snapshotter, then hands off to the pod's shim, which invokes runc. Swapping runc for runsc (gVisor) changes only the isolation layer below the shim; every layer above is unchanged.*
 
 ```
 OCI bundle that runc consumes
@@ -185,7 +185,7 @@ flowchart LR
 
     running("containerd<br/>running") --> upgrade{"upgrade /<br/>restart triggered"}
     upgrade -.->|"daemon down<br/>briefly"| down(["containerd<br/>briefly unavailable"])
-    upgrade --> shim("per-container shim<br/>parented independently")
+    upgrade --> shim("pod's shim<br/>parented independently")
     shim --> proc(["app process<br/>keeps running"])
     down -->|"daemon<br/>returns"| back("containerd<br/>back up")
     shim -.->|"reports exit<br/>status"| back
@@ -197,14 +197,14 @@ flowchart LR
     class proc train
 ```
 
-*Restarting containerd never kills a running container because each one is parented to its own shim, not to containerd — the shim keeps the process alive through the brief outage and reports its exit status back once containerd returns. Without shims, upgrading the runtime daemon would kill every pod on the node.*
+*Restarting containerd never kills a running container because each one is parented to its pod's shim, not to containerd — the shim keeps the process alive through the brief outage and reports its exit status back once containerd returns. Without shims, upgrading the runtime daemon would kill every pod on the node.*
 
 ---
 
 ## 7. Real-World Examples
 
 - **dockershim removal (Kubernetes 1.24, 2022)**: the kubelet stopped supporting Docker via a special shim; clusters moved to containerd/CRI-O. Images kept working because they're OCI — only the node's runtime plumbing changed.
-- **AWS Fargate & gVisor-style isolation**: serverless container platforms run each task in a microVM-isolated sandbox so untrusted tenant workloads can't escape to the host or each other.
+- **AWS Fargate microVM isolation**: each Fargate task runs inside its own Firecracker microVM, so untrusted tenant workloads share no kernel and can't escape to the host or each other.
 - **AWS Lambda / Firecracker**: Firecracker microVMs (which Kata can use) boot in ~125 ms, giving VM-grade isolation with near-container density — the model behind Lambda and Fargate.
 - **GKE Sandbox (gVisor)**: Google offers `runsc` as a RuntimeClass so a single cluster can run trusted workloads on runc and untrusted ones on gVisor.
 
@@ -305,7 +305,7 @@ crictl exec -it <id> sh        # exec (if the image has a shell)
 ## 12. Interview Questions with Answers
 
 **Q1: Walk through what happens when the kubelet starts a pod.**
-The kubelet calls the CRI runtime (containerd/CRI-O) over gRPC to create a pod sandbox, pull/unpack the image into an OCI bundle (rootfs + config.json) via a snapshotter, and start containers. containerd spawns a per-container shim and invokes the OCI runtime (runc), which makes the `clone()` syscall with namespace flags and writes cgroup limits, then `execve`s the entrypoint. The shim keeps the container alive independent of the containerd daemon.
+The kubelet calls the CRI runtime (containerd/CRI-O) over gRPC to create a pod sandbox, pull/unpack the image into an OCI bundle (rootfs + config.json) via a snapshotter, and start containers. containerd spawns a shim for the pod and invokes the OCI runtime (runc), which makes the `clone()` syscall with namespace flags and writes cgroup limits, then `execve`s the entrypoint. The shim keeps the containers alive independent of the containerd daemon.
 
 **Q2: What is the CRI and why does it exist?**
 The Container Runtime Interface is a gRPC API the kubelet uses to manage pods/containers/images, decoupling Kubernetes from any specific runtime. Before CRI, runtime support was hardcoded; with CRI, any compliant runtime (containerd, CRI-O) plugs in interchangeably. It's why "removing dockershim" was possible without breaking workloads.
@@ -320,7 +320,7 @@ The **image spec** (layered, content-addressed image format), the **runtime spec
 runc uses host-kernel namespaces/cgroups — fast but shares the kernel (a kernel exploit can escape). gVisor (runsc) interposes a user-space kernel that intercepts syscalls, isolating the host kernel at the cost of syscall overhead and partial compatibility. Kata runs each container in a lightweight VM (Firecracker/QEMU), giving hardware-virtualization isolation at the cost of VM boot time and per-container memory.
 
 **Q6: Why does a container runtime use a shim process?**
-The shim is a small process that parents the container so it survives restarts/upgrades of the containerd daemon — you can upgrade the runtime without killing running pods. It also reports the container's exit status back to containerd and handles I/O streams. Without it, the container's lifecycle would be tied to the daemon's.
+The shim is a small process that parents the container so it survives restarts/upgrades of the containerd daemon — you can upgrade the runtime without killing running pods. It also reports the container's exit status back to containerd and handles I/O streams. containerd's `runc.v2` shim groups on the CRI `io.kubernetes.cri.sandbox-id` label, so all containers in one pod share a single shim rather than paying for one process each. Without a shim, the container's lifecycle would be tied to the daemon's.
 
 **Q7: How do you run a specific workload under a different runtime?**
 Define a `RuntimeClass` mapping to a containerd handler (e.g., `runsc` for gVisor), then set `runtimeClassName` on the Pod. This lets a single cluster run trusted workloads on runc and untrusted/multi-tenant ones on gVisor/Kata, choosing isolation per workload rather than per cluster.

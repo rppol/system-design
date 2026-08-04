@@ -23,7 +23,7 @@ The Kubernetes network model has four foundational rules:
 These rules are *implemented* by a **CNI plugin** (Calico, Cilium, AWS VPC CNI, Flannel) the kubelet calls when a Pod is created, to allocate an IP and wire up routing/overlay.
 
 On top of Pod networking:
-- **Service** — a stable virtual IP (ClusterIP) and DNS name front-ending a changing set of Pods; **kube-proxy** programs the dataplane (iptables/IPVS) so the VIP load-balances to Pod IPs.
+- **Service** — a stable virtual IP (ClusterIP) and DNS name front-ending a changing set of Pods; **kube-proxy** programs the dataplane (iptables/nftables) so the VIP load-balances to Pod IPs.
 - **CoreDNS** — resolves Service names (`svc.ns.svc.cluster.local`) to ClusterIPs and headless Services to Pod IPs.
 - **Ingress / Gateway API** — L7 HTTP routing (host/path) into Services via an ingress controller.
 - **NetworkPolicy** — firewall rules between Pods (default is allow-all; policies restrict).
@@ -46,7 +46,7 @@ On top of Pod networking:
 
 1. **Flat Pod network, no NAT between Pods.** The CNI guarantees this.
 2. **Services are stable virtual IPs over ephemeral Pod IPs.** Address Services, not Pods.
-3. **kube-proxy programs the dataplane, doesn't proxy (usually).** iptables/IPVS rules DNAT VIP→Pod; the kernel forwards.
+3. **kube-proxy programs the dataplane, doesn't proxy (usually).** iptables/nftables rules DNAT VIP→Pod; the kernel forwards.
 4. **DNS is service discovery.** CoreDNS resolves Service names; it's a critical, easily-overloaded component.
 5. **NetworkPolicy is default-allow until a policy selects the Pod.** Then it's default-deny for that direction.
 6. **Ingress/Gateway is the L7 edge.** One controller fronts many Services by host/path.
@@ -68,8 +68,8 @@ On top of Pod networking:
 
 | Mode | Mechanism | Scaling |
 |------|-----------|---------|
-| iptables (default) | Linear-ish iptables chains | Fine to ~1000s of Services; rule updates slow at high churn |
-| IPVS | Kernel hash-table LB | Better at large Service counts, more algorithms |
+| iptables (default) | Sequential iptables chains, O(n) in Service count | Fine to ~1000s of Services; rule updates slow at high churn |
+| nftables (recommended on Linux) | Single nftables verdict map, O(1) dispatch | Constant per-packet latency into the tens of thousands of Services |
 | eBPF (Cilium, no kube-proxy) | eBPF programs | Best scale + observability |
 
 ```mermaid
@@ -90,9 +90,9 @@ flowchart LR
         rN -->|"match"| dnat1(["DNAT to<br/>Pod IP"])
     end
 
-    subgraph ipvsG["IPVS: O(1) hash"]
+    subgraph nftG["nftables: O(1) verdict map"]
         direction LR
-        pkt2(["Packet to<br/>ClusterIP"]) --> hash{"hash table<br/>lookup"}
+        pkt2(["Packet to<br/>ClusterIP"]) --> hash{"verdict map<br/>lookup"}
         hash -->|"O(1)"| dnat2(["DNAT to<br/>Pod IP"])
     end
 
@@ -107,7 +107,7 @@ flowchart LR
     class dnat1,dnat2,dnat3 train
 ```
 
-*Why scaling differs: iptables re-evaluates a growing chain of sequential rules per packet (linear in Service count — "rule updates slow at high churn"), IPVS does one O(1) hash lookup regardless of Service count, and eBPF runs a single in-kernel hook — the mechanical reason IPVS/eBPF stay fast past ~1000s of Services where iptables degrades.*
+*Why scaling differs: iptables re-evaluates a growing chain of sequential rules per packet (linear in Service count — "rule updates slow at high churn"), nftables dispatches through a single O(1) verdict map regardless of Service count, and eBPF runs a single in-kernel hook — the mechanical reason nftables/eBPF stay fast past ~1000s of Services where iptables degrades.*
 
 ### Service discovery DNS
 
@@ -136,7 +136,7 @@ flowchart LR
     client(["Client"]) -->|"DNS: app.example.com<br/>to cloud LB IP"| lb(["Cloud LB"])
     lb --> ing(["Ingress controller<br/>terminates TLS, routes by host/path"])
     ing -->|"to Service ClusterIP"| vip{"ClusterIP (virtual)"}
-    vip -->|"kube-proxy iptables/IPVS DNAT"| pod(["Pod<br/>routable IP from CNI"])
+    vip -->|"kube-proxy iptables/nftables DNAT"| pod(["Pod<br/>routable IP from CNI"])
     pod --> container(["Container"])
 
     class client,container io
@@ -228,7 +228,7 @@ kubectl get endpointslices -l kubernetes.io/service-name=orders
 ### Diagnosing in-cluster DNS
 
 ```bash
-kubectl run -it --rm dnsutils --image=tutum/dnsutils -- bash
+kubectl run -it --rm dnsutils --image=registry.k8s.io/e2e-test-images/agnhost:2.39 -- bash
 > nslookup orders.default.svc.cluster.local      # should return the ClusterIP
 > cat /etc/resolv.conf
 #  nameserver 10.96.0.10   (CoreDNS ClusterIP)
@@ -266,8 +266,8 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: web
-  annotations: {nginx.ingress.kubernetes.io/ssl-redirect: "true"}
 spec:
+  ingressClassName: external           # names the IngressClass whose controller owns this Ingress
   tls: [{hosts: [app.example.com], secretName: app-tls}]   # TLS terminated at the controller
   rules:
     - host: app.example.com
@@ -277,7 +277,7 @@ spec:
           - {path: /,    pathType: Prefix, backend: {service: {name: web, port: {number: 80}}}}
 ```
 
-The newer **Gateway API** (GA) replaces Ingress with a richer, role-oriented model (`GatewayClass`/`Gateway`/`HTTPRoute`) supporting traffic splitting, header matching, and cross-namespace routing natively.
+Ingress is feature-frozen; **Gateway API** is its GA successor and where new L7 capability lands. It replaces the single annotation-driven Ingress object with a richer, role-oriented model (`GatewayClass`/`Gateway`/`HTTPRoute`) supporting traffic splitting, header matching, and cross-namespace routing natively. Implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric.
 
 ```mermaid
 flowchart LR
@@ -310,7 +310,7 @@ flowchart LR
     class s1,s2,s3,sA,sB,sC train
 ```
 
-*One `LoadBalancer` Service per app (left) multiplies cloud LB cost with no L7 features; an Ingress controller behind a single shared LB (right) fronts every Service by host/path — the pattern that lets ingress-nginx/Gateway API "front dozens of microservices behind one cloud LB" (see Real-World Examples).*
+*One `LoadBalancer` Service per app (left) multiplies cloud LB cost with no L7 features; an Ingress controller behind a single shared LB (right) fronts every Service by host/path — the pattern that lets an Ingress or Gateway API controller "front dozens of microservices behind one cloud LB" (see Real-World Examples).*
 
 ### NetworkPolicy (default-deny + explicit allow)
 
@@ -345,7 +345,7 @@ NetworkPolicy is only enforced if the CNI supports it (Calico/Cilium yes; Flanne
 - **AWS VPC CNI** assigns each Pod a real VPC IP via ENIs, giving native security-group integration but creating **subnet IP exhaustion** at scale (a `/24` ≈ 250 Pods) — a top EKS sizing pitfall.
 - **Cilium + eBPF** replaces kube-proxy entirely, scaling Service routing past iptables limits and providing flow observability (Hubble) — increasingly the default for large clusters.
 - **NodeLocal DNSCache** is widely deployed to fix CoreDNS overload: a per-node DNS cache absorbs the `ndots` amplification and cuts CoreDNS QPS dramatically.
-- **ingress-nginx / Gateway API** front dozens of microservices behind one cloud LB with host/path routing and TLS termination, instead of one expensive `LoadBalancer` Service per app.
+- **Gateway API controllers** (Envoy Gateway, Istio, Traefik, NGINX Gateway Fabric) front dozens of microservices behind one cloud LB with host/path routing and TLS termination, instead of one expensive `LoadBalancer` Service per app.
 
 ### Sizing the subnet: where "a `/24` ≈ 250 Pods" comes from
 
@@ -390,9 +390,9 @@ So a cluster that needs 1000 Pods cannot fit in a `/24` (251) or a `/23` (507) n
 | Decision | Option A | Option B | Key factor |
 |----------|----------|----------|-----------|
 | CNI | AWS VPC CNI (native IPs) | Calico/Cilium (overlay/eBPF) | VPC integration vs IP conservation + policy |
-| kube-proxy | iptables (default) | IPVS / eBPF | Service count + churn |
+| kube-proxy | iptables (default) | nftables / eBPF | Service count + churn |
 | Edge | Ingress (one LB, shared) | LoadBalancer per Service | Cost + L7 features |
-| Ingress API | Ingress (mature, simple) | Gateway API (richer, future) | Feature needs vs ecosystem maturity |
+| L7 routing API | Ingress (simple, feature-frozen) | Gateway API (richer, the successor) | Feature needs vs migration effort |
 | DNS | Cluster CoreDNS | + NodeLocal DNSCache | QPS scale |
 | Segmentation | No policy (flat, simple) | NetworkPolicy (zero-trust) | Security posture |
 
@@ -400,7 +400,7 @@ So a cluster that needs 1000 Pods cannot fit in a `/24` (251) or a `/23` (507) n
 
 ## 9. When to Use / When NOT to Use
 
-**Invest in network design when:** running multi-tenant clusters (NetworkPolicy segmentation), large clusters (CNI/IP planning, IPVS/eBPF), or internet-facing apps (Ingress/Gateway + TLS).
+**Invest in network design when:** running multi-tenant clusters (NetworkPolicy segmentation), large clusters (CNI/IP planning, nftables/eBPF), or internet-facing apps (Ingress/Gateway + TLS).
 
 **Keep it simple when:** a small single-tenant cluster — defaults (managed CNI, iptables kube-proxy, one Ingress) are fine. Don't hand-roll a service mesh for three services; don't add NetworkPolicy complexity without a segmentation requirement.
 
@@ -442,8 +442,8 @@ egress:
 |------|---------|
 | Calico / Cilium / AWS VPC CNI / Flannel | CNI (Pod networking, policy) |
 | CoreDNS + NodeLocal DNSCache | Service discovery + per-node cache |
-| ingress-nginx / Gateway API | L7 routing, TLS termination |
-| kube-proxy (iptables/IPVS) / Cilium eBPF | Service dataplane |
+| Gateway API (Envoy Gateway, Istio, Traefik, NGINX Gateway Fabric) | L7 routing, TLS termination |
+| kube-proxy (iptables/nftables) / Cilium eBPF | Service dataplane |
 | Hubble (Cilium) | Flow-level network observability |
 | `kubectl get endpointslices` | Endpoint debugging |
 | `dnsutils` pod / `nslookup` | DNS debugging |
@@ -457,13 +457,13 @@ egress:
 Every Pod gets its own IP; all Pods can communicate with all other Pods across nodes without NAT; nodes can reach all Pods without NAT; and a Pod sees its own IP as the same one others use to reach it. This flat model is implemented by the CNI plugin and is what lets Services and DNS work uniformly regardless of which node a Pod lands on.
 
 **Q2: What is a ClusterIP, and what's actually listening on it?**
-A ClusterIP is a *virtual* IP for a Service — no machine or NIC holds it. kube-proxy installs iptables/IPVS rules so packets destined for the ClusterIP are DNAT'd to one of the Service's ready Pod IPs. Nothing listens on the ClusterIP itself; the kernel rewrites the destination. Understanding this resolves most "I can't reach my Service" confusion.
+A ClusterIP is a *virtual* IP for a Service — no machine or NIC holds it. kube-proxy installs iptables/nftables rules so packets destined for the ClusterIP are DNAT'd to one of the Service's ready Pod IPs. Nothing listens on the ClusterIP itself; the kernel rewrites the destination. Understanding this resolves most "I can't reach my Service" confusion.
 
 **Q3: What does the CNI do?**
 The Container Network Interface plugin is invoked by the kubelet when a Pod is created to allocate the Pod's IP and wire up connectivity (routes, overlay/VXLAN, or BGP) so the network-model rules hold. Different CNIs implement it differently — AWS VPC CNI hands out real VPC IPs, Calico uses BGP/overlay, Cilium uses eBPF — and some (Calico/Cilium) also enforce NetworkPolicy.
 
 **Q4: How does kube-proxy work, and what are its modes?**
-kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (default) it installs chains the kernel evaluates; in IPVS mode it uses a kernel hash-table load balancer (better at thousands of Services); with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/IPVS modes it doesn't proxy bytes itself — the kernel forwards.
+kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (the default) it installs chains the kernel evaluates sequentially, so per-packet cost grows with Service count; in nftables mode — the recommended mode on Linux — it installs a single verdict map, giving O(1) dispatch that stays flat into the tens of thousands of Services; with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/nftables modes it doesn't proxy bytes itself — the kernel forwards.
 
 **Q5: Walk a packet from the internet to a container.**
 Client DNS resolves to a cloud LB; the LB forwards to the ingress controller Pod, which terminates TLS and routes by host/path to a Service ClusterIP; kube-proxy's rules DNAT the ClusterIP to a ready Pod IP; the CNI's routing delivers the packet to that Pod on its node; the container receives it on `targetPort`. The response retraces the path (with SNAT where needed).
@@ -481,7 +481,7 @@ Check the EndpointSlices: `kubectl get endpointslices -l kubernetes.io/service-n
 By default all Pod-to-Pod traffic is allowed. The moment a NetworkPolicy selects a Pod for a direction (Ingress/Egress), that direction becomes default-deny for that Pod, and only the policy's explicit `from`/`to` rules are permitted. Policies are additive (union of allows). Crucially, NetworkPolicy is only enforced if the CNI supports it — Flannel doesn't, AWS VPC CNI needs an add-on.
 
 **Q10: Ingress vs LoadBalancer Service vs Gateway API?**
-A `LoadBalancer` Service provisions one cloud LB per Service (costly, L4). Ingress lets one ingress controller (behind a single LB) route HTTP by host/path to many Services with TLS termination — far cheaper and L7-aware. Gateway API is the newer, more expressive successor (role-separated `Gateway`/`HTTPRoute`, native traffic splitting and header matching), addressing Ingress's annotation-driven limitations.
+A `LoadBalancer` Service provisions one cloud LB per Service (costly, L4). Ingress lets one ingress controller (behind a single LB) route HTTP by host/path to many Services with TLS termination — far cheaper and L7-aware, though the Ingress API itself is feature-frozen. Gateway API is its GA successor and the target for new work: role-separated `GatewayClass`/`Gateway`/`HTTPRoute`, with native traffic splitting and header matching instead of Ingress's per-controller annotations.
 
 **Q11: Why does AWS VPC CNI risk IP exhaustion?**
 It assigns each Pod a real IP from the VPC subnet (via ENIs), so Pod IPs consume subnet address space directly. A `/24` subnet (~250 usable IPs) supports only ~250 Pods regardless of node count, so dense clusters exhaust subnets and Pods get stuck Pending with IP-allocation errors. Mitigations: larger/secondary CIDRs, prefix delegation (assign /28 prefixes per ENI), or an overlay CNI.
@@ -507,7 +507,7 @@ Cilium uses eBPF programs attached to kernel hooks to implement Service load bal
 - Plan **CIDR/IP capacity** for peak Pod count (especially AWS VPC CNI); consider prefix delegation.
 - Deploy **NodeLocal DNSCache** and use FQDNs to dodge `ndots` amplification.
 - Adopt **default-deny NetworkPolicy** in sensitive namespaces — but always allow DNS egress.
-- Choose **IPVS/eBPF** for large Service counts; pick a CNI that enforces policy if you need segmentation.
+- Choose **nftables/eBPF** for large Service counts; pick a CNI that enforces policy if you need segmentation.
 - Terminate **TLS at the edge** (Ingress) with automated certs (cert-manager — see [networking_for_devops](../networking_for_devops/networking_for_devops.md)).
 
 ---

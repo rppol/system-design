@@ -17,7 +17,7 @@ Kubernetes security spans the request lifecycle and the workload runtime:
 **Access control (who can do what):**
 - **Authentication** — who are you (client certs, OIDC, ServiceAccount tokens). Kubernetes has no built-in user store; identity is external.
 - **Authorization (RBAC)** — what you can do, via Roles/ClusterRoles bound to subjects. Default-deny.
-- **Admission control** — policy enforcement before persistence (Pod Security Admission, OPA Gatekeeper, Kyverno).
+- **Admission control** — policy enforcement before persistence (Pod Security Admission, in-tree CEL policies via `ValidatingAdmissionPolicy`/`MutatingAdmissionPolicy`, and webhook engines like OPA Gatekeeper and Kyverno).
 
 **Workload hardening (what a Pod can do):**
 - **securityContext** — non-root, read-only rootfs, dropped capabilities, no privilege escalation, seccomp.
@@ -144,7 +144,7 @@ flowchart LR
     authn -->|"ok"| authz{"Authorization RBAC<br/>allowed verb on resource?"}
     authz -->|"fail"| e403(["403 Forbidden"])
     authz -->|"ok"| mut("Admission: Mutating<br/>inject / default")
-    mut --> val{"Admission: Validating<br/>Gatekeeper / Kyverno / PSA"}
+    mut --> val{"Admission: Validating<br/>PSA / CEL policy / webhooks"}
     val -->|"fail"| erej(["Rejected"])
     val -->|"ok"| etcd[("etcd")]
 
@@ -256,13 +256,17 @@ kind: EncryptionConfiguration
 resources:
   - resources: ["secrets"]
     providers:
-      - kms: {name: aws-kms, endpoint: ...}     # envelope encryption via cloud KMS
+      - kms:                                     # envelope encryption via cloud KMS
+          apiVersion: v2                         # KMS v2: DEK-per-write via KDF, no cachesize knob
+          name: aws-kms
+          endpoint: unix:///var/run/kmsplugin/socket.sock
+          timeout: 3s
       - identity: {}                             # fallback (unencrypted) for migration
 ```
 
 ```bash
 # Without this, anyone with etcd access reads secrets trivially:
-ETCDCTL_API=3 etcdctl get /registry/secrets/shop/db-password   # base64 -> plaintext
+etcdctl get /registry/secrets/shop/db-password   # base64 -> plaintext
 ```
 
 ### Audit the surface
@@ -344,7 +348,8 @@ roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k
 |------|---------|
 | RBAC (Roles/Bindings) | Authorization |
 | Pod Security Admission | Built-in PSS enforcement |
-| OPA Gatekeeper / Kyverno | Custom admission policy (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)) |
+| ValidatingAdmissionPolicy / MutatingAdmissionPolicy | In-tree CEL admission policy — no webhook to run, no availability risk |
+| OPA Gatekeeper / Kyverno | Custom admission policy where CEL isn't enough (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)) |
 | kube-bench | CIS Benchmark auditing |
 | Trivy / Grype | Image + cluster CVE scanning |
 | Falco / Tetragon (eBPF) | Runtime threat detection |
@@ -370,16 +375,16 @@ By default every Pod auto-mounts its namespace's `default` ServiceAccount token 
 `runAsNonRoot: true` with a non-zero `runAsUser`; `allowPrivilegeEscalation: false`; `readOnlyRootFilesystem: true` (with writable `emptyDir` for `/tmp`); `capabilities.drop: ["ALL"]` adding back only what's required (e.g., `NET_BIND_SERVICE`); `seccompProfile: RuntimeDefault`; never `privileged: true`. Together these ensure a code-execution exploit in the container has minimal local power and can't trivially escape.
 
 **Q5: What replaced PodSecurityPolicy and how does it work?**
-Pod Security Admission (PSA) with Pod Security Standards (Privileged/Baseline/Restricted), enforced per namespace via labels (`pod-security.kubernetes.io/enforce: restricted`). PSP was removed in 1.25 because it was hard to use and inconsistent. PSA is simpler (three built-in profiles, with `warn`/`audit` modes for safe rollout) but less flexible — for custom rules you layer OPA Gatekeeper or Kyverno.
+Pod Security Admission (PSA) with Pod Security Standards (Privileged/Baseline/Restricted), enforced per namespace via labels (`pod-security.kubernetes.io/enforce: restricted`). PSP was removed in 1.25 because it was hard to use and inconsistent. PSA is simpler (three built-in profiles, with `warn`/`audit` modes for safe rollout) but less flexible. For custom rules, reach first for the in-tree CEL policies — a `ValidatingAdmissionPolicy` plus a `ValidatingAdmissionPolicyBinding` in `admissionregistration.k8s.io/v1`, which run inside the API server with no webhook to deploy — and layer OPA Gatekeeper or Kyverno when you need policy logic, external data, or reporting that CEL alone can't express.
 
 **Q6: Are Kubernetes Secrets encrypted? How do you actually protect them?**
 By default Secrets are only base64-encoded and stored as plaintext in etcd — anyone with `get secrets` RBAC or etcd access can read them. To protect them: enable encryption-at-rest with a KMS provider (envelope encryption) so etcd holds ciphertext; tightly scope RBAC on secrets; and prefer an external store (Vault) via the External Secrets Operator so the sensitive material never lives in etcd at all.
 
 **Q7: How do admission controllers enforce security, and what's the risk?**
-After authn/authz, mutating then validating admission webhooks intercept the request before persistence. Validating webhooks (Gatekeeper/Kyverno/PSA) reject non-compliant objects — e.g., Pods running as root, missing limits, or using unsigned images. The risk: a slow or unavailable webhook can block all writes (if `failurePolicy: Fail`) or silently allow violations (if `Ignore`), so webhook latency, availability, and failure policy must be designed carefully.
+After authn/authz, mutating then validating admission webhooks intercept the request before persistence. Validating webhooks (Gatekeeper/Kyverno/PSA) reject non-compliant objects — e.g., Pods running as root, missing limits, or using unsigned images. The risk: a slow or unavailable webhook can block all writes (if `failurePolicy: Fail`) or silently allow violations (if `Ignore`), so webhook latency, availability, and failure policy must be designed carefully. That risk is the reason to express what you can as a `ValidatingAdmissionPolicy` or `MutatingAdmissionPolicy` instead: those evaluate CEL inside the API server itself, so there is no extra Deployment to keep highly available and no network hop in the write path.
 
 **Q8: How do you avoid storing long-lived cloud credentials in the cluster?**
-Use workload identity federation: EKS IRSA or GKE Workload Identity bind a Kubernetes ServiceAccount to a cloud IAM role via a projected OIDC token. The Pod assumes the role and gets short-lived, automatically-rotated cloud credentials — no static access keys in Secrets to leak. This eliminates the most commonly exfiltrated secret type.
+Use workload identity federation: EKS IRSA or GKE Workload Identity bind a Kubernetes ServiceAccount to a cloud IAM role via a projected OIDC token. The Pod assumes the role and gets short-lived, automatically-rotated cloud credentials — no static access keys in Secrets to leak. This eliminates the most commonly exfiltrated secret type. On EKS there are two supported bindings: IRSA, where the IAM role's trust policy names the cluster's OIDC provider, and EKS Pod Identity, where an association maps a ServiceAccount to a role and EKS itself owns the trust relationship — the latter is the simpler choice for new clusters because one role works across clusters without per-cluster trust-policy edits.
 
 **Q9: How does NetworkPolicy contribute to security?**
 By default all Pods can talk to all Pods (flat network), enabling lateral movement after a breach. NetworkPolicy lets you default-deny and explicitly allow only required flows (e.g., api→db on 5432), containing a compromised Pod. It's only enforced if the CNI supports it (Calico/Cilium). Remember to allow DNS egress when default-denying egress (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)).

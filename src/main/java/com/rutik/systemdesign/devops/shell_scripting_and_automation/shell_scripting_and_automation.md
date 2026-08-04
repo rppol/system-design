@@ -59,7 +59,7 @@ For anything past ~50 lines or needing data structures, JSON, or robust error ha
 |------|--------|
 | `-e` (errexit) | Exit on any command returning non-zero |
 | `-u` (nounset) | Error on use of an unset variable (catches typos) |
-| `-o pipefail` | Pipeline returns the first non-zero exit, not the last |
+| `-o pipefail` | Pipeline returns the **rightmost non-zero** exit code instead of only the last command's |
 | `-x` (xtrace) | Print each command before running (debugging) |
 | `IFS=$'\n\t'` | Safer word-splitting (no space-splitting surprises) |
 
@@ -137,9 +137,9 @@ main "$@"
 curl -s https://api.example.com/health | grep -q '"status":"ok"' | tee /dev/null
 echo $?   # 0  even if the health string was absent!
 
-# WITH set -o pipefail: the grep failure (exit 1) propagates.
+# WITH set -o pipefail: the same pipeline now reports grep's exit 1.
 set -o pipefail
-curl -s https://api.example.com/health | grep -q '"status":"ok"'
+curl -s https://api.example.com/health | grep -q '"status":"ok"' | tee /dev/null
 echo $?   # 1  -> script with set -e exits here
 ```
 
@@ -265,7 +265,7 @@ One thing this implementation omits deliberately worth naming: there is no **jit
 ## 7. Real-World Examples
 
 - **Container `ENTRYPOINT` scripts** render config from env vars (`envsubst`), wait for dependencies, then `exec "$@"` so the app inherits PID 1 and signals.
-- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail` (GitHub Actions does NOT set it by default in `run:` — a common cause of "green but broken" jobs).
+- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail`. GitHub Actions runs an unspecified `run:` step as `bash -e {0}`, so `-e` is on but `pipefail` and `-u` are not; adding `shell: bash` upgrades it to `bash --noprofile --norc -eo pipefail {0}`. A masked pipeline failure under the default shell is a common cause of "green but broken" jobs.
 - **Cloud bootstrap** via EC2 user-data / cloud-init runs shell to install agents and join a cluster; must be idempotent because re-runs happen.
 - **Kubernetes liveness/readiness `exec` probes** are commands (`sh -c 'pg_isready -h localhost'`); their exit code is the health signal.
 
@@ -344,10 +344,15 @@ kubectl rollout restart deploy/app
 **Pitfall 2 — Unquoted variables cause catastrophic globbing/splitting.**
 
 ```bash
-DIR=""               # accidentally empty
-rm -rf $DIR/*        # BROKEN: expands to "rm -rf /*"  -> deletes root
-rm -rf "$DIR"/*      # FIX: with set -u and quoting, empty DIR errors instead of nuking /
+DIR=""                          # accidentally empty (set, so set -u does NOT catch it)
+rm -rf $DIR/*                   # BROKEN: expands to "rm -rf /*"  -> deletes root
+rm -rf "$DIR"/*                 # STILL BROKEN: quoting an empty value still yields "/*"
+rm -rf "${DIR:?DIR required}"/* # FIX: :? aborts on unset OR empty, before rm ever runs
 ```
+
+Quoting is necessary but not sufficient here. `set -u` fires only on an *unset* variable, and
+`"$DIR"` with `DIR=""` expands to the empty string, so both unquoted and quoted forms still
+glob `/*`. Only `${DIR:?msg}` (or an explicit `[ -n "$DIR" ]` guard) rejects the empty value.
 
 **Pitfall 3 — Parsing structured output with line tools.** `kubectl get … | grep | awk '{print $3}'` breaks the moment column order or spacing changes. Use `-o jsonpath` / `jq` against a stable schema instead.
 
@@ -375,7 +380,7 @@ rm -rf "$DIR"/*      # FIX: with set -u and quoting, empty DIR errors instead of
 `-e` exits on any non-zero command so failures don't cascade; `-u` errors on unset variables, catching typos like `$DIR` vs `$DIRR`; `-o pipefail` makes a pipeline fail if *any* stage fails, not just the last. Together they convert silent, dangerous continuation into immediate, debuggable failure — the single most important line in any production script.
 
 **Q2: Why quote variables, and what breaks without it?**
-Unquoted `$var` undergoes word-splitting (on `IFS`) and glob expansion. `rm -rf $DIR/*` with an empty `DIR` becomes `rm -rf /*`; a path with spaces becomes multiple arguments. `"$var"` preserves it as a single literal token. The rule: quote unless you specifically want splitting.
+Unquoted `$var` undergoes word-splitting (on `IFS`) and glob expansion: a path with spaces becomes multiple arguments, and a value containing `*` or `?` gets expanded against the filesystem. `"$var"` preserves it as a single literal token. The rule: quote unless you specifically want splitting. Quoting alone does not cover the *empty*-value case — `rm -rf "$DIR"/*` with `DIR=""` still expands to `rm -rf /*`, and `set -u` will not save you because the variable is set, just empty; guard those with `"${DIR:?DIR required}"`.
 
 **Q3: What makes a script idempotent and why does it matter for automation?**
 Idempotent = running it N times yields the same end state as running it once. It matters because automation is retried (CI re-runs, cron, failed-then-resumed deploys). Use `mkdir -p`, `kubectl apply` over `create`, check-before-append, and conditional creation. Non-idempotent scripts duplicate resources or fail on the second run.
@@ -393,7 +398,7 @@ By default `$?` of `a | b | c` is `c`'s exit code, so a failure in `a` or `b` is
 `exec` replaces the shell process with the app, so the app becomes PID 1 and receives signals (SIGTERM) directly instead of the shell swallowing them. Without `exec`, the shell stays PID 1, doesn't forward signals, and graceful shutdown breaks.
 
 **Q8: GitHub Actions `run:` steps — what's a subtle failure mode?**
-Each `run:` block runs in a shell that, by default, is NOT `set -euo pipefail` for multi-line scripts in the same way you'd expect; a failed command mid-block may not fail the step unless it's the last line, and piped failures are masked. Add `set -euo pipefail` at the top of multi-line `run:` blocks (or set `shell: bash` with explicit flags).
+A `run:` step with no `shell:` key executes as `bash -e {0}`, which gives you `-e` but neither `pipefail` nor `-u` — so a failing stage in the middle of a pipeline is masked by the last stage's exit 0 and the step goes green, and a typo'd variable silently expands to the empty string. Declaring `shell: bash` changes the invocation to `bash --noprofile --norc -eo pipefail {0}`, which adds pipefail but still not `-u`. Put an explicit `set -euo pipefail` at the top of any multi-line `run:` block so the step's failure semantics do not depend on which shell key someone remembered to write.
 
 **Q9: How do you parse JSON safely in a shell pipeline?**
 Use `jq`: `jq -r '.items[].metadata.name'`. It understands JSON structure, handles escaping, and survives whitespace/order changes that break `grep|awk|cut`. For building JSON, `jq -n --arg`/`--argjson` escapes values correctly, avoiding injection from unescaped input.

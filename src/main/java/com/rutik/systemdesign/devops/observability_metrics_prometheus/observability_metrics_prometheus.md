@@ -6,7 +6,7 @@ files this module contributes to each curated path; omit a tier to leave it out
 -->
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
-Prometheus is a **pull-based, time-series monitoring system** built around a multi-dimensional data model (metric name + key/value labels), a local TSDB, and a query language (PromQL) for slicing and aggregating that data. It scrapes HTTP `/metrics` endpoints on a fixed interval (default 15s), stores samples locally in 2-hour blocks, evaluates recording and alerting rules, and pushes firing alerts to Alertmanager. It is the de-facto standard for metrics in the cloud-native ecosystem and the metrics backend behind nearly every Kubernetes deployment.
+Prometheus is a **pull-based, time-series monitoring system** built around a multi-dimensional data model (metric name + key/value labels), a local TSDB, and a query language (PromQL) for slicing and aggregating that data. It scrapes HTTP `/metrics` endpoints on a fixed `scrape_interval` (the built-in default is 1m; almost every real deployment sets 15s or 30s), stores samples locally in 2-hour blocks, evaluates recording and alerting rules, and pushes firing alerts to Alertmanager. It is the de-facto standard for metrics in the cloud-native ecosystem and the metrics backend behind nearly every Kubernetes deployment.
 
 ---
 
@@ -17,7 +17,7 @@ Prometheus collects **metrics** — numeric measurements sampled over time. A si
 The architecture is deliberately simple and pull-based:
 
 1. **Targets** expose metrics over HTTP at `/metrics` in a text exposition format (client libraries or **exporters** generate this).
-2. **Prometheus server** scrapes each target on its `scrape_interval` (default 15s), appends samples to its local TSDB (a `head` block in memory flushed to 2-hour blocks on disk).
+2. **Prometheus server** scrapes each target on its `scrape_interval` (built-in default 1m, conventionally set to 15s), appends samples to its local TSDB (a `head` block in memory flushed to 2-hour blocks on disk).
 3. **Recording rules** precompute expensive expressions on a schedule; **alerting rules** evaluate conditions and emit alerts.
 4. **Alertmanager** deduplicates, groups, silences, and routes alerts to receivers (PagerDuty, Slack, email).
 5. **PromQL** queries the TSDB ad hoc (Grafana, API) or from rules.
@@ -62,6 +62,8 @@ Prometheus is intentionally **not** a long-term, globally-aggregated, infinitely
 | Gauge | Up and down | memory, queue depth, temperature | `name` |
 | Histogram | Bucketed observations | latency, response size | `name_bucket{le}`, `name_sum`, `name_count` |
 | Summary | Client-side quantiles | latency when you can't aggregate | `name{quantile}`, `name_sum`, `name_count` |
+
+A histogram can be exposed in either of two forms. The **classic** form emits one `_bucket` series per `le` boundary, so bucket count multiplies cardinality and the boundaries are fixed at instrumentation time. The **native** form ships the whole distribution as a single series with exponentially-spaced buckets whose resolution adapts automatically — far cheaper and far more accurate at the tails, queried with the same `histogram_quantile`. Native histograms are a stable Prometheus feature, but scraping them is opt-in via the `scrape_native_histograms` scrape setting and forwarding them needs `send_native_histograms` on `remote_write`.
 
 ### Collection strategies
 
@@ -112,7 +114,7 @@ flowchart LR
     class sd,am mathOp
 ```
 
-Targets expose `/metrics`; Prometheus scrapes them every 15s (default `scrape_interval`) directly or via service discovery, evaluates rules, and routes firing alerts to Alertmanager while PromQL serves dashboards straight from the TSDB.
+Targets expose `/metrics`; Prometheus scrapes them on the configured `scrape_interval` (15s here) directly or via service discovery, evaluates rules, and routes firing alerts to Alertmanager while PromQL serves dashboards straight from the TSDB.
 
 **Thanos long-term + global view (HA + object storage)**
 
@@ -221,9 +223,9 @@ The reverse direction sizes hardware. The §6 note that 1M active series needs ~
 ```yaml
 # prometheus.yml
 global:
-  scrape_interval: 15s          # default; how often to pull each target
+  scrape_interval: 15s          # built-in default is 1m; 15s is the usual choice
   scrape_timeout: 10s           # must be < scrape_interval
-  evaluation_interval: 15s      # how often rules run
+  evaluation_interval: 15s      # how often rules run (built-in default 1m)
 
 scrape_configs:
   - job_name: node
@@ -291,12 +293,12 @@ Rough sizing: bytes/sample ≈ 1–2 bytes after compression; a series at 15s = 
 
 | Symbol | What it is |
 |--------|------------|
-| `86400 / scrape_interval` | Samples one series produces per day — 5,760 at the default 15s |
+| `86400 / scrape_interval` | Samples one series produces per day — 5,760 at the 15s interval configured above |
 | `bytes_per_sample` | Post-compression cost on disk, 1–2 bytes thanks to delta-of-delta + XOR encoding |
 | `active_series` | Series receiving samples right now — the driver of both RAM and disk |
 | `retention.time` | Days kept before blocks are deleted; multiplies disk, never RAM |
 
-**Walk one example.** 1M active series at the default 15s scrape, 15-day retention:
+**Walk one example.** 1M active series at a 15s scrape, 15-day retention:
 
 ```
   samples/day  =  1,000,000 x (86400 / 15)  =  1,000,000 x 5,760  =  5.76 billion
@@ -613,7 +615,9 @@ metric_relabel_configs:
 | Grafana Mimir / Cortex | Horizontally scalable, multi-tenant remote-write backend |
 | pint / promtool | Rule linting, cardinality checks, config validation |
 | Grafana | Dashboards over PromQL (see [visualization_and_alerting](../visualization_and_alerting/visualization_and_alerting.md)) |
-| OpenMetrics | Standardized exposition format (CNCF) |
+| OpenMetrics | Exposition-format specification, now developed inside the Prometheus project |
+| Prometheus Agent mode | Scrape-and-`remote_write` only: no TSDB, no rules, no queries — for edge/forwarding tiers |
+| Remote-Write 2.0 | Protocol version carrying metadata, exemplars, created timestamps and native histograms, with string interning to shrink payloads; sender and receiver negotiate 2.0 vs 1.0 per connection |
 
 ---
 
@@ -626,7 +630,7 @@ Prometheus scrapes targets so it can observe target health directly (the synthet
 Cardinality is the number of distinct time series, which equals the product of label-value combinations for each metric. Prometheus keeps the active series index and head block in memory (roughly 1–2 KB per series), so a label like `user_id` with 5M values creates 5M series and OOM-kills the server. You plan RAM around active series count and aggressively keep labels bounded; per-request identifiers go to traces/logs, not labels.
 
 **Q3: Explain counter vs gauge vs histogram vs summary.**
-A counter only increases and resets to zero on restart (requests, errors) — you query its `rate()`. A gauge moves up and down (memory, queue depth). A histogram buckets observations and exposes `_bucket`/`_sum`/`_count`, letting you compute aggregatable quantiles across instances with `histogram_quantile`. A summary computes quantiles client-side, which are cheaper but cannot be aggregated across instances (you can't average percentiles) — prefer histograms for fleet-wide latency.
+A counter only increases and resets to zero on restart (requests, errors) — you query its `rate()`. A gauge moves up and down (memory, queue depth). A histogram buckets observations and exposes `_bucket`/`_sum`/`_count`, letting you compute aggregatable quantiles across instances with `histogram_quantile`. A summary computes quantiles client-side, which are cheaper but cannot be aggregated across instances (you can't average percentiles) — prefer histograms for fleet-wide latency. A histogram can be exposed classically (one `_bucket` series per boundary, fixed at instrumentation time) or natively (one series carrying exponentially-spaced, auto-adapting buckets), and the native form gives better tail accuracy at a fraction of the cardinality; enable it with `scrape_native_histograms`.
 
 **Q4: Why use `rate()` on counters, and how does it handle restarts?**
 `rate(counter[5m])` computes the per-second average increase over the window, turning a meaningless monotonic value into a trend you can graph and alert on. It automatically detects counter resets (a value dropping to a lower number implies a process restart) and corrects for them, so a service restart doesn't show as a huge negative spike. Use `rate` for alerts/graphs, `increase` for "how many in this window," and avoid `irate` for alerts because it's noisy.
@@ -644,7 +648,7 @@ You alert when the error-budget burn rate exceeds a threshold over both a long w
 Samples land in an in-memory head block (backed by a WAL for crash recovery), which is cut to immutable 2-hour on-disk blocks and then compacted into larger blocks. Retention is bounded by local disk (`--storage.tsdb.retention.time`, commonly 15–90 days) and there's no native cross-instance aggregation or HA dedup. For long-term and global views you add Thanos (sidecar ships blocks to object storage) or remote-write into Cortex/Mimir.
 
 **Q9: Compare Thanos, Cortex, and Mimir.**
-All three add long-term storage and horizontal/global scale on top of Prometheus. Thanos uses a sidecar that ships local TSDB blocks to object storage with a Querier that fans out across sidecars and a Store Gateway, plus a Compactor for dedup and downsampling — minimal change to existing Prometheus. Cortex and its successor Mimir take Prometheus `remote_write` into a clustered, multi-tenant ingest/query system designed for tens of millions of series per tenant; Mimir is the actively-developed, operationally simpler evolution. Choose Thanos for an additive sidecar model, Mimir for a fully clustered remote-write backend.
+All three add long-term storage and horizontal/global scale on top of Prometheus. Thanos uses a sidecar that ships local TSDB blocks to object storage with a Querier that fans out across sidecars and a Store Gateway, plus a Compactor for dedup and downsampling — minimal change to existing Prometheus. Cortex and Grafana Mimir — Mimir is Grafana Labs' AGPLv3 fork of Cortex, while Cortex itself continues as an Apache-2.0 CNCF project — both take Prometheus `remote_write` into a clustered, multi-tenant ingest/query system designed for tens of millions of series per tenant; Mimir is the more commonly chosen of the two for new builds and is the simpler to operate. Choose Thanos for an additive sidecar model, Mimir for a fully clustered remote-write backend.
 
 **Q10: What's the difference between `relabel_configs` and `metric_relabel_configs`?**
 `relabel_configs` runs before the scrape and operates on the target's meta-labels — it selects which targets to scrape (`keep`/`drop`) and rewrites target labels like `__address__` and `namespace`. `metric_relabel_configs` runs after the scrape on the resulting samples — it's where you drop noisy or high-cardinality series (`labeldrop`, `drop`) before they hit the TSDB. Together they are your primary cardinality and cost-control levers.

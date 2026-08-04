@@ -14,6 +14,8 @@ FinOps (a portmanteau of Finance + DevOps) is the practice of maximizing the bus
 - **Optimize** — act on the data: rightsizing, eliminating waste (idle/orphaned resources), and applying commitment discounts (Reserved Instances, Savings Plans, Spot).
 - **Operate** — continuous governance: policies, automation, anomaly detection, and embedding cost awareness into engineering culture.
 
+The lifecycle is one of three axes in the Foundation's Framework. **Domains** name the business outcomes a practice is accountable for — Understand Usage and Cost, Quantify Business Value, Optimize Usage and Cost, Manage the FinOps Practice — and each decomposes into **Capabilities** (allocation, forecasting, anomaly management, rate optimization, and so on). **Scopes** segment the spend a practice covers, so the same discipline applies to SaaS, licensing, and data-center spend rather than cloud alone. The Foundation also publishes **FOCUS** (FinOps Open Cost and Usage Specification), an open schema for billing exports that AWS, Azure, Google Cloud, and a growing list of SaaS vendors emit — it is what makes a single multi-cloud cost query possible without writing a per-provider parser.
+
 Core pricing models (AWS, with equivalents on GCP/Azure):
 
 - **On-Demand** — pay-per-use, no commitment, highest unit price. Default; use for spiky/unpredictable workloads.
@@ -123,7 +125,7 @@ The 3-year, 72%-off commitment breaks even at month 10.1 of a 36-month term — 
 | Over-provisioned instances | CPU/mem < 40% sustained | Rightsize down / Graviton |
 | Idle dev/test environments | No traffic off-hours | Scheduled shutdown (nights/weekends) |
 | Orphaned EBS volumes | Unattached | Delete / snapshot then delete |
-| Unattached Elastic IPs | Not associated | Release (billed when idle) |
+| Unused public IPv4 / Elastic IPs | Not associated, or attached to something idle | Release them — every public IPv4 address is billed $0.005/hr whether attached or not |
 | Old snapshots | Age > retention | Lifecycle delete |
 | Idle load balancers / NAT | Low traffic | Consolidate / remove |
 | Over-broad NAT egress | S3/DDB via NAT | VPC Endpoints (free) |
@@ -466,7 +468,10 @@ resource "aws_budgets_budget" "team_orders" {
   limit_amount = "12000"
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
-  cost_filter { name = "TagKeyValue"; values = ["user:team$orders"] }   # per-team budget
+  cost_filter {                                    # per-team budget
+    name   = "TagKeyValue"
+    values = ["user:team$orders"]
+  }
   notification {
     comparison_operator = "GREATER_THAN"
     threshold           = 80          # alert at 80% of budget
@@ -526,7 +531,9 @@ resource "aws_instance" "worker" {
 ```hcl
 # FIX: enforce tags via provider default_tags + an Organizations tag policy
 provider "aws" {
-  default_tags { tags = { team = "data", env = "prod", cost-center = "CC-2001", managed-by = "terraform" } }
+  default_tags {
+    tags = { team = "data", env = "prod", cost-center = "CC-2001", managed-by = "terraform" }
+  }
 }
 resource "aws_instance" "worker" {
   ami           = "ami-123"
@@ -554,7 +561,8 @@ resource "aws_instance" "worker" {
 | Savings Plans / RIs / CUDs | Commitment discounts |
 | Spot / Karpenter / Spot Fleet | Interruptible discounted compute |
 | Kubecost / OpenCost | Kubernetes cost allocation ([kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md)) |
-| CloudHealth / Cloudability / Infracost | Third-party FinOps + IaC cost estimates |
+| Tanzu CloudHealth / IBM Cloudability / Infracost | Third-party FinOps + IaC cost estimates |
+| FOCUS | Open cost-and-usage schema; normalizes AWS/Azure/GCP/SaaS billing exports into one table |
 | BigQuery / Athena billing export | Detailed cost analysis |
 
 ---
@@ -641,14 +649,30 @@ BROKEN:
 
 ```hcl
 # FIX (Inform): enforce tags everywhere + per-team budgets with anomaly alerts
-provider "aws" { default_tags { tags = { team = var.team, env = var.env, cost-center = var.cc } } }
+provider "aws" {
+  default_tags {
+    tags = { team = var.team, env = var.env, cost-center = var.cc }
+  }
+}
 
 resource "aws_budgets_budget" "per_team" {
   for_each     = toset(["orders", "data", "platform"])
   name         = "${each.key}-monthly"
-  budget_type  = "COST"; limit_amount = var.limits[each.key]; limit_unit = "USD"; time_unit = "MONTHLY"
-  cost_filter { name = "TagKeyValue"; values = ["user:team$${each.key}"] }
-  notification { comparison_operator = "GREATER_THAN"; threshold = 80; threshold_type = "PERCENTAGE"; notification_type = "ACTUAL"; subscriber_email_addresses = [var.alerts[each.key]] }
+  budget_type  = "COST"
+  limit_amount = var.limits[each.key]
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:team$${each.key}"]
+  }
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.alerts[each.key]]
+  }
 }
 ```
 

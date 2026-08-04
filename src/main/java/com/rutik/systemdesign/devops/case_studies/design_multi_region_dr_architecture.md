@@ -340,11 +340,17 @@ resource "aws_dynamodb_table" "idempotency" {
   stream_enabled   = true
   stream_view_type = "NEW_AND_OLD_IMAGES"
 
-  attribute { name = "idempotency_key"; type = "S" }
+  attribute {
+    name = "idempotency_key"
+    type = "S"
+  }
 
   replica { region_name = "us-west-2" }   # turns this into a Global Table
 
-  ttl { attribute_name = "expires_at"; enabled = true }
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
   point_in_time_recovery { enabled = true }
 }
 ```
@@ -592,14 +598,20 @@ resource "aws_secretsmanager_secret" "db_creds" {
   provider = aws.use1
   name     = "payments/db-creds"
   kms_key_id = aws_kms_key.primary_mrk.id
-  replica { region = "us-west-2"; kms_key_id = aws_kms_replica_key.usw2.arn }
+  replica {
+    region     = "us-west-2"
+    kms_key_id = aws_kms_replica_key.usw2.arn
+  }
 }
 
 # ECR cross-region replication so the warm ASG can pull the image post-failover
 resource "aws_ecr_replication_configuration" "images" {
   replication_configuration {
     rule {
-      destination { region = "us-west-2"; registry_id = data.aws_caller_identity.cur.account_id }
+      destination {
+        region      = "us-west-2"
+        registry_id = data.aws_caller_identity.cur.account_id
+      }
     }
   }
 }

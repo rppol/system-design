@@ -143,10 +143,10 @@ The deployable artifact is built from a specific SHA, so a deploy is fully repro
 
 ```bash
 # Merge: preserves true history, adds a merge commit (non-linear graph).
-git checkout main && git merge feat/x
+git switch main && git merge feat/x
 
 # Rebase: replays your commits on top of main -> linear history, NEW commit SHAs.
-git checkout feat/x && git rebase main      # rewrites feat/x commits
+git switch feat/x && git rebase main        # rewrites feat/x commits
 
 # Squash merge: collapses the branch into one commit on main (clean, atomic).
 git merge --squash feat/x && git commit     # common for PR merges
@@ -270,7 +270,10 @@ git push --force origin shared-feature        # teammates' commits now unreachab
 ```bash
 # FIX: never force-push shared branches; if you must, use the safe variant that
 # refuses to clobber others' work, and rebase only your own local branches.
-git push --force-with-lease origin my-own-branch   # aborts if remote moved unexpectedly
+git push --force-with-lease --force-if-includes origin my-own-branch
+#   --force-with-lease  aborts if the remote moved off the SHA your origin/<branch> shows
+#   --force-if-includes also aborts unless you actually integrated that tip locally,
+#                       which closes the hole a stray background fetch opens up
 # Recovery for victims: git reflog -> git reset --hard <their-old-sha>
 ```
 
@@ -368,13 +371,13 @@ They are easier to review, revert (`git revert <sha>` cleanly undoes one change)
 `--force` overwrites the remote branch unconditionally, potentially erasing commits someone else pushed after your last fetch. `--force-with-lease` only overwrites if the remote is still at the SHA you last saw, aborting if someone else pushed in between — so it protects against clobbering others' work. Even so, reserve force-pushing for your own branches.
 
 **Q11: How do you recover a branch that was deleted with `git branch -D`, after the reflog for that branch name is gone?**
-Deleting a branch removes its own reflog, but the commits stay reachable through HEAD's reflog or a full object-database scan until garbage collection runs. `git reflog show HEAD` lists every commit HEAD pointed to, including the tip of the deleted branch right before the delete, so `git checkout -b recovered <that-sha>` restores it; if that's not enough, `git fsck --unreachable --no-reflog` surfaces dangling commits directly from the object database. This window isn't infinite — unreachable objects referenced only by expired reflog entries are pruned by `git gc`, with entries for unreachable commits expiring after 30 days by default and reachable ones after 90. If you delete the wrong branch, stop making new commits and run the recovery immediately, since every subsequent `git gc` shrinks the window.
+Deleting a branch removes its own reflog, but the commits stay reachable through HEAD's reflog or a full object-database scan until garbage collection runs. `git reflog show HEAD` lists every commit HEAD pointed to, including the tip of the deleted branch right before the delete, so `git switch -c recovered <that-sha>` restores it; if that's not enough, `git fsck --unreachable --no-reflog` surfaces dangling commits directly from the object database. This window isn't infinite — unreachable objects referenced only by expired reflog entries are pruned by `git gc`, with entries for unreachable commits expiring after 30 days by default and reachable ones after 90. If you delete the wrong branch, stop making new commits and run the recovery immediately, since every subsequent `git gc` shrinks the window.
 
 **Q12: Under what concrete conditions would you deliberately choose GitFlow over trunk-based development?**
 GitFlow fits when you ship versioned software to customers and must maintain several released versions in production simultaneously. A desktop app or on-prem product supporting v2.x and v3.x concurrently needs long-lived release and hotfix branches to patch an old version without dragging in unreleased work, something trunk-based's single always-deployable main can't cleanly express; regulatory environments requiring a formal, auditable release sign-off before code reaches customers are the other common trigger. Teams sometimes default to GitFlow out of habit for a SaaS product with one continuously-deployed environment, where it only adds merge debt with none of its versioning benefits. Ask whether you support multiple released versions at once — if no, trunk-based almost always wins; if yes, GitFlow's structure earns its overhead.
 
 **Q13: How does `--force-with-lease` actually detect a stale remote, and when can it still be unsafe?**
-It compares the remote branch's current SHA against your local remote-tracking ref, such as origin/main, before pushing, and refuses to push if they differ. That remote-tracking ref is only as fresh as your last fetch, so if a teammate pushed after your last fetch, the safety check can still be fooled unless you fetch again immediately beforehand. `--force-with-lease` with no argument checks the branch matching your current HEAD, but `--force-with-lease=<branch>:<expected-sha>` lets you pin the exact expected SHA for a stronger guarantee in scripted or CI contexts. Fetch immediately before a lease-protected force-push, and prefer the explicit branch-and-SHA form in automation where a race is unacceptable.
+It compares the remote branch's current value against your local remote-tracking ref (`refs/remotes/origin/<branch>`) and refuses the push if they differ; given with no arguments it applies that check to every remote ref the push would update. The unsafe case is the opposite of what people assume: a *stale* remote-tracking ref makes the lease correctly fail, and the real hole is anything that refreshes `origin/<branch>` without you integrating the new commits — a `git fetch` in another terminal, an IDE's background fetch, a wrapper script that fetches before pushing — because once the tracking ref matches the remote, the lease passes and you clobber the teammate's commit anyway. That is why "fetch right before force-pushing" is exactly the wrong habit. Add `--force-if-includes`, which additionally requires the remote-tracking tip to be reachable from your branch's reflog (proof you really integrated it), or enable it permanently with `git config --global push.useForceIfIncludes true`; it is a no-op alongside the explicit `--force-with-lease=<branch>:<expected-sha>` form, which is what you pin by hand in automation where you already know the SHA you expect.
 
 **Q14: How do partial clone and sparse checkout make working in a huge monorepo practical?**
 Partial clone skips downloading file contents up front, fetching blobs on demand as you check them out, while sparse checkout limits your working directory to a chosen subset of paths. A Google- or Meta-scale monorepo with millions of files would take hours to fully clone and gigabytes of local disk if cloned normally; `git clone --filter=blob:none` gets history and trees immediately and lazily fetches blob content only for files you actually touch, and `git sparse-checkout set services/payments/` then materializes only that directory in the working tree instead of the entire repo. Commands that need full history or content, like a repo-wide grep across unfetched paths, trigger extra network fetches the first time, so sparse-checkout scope should roughly match what you actually work on. Combine both for monorepos beyond a few gigabytes — partial clone for history and objects, sparse checkout for the working tree — rather than cloning and checking out everything.
@@ -392,7 +395,7 @@ You lose the intermediate commits' granularity, so `git bisect` can only localiz
 - Default to **trunk-based development** with short-lived branches and feature flags.
 - Keep `main` always-deployable; protect it (required reviews, status checks, no direct pushes).
 - Write small, atomic commits; use Conventional Commits to drive automated versioning.
-- Never force-push shared branches; rebase only local/private work; use `--force-with-lease`.
+- Never force-push shared branches; rebase only local/private work; force-push with `--force-with-lease --force-if-includes` (or set `push.useForceIfIncludes` globally).
 - Scan for secrets in pre-commit and CI; rotate immediately if one leaks.
 - Tag releases with semantic versions; build artifacts from the tag's SHA for reproducible provenance.
 - Use CODEOWNERS + protected branches to enforce review on infra/IaC paths.

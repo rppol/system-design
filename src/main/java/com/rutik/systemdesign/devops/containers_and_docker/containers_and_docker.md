@@ -88,7 +88,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    base(["FROM node:20-slim<br/>shared, changes rarely"]) --> pkg["COPY package.json"]
+    base(["FROM node:24-slim<br/>shared, changes rarely"]) --> pkg["COPY package.json"]
     pkg --> npmci["RUN npm ci<br/>changes when deps change"]
     npmci --> appcode["COPY app code<br/>changes every commit"]
     appcode -->|"keep LAST for<br/>max cache hits"| rw(["container R/W<br/>logs, tmp"])
@@ -112,7 +112,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph builder["Stage 1 · builder (node:20)"]
+    subgraph builder["Stage 1 · builder (node:24)"]
         direction LR
         src(["COPY src"]) --> build["RUN npm ci && build<br/>toolchain ~900MB"]
         build --> artifacts(["dist/, node_modules"])
@@ -144,7 +144,7 @@ flowchart LR
 
 ```dockerfile
 # ---- build stage: has the full toolchain ----
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 WORKDIR /app
 
 # Copy ONLY manifests first so the expensive install layer caches across code changes.
@@ -155,7 +155,7 @@ COPY . .                                     # source changes often -> later lay
 RUN npm run build                            # produces /app/dist
 
 # ---- runtime stage: minimal, no toolchain, no source ----
-FROM gcr.io/distroless/nodejs20-debian12 AS runtime
+FROM gcr.io/distroless/nodejs24-debian13 AS runtime
 WORKDIR /app
 COPY --from=builder /app/dist        ./dist
 COPY --from=builder /app/node_modules ./node_modules
@@ -174,7 +174,7 @@ docker image inspect myimg:latest --format '{{.RootFS.Layers}}'   # layer digest
 dive myimg:latest                    # interactive layer/wasted-space explorer
 ```
 
-### BuildKit features (default in modern Docker)
+### BuildKit features (BuildKit is the default builder)
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -206,8 +206,8 @@ node_modules
 
 ```bash
 # Tags are mutable (someone can re-push :latest). Digests are immutable.
-FROM node:20-slim                                   # mutable
-FROM node:20-slim@sha256:abc123...                  # pinned, reproducible
+FROM node:24-slim                                   # mutable
+FROM node:24-slim@sha256:abc123...                  # pinned, reproducible
 ```
 
 ---
@@ -309,8 +309,8 @@ USER 10001
 | `dive` | Inspect layers, find wasted space |
 | Trivy / Grype | Image CVE scanning (see [devsecops](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)) |
 | distroless / Chainguard images | Minimal, low-CVE base images |
-| Kaniko / BuildKit | In-cluster, daemonless image builds (CI) |
-| `docker-slim` | Auto-minify images |
+| Rootless BuildKit / Buildah | In-cluster, daemonless image builds (CI) |
+| SlimToolkit (`slim`) | Auto-minify images |
 | cosign | Sign/verify images |
 
 ---
@@ -330,7 +330,7 @@ It separates the build environment from the runtime environment. You compile in 
 Root in the container is root in its namespaces; combined with a kernel container-escape vulnerability or a host mount, it escalates the blast radius of any compromise. Avoid it by creating a non-root user (`USER 10001`) in the image and enforcing `runAsNonRoot: true` plus `readOnlyRootFilesystem: true` in the Kubernetes `securityContext`.
 
 **Q5: Tag vs digest — why pin by digest?**
-A tag (`node:20`) is a mutable pointer — the same tag can be re-pushed to point at different content, so builds aren't reproducible and a supply-chain attacker could swap it. A digest (`node:20@sha256:...`) is immutable and content-verified, guaranteeing you get exactly the bits you tested. Pin by digest for reproducible builds and supply-chain integrity.
+A tag (`node:24`) is a mutable pointer — the same tag can be re-pushed to point at different content, so builds aren't reproducible and a supply-chain attacker could swap it. A digest (`node:24@sha256:...`) is immutable and content-verified, guaranteeing you get exactly the bits you tested. Pin by digest for reproducible builds and supply-chain integrity.
 
 **Q6: Alpine vs Debian-slim — what's the catch with Alpine?**
 Alpine is tiny (~5 MB) but uses musl libc instead of glibc. This causes real problems: different DNS resolution behavior, Python packages that ship glibc wheels needing recompilation (slower builds), and occasional subtle runtime bugs. Debian-slim is larger but glibc-compatible and avoids these surprises — many teams choose slim for reliability over Alpine's size.
@@ -356,8 +356,8 @@ Use a multi-stage build (drop the toolchain and source), choose a minimal runtim
 **Q13: Why might a container ignore `docker stop` and hang until it's force-killed?**
 Shell-form `CMD`/`ENTRYPOINT` makes `/bin/sh` PID 1 instead of your app, so it never forwards the SIGTERM that `docker stop` sends. Exec-form (`CMD ["node", "server.js"]`) runs your process directly as PID 1 so it receives signals itself and can shut down cleanly. Kubernetes sends SIGTERM then waits `terminationGracePeriodSeconds` (30s by default) before SIGKILL, so a process that never sees SIGTERM always takes the hard, ungraceful path out. Always use exec-form `CMD`/`ENTRYPOINT` (per this module's Best Practices) and handle SIGTERM in your application code.
 
-**Q14: Why do CI pipelines prefer Kaniko or rootless builds over Docker-in-Docker (DinD)?**
-Docker-in-Docker needs a privileged container with access to a Docker daemon socket, which is a serious CI security risk. A compromised build step — say, a malicious `npm ci` postinstall script — can use that socket or `--privileged` access to escape to the host, since privileged mode disables most container isolation. Kaniko and rootless BuildKit/Buildx build OCI images from a Dockerfile entirely in userspace without a daemon or elevated privileges, so a compromised build stays contained (Podman/Buildah offer the same daemonless model outside CI). Prefer Kaniko or rootless builds over DinD for any pipeline that builds untrusted or dependency-heavy code.
+**Q14: Why do CI pipelines prefer rootless, daemonless builders over Docker-in-Docker (DinD)?**
+Docker-in-Docker needs a privileged container with access to a Docker daemon socket, which is a serious CI security risk. A compromised build step — say, a malicious `npm ci` postinstall script — can use that socket or `--privileged` access to escape to the host, since privileged mode disables most container isolation. Rootless BuildKit (`buildkitd` running as an unprivileged user, driven by `docker buildx` or `buildctl`) and Buildah build OCI images from a Dockerfile entirely in userspace without a daemon or elevated privileges, so a compromised build stays contained (Podman offers the same daemonless model outside CI). Prefer a rootless builder over DinD for any pipeline that builds untrusted or dependency-heavy code.
 
 **Q15: How does a BuildKit cache mount differ from the normal image layer cache?**
 A cache mount persists a directory like `/root/.npm` across builds without ever becoming part of an image layer. The normal layer cache is invalidated the instant `COPY . .`'s input changes, forcing `RUN npm ci` to reinstall from scratch on every code edit; a cache mount survives that invalidation because it lives outside the layer entirely, so npm/pip/apt still reuse already-downloaded packages. This is why `RUN --mount=type=cache,target=/root/.npm npm ci` in the case study's fixed Dockerfile cut code-only rebuilds from a 6-minute cold build down to about 40 seconds. Add a cache mount for your package manager's cache directory whenever dependency installs rerun needlessly on code-only changes.
@@ -388,7 +388,7 @@ A Node.js service's image is 1.4 GB and rebuilds take ~6 minutes on every commit
 
 ```
 Original Dockerfile (single stage, bad order)
-  FROM node:20            # full image ~1.1GB
+  FROM node:24            # full image ~1.1GB
   COPY . .                # source FIRST -> any code change busts cache below
   RUN npm install         # full devDependencies + build toolchain shipped
   CMD npm start           # shell-form, root user, dev deps in prod image
@@ -398,14 +398,14 @@ Original Dockerfile (single stage, bad order)
 ```dockerfile
 # FIX: multi-stage + cache-friendly order + distroless + non-root.
 # syntax=docker/dockerfile:1
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci      # cached across code changes
 COPY . .
 RUN npm run build && npm prune --omit=dev            # drop devDependencies
 
-FROM gcr.io/distroless/nodejs20-debian12
+FROM gcr.io/distroless/nodejs24-debian13
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules

@@ -19,7 +19,7 @@ Cloud networking layers on top of the single-VPC basics from [cloud_fundamentals
 - **PrivateLink** — exposes a service in one VPC to consumers in other VPCs/accounts via private IPs (an interface endpoint backed by an NLB), with no peering, no route exposure, and traffic that never touches the public internet. (GCP: Private Service Connect; Azure: Private Link.)
 - **CDN (Content Delivery Network)** — a globally distributed cache (CloudFront, Cloudflare, Fastly) that serves content from edge locations near users, offloading the origin and cutting latency. Also provides TLS termination, WAF, DDoS protection, and edge compute.
 - **Global load balancing** — routes users to the nearest/healthiest Regional backend, via anycast (Cloudflare, GCP Global LB) or DNS-based (Route 53, AWS Global Accelerator uses anycast IPs).
-- **DNS strategies** — Route 53 routing policies (simple, weighted, latency, geolocation, geoproximity, failover, multivalue) decide which endpoint a resolver returns.
+- **DNS strategies** — Route 53's eight routing policies (simple, weighted, latency, geolocation, geoproximity, IP-based, failover, multivalue) decide which endpoint a resolver returns.
 
 ---
 
@@ -65,8 +65,8 @@ Cloud networking layers on top of the single-VPC basics from [cloud_fundamentals
 | Peering | VPC Peering | VPC Network Peering | VNet Peering |
 | Hub | Transit Gateway | Network Connectivity Center | Virtual WAN |
 | Private service | PrivateLink | Private Service Connect | Private Link |
-| Global LB | Global Accelerator | Global HTTP(S) LB | Front Door |
-| CDN | CloudFront | Cloud CDN | Front Door/CDN |
+| Global LB | Global Accelerator | Global external Application Load Balancer | Front Door |
+| CDN | CloudFront | Cloud CDN / Media CDN | Front Door (Standard/Premium) |
 | DNS | Route 53 | Cloud DNS | Azure DNS / Traffic Manager |
 
 ### DNS routing policies (Route 53)
@@ -78,6 +78,7 @@ Cloud networking layers on top of the single-VPC basics from [cloud_fundamentals
 | Latency | Lowest-latency Region | Global low-latency |
 | Geolocation | By user country/continent | Compliance, localization |
 | Geoproximity | By geographic distance + bias | Traffic shaping by region |
+| IP-based | By caller CIDR block you supply | Override geo guesses for known ISP/corporate ranges |
 | Failover | Primary/secondary + health check | Active-passive DR |
 | Multivalue | Up to 8 healthy records | Simple client-side LB |
 
@@ -282,19 +283,32 @@ resource "aws_cloudfront_distribution" "cdn" {
   origin {
     domain_name = aws_lb.origin.dns_name
     origin_id   = "alb"
-    custom_origin_config { http_port = 80; https_port = 443; origin_protocol_policy = "https-only"; origin_ssl_protocols = ["TLSv1.2"] }
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
   }
   default_cache_behavior {
     target_origin_id       = "alb"
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
-    min_ttl = 0; default_ttl = 86400; max_ttl = 31536000   # 1 day default, 1 year max
-    compress = true
+    min_ttl                = 0
+    default_ttl            = 86400        # 1 day
+    max_ttl                = 31536000     # 1 year
+    compress               = true
   }
   # cache key = which headers/query/cookies matter; over-broad keys destroy hit ratio
-  restrictions { geo_restriction { restriction_type = "none" } }
-  viewer_certificate { acm_certificate_arn = var.cert_arn; ssl_support_method = "sni-only" }
+  restrictions {
+    geo_restriction { restriction_type = "none" }
+  }
+  viewer_certificate {
+    acm_certificate_arn      = var.cert_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
 }
 ```
 
@@ -350,11 +364,17 @@ A hot object is insensitive to TTL — at 2 req/s even a 60s TTL still hits 99.1
 
 ```hcl
 resource "aws_route53_record" "us" {
-  zone_id = var.zone; name = "app.example.com"; type = "A"
-  set_identifier         = "us-east-1"
+  zone_id        = var.zone
+  name           = "app.example.com"
+  type           = "A"
+  set_identifier = "us-east-1"
   latency_routing_policy { region = "us-east-1" }
-  health_check_id        = aws_route53_health_check.us.id   # unhealthy -> not returned
-  alias { name = aws_lb.us.dns_name; zone_id = aws_lb.us.zone_id; evaluate_target_health = true }
+  health_check_id = aws_route53_health_check.us.id   # unhealthy -> not returned
+  alias {
+    name                   = aws_lb.us.dns_name
+    zone_id                = aws_lb.us.zone_id
+    evaluate_target_health = true
+  }
 }
 # A matching record for eu-west-1; resolvers get the lowest-latency healthy Region.
 ```
@@ -395,7 +415,7 @@ Versioned URLs move you permanently into the first two rows: a new content hash 
 ## 7. Real-World Examples
 
 - **Netflix Open Connect** places CDN appliances inside ISPs so streams come from within the user's ISP network — extreme edge caching to minimize backbone traffic.
-- **Cloudflare** fronts millions of sites with an anycast network: one IP, BGP routes each user to the nearest of 300+ edge locations, terminating TLS, caching, running edge Workers, and absorbing DDoS before traffic reaches origins.
+- **Cloudflare** fronts millions of sites with an anycast network: one IP, BGP routes each user to the nearest of 330+ cities across 100+ countries, terminating TLS, caching, running edge Workers, and absorbing DDoS before traffic reaches origins.
 - **A multi-account enterprise** connects 50+ VPCs across teams via a central Transit Gateway with segmented route tables (prod can't reach dev), plus PrivateLink for shared services (a central logging/auth service consumed privately), avoiding a 1225-connection peering mesh.
 - **SaaS providers** expose their API to customers' VPCs via PrivateLink so the customer reaches the service over private IPs without internet egress or peering — common for security-conscious B2B (e.g., Snowflake, Datadog).
 
@@ -493,17 +513,35 @@ flowchart LR
 
 ```hcl
 # BROKEN: peer A<->B and B<->C, then expect A to reach C through B
-resource "aws_vpc_peering_connection" "a_b" { vpc_id = aws_vpc.a.id; peer_vpc_id = aws_vpc.b.id }
-resource "aws_vpc_peering_connection" "b_c" { vpc_id = aws_vpc.b.id; peer_vpc_id = aws_vpc.c.id }
+resource "aws_vpc_peering_connection" "a_b" {
+  vpc_id      = aws_vpc.a.id
+  peer_vpc_id = aws_vpc.b.id
+}
+resource "aws_vpc_peering_connection" "b_c" {
+  vpc_id      = aws_vpc.b.id
+  peer_vpc_id = aws_vpc.c.id
+}
 # A's packets to C are dropped: peering is NON-transitive, B does not route A->C.
 ```
 
 ```hcl
 # FIX: use a Transit Gateway (transitive hub) for many-VPC routing
 resource "aws_ec2_transit_gateway" "hub" {}
-resource "aws_ec2_transit_gateway_vpc_attachment" "a" { transit_gateway_id = aws_ec2_transit_gateway.hub.id; vpc_id = aws_vpc.a.id; subnet_ids = [aws_subnet.a.id] }
-resource "aws_ec2_transit_gateway_vpc_attachment" "b" { transit_gateway_id = aws_ec2_transit_gateway.hub.id; vpc_id = aws_vpc.b.id; subnet_ids = [aws_subnet.b.id] }
-resource "aws_ec2_transit_gateway_vpc_attachment" "c" { transit_gateway_id = aws_ec2_transit_gateway.hub.id; vpc_id = aws_vpc.c.id; subnet_ids = [aws_subnet.c.id] }
+resource "aws_ec2_transit_gateway_vpc_attachment" "a" {
+  transit_gateway_id = aws_ec2_transit_gateway.hub.id
+  vpc_id             = aws_vpc.a.id
+  subnet_ids         = [aws_subnet.a.id]
+}
+resource "aws_ec2_transit_gateway_vpc_attachment" "b" {
+  transit_gateway_id = aws_ec2_transit_gateway.hub.id
+  vpc_id             = aws_vpc.b.id
+  subnet_ids         = [aws_subnet.b.id]
+}
+resource "aws_ec2_transit_gateway_vpc_attachment" "c" {
+  transit_gateway_id = aws_ec2_transit_gateway.hub.id
+  vpc_id             = aws_vpc.c.id
+  subnet_ids         = [aws_subnet.c.id]
+}
 # Now A, B, C all route to each other via the TGW route table.
 ```
 
@@ -573,7 +611,7 @@ The cache key is the set of attributes (path, plus chosen headers/query strings/
 DNS-based routing (Route 53 latency/failover policies) returns the nearest/healthy Region's IP to the resolver, but failover is bounded by DNS TTL and resolver caching — clients can keep hitting a dead Region for the TTL duration. Anycast (Global Accelerator, Cloudflare, GCP Global LB) advertises a single static IP and uses BGP to route each user to the nearest healthy edge, so failover is near-instant with no DNS-cache delay. Use anycast when fast, reliable failover and stable IPs matter; DNS routing is simpler and often sufficient.
 
 **Q6: How do you choose between the Route 53 routing policies?**
-Use simple for one endpoint; weighted for canary/A-B/gradual migration; latency for routing global users to the lowest-latency Region; geolocation for compliance/localization by country; failover for active-passive DR with health checks; and multivalue for simple health-checked client-side load balancing. The choice follows the goal — performance (latency), compliance (geolocation), resilience (failover), or rollout control (weighted). Pair them with health checks so unhealthy endpoints are removed from responses.
+Use simple for one endpoint; weighted for canary/A-B/gradual migration; latency for routing global users to the lowest-latency Region; geolocation for compliance/localization by country; geoproximity when you want distance-based routing you can bias toward a Region; IP-based when you have the caller's CIDR ranges and want to override Route 53's geo inference for known ISP or corporate networks; failover for active-passive DR with health checks; and multivalue for simple health-checked client-side load balancing across up to eight records. The choice follows the goal — performance (latency), compliance (geolocation), resilience (failover), or rollout control (weighted). Pair them with health checks so unhealthy endpoints are removed from responses.
 
 **Q7: Why are overlapping CIDR ranges a problem, and how do you avoid them?**
 Two VPCs with overlapping CIDRs (e.g., both `10.0.0.0/16`) can't be peered or share a Transit Gateway because the router can't unambiguously decide where a given IP lives. You avoid it by planning a non-overlapping address scheme up front — typically with an IPAM tool that allocates distinct ranges per VPC/account/Region — because renumbering a live, in-use VPC is disruptive. Treat IP planning as a foundational design step, not an afterthought.
@@ -600,7 +638,7 @@ A Gateway endpoint is a free VPC route-table entry limited to S3 and DynamoDB; a
 Non-transitive peering doesn't route or reject cross-hop traffic explicitly — packets from A destined for C are simply dropped because no route exists via B, producing a timeout rather than an error message. This looks identical to a firewall block, a dead target, or ordinary packet loss, so engineers often chase the wrong hypothesis before realizing the topology itself cannot forward the packet. The case study's fix was structural, not diagnostic: replacing the 30-VPC mesh with a Transit Gateway hub so every VPC could reach every other VPC by design. Treat an unexplained cross-VPC timeout as a topology question first — trace the actual peering/TGW attachments before chasing application-level causes.
 
 **Q15: Besides caching, what other capabilities does a CDN edge provide, and when do they matter even if cache hit ratio is low?**
-A CDN edge also terminates TLS, absorbs DDoS traffic, runs a WAF, and can execute edge compute such as Cloudflare Workers close to the user. These matter even for fully dynamic, near-zero-hit-ratio traffic, since offloading TLS handshakes and filtering malicious requests at 300+ edge locations protects the origin regardless of whether content is cacheable. Netflix Open Connect goes further, placing CDN appliances inside ISP networks so streams barely cross the public backbone at all. Evaluate a CDN on its security and edge-compute value, not cache hit ratio alone, before ruling it out for personalized traffic.
+A CDN edge also terminates TLS, absorbs DDoS traffic, runs a WAF, and can execute edge compute such as Cloudflare Workers close to the user. These matter even for fully dynamic, near-zero-hit-ratio traffic, since offloading TLS handshakes and filtering malicious requests across 330+ edge cities protects the origin regardless of whether content is cacheable. Netflix Open Connect goes further, placing CDN appliances inside ISP networks so streams barely cross the public backbone at all. Evaluate a CDN on its security and edge-compute value, not cache hit ratio alone, before ruling it out for personalized traffic.
 
 **Q16: How do AWS's Transit Gateway and PrivateLink map onto GCP and Azure?**
 AWS Transit Gateway maps to GCP Network Connectivity Center and Azure Virtual WAN; AWS PrivateLink maps to GCP Private Service Connect and Azure Private Link. Both hub concepts solve the same peering-mesh-explosion problem, and both private-service concepts expose a single service without network-level peering. All three clouds also mirror CloudFront and Route 53 with their own CDN and DNS-routing offerings — GCP Cloud CDN/Cloud DNS and Azure Front Door/Traffic Manager. Recognize the pattern behind the product name so you can translate an AWS-centric design onto another cloud without re-deriving the concepts from scratch.
@@ -641,19 +679,35 @@ resource "aws_ec2_transit_gateway" "hub" {}
 
 # FIX 2: put CloudFront in front; version assets so they cache for a year
 resource "aws_cloudfront_distribution" "cdn" {
-  origin { domain_name = aws_lb.origin.dns_name; origin_id = "alb"
-           custom_origin_config { http_port = 80; https_port = 443; origin_protocol_policy = "https-only"; origin_ssl_protocols = ["TLSv1.2"] } }
+  origin {
+    domain_name = aws_lb.origin.dns_name
+    origin_id   = "alb"
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
   default_cache_behavior {
-    target_origin_id = "alb"; viewer_protocol_policy = "redirect-to-https"
-    allowed_methods = ["GET","HEAD","OPTIONS"]; cached_methods = ["GET","HEAD"]
-    default_ttl = 86400; max_ttl = 31536000; compress = true   # versioned URLs -> cache 1yr
+    target_origin_id       = "alb"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    default_ttl            = 86400
+    max_ttl                = 31536000     # versioned URLs -> cache 1yr
+    compress               = true
   }
 }
 
 # FIX 3: short TTL + health-checked failover (or Global Accelerator for instant failover)
 resource "aws_route53_record" "app" {
-  zone_id = var.zone; name = "app.example.com"; type = "A"; ttl = 60
-  set_identifier = "primary"; failover_routing_policy { type = "PRIMARY" }
+  zone_id        = var.zone
+  name           = "app.example.com"
+  type           = "A"
+  ttl            = 60
+  set_identifier = "primary"
+  failover_routing_policy { type = "PRIMARY" }
   health_check_id = aws_route53_health_check.primary.id
 }
 ```

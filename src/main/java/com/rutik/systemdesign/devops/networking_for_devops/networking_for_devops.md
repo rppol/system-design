@@ -202,7 +202,8 @@ The main request path (solid) ends at the pod; the NAT egress branch (dotted) is
 10.0.1.0/28   -> 16 addresses     (usable fewer: network + broadcast + cloud-reserved)
 
 # /N: the first N bits are the network; 32-N bits are host.
-# addresses = 2^(32 - N).  AWS reserves 5 IPs per subnet (.0 .1 .2 .3 and .255).
+# addresses = 2^(32 - N).  AWS reserves 5 per subnet: the FIRST FOUR and the LAST one,
+# whatever the prefix length (in 10.0.1.0/28 that is .0 .1 .2 .3 and .15).
 ```
 
 A Kubernetes pitfall: pods need IPs from the VPC (with the AWS VPC CNI). A `/24` per subnet = 256 IPs ≈ ~250 pods. Large clusters exhaust subnet space fast — size for peak pod count, not node count.
@@ -219,7 +220,7 @@ The lever is that N moves the count by *powers of two*, not linearly. Going from
 | `N` | The prefix length — how many leading bits are pinned to the network |
 | `32 - N` | Host bits, the ones left free to enumerate |
 | `2^(32-N)` | Total addresses in the block, including unusable ones |
-| AWS reserve `5` | `.0` network, `.1` router, `.2` DNS, `.3` future, and the last `.255` broadcast |
+| AWS reserve `5` | First four of the block — network, VPC router, VPC DNS, reserved for future use — plus the block's last address (broadcast). Not tied to `.0`/`.255`; in a `/28` the last one is `.15` |
 
 **Walk one example.** Every block from the code above, plus the two sizes you actually pick between:
 
@@ -283,44 +284,48 @@ openssl s_client -connect api:443 -servername api.example.com </dev/null \
 
 ### NAT and source-port exhaustion
 
-A NAT gateway SNATs many private hosts behind one public IP. Each outbound connection consumes a source port from the ~64K range *per destination 5-tuple*. Thousands of connections to the *same* external endpoint (e.g., one S3 region, one API) can exhaust ports, causing `connection timed out` on new egress while bandwidth is fine.
+A NAT gateway SNATs many private hosts behind one public IP. Every outbound connection needs its own source port out of the 1024–65535 range the gateway draws from, and each IPv4 address on the gateway supports **55,000 simultaneous connections to each unique destination** — where "unique destination" means a distinct combination of destination IP, destination port, and protocol. Thousands of connections to the *same* external endpoint (e.g., one S3 regional endpoint, one payment API) exhaust that one pool, causing `connection timed out` on new egress while bandwidth sits idle.
 
 ```bash
 # Symptom: rising egress errors; CloudWatch ErrorPortAllocation > 0 on the NAT GW.
-# Fix: VPC endpoints (PrivateLink) for AWS services to bypass NAT, or scale NAT/IPs.
+# Fix: VPC endpoints (PrivateLink) for AWS services to bypass NAT, add secondary
+#      IPv4 addresses to the gateway, or split clients across per-AZ NAT gateways.
 ```
 
-#### Why "~64K per 5-tuple" is the number that matters
+#### Why 55,000 per unique destination is the number that matters
 
 ```
-availablePorts   = 65535 - 1024 + 1  =  64,512   (ephemeral range per NAT public IP)
-distinctFlows    = (srcIP, srcPort, dstIP, dstPort, proto)   -- the 5-tuple
+portRange      = 1024 - 65535                        what a NAT gateway draws source ports from
+uniqueDest     = (dstIP, dstPort, protocol)          NOT the full 5-tuple
+connLimit      = 55,000 simultaneous connections per uniqueDest, per IPv4 address
 
-  headroom to ONE destination endpoint  =  64,512 x (number of NAT public IPs)
+  headroom to ONE destination endpoint = 55,000 x (IPv4 addresses on the gateway)
+  addresses per NAT gateway            = up to 8 (1 primary + 7 secondary)
+  absolute ceiling to one destination  = 55,000 x 8 = 440,000
 ```
 
-**What it means.** "The NAT can rewrite every private host to its own IP, but it must hand each connection a unique source port, and there are only about 64 thousand ports to give out per destination it is talking to."
+**What it means.** "The NAT can rewrite every private host to its own IP, but each of its addresses gets only 55,000 live connections to any one destination it is talking to."
 
-The reason this surprises people is the *per-destination* scoping. Fan-out traffic to a thousand different endpoints never exhausts anything, because each destination gets its own fresh 64K pool. It is the concentrated case — every pod hammering one S3 regional endpoint or one payment API — that collapses the whole fleet onto a single pool.
+The reason this surprises people is the *per-destination* scoping. Fan-out traffic to a thousand different endpoints never exhausts anything, because each destination gets its own fresh 55,000-connection pool. It is the concentrated case — every pod hammering one S3 regional endpoint or one payment API — that collapses the whole fleet onto a single pool.
 
 | Symbol | What it is |
 |--------|------------|
-| `1024` | Start of the ephemeral range; ports below are reserved for well-known services |
-| `65535` | Highest port number a 16-bit port field can express |
-| 5-tuple | What makes a flow unique. Change any one field and it is a different connection |
-| `dstIP, dstPort` | Held constant in the failure case — which is what forces port reuse |
-| `TIME_WAIT` | Ports stay pinned ~2 minutes *after* close, so the pool drains slower than it refills |
+| `1024 - 65535` | The source-port range a NAT gateway allocates from; note NACLs on the NAT subnet must permit it |
+| `55,000` | Simultaneous connections per unique destination, per IPv4 address on the gateway |
+| unique destination | `dstIP + dstPort + protocol`. Change any one and it is a separate 55,000 pool |
+| secondary IPv4s | Up to 7 can be added (8 total), multiplying the ceiling linearly |
+| `TIME_WAIT` | Linux pins a closing socket for a fixed 60 s (`TCP_TIMEWAIT_LEN`, not sysctl-tunable), so the pool drains slower than it refills |
 
-**Walk one example.** A fleet opening short-lived connections to a single external API through one NAT gateway:
+**Walk one example.** A fleet opening short-lived connections to a single external API through a one-address NAT gateway. What matters is not "time to exhaust" but the *steady-state* occupancy, since every closed socket stays pinned for 60 s:
 
 ```
-  new connections/sec   pool = 64,512 ports   time to exhaust   observed symptom
-          100                 64,512               645 s        fine, ports recycle
-        1,000                 64,512                65 s        ErrorPortAllocation climbs
-        5,000                 64,512                13 s        egress timeouts, bandwidth idle
+  new conns/sec   pinned for 60 s   vs the 55,000 pool   observed symptom
+        100             6,000              11%           fine, ports recycle
+      1,000            60,000             109%           ErrorPortAllocation climbs
+      5,000           300,000             545%           egress timeouts, bandwidth idle
 ```
 
-The middle row is the classic incident: 65 seconds to burn the pool, but `TIME_WAIT` holds each closed port for roughly 120 seconds, so at 1,000 conn/s the pool never recovers and errors are permanent, not bursty. Bandwidth graphs stay flat and healthy the entire time, which is why the fix is counterintuitive — a VPC endpoint removes the destination from NAT's books entirely, taking the pool pressure to zero rather than adding capacity.
+The middle row is the classic incident, and the arithmetic is the whole story: at 1,000 conn/s the fleet burns the 55,000-port pool in 55 seconds, but each of those sockets stays in `TIME_WAIT` for 60 s, so the pool never refills faster than it drains and errors are permanent rather than bursty. Bandwidth graphs stay flat and healthy the entire time, which is why the fix is counterintuitive — a VPC endpoint removes the destination from NAT's books entirely, taking the pool pressure to zero rather than adding capacity.
 
 ### Stateful SG vs stateless NACL (the asymmetric-bug source)
 
@@ -477,7 +482,7 @@ A security group is stateful: allow inbound on a port and the response is automa
 Edge termination (at the LB) is simplest, offloads crypto, and centralizes cert management, but traffic is plaintext inside the network. End-to-end/mTLS encrypts the whole path and provides identity (zero-trust) at the cost of cert lifecycle complexity. Re-encryption terminates at the edge for inspection/routing then re-encrypts to the backend — the compliance-friendly middle ground.
 
 **Q7: What is NAT source-port exhaustion and how do you fix it?**
-A NAT gateway SNATs many hosts behind one IP; each outbound connection to a given destination consumes a source port from ~64K. Thousands of connections to the *same* endpoint exhaust the pool, so new egress connections fail/time out while bandwidth is unused. Fixes: VPC endpoints (PrivateLink) to reach AWS services without NAT, connection pooling/reuse, or more NAT IPs.
+A NAT gateway SNATs many hosts behind one IP, and each of its IPv4 addresses supports only 55,000 simultaneous connections to a given unique destination (destination IP + port + protocol). Thousands of connections to the *same* endpoint exhaust that pool — and because Linux holds each closed socket in `TIME_WAIT` for 60 s, sustained churn never lets it refill — so new egress connections time out while bandwidth is unused; `ErrorPortAllocation` on the NAT gateway is the giveaway. Fixes: VPC endpoints (PrivateLink) to reach AWS services without NAT, connection pooling/reuse, secondary IPv4 addresses on the gateway (up to 8), or a NAT gateway per AZ with clients split across them.
 
 **Q8: How does DNS TTL affect failover, and what's the tradeoff?**
 TTL is how long resolvers cache a record. Low TTL (e.g., 30–60s) means failover/changes propagate quickly but generates more queries (and cost); high TTL reduces query load but means clients keep hitting a dead/old IP after a change. For failover-critical records, keep TTL low; for stable records, keep it higher.

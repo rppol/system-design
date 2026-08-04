@@ -16,7 +16,7 @@ Linux is a multi-user, multi-tasking, monolithic-kernel operating system. For De
 
 The kernel manages four resource classes that every production incident eventually traces back to:
 
-- **CPU** — scheduled in time slices by the CFS (Completely Fair Scheduler); cgroup quotas can throttle it.
+- **CPU** — scheduled by EEVDF (Earliest Eligible Virtual Deadline First), the SCHED_NORMAL scheduler; cgroup CPU-bandwidth quotas can throttle it.
 - **Memory** — virtual memory backed by physical RAM and swap; the OOM killer reaps processes under pressure.
 - **I/O** — block devices and the page cache; `iostat`/`iotop` expose saturation.
 - **Processes** — created via `fork()`/`exec()`, terminated via signals, reaped via `wait()`.
@@ -97,7 +97,7 @@ flowchart LR
 
     subgraph KS["Kernel Space"]
         direction TB
-        sched("Scheduler (CFS)")
+        sched("Scheduler (EEVDF)")
         memmgr("Memory mgr<br/>VM + page cache")
         vfs("VFS / block layer")
         net(Network stack)
@@ -347,7 +347,7 @@ Only two outcomes exist: the app traps SIGTERM and exits cleanly, or the grace p
 | Memory control | `memory.max` hard limit (OOM on breach) | `memory.high` throttle (reclaim pressure) | Tolerate latency vs tolerate kills |
 | CPU control | CPU limits (throttling) | CPU requests only (no cap) | Latency-sensitive vs throughput batch |
 | Isolation strength | Namespaces (shared kernel, fast) | microVM/gVisor (stronger, overhead) | Trust level of workload |
-| Swap | Off (K8s default) | On (zswap/swap accounting) | Predictability vs memory headroom |
+| Swap | kubelet `NoSwap` (default) | kubelet `LimitedSwap` (`memory.swap.max` per container) | Predictability vs memory headroom |
 
 ---
 
@@ -360,7 +360,7 @@ Only two outcomes exist: the app traps SIGTERM and exits cleanly, or the grace p
 
 **Do NOT over-index on it when:**
 - The problem is clearly application logic (a 500 from a bad query) — go to app logs/traces first.
-- A managed platform abstracts it well; you rarely tune CFS parameters by hand on a managed node pool.
+- A managed platform abstracts it well; you rarely tune kernel scheduler parameters by hand on a managed node pool.
 
 ---
 
@@ -386,7 +386,7 @@ CMD ["node", "server.js"]
 
 ```bash
 # Diagnose:
-cat /proc/$(pgrep -n envoy)/limits | grep 'open files'   # 1024  4096
+cat /proc/$(pgrep -n envoy)/limits | grep 'open files'   # 1024  524288
 ls /proc/$(pgrep -n envoy)/fd | wc -l                    # 1023  <- at the ceiling
 # FIX (systemd unit): LimitNOFILE=1048576   (or pod securityContext / sysctls)
 ```
@@ -401,7 +401,7 @@ EMFILE      when open fds reach the soft limit shown by `ulimit -n`
 | Symbol | What it is |
 |--------|------------|
 | soft limit | Enforced ceiling, raisable by the process itself up to the hard limit; often 1024 |
-| hard limit | Ceiling only root/systemd can raise; the `4096` in the `limits` output above |
+| hard limit | Ceiling only root/systemd can raise; the `524288` in the `limits` output above — systemd's `DefaultLimitNOFILE` is `1024:524288` |
 | `EMFILE` | The errno `accept()` returns once the soft limit is hit — new connections refused |
 | `LimitNOFILE` | systemd directive that sets both limits for the unit |
 
@@ -458,7 +458,7 @@ SIGTERM (15) is catchable: a well-behaved app traps it, stops accepting new work
 It computes `oom_score` per process, roughly proportional to memory footprint, adjusted by `oom_score_adj` (`-1000` = never kill, `+1000` = kill first). Under whole-node pressure it kills the highest scorer; under cgroup pressure it kills within the offending cgroup. Kubernetes sets `oom_score_adj` so BestEffort pods die before Guaranteed ones.
 
 **Q6: Why might a process show 100% CPU but the service is slow, vs low CPU but slow?**
-High CPU + slow = genuinely CPU-bound (profile the hot path). Low CPU + slow + rising `cpu.cfs_throttled` = CFS throttling against a CPU limit. Low CPU + slow + high iowait (`vmstat`/`iostat`) = blocked on disk/network I/O. The metrics distinguish the three.
+High CPU + slow = genuinely CPU-bound (profile the hot path). Low CPU + slow + a rising `nr_throttled`/`throttled_usec` in the cgroup's `cpu.stat` = CFS bandwidth throttling against a CPU limit. Low CPU + slow + high iowait (`vmstat`/`iostat`) = blocked on disk/network I/O. The metrics distinguish the three.
 
 **Q7: What is a zombie process and how does it arise in containers?**
 A zombie (`<defunct>`) is a terminated child whose exit status hasn't been reaped by its parent via `wait()`. In containers, if PID 1 is a shell or an app that spawns children but never reaps them, zombies accumulate and can exhaust the PID table. Fix: use an init like `tini`/`dumb-init` as PID 1, or `shareProcessNamespace` with a proper init.
@@ -500,7 +500,7 @@ Choose gVisor or Kata Containers when running untrusted, multi-tenant workloads 
 - **Set memory limits = requests** for predictable QoS (Guaranteed class); be cautious with CPU limits on latency-sensitive paths.
 - **Raise `LimitNOFILE`** for connection-heavy services and alert on FD usage approaching the ceiling.
 - **Read `/proc` and `/sys/fs/cgroup` first** during resource incidents — they are ground truth, not the application logs.
-- **Disable swap on Kubernetes nodes** (or use the swap feature deliberately) for predictable OOM behavior.
+- **Leave the kubelet in `NoSwap` mode** for predictable OOM behavior; opt into `LimitedSwap` only deliberately, for workloads whose cold pages you genuinely want paged out.
 
 ---
 

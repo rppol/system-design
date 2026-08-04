@@ -17,7 +17,7 @@ A log is a timestamped, often-textual record of a discrete event: a request serv
 A logging pipeline has four stages:
 
 1. **Emit** — applications write **structured logs** (JSON key/value), ideally to `stdout`/`stderr` (the 12-factor convention) so the platform captures them.
-2. **Collect** — a node-level agent (Fluent Bit, Fluentd, Vector, Promtail/Alloy, Filebeat) tails container log files, adds metadata (pod, namespace, node), and forwards.
+2. **Collect** — a node-level agent (Fluent Bit, Fluentd, Vector, Grafana Alloy, Filebeat) tails container log files, adds metadata (pod, namespace, node), and forwards.
 3. **Process/parse** — parse unstructured lines into fields, enrich with labels, redact secrets/PII, drop/sample noise.
 4. **Store + query** — an index/store (Elasticsearch/OpenSearch, Loki, ClickHouse, cloud log services) supports full-text or label-scoped search and retention.
 
@@ -70,7 +70,7 @@ The defining economic fact: logs are the most expensive observability pillar per
 | Fluent Bit | Lightweight C agent (~1 vCPU low RAM), DaemonSet default; great for k8s node collection |
 | Fluentd | Ruby, plugin-rich, heavier; aggregator tier |
 | Vector | Rust, fast, vendor-neutral transforms (VRL), good routing/sampling |
-| Promtail / Grafana Alloy | Loki-native collector, label-centric |
+| Grafana Alloy | Loki-native collector, label-centric; also an OTLP receiver and Prometheus scraper, so one agent covers all three signals |
 | Filebeat | Elastic's lightweight shipper into ELK |
 
 ### Logging strategies
@@ -268,6 +268,12 @@ exclude = '.status >= 400'             # never sample out errors
 # via LogQL regex), not in labels.
 #   labels: {app="api", namespace="prod", level="error"}
 #   line:   {"user_id":"8842","request_id":"r-91c2", ...}
+
+# BETTER for identifiers you filter on constantly (trace_id, request_id): structured metadata —
+# key/value attached to the log entry, stored outside the label index, so it costs no streams
+# but is queryable directly. It is what Loki's native OTLP endpoint maps resource/log
+# attributes onto, and it is what bloom-filter chunk-skipping is built over.
+#   {app="api"} | trace_id="4bf92f3577b34da6a3ce929d0e0e4736"
 ```
 
 ```logql
@@ -448,14 +454,14 @@ log.error("order_failed", order_id=oid, user_id=uid, reason="card_declined", amo
 
 | Tool | Purpose |
 |------|---------|
-| Elasticsearch / OpenSearch | Full-text indexed log store |
+| Elasticsearch / OpenSearch | Full-text indexed log store. Elasticsearch and Kibana are tri-licensed AGPLv3 / SSPL / Elastic License 2.0; OpenSearch is the Apache-2.0 fork, governed by the OpenSearch Software Foundation under the Linux Foundation |
 | Kibana / OpenSearch Dashboards | Search and visualization for ELK |
-| Loki | Label-indexed, object-storage-backed log store |
+| Loki | Label-indexed, object-storage-backed log store (AGPLv3); TSDB index, structured metadata, native OTLP ingest endpoint |
 | Grafana | Query/visualize Loki (LogQL) and correlate with metrics/traces |
 | Fluent Bit | Lightweight node-level collector (k8s DaemonSet) |
 | Fluentd | Plugin-rich collector/aggregator |
 | Vector | Fast Rust collector with VRL transforms, sampling, routing |
-| Promtail / Grafana Alloy | Loki-native collectors |
+| Grafana Alloy | Loki-native collector; single agent for logs, metrics and OTLP traces |
 | Filebeat / Logstash | Elastic shippers/processors |
 | ClickHouse | Columnar SQL store for very high-volume logs/analytics |
 | Cloud log services | CloudWatch Logs, GCP Cloud Logging, Azure Monitor Logs |
@@ -501,7 +507,7 @@ ERROR for actionable failures that need attention, WARN for degraded-but-handled
 You *can* compute log-derived metrics (e.g. Loki `sum(rate({app="api"} |= "error" [5m]))` or ELK threshold alerts), and it's useful when the only signal is in the log text. But prefer emitting a real metric at the source for anything you alert on, because metric pipelines are cheaper, faster, and more reliable than parsing/aggregating logs at query time. Use log-based alerts as a fallback or for one-off patterns, not as the backbone of your alerting (that belongs to [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md)).
 
 **Q13: Why do high-cardinality Loki labels like user_id or request_id break Loki's design, when the same fields are fine inside a log line?**
-Loki creates one index stream per unique label combination, so an unbounded label like user_id or request_id spawns millions of tiny streams, defeating the small-index design that keeps Loki cheap. The fix is keeping labels to a bounded set (app, namespace, level) and putting high-cardinality detail in the log line itself, where it stays searchable via a LogQL `| json` filter on the body without touching the index. This mirrors the same cardinality discipline Prometheus enforces on its labels, since Loki reuses Prometheus's label model and inherits its cardinality failure mode. Audit a label schema before rollout, because unwinding an index blowup after ingestion has scaled up is expensive.
+Loki creates one index stream per unique label combination, so an unbounded label like user_id or request_id spawns millions of tiny streams, defeating the small-index design that keeps Loki cheap. The fix is keeping labels to a bounded set (app, namespace, level) and putting high-cardinality detail either in the log line itself, where a LogQL `| json` filter finds it without touching the index, or in structured metadata — key/value pairs attached to the entry and stored outside the label index, filtered directly as `{app="api"} | trace_id="4bf9..."`, which is where Loki's OTLP endpoint puts log and resource attributes. This mirrors the same cardinality discipline Prometheus enforces on its labels, since Loki reuses Prometheus's label model and inherits its cardinality failure mode. Audit a label schema before rollout, because unwinding an index blowup after ingestion has scaled up is expensive.
 
 **Q14: How do Fluent Bit, Fluentd, and Vector differ as log collectors, and when would you choose each?**
 Fluent Bit is a lightweight, low-footprint choice for per-node DaemonSet collection, Fluentd is a heavier plugin-rich agent suited to an aggregator tier, and Vector is a fast Rust collector for programmable transforms. Choose Fluent Bit when per-node footprint matters most across thousands of nodes, Fluentd when you need its mature plugin ecosystem at a central aggregation point, and Vector when you need programmable routing/sampling/redaction like the transform pipeline in section 6. Many production pipelines combine a lightweight node agent with a Vector or Fluentd aggregator tier for buffering and fan-out to multiple backends. Pick the collector based on where it sits in the pipeline, not a single "best" tool.

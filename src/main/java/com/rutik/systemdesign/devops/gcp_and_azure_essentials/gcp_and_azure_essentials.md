@@ -56,27 +56,27 @@ See [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamental
 | Autoscaling | Auto Scaling Group | Managed Instance Group (MIG) | VM Scale Sets |
 | Managed Kubernetes | EKS | GKE | AKS |
 | Serverless container | Fargate / App Runner | Cloud Run | Container Apps |
-| FaaS | Lambda | Cloud Functions | Azure Functions |
+| FaaS | Lambda | Cloud Run functions | Azure Functions |
 | Object storage | S3 | Cloud Storage (GCS) | Blob Storage |
 | Block storage | EBS | Persistent Disk | Managed Disks |
 | File storage | EFS | Filestore | Azure Files |
 | Virtual network | VPC (regional) | VPC (global) | Virtual Network (VNet) |
-| L7 load balancer | ALB | HTTP(S) Load Balancer (global) | Application Gateway |
+| L7 load balancer | ALB | Application Load Balancer (global external) | Application Gateway |
 | L4 load balancer | NLB | Network Load Balancer | Azure Load Balancer |
 | DNS | Route 53 | Cloud DNS | Azure DNS |
-| CDN | CloudFront | Cloud CDN | Azure Front Door / CDN |
+| CDN | CloudFront | Cloud CDN / Media CDN | Azure Front Door (Standard/Premium) |
 | Private connectivity | PrivateLink | Private Service Connect | Private Link |
 | NAT | NAT Gateway | Cloud NAT | NAT Gateway |
 | Managed relational DB | RDS / Aurora | Cloud SQL / AlloyDB / Spanner | Azure SQL / Database for PostgreSQL |
 | NoSQL (key-value) | DynamoDB | Firestore / Bigtable | Cosmos DB |
-| Data warehouse | Redshift | BigQuery | Synapse Analytics |
+| Data warehouse | Redshift | BigQuery | Synapse Analytics / Microsoft Fabric |
 | In-memory cache | ElastiCache | Memorystore | Azure Cache for Redis |
 | Object message queue | SQS | Pub/Sub | Service Bus / Storage Queues |
 | Pub/sub streaming | Kinesis / MSK | Pub/Sub / Managed Kafka | Event Hubs |
 | Secrets | Secrets Manager | Secret Manager | Key Vault |
 | KMS | KMS | Cloud KMS | Key Vault / Managed HSM |
-| IaC native | CloudFormation/CDK | Deployment Manager / Config Controller | ARM / Bicep |
-| Monitoring | CloudWatch | Cloud Monitoring (ops suite) | Azure Monitor |
+| IaC native | CloudFormation/CDK | Infrastructure Manager (Terraform-based) / Config Connector | ARM / Bicep |
+| Monitoring | CloudWatch | Cloud Monitoring (Google Cloud Observability) | Azure Monitor |
 | Audit log | CloudTrail | Cloud Audit Logs | Activity Log |
 | Container registry | ECR | Artifact Registry | Azure Container Registry (ACR) |
 | Workflow orchestration | Step Functions | Workflows | Logic Apps / Durable Functions |
@@ -140,7 +140,7 @@ flowchart LR
 
     subgraph GCP["GCP"]
         direction LR
-        g1([Cloud DNS]) --> g2(Global HTTPS LB) --> g3(GKE) --> g4([Cloud SQL<br/>HA])
+        g1([Cloud DNS]) --> g2(Global App LB) --> g3(GKE) --> g4([Cloud SQL<br/>HA])
         g3 -.->|"Private Google Access"| g5([GCS])
     end
 
@@ -237,7 +237,10 @@ resource "google_storage_bucket" "uploads" {
   storage_class = "STANDARD"
   lifecycle_rule {
     condition { age = 30 }
-    action { type = "SetStorageClass"; storage_class = "NEARLINE" }  # like S3 Standard-IA
+    action {                             # like S3 Standard-IA
+      type          = "SetStorageClass"
+      storage_class = "NEARLINE"
+    }
   }
   uniform_bucket_level_access = true   # disables per-object ACLs; IAM-only (best practice)
 }
@@ -266,7 +269,7 @@ az storage container create --name uploads --account-name ordersstorage
 
 # Azure Function (FaaS) - consumption (serverless) plan
 az functionapp create --name orders-fn --resource-group orders-rg \
-  --consumption-plan-location eastus --runtime python --runtime-version 3.11 \
+  --consumption-plan-location eastus --runtime python --runtime-version 3.12 \
   --functions-version 4 --storage-account ordersstorage
 ```
 
@@ -353,16 +356,35 @@ flowchart LR
 ```hcl
 # BROKEN: treating GCP VPC as regional like AWS, creating one VPC per region
 # and peering them manually -> wasted effort, GCP VPCs are already global.
-resource "google_compute_network" "us"   { name = "vpc-us";   auto_create_subnetworks = false }
-resource "google_compute_network" "eu"   { name = "vpc-eu";   auto_create_subnetworks = false }
+resource "google_compute_network" "us" {
+  name                    = "vpc-us"
+  auto_create_subnetworks = false
+}
+resource "google_compute_network" "eu" {
+  name                    = "vpc-eu"
+  auto_create_subnetworks = false
+}
 # then manually peering vpc-us <-> vpc-eu ...
 ```
 
 ```hcl
 # FIX: one global VPC with regional subnets; no peering needed for cross-region
-resource "google_compute_network" "main" { name = "vpc"; auto_create_subnetworks = false }
-resource "google_compute_subnetwork" "us" { name = "us"; region = "us-central1"; network = google_compute_network.main.id; ip_cidr_range = "10.0.0.0/20" }
-resource "google_compute_subnetwork" "eu" { name = "eu"; region = "europe-west1"; network = google_compute_network.main.id; ip_cidr_range = "10.1.0.0/20" }
+resource "google_compute_network" "main" {
+  name                    = "vpc"
+  auto_create_subnetworks = false
+}
+resource "google_compute_subnetwork" "us" {
+  name          = "us"
+  region        = "us-central1"
+  network       = google_compute_network.main.id
+  ip_cidr_range = "10.0.0.0/20"
+}
+resource "google_compute_subnetwork" "eu" {
+  name          = "eu"
+  region        = "europe-west1"
+  network       = google_compute_network.main.id
+  ip_cidr_range = "10.1.0.0/20"
+}
 # instances in us and eu subnets reach each other over the global VPC backbone
 ```
 
@@ -380,7 +402,7 @@ resource "google_compute_subnetwork" "eu" { name = "eu"; region = "europe-west1"
 |--------------|---------|
 | GKE / AKS | Managed Kubernetes (GCP / Azure) |
 | Cloud Run / Azure Container Apps | Serverless containers |
-| Cloud Functions / Azure Functions | FaaS |
+| Cloud Run functions / Azure Functions | FaaS |
 | GCS / Blob Storage | Object storage |
 | Cloud IAM / Microsoft Entra ID + RBAC | Identity |
 | Cloud SQL / Azure SQL | Managed relational DB ([../../database/](../../database/README.md)) |
@@ -395,7 +417,7 @@ resource "google_compute_subnetwork" "eu" { name = "eu"; region = "europe-west1"
 ## 12. Interview Questions with Answers
 
 **Q1: Map the core AWS services to their GCP and Azure equivalents.**
-EC2 maps to GCP Compute Engine and Azure VMs; S3 to GCS and Blob Storage; EKS to GKE and AKS; Lambda to Cloud Functions and Azure Functions; RDS to Cloud SQL and Azure SQL; DynamoDB to Firestore/Bigtable and Cosmos DB; Route 53 to Cloud DNS and Azure DNS; IAM to Cloud IAM and Entra ID + RBAC. The concepts are identical — identity, network, compute, storage, managed DB — only the names and a few semantics change. The key skill is translating a design through this table rather than relearning each cloud.
+EC2 maps to GCP Compute Engine and Azure VMs; S3 to GCS and Blob Storage; EKS to GKE and AKS; Lambda to Cloud Run functions and Azure Functions; RDS to Cloud SQL and Azure SQL; DynamoDB to Firestore/Bigtable and Cosmos DB; Route 53 to Cloud DNS and Azure DNS; IAM to Cloud IAM and Entra ID + RBAC. The concepts are identical — identity, network, compute, storage, managed DB — only the names and a few semantics change. The key skill is translating a design through this table rather than relearning each cloud.
 
 **Q2: How do the resource hierarchies differ across the three clouds?**
 AWS uses Accounts grouped into Organizations/OUs; GCP uses Organization -> Folders -> Projects with IAM inheriting downward; Azure uses Management Groups -> Subscriptions -> Resource Groups with RBAC assignable at any scope. The Project (GCP), Account (AWS), and Subscription/Resource Group (Azure) are the units of billing and isolation. Understanding the hierarchy is critical because IAM/RBAC inherits down it, so granting at the wrong level over-permissions everything below.
@@ -422,7 +444,7 @@ BigQuery, a serverless data warehouse that separates storage and compute and sca
 Standardize on portable layers — Kubernetes (EKS/GKE/AKS), containers, object storage, Terraform IaC — so workloads move with minimal change, and isolate provider-specific services behind interfaces. Keep one cloud as primary and the other as DR or for specific best-of-breed services (e.g., BigQuery), rather than running everything everywhere. Be deliberate: multi-cloud doubles IAM, networking, monitoring, and egress costs, so adopt it only when resilience or negotiation leverage justifies the complexity.
 
 **Q10: What are the cross-cloud equivalents for private connectivity and CDN?**
-For private connectivity to services without traversing the public internet: AWS PrivateLink maps to GCP Private Service Connect and Azure Private Link. For CDN: AWS CloudFront maps to GCP Cloud CDN and Azure Front Door/CDN. These map one-to-one conceptually, though features (e.g., edge compute, WAF integration) differ in detail — see [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for how they're used in a global architecture.
+For private connectivity to services without traversing the public internet: AWS PrivateLink maps to GCP Private Service Connect and Azure Private Link. For CDN: AWS CloudFront maps to GCP Cloud CDN (or Media CDN for large-scale streaming) and Azure Front Door Standard/Premium. These map one-to-one conceptually, though features (e.g., edge compute, WAF integration) differ in detail — see [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for how they're used in a global architecture.
 
 **Q11: What's the most common misconfiguration when setting up workload identity (GKE Workload Identity, AWS IRSA, or Azure's equivalent)?**
 The most common mistake is scoping the trust binding too broadly — to an entire namespace or cluster instead of one exact service account. On GKE, the `roles/iam.workloadIdentityUser` member string should reference one specific `namespace/service-account` pair, not a wildcard; on AWS IRSA, the OIDC trust policy's `sub` condition should match exactly one service account, not a namespace-wide pattern. Getting this wrong is dangerous precisely because it's invisible in normal operation — everything works fine until an unrelated or compromised pod in the same namespace discovers it can silently assume cloud permissions meant for a different workload. Always scope the trust condition to the exact namespace-and-service-account pair, and treat any namespace-wide or cluster-wide binding as a review-blocking finding.

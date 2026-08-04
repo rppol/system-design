@@ -2,7 +2,7 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
-Visualization turns raw telemetry into **dashboards humans can read at a glance**; alerting turns telemetry into **pages that wake the right person at the right time — and only when action is needed**. **Grafana** is the de-facto dashboard layer over metrics/logs/traces; **Alertmanager** (and Grafana Alerting) dedupes, groups, silences, and routes alerts to **PagerDuty/OpsGenie/Slack**. The hardest problem here is not building dashboards — it's **alert quality**: too many alerts cause fatigue and missed incidents; too few mean outages go unnoticed. The modern answer is **SLO burn-rate alerting** instead of static thresholds.
+Visualization turns raw telemetry into **dashboards humans can read at a glance**; alerting turns telemetry into **pages that wake the right person at the right time — and only when action is needed**. **Grafana** is the de-facto dashboard layer over metrics/logs/traces; **Alertmanager** (and Grafana Alerting) dedupes, groups, silences, and routes alerts to **PagerDuty / Jira Service Management Operations / Slack**. The hardest problem here is not building dashboards — it's **alert quality**: too many alerts cause fatigue and missed incidents; too few mean outages go unnoticed. The modern answer is **SLO burn-rate alerting** instead of static thresholds.
 
 ---
 
@@ -16,7 +16,7 @@ Two distinct jobs, often conflated:
 
 1. **Detect** — Prometheus (or Grafana) evaluates an alerting rule; when true for the `for:` duration it sends an alert to Alertmanager.
 2. **Process** — Alertmanager **groups** related alerts (so 50 pods down = 1 page, not 50), **dedupes** identical alerts from HA Prometheus pairs, applies **inhibition** (a higher-severity alert suppresses dependent lower ones) and **silences** (mute during maintenance).
-3. **Route** — a routing tree maps alerts (by labels like `severity`, `team`) to **receivers**: page (PagerDuty/OpsGenie) for urgent, ticket/Slack for non-urgent.
+3. **Route** — a routing tree maps alerts (by labels like `severity`, `team`) to **receivers**: page (PagerDuty, JSM Operations) for urgent, ticket/Slack for non-urgent.
 4. **Notify** — the on-call tool escalates per its policy if unacknowledged (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
 
 The central tension is **alert fatigue**: an alert that fires without requiring human action trains people to ignore alerts, which eventually causes a real one to be missed. Every alert must be **actionable, urgent (if it pages), and tied to user impact**. The discipline that achieves this is alerting on **SLO error-budget burn rate** — page only when you're consuming the budget fast enough to threaten the SLO — instead of on raw symptoms like CPU > 80%.
@@ -61,7 +61,7 @@ The central tension is **alert fatigue**: an alert that fires without requiring 
 
 | Severity | Means | Routes to | Response |
 |----------|-------|-----------|----------|
-| page / critical | User impact now, act immediately | PagerDuty/OpsGenie (24/7) | Wake on-call |
+| page / critical | User impact now, act immediately | PagerDuty / JSM Operations (24/7) | Wake on-call |
 | ticket / warning | Degraded, fix in business hours | Slack/Jira | Triage soon |
 | info | Awareness only | Slack channel / dashboard | No action |
 
@@ -411,7 +411,7 @@ providers:
 
 - **Google SRE (Golden Signals + burn-rate)**: the SRE Workbook codified alerting on the four golden signals and the multi-window multi-burn-rate pattern that the whole industry now copies — page on user-facing symptoms tied to SLOs, not on resource causes.
 - **Grafana + Alertmanager standard stack**: the near-universal open-source pairing — Prometheus rules → Alertmanager routing/dedup → PagerDuty, with Grafana dashboards drilling from overview → service → trace.
-- **PagerDuty / OpsGenie escalation**: companies route `severity=page` to an on-call schedule with escalation policies (ack within 5–15 min or escalate to the next responder, then the manager) and quiet `severity=ticket` to Slack.
+- **PagerDuty / JSM Operations escalation**: companies route `severity=page` to an on-call schedule with escalation policies (ack within 5–15 min or escalate to the next responder, then the manager) and quiet `severity=ticket` to Slack.
 - **Alert-fatigue cleanups**: teams that cut alert count by 70–90% (deleting non-actionable cause-based alerts, consolidating with grouping, converting most to tickets) routinely report faster real-incident response and lower on-call burnout.
 - **Inhibition during regional outages**: when a region goes down, an inhibition rule suppresses the hundreds of dependent per-service alerts so on-call gets the one meaningful "region down" page instead of a pager storm.
 
@@ -474,15 +474,15 @@ providers:
 
 | Tool | Purpose |
 |------|---------|
-| Grafana | Dashboards over metrics/logs/traces; unified Grafana Alerting |
+| Grafana | Dashboards over metrics/logs/traces (AGPLv3); unified Grafana Alerting |
 | Alertmanager | Group/dedupe/inhibit/silence/route Prometheus alerts |
 | PagerDuty | On-call scheduling, escalation, paging |
-| OpsGenie | On-call/escalation (Atlassian) |
+| Jira Service Management Operations | On-call scheduling and escalation (Atlassian) |
 | Slack / Microsoft Teams | Non-urgent ticket/notification channels |
 | Prometheus alerting rules | Detect conditions, emit alerts (see [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md)) |
 | Sloth / Pyrra | Generate SLO + burn-rate alert rules from SLO specs |
 | Kibana / OpenSearch Dashboards | Log dashboards/alerts for ELK |
-| Grafana OnCall | Open-source on-call/escalation |
+| Grafana IRM | On-call scheduling, escalation and incident response, integrated with Grafana Alerting |
 | Statuspage / Atlassian Statuspage | Public status communication |
 
 ---
@@ -508,7 +508,7 @@ Alertmanager groups related alerts so one root cause produces one notification (
 Grouping collapses alerts sharing labels into a single notification — `group_by: [alertname, cluster]` turns 50 `PodDown` alerts on one cluster into one page. Inhibition suppresses dependent alerts when a parent fires — a `ClusterDown` alert inhibits all the `PodDown` alerts for that cluster so you get the meaningful page only. Silencing mutes matching alerts for a window — you silence a service's alerts during a planned migration so expected noise doesn't page anyone.
 
 **Q7: How do you route alerts to the right people?**
-Use a routing tree keyed on labels: `severity=page` goes to the on-call escalation tool (PagerDuty/OpsGenie) for 24/7 paging, `severity=ticket` goes to Slack/Jira for business-hours triage, and team labels (`team=payments`) route to that team's specific on-call. Tune `group_wait`/`group_interval`/`repeat_interval` per route so criticals page fast and unresolved ones re-notify. The escalation policy (ack within N minutes or escalate) lives in the on-call tool (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
+Use a routing tree keyed on labels: `severity=page` goes to the on-call escalation tool (PagerDuty, Jira Service Management Operations) for 24/7 paging, `severity=ticket` goes to Slack/Jira for business-hours triage, and team labels (`team=payments`) route to that team's specific on-call. Tune `group_wait`/`group_interval`/`repeat_interval` per route so criticals page fast and unresolved ones re-notify. The escalation policy (ack within N minutes or escalate) lives in the on-call tool (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
 
 **Q8: What are the RED and USE methods, and when do you use each?**
 RED (Rate, Errors, Duration) is for request-driven services — it tells you how busy a service is, how often it fails, and how slow it is, which maps directly to user experience. USE (Utilization, Saturation, Errors) is for resources like CPU, disk, and network — it tells you how full and stressed the infrastructure is. Use RED for service dashboards and (its symptoms) for alerts; use USE for infrastructure dashboards and capacity investigation, generally not for paging.
@@ -529,7 +529,7 @@ Each timing knob controls a different phase: `group_wait` batches an alert group
 A never-draining queue pages because a user-facing request is stuck waiting right now, while elevated GC pause time stays on a dashboard as an investigatable cause. Applying the "does a user feel it right now" test, a queue that never drains means work is backing up and requests are or will imminently be delayed, which is symptom-tier and immediately actionable, matching the diagram's page examples of SLO burn, error ratio, and p99 latency; GC pauses correlate with latency but aren't guaranteed to be user-visible at any given moment, so they're better surfaced as a dashboard panel an engineer checks once a real symptom, like elevated p99, has already paged. Teams that page directly on GC pause count because it's easy to measure reproduce exactly the alert-fatigue pattern described elsewhere in this module. When in doubt, ask whether the metric is the user's experience or merely correlates with it — only the former belongs on a page.
 
 **Q14: What are the three standard alert severity tiers, and what response does each require?**
-The three tiers are page/critical, ticket/warning, and info, each mapped to a different urgency and receiver. Page/critical means user impact right now and routes to PagerDuty or OpsGenie for 24/7 on-call wake-up with an immediate response expected; ticket/warning means something is degraded but not urgent, routing to Slack or Jira for triage within business hours; info is awareness-only, posted to a Slack channel or left on a dashboard with no action expected at all. A common mistake is defaulting new alerts to page/critical "to be safe," which inflates the on-call's page volume with things that were really ticket or info tier and directly causes the alert fatigue described elsewhere in this module. When writing a new alerting rule, choose the severity label deliberately based on the required response time, not by copying whatever severity a similar-looking alert already has.
+The three tiers are page/critical, ticket/warning, and info, each mapped to a different urgency and receiver. Page/critical means user impact right now and routes to PagerDuty or Jira Service Management Operations for 24/7 on-call wake-up with an immediate response expected; ticket/warning means something is degraded but not urgent, routing to Slack or Jira for triage within business hours; info is awareness-only, posted to a Slack channel or left on a dashboard with no action expected at all. A common mistake is defaulting new alerts to page/critical "to be safe," which inflates the on-call's page volume with things that were really ticket or info tier and directly causes the alert fatigue described elsewhere in this module. When writing a new alerting rule, choose the severity label deliberately based on the required response time, not by copying whatever severity a similar-looking alert already has.
 
 **Q15: Why provision Grafana dashboards and Alertmanager rules from Git instead of editing them in the UI?**
 Provisioning as code means dashboards and alert rules are defined in version-controlled files that Grafana and Prometheus load on startup, rather than being hand-edited through a web UI. A provider config pointing Grafana at a file path, or a Terraform resource for a dashboard, means a change goes through the same pull request review, diff, and rollback as any other code change, and the same is true for alerting rules stored as Prometheus rule YAML or Terraform; this closes the classic drift problem where a critical panel or alert threshold was hand-tweaked in production and nobody else knows it changed. A UI-edited dashboard that isn't provisioned from Git will be silently overwritten, or will diverge invisibly, the next time the provisioner reloads its source files. Once a dashboard or alert rule matters enough to be relied on operationally, move it into the provisioned, Git-backed set immediately, and treat any UI edit as a draft to be ported back into code.
@@ -545,7 +545,7 @@ RED covers request-driven services, USE covers resources, and the Four Golden Si
 - **Make every page actionable, urgent, and runbook-linked;** convert non-urgent alerts to tickets.
 - **Adopt SLO multi-window burn-rate alerts** instead of static thresholds (see [sre_principles_and_slos](../sre_principles_and_slos/sre_principles_and_slos.md)).
 - **Group and dedupe** with `group_by` and HA dedup; add inhibition rules to prevent pager storms.
-- **Route by `severity`/`team`** to PagerDuty/OpsGenie (page) vs Slack/Jira (ticket); tune the timing knobs.
+- **Route by `severity`/`team`** to PagerDuty/JSM Operations (page) vs Slack/Jira (ticket); tune the timing knobs.
 - **Silence planned maintenance** (ideally automated from the pipeline) and let silences expire.
 - **Build RED/USE dashboards that answer one question,** embed SLO/error-budget panels, deploy markers, and exemplars.
 - **Provision dashboards and alerts as code** (Git) and audit alert-to-action ratios; delete alerts nobody acts on.

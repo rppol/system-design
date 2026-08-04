@@ -547,8 +547,9 @@ Track toil as a % of team time (timesheets/ticket tags). Google guidance: keep <
 | Nobl9 | Managed SLO platform (multi-source SLIs, budgets) |
 | Alertmanager / PagerDuty | Route burn-rate alerts to on-call |
 | Blackbox exporter / synthetics | Client-side / probe SLIs for true user experience |
-| Chaos tools (Gremlin, Chaos Mesh) | Validate SLOs under fault (see [../../backend/chaos_engineering](../../backend/chaos_engineering/chaos_engineering.md)) |
-| Capacity/forecast tools | Demand forecasting for capacity planning |
+| Gremlin / Chaos Mesh / LitmusChaos | Validate SLOs under injected fault (see [../../backend/chaos_engineering](../../backend/chaos_engineering/chaos_engineering.md)) |
+| AWS Fault Injection Service | Managed fault injection against AWS resources during a game day |
+| AWS Predictive Scaling / AWS Compute Optimizer | Demand forecasting and utilization-based sizing for capacity planning |
 
 ---
 
@@ -567,7 +568,7 @@ Because it's effectively impossible (deploys, dependencies, and the user's own d
 Start from what users actually perceive and what the business needs: pick the lowest number of nines where users can't distinguish your service from perfect, informed by historical performance and competitor/contract expectations. Validate with data — if dropping from 99.99% to 99.9% produces no measurable change in user behavior or complaints, the extra nine is wasted money. Set the SLO slightly above the SLA for safety margin, and revisit it if you repeatedly exhaust the budget (too strict) or never come close (too loose).
 
 **Q5: What is burn rate, and where does the 14.4x number come from?**
-Burn rate is how fast you're consuming the error budget relative to "evenly over the window" — a burn rate of 1x exactly exhausts the budget at the window's end, 2x in half the time, and so on. The 14.4x fast-page threshold comes from wanting to alert when a 30-day budget would be gone in about 2 days (30/2 ≈ 15, rounded to Google's canonical 14.4x), which means in one hour you'd consume ~2% of the budget. You alert on high burn rates over short windows because that's the only way to detect "we'll breach the SLO soon" before it actually happens.
+Burn rate is how fast you're consuming the error budget relative to "evenly over the window" — a burn rate of 1x exactly exhausts the budget at the window's end, 2x in half the time, and so on. Google's canonical 14.4x fast-page threshold is the exact answer to "spend at most 2% of the month's budget in a single hour": one hour is 1/720 of a 30-day window, so `burn × (1/720) = 0.02` gives `burn = 14.4`. The rough sanity check is that 14.4x would exhaust the whole budget in `30/14.4 ≈ 2` days. You alert on high burn rates over short windows because that's the only way to detect "we'll breach the SLO soon" before it actually happens.
 
 **Q6: Why use multi-window, multi-burn-rate alerts instead of a single threshold?**
 A single short window flaps on transient spikes; a single long window detects severe burns far too slowly. Pairing a long window (confirms the burn is real and sustained) with a short confirmation window (ensures it's still happening and lets the alert clear quickly) gives both fast detection on severe burns and low noise. You then set multiple tiers — 14.4x → page fast, 6x → page/ticket, 1x → slow ticket — so severity matches how urgently the budget is being threatened.

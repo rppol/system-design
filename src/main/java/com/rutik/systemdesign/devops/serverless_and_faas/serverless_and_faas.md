@@ -6,7 +6,7 @@ files this module contributes to each curated path; omit a tier to leave it out
 -->
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
-Serverless lets you run code without provisioning or managing servers — the platform handles scaling (including to zero), patching, and capacity, and you pay only for actual execution. **Function-as-a-Service (FaaS)** — AWS Lambda, Google Cloud Functions, Azure Functions, and the Kubernetes-native **Knative** — is the purest form. This module covers the FaaS execution model, the **cold-start** problem, **event-driven** architectures, **API Gateway** as the HTTP front door, and **Step Functions** for orchestrating multi-step workflows, with concrete limits (Lambda's 15-minute max timeout, ~100ms-1s cold starts, 10 GB memory ceiling) that shape real designs.
+Serverless lets you run code without provisioning or managing servers — the platform handles scaling (including to zero), patching, and capacity, and you pay only for actual execution. **Function-as-a-Service (FaaS)** — AWS Lambda, Google Cloud Run functions, Azure Functions, and the Kubernetes-native **Knative** — is the purest form. This module covers the FaaS execution model, the **cold-start** problem, **event-driven** architectures, **API Gateway** as the HTTP front door, and **Step Functions** for orchestrating multi-step workflows, with concrete limits (Lambda's 15-minute max timeout, ~100ms-1s cold starts, 10 GB memory ceiling) that shape real designs.
 
 ---
 
@@ -52,8 +52,8 @@ Concrete Lambda limits: 15-minute max timeout, 128 MB-10 GB memory (CPU scales w
 
 ### FaaS platform comparison
 
-| Feature | AWS Lambda | GCP Cloud Functions (2nd gen) | Azure Functions | Knative (K8s) |
-|---------|-----------|-------------------------------|-----------------|---------------|
+| Feature | AWS Lambda | GCP Cloud Run functions | Azure Functions | Knative (K8s) |
+|---------|-----------|-------------------------|-----------------|---------------|
 | Max timeout | 15 min | 60 min (HTTP) / 9 min (event) | 5-10 min (longer on Premium) | Configurable |
 | Memory | 128 MB-10 GB | up to 32 GB | up to 14 GB | Pod limits |
 | Scale to zero | Yes | Yes | Yes (Consumption) | Yes |
@@ -78,7 +78,7 @@ Concrete Lambda limits: 15-minute max timeout, 128 MB-10 GB memory (CPU scales w
 | Reserved concurrency | Caps a function's max concurrent executions (also guarantees that floor) |
 | Provisioned concurrency | Pre-warms N environments -> no cold start on those |
 | Account concurrency | Default 1000 (soft); shared across functions unless reserved |
-| SnapStart (Java) | Snapshots initialized state to cut cold starts ~10x |
+| SnapStart (Java 11+, Python 3.12+, .NET 8+) | Snapshots initialized state to cut cold starts ~10x; published versions/aliases only, and mutually exclusive with provisioned concurrency |
 
 ---
 
@@ -333,7 +333,7 @@ Mitigations:
   - keep package small; lazy-import infrequently used modules
   - reuse clients across invocations (define boto3 client at module scope)
   - provisioned concurrency for latency-critical sync paths
-  - Java: SnapStart (~10x faster cold start via Firecracker snapshot)
+  - SnapStart on Java 11+, Python 3.12+, .NET 8+ (~10x faster cold start via Firecracker snapshot)
   - avoid unnecessary VPC attachment (modern Hyperplane ENIs reduced this penalty)
 ```
 
@@ -386,7 +386,7 @@ flowchart LR
     d2 -->|"yes"| containers
     d2 -->|"no"| d3{"Needs sub-10ms tail latency,<br/>or GPU/specialized HW?"}
     d3 -->|"yes"| containers
-    d3 -->|"no"| faas(["FaaS<br/>(Lambda / Cloud Functions)"])
+    d3 -->|"no"| faas(["FaaS<br/>(Lambda / Cloud Run functions)"])
 
     class start io
     class d1,d2,d3 mathOp
@@ -457,7 +457,7 @@ flowchart LR
 
 | Tool/Service | Purpose |
 |--------------|---------|
-| AWS Lambda / Cloud Functions / Azure Functions | FaaS |
+| AWS Lambda / Cloud Run functions / Azure Functions | FaaS |
 | Knative | Kubernetes-native serverless ([kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md)) |
 | API Gateway (HTTP/REST) / Cloud Endpoints | HTTP front door, auth, throttling |
 | Step Functions / Workflows / Durable Functions | Stateful workflow orchestration |
@@ -472,7 +472,7 @@ flowchart LR
 ## 12. Interview Questions with Answers
 
 **Q1: What is a cold start, what causes it, and how do you mitigate it?**
-A cold start is the added latency (~100ms-1s) when the platform must initialize a new execution environment — downloading code, starting the runtime, and running your init code — because no warm one is available. It's worsened by large deployment packages, heavy module-level initialization, and (historically) VPC ENI attachment. Mitigate by minimizing package size, reusing SDK clients at module scope, using provisioned concurrency for latency-critical synchronous paths, and SnapStart for Java; for truly latency-sensitive endpoints, keep instances warm.
+A cold start is the added latency (~100ms-1s) when the platform must initialize a new execution environment — downloading code, starting the runtime, and running your init code — because no warm one is available. It's worsened by large deployment packages, heavy module-level initialization, and (historically) VPC ENI attachment. Mitigate by minimizing package size, reusing SDK clients at module scope, using provisioned concurrency for latency-critical synchronous paths, and SnapStart on Java, Python, or .NET; for truly latency-sensitive endpoints, keep instances warm.
 
 **Q2: Why must serverless functions be idempotent?**
 Because event sources like SQS, Kinesis, and EventBridge guarantee at-least-once delivery, so the same event can invoke your function more than once. A non-idempotent handler would double-charge a card or double-insert a record. Make handlers idempotent by deduplicating on a stable key with a conditional write to DynamoDB or by using idempotency keys (e.g., Lambda Powertools), so reprocessing a duplicate is a no-op.
@@ -514,7 +514,7 @@ Lambda enforces a 15-minute max timeout, a 6 MB synchronous payload, a 250 MB un
 A poison record on an ordered stream can block the entire shard from progressing, unlike SQS where one bad message is isolated and redriven to a DLQ independently. Kinesis and DynamoDB streams deliver ordered batches per shard, so if a single record repeatedly fails processing, Lambda keeps retrying that batch and no later record on the same shard is processed until it's resolved — a stuck shard, not just a stuck message. Handle it with a bounded retry count plus `BisectBatchOnFunctionError` to isolate the bad record, and an on-failure destination to remove it from the retry loop, or by catching and swallowing known-bad-record errors in the handler. Unlike SQS's per-message DLQ, stream poison-record handling has to account for ordering being blocked, not just one message being lost.
 
 **Q15: What is SnapStart, and how does it reduce Java cold starts?**
-SnapStart cuts Java cold starts roughly 10x by snapshotting an initialized execution environment and restoring from that snapshot instead of rerunning startup. A normal cold start pays for JVM boot plus all module-level init (class loading, connection pools, DI wiring), which is especially expensive for Java; SnapStart runs that init once ahead of time via Firecracker snapshotting, then resumes new environments from the pre-initialized memory snapshot on subsequent cold starts. It's called out specifically as a Java mitigation alongside provisioned concurrency and small packages in the cold-start playbook. Use it for Java functions with expensive init, but re-test any code that assumes fresh randomness or fresh connections on every cold start, since a restored snapshot can violate those assumptions.
+SnapStart cuts Java cold starts roughly 10x by snapshotting an initialized execution environment and restoring from that snapshot instead of rerunning startup. A normal cold start pays for JVM boot plus all module-level init (class loading, connection pools, DI wiring), which is especially expensive for Java; SnapStart runs that init once when you publish a function version, takes an encrypted Firecracker snapshot of the initialized environment, and resumes new environments from that snapshot on subsequent cold starts. It covers Java 11 and later, Python 3.12 and later, and .NET 8 and later — Java sees the largest win because its init is the heaviest, and Java is also the one runtime where SnapStart carries no extra charge (Python and .NET add snapshot-caching and per-restore charges). The operational constraints matter: SnapStart works only on published versions and aliases, never on `$LATEST`, and it cannot be combined with provisioned concurrency, so you pick one or the other per function. Use it for functions with expensive init, but re-test any code that assumes fresh randomness or fresh connections on every cold start, since a restored snapshot reuses whatever the init phase produced.
 
 **Q16: When would you package a Lambda as a container image instead of a zip, and what's the tradeoff?**
 Package as a container image when you need large dependencies, custom runtimes, or existing Docker tooling, since it raises the size ceiling to 10 GB versus 250 MB unzipped for a zip package. Container images let you reuse existing Dockerfiles and base images — useful for ML models or native libraries — and share the same ECR-based tooling as your other containerized services, at the cost of a heavier build/push pipeline and typically slower cold starts than a lean zip package. Zip packaging stays the default for simple functions because it's faster to build, deploy, and cold-start. Choose container images when dependency size or tooling consistency outweighs the cold-start and pipeline cost, not as a default.
@@ -586,4 +586,4 @@ The redesign split the monolith: API Gateway invokes a tiny Lambda that validate
 
 ---
 
-**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (Lambda IAM roles, VPC), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (Cloud Functions/Cloud Run/Azure Functions equivalents), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (per-invocation vs always-on cost), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (Knative on K8s), [../../hld/](../../hld/README.md) (event-driven/messaging patterns), [../../database/](../../database/README.md) (DynamoDB as serverless state), [secrets_management](../secrets_management/secrets_management.md) (function secrets).
+**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (Lambda IAM roles, VPC), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (Cloud Run functions/Cloud Run/Azure Functions equivalents), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (per-invocation vs always-on cost), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (Knative on K8s), [../../hld/](../../hld/README.md) (event-driven/messaging patterns), [../../database/](../../database/README.md) (DynamoDB as serverless state), [secrets_management](../secrets_management/secrets_management.md) (function secrets).

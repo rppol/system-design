@@ -211,8 +211,10 @@ resource "aws_ecr_repository" "app" {
 ### Provenance & SBOM attach (supply chain)
 
 ```bash
-syft "$DIGEST" -o spdx-json > sbom.json          # generate SBOM
-cosign attest --predicate sbom.json --type spdx "$DIGEST"   # attach signed SBOM attestation
+syft scan "$DIGEST" -o spdx-json > sbom.json     # generate SBOM
+cosign attest --predicate sbom.json --type spdxjson "$DIGEST"   # attach signed SBOM attestation
+# --type must match the SBOM encoding: spdxjson for SPDX JSON, spdx for SPDX tag-value,
+# cyclonedx for CycloneDX JSON. A mismatch signs fine and fails at verify/decode time.
 # Admission can later verify both the signature AND the SBOM attestation (see devsecops module).
 ```
 
@@ -278,8 +280,9 @@ image: registry.example.com/prod/app@sha256:abc123...   # exact, traceable, sign
 | Harbor | Self-hosted OCI registry (scan, sign, RBAC, replication) |
 | GHCR / GitLab Registry | SCM-integrated registries |
 | Trivy / Grype | Vulnerability scanning (see [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)) |
-| cosign / Sigstore | Sign/verify images and attestations |
-| syft | SBOM generation |
+| cosign / Sigstore | Sign/verify images and attestations (keyless OIDC by default) |
+| Notation (Notary Project) | OCI-native signing on an x.509/PKI trust model — the alternative to cosign where an existing CA hierarchy is mandated |
+| syft | SBOM generation (SPDX, CycloneDX) |
 | crane / skopeo | Copy/inspect images without a daemon |
 
 ---
@@ -320,7 +323,7 @@ Hosted (local) repos store artifacts your org publishes. Proxy (remote) repos ar
 They defend different layers, so both are worth running rather than picking one. Digest pinning secures the deploy reference itself — a manifest pointing at `app@sha256:abc123` runs those exact bytes no matter what happens to any tag afterward. Tag immutability (like ECR's `IMMUTABLE` setting) secures the registry's write path instead, blocking anyone from ever re-pushing an existing tag, which protects consumers who still pull by tag — a human running a manual `docker pull`, an older script, or a manifest nobody has migrated yet. Use digest pinning for automated deploys and tag immutability as the backstop for everything still tag-based.
 
 **Q12: What Docker Hub rate-limit tiers does a pull-through cache protect a CI fleet from?**
-Docker Hub throttles pulls by identity tier, and a pull-through cache removes your fleet from that quota entirely. Anonymous, unauthenticated pulls are capped around 100 pulls per 6 hours per IP; authenticated free accounts get a higher ceiling; paid plans remove the limit. A pull-through cache (Artifactory, Nexus, or an ECR pull-through cache rule) sits in front of all of it — after the first fetch, every later pull across hundreds of CI runners is served from the cache instead of hitting Docker Hub again, so the fleet's actual upstream request count stays tiny regardless of how many builds run. Skip the cache and a shared office or CI IP burns through the anonymous ceiling within a few busy hours, failing builds at random with `toomanyrequests`.
+Docker Hub throttles pulls by identity tier, and a pull-through cache removes your fleet from that quota entirely. Unauthenticated pulls are capped at 100 pulls per 6 hours per IPv4 address (or per IPv6 /64 subnet); an authenticated free Personal account gets 200 per 6 hours; Pro, Team and Business plans are unlimited under a fair-use policy. A pull-through cache (Artifactory, Nexus, or an ECR pull-through cache rule) sits in front of all of it — after the first fetch, every later pull across hundreds of CI runners is served from the cache instead of hitting Docker Hub again, so the fleet's actual upstream request count stays tiny regardless of how many builds run. Skip the cache and a shared office or CI IP burns through the anonymous ceiling within a few busy hours, failing builds at random with `toomanyrequests`.
 
 **Q13: How can an overly aggressive lifecycle policy delete an image that's still deployed?**
 A retention rule keyed only on tag pattern or a flat keep-last-N count can expire a digest that a live deployment or a pending rollback still depends on. For example, a rule that keeps only the last 30 `prod`-prefixed images expires the 31st-oldest the moment a new one is pushed, even if a slow-rolling region or an incident runbook still expects to roll back to it. The fix is to make retention aware of what's actually running — check live deployment references before pruning, widen the keep-count with margin for your slowest rollout, and never key expiry purely on push recency. Treat "currently deployed" as a hard exemption from any age- or count-based rule, not an afterthought.
@@ -366,7 +369,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(CI pulls node:20<br/>anonymously from Hub) --> B(over 100 pulls<br/>per 6h limit hit)
+    A(CI pulls node:24<br/>anonymously from Hub) --> B(over 100 pulls<br/>per 6h limit hit)
     B --> C(random toomanyrequests<br/>failures across fleet)
     D(prod image:<br/>registry/app:latest) --> E(mutable tag<br/>re-pushed constantly)
     E --> F(what runs in prod<br/>is unknowable)
@@ -384,9 +387,16 @@ flowchart LR
 resource "aws_ecr_pull_through_cache_rule" "dockerhub" {
   ecr_repository_prefix = "dockerhub"
   upstream_registry_url = "registry-1.docker.io"
+  # Docker Hub is an authenticated upstream: the secret name MUST start with
+  # ecr-pullthroughcache/ and live in the same account and Region as the rule.
+  credential_arn = aws_secretsmanager_secret.dockerhub.arn
 }
-# Dockerfile now: FROM <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/library/node:20
+resource "aws_secretsmanager_secret" "dockerhub" {
+  name = "ecr-pullthroughcache/dockerhub"   # holds {"username":..., "accessToken":...}
+}
+# Dockerfile now: FROM <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/library/node:24
 # -> cached locally, no Hub rate limits, survives Hub outages.
+# ECR revalidates a cached tag against the upstream at most once every 24h.
 ```
 
 ```hcl

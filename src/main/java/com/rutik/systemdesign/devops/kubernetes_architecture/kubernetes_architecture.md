@@ -23,7 +23,7 @@ A Kubernetes cluster has two planes:
 
 **Node/data plane** (the muscle, on every worker):
 - **kubelet** — the node agent; ensures the containers described in PodSpecs are running and healthy; talks CRI to the runtime.
-- **kube-proxy** — programs node networking (iptables/IPVS/eBPF) so Service virtual IPs route to pod IPs.
+- **kube-proxy** — programs node networking (iptables/nftables/eBPF) so Service virtual IPs route to pod IPs.
 - **container runtime** — containerd/CRI-O (see [container_runtimes_and_oci](../container_runtimes_and_oci/container_runtimes_and_oci.md)).
 
 Everything communicates through the API server — components **never** talk to each other directly. This hub-and-spoke design is why the API server is both the most critical and most load-bearing component.
@@ -150,7 +150,7 @@ flowchart LR
         runc("runc")
         pods(["pods"])
         kubeproxy("kube-proxy")
-        netrules{"iptables / IPVS / eBPF"}
+        netrules{"iptables / nftables / eBPF"}
 
         kubelet -->|"CRI"| containerd --> runc --> pods
         kubeproxy --> netrules
@@ -276,19 +276,20 @@ ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-$(date +%F).db \
   --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=...  --key=...
-# Defaults that bite: etcd has an ~8 GB DB size quota (--quota-backend-bytes).
-# Exceeding it puts etcd into a read-only "alarm" state -> the whole cluster stops accepting writes.
+# Defaults that bite: etcd's DB size quota (--quota-backend-bytes) defaults to 2 GiB;
+# 8 GiB is the suggested ceiling, and etcd warns at startup if you configure more.
+# Exceeding the quota puts etcd into a read-only "alarm" state -> the whole cluster stops accepting writes.
 ```
 
 ```mermaid
 stateDiagram-v2
     [*] --> Writable
     state "NOSPACE alarm" as NS
-    Writable --> NS: DB size crosses<br/>quota-backend-bytes (~8GB default)
+    Writable --> NS: DB size crosses<br/>quota-backend-bytes (2 GiB default)
     NS --> Writable: etcdctl defrag + compact,<br/>clear the alarm
 ```
 
-*The ~8 GB default quota is a hard boundary, not a soft warning: crossing it flips etcd into the NOSPACE alarm, and the whole cluster — including the self-healing writes that would normally fix things — stops accepting writes until a defrag brings the DB back below quota.*
+*The 2 GiB default quota is a hard boundary, not a soft warning: crossing it flips etcd into the NOSPACE alarm, and the whole cluster — including the self-healing writes that would normally fix things — stops accepting writes until a defrag brings the DB back below quota.*
 
 ### Why the scheduler is separate
 
@@ -299,7 +300,7 @@ The scheduler's only job: for each Pod with no `nodeName`, score feasible nodes 
 ## 7. Real-World Examples
 
 - **Managed control planes (EKS/GKE/AKS)**: the cloud runs and scales the API server + etcd; you manage only worker nodes. GKE Autopilot abstracts nodes too. This is how most production clusters run.
-- **etcd outages = cluster-wide impact**: multiple public postmortems trace total cluster unavailability to etcd disk saturation or the 8 GB quota alarm — because no writes (including self-healing) can proceed.
+- **etcd outages = cluster-wide impact**: multiple public postmortems trace total cluster unavailability to etcd disk saturation or the backend-quota NOSPACE alarm — because no writes (including self-healing) can proceed.
 - **API server overload**: a misbehaving controller or operator doing unbounded list-watches (no field selectors, hot loops) can saturate the API server, slowing every other component — a frequent large-cluster incident.
 - **Operators extend the same model**: tools like Prometheus Operator and cert-manager add CRDs and custom controllers that reconcile just like built-in ones (see [kubernetes_operators_and_crds](../kubernetes_operators_and_crds/kubernetes_operators_and_crds.md)).
 
@@ -314,7 +315,7 @@ The scheduler's only job: for each Pod with no `nodeName`, score feasible nodes 
 | etcd nodes | 3 (tolerates 1) | 5 (tolerates 2) | Fault tolerance vs write latency |
 | Cluster size | Many small clusters | Few large clusters | Blast radius vs overhead/fleet mgmt |
 | API access | Direct kubectl | GitOps only | Auditability/drift vs flexibility |
-| kube-proxy mode | iptables (default) | IPVS/eBPF (scale) | Service count + performance |
+| kube-proxy mode | iptables (default) | nftables/eBPF (scale) | Service count + performance |
 
 ---
 
@@ -338,8 +339,8 @@ The scheduler's only job: for each Pod with no `nodeName`, score feasible nodes 
 ```bash
 # FIX: scheduled etcd snapshots + tested restore; HA etcd (3 nodes); monitor DB size.
 ETCDCTL_API=3 etcdctl snapshot save /backup/etcd.db ...   # cron/systemd timer
-# Alert on etcd_mvcc_db_total_size_in_bytes approaching --quota-backend-bytes (default ~8GB).
-# Practice restore: etcdctl snapshot restore -> re-point apiserver -> verify objects.
+# Alert on etcd_mvcc_db_total_size_in_bytes approaching --quota-backend-bytes (default 2 GiB).
+# Practice restore: etcdutl snapshot restore -> re-point apiserver -> verify objects.
 ```
 
 **Pitfall 2 — A custom controller/operator hammering the API server.**
@@ -394,7 +395,7 @@ Declarative means you specify the desired end state (`spec`), not the steps to g
 It centralizes authentication, authorization, admission, validation, and auditing in one place, and gives every component a consistent, watchable view of state via etcd. Direct component-to-component calls would fragment security and consistency. The cost is that the API server (and etcd) is the scalability and reliability bottleneck — which is why protecting it (rate limits, efficient watches) is critical.
 
 **Q5: What is etcd, and what happens if it fails or fills up?**
-etcd is the strongly-consistent, Raft-based key-value store holding all cluster state. Lose it without a backup and you lose the cluster's desired state (Deployments, Secrets, everything). It has a default DB size quota (~8 GB); exceeding it raises a NOSPACE alarm and puts etcd read-only, so the cluster stops accepting writes — including self-healing — until you compact/defragment and clear the alarm. Hence: HA (3/5 nodes), scheduled snapshots, tested restores, and size monitoring.
+etcd is the strongly-consistent, Raft-based key-value store holding all cluster state. Lose it without a backup and you lose the cluster's desired state (Deployments, Secrets, everything). It has a default DB size quota of 2 GiB (`--quota-backend-bytes`, with 8 GiB the suggested ceiling); exceeding it raises a NOSPACE alarm and puts etcd read-only, so the cluster stops accepting writes — including self-healing — until you compact/defragment and clear the alarm. Hence: HA (3/5 nodes), scheduled snapshots, tested restores, and size monitoring.
 
 **Q6: Why 3 or 5 etcd nodes and not 2 or 4?**
 etcd needs a majority quorum to commit writes (Raft). With N nodes, quorum is ⌊N/2⌋+1: 3 → quorum 2 (tolerates 1 failure), 5 → quorum 3 (tolerates 2). An even count adds no extra fault tolerance (4 still only tolerates 1, same as 3) while adding write latency and split-vote risk — so you always use odd numbers.
@@ -406,7 +407,7 @@ etcd needs a majority quorum to commit writes (Raft). With N nodes, quorum is �
 No. The kubelet watches the API server for Pods bound to its node, then uses the CRI to pull images and start/stop containers via the runtime, runs probes, and reports Pod status back to the API server. It never touches etcd directly — only the API server does. It's the node-level reconciler ensuring its node's actual containers match the PodSpecs assigned to it.
 
 **Q9: What does kube-proxy do?**
-kube-proxy programs node-level networking so that a Service's stable virtual IP load-balances to the current set of backing pod IPs. It watches Services/EndpointSlices and installs rules via iptables (default), IPVS (better at large Service counts), or is replaced entirely by eBPF dataplanes (Cilium). It implements Service routing; it does not proxy most traffic itself in iptables/IPVS modes (the kernel does).
+kube-proxy programs node-level networking so that a Service's stable virtual IP load-balances to the current set of backing pod IPs. It watches Services/EndpointSlices and installs rules via iptables (the default mode) or nftables (the recommended mode on Linux — it scales far better with large Service counts), or is replaced entirely by eBPF dataplanes (Cilium). It implements Service routing; it does not proxy most traffic itself in iptables/nftables modes (the kernel does).
 
 **Q10: How does the scheduler decide where a pod goes?**
 For each unscheduled Pod it runs a two-phase process: **filtering** (which nodes are feasible — enough CPU/memory, tolerations match taints, node selectors/affinity satisfied) and **scoring** (rank feasible nodes by spread, resource balance, affinity preferences), then binds the Pod to the top node by writing `nodeName`. It only schedules; the kubelet then starts the containers.
@@ -421,7 +422,7 @@ Managed (EKS/GKE/AKS) offloads API server + etcd operation, scaling, patching, a
 Admission controllers intercept authorized requests *before* they're persisted to etcd, after authn/authz: first **mutating** webhooks (e.g., sidecar injection, defaulting), then schema validation, then **validating** webhooks (e.g., policy checks). They're how OPA Gatekeeper/Kyverno enforce policy and how service meshes inject sidecars — a powerful, cluster-wide enforcement point (and a latency/availability risk if a webhook is slow or down).
 
 **Q14: How does Kubernetes self-heal when a node dies?**
-The Node controller stops receiving heartbeats, marks the node `NotReady` after a grace period, and (after the pod-eviction timeout) the pods on it are marked for deletion. Their owning controllers (ReplicaSet/StatefulSet) observe replicas below desired and create replacement pods, which the scheduler places on healthy nodes. The level-triggered loops make recovery automatic — no human action needed.
+The node lifecycle controller stops receiving heartbeats, marks the node `NotReady` after a grace period, and applies a `node.kubernetes.io/not-ready` or `node.kubernetes.io/unreachable` `NoExecute` taint; pods carry a default 300-second `tolerationSeconds` for those taints, so once it elapses they are marked for deletion. Their owning controllers (ReplicaSet/StatefulSet) observe replicas below desired and create replacement pods, which the scheduler places on healthy nodes. The level-triggered loops make recovery automatic — no human action needed.
 
 **Q15: Why might a cluster be "slow" even though apps have spare CPU/memory?**
 The bottleneck is usually the control plane, not the workloads: an overloaded API server (heavy list-watch traffic, slow/failing admission webhooks), etcd under disk pressure or near its size quota (slow writes, defrag pauses), or DNS (CoreDNS) saturation. Symptoms are slow `kubectl`, laggy rollouts, and delayed self-healing. You diagnose via API server/etcd latency metrics and request rates, not app dashboards.
@@ -462,7 +463,7 @@ flowchart TD
     bottleneck{"control-plane bottleneck<br/>(NOT workloads)"}
     m1("apiserver_request_duration<br/>P99 = 8s (was 50ms)")
     m2("apiserver inflight<br/>requests saturated")
-    m3[("etcd_disk_wal_fsync slow<br/>DB 7.6GB / 8GB quota")]
+    m3[("etcd_disk_wal_fsync slow<br/>DB 1.9GiB / 2GiB quota")]
     culprit(("label-sync operator:<br/>LISTs all pods every 2s,<br/>hot-loop PATCH"))
 
     s1 --> bottleneck
@@ -532,7 +533,7 @@ The dangerous term is `objectCount`, because it grows with the cluster while `in
 | `interval` | The hardcoded `time.Sleep(2 * time.Second)` |
 | `revisionsPerWrite` | 1 per patch, even a no-op patch that sets a label to its current value |
 | inflight limit | The apiserver's concurrency cap; saturating it queues *every other* component |
-| `etcdGrowth` | Why the DB reached `7.6 GB` against the `8 GB` quota |
+| `etcdGrowth` | Why the DB reached `1.9 GiB` against the default `2 GiB` quota |
 
 **Walk one example.** Broken versus fixed, at steady state with no pods actually changing:
 
@@ -546,7 +547,7 @@ The dangerous term is `objectCount`, because it grows with the cluster while `in
   P99 improvement: 8000 ms / 45 ms = ~178x
 ```
 
-Seven million writes an hour, none of which change anything, is the whole story: it saturates the inflight limit (starving the scheduler, HPA, and `kubectl` alike), and each revision is retained until compaction, which is what walked the DB to 95% of its 8 GB quota with only 0.4 GB of headroom left. The idempotent guard — `if desiredLabel(pod) == pod.Labels["team"] { continue }` — takes the steady-state write rate to literally zero, which is a far bigger win than merely making the writes cheaper.
+Seven million writes an hour, none of which change anything, is the whole story: it saturates the inflight limit (starving the scheduler, HPA, and `kubectl` alike), and each revision is retained until compaction, which is what walked the DB to 95% of its 2 GiB quota with only 0.1 GiB of headroom left. The idempotent guard — `if desiredLabel(pod) == pod.Labels["team"] { continue }` — takes the steady-state write rate to literally zero, which is a far bigger win than merely making the writes cheaper.
 
 Operationally the team also defragmented etcd (`etcdctl defrag`) to reclaim space below the quota and added alerts on `apiserver_current_inflight_requests` and `etcd_mvcc_db_total_size_in_bytes`.
 
