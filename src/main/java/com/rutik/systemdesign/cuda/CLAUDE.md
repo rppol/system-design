@@ -18,16 +18,30 @@ read the trap below before touching the audit.
 | Factual-audit units | 14 of 19 outstanding (5 complete) |
 | Q&As awaiting `**Short:**` summaries | 427 (of 427) |
 
-**THE TRAP — the section is in three states, not two.** Anyone resuming must know which:
+**THE TRAP IS CLEARED (2026-08-04).** The section was in three states; it is now in two.
 
 | Modules | State | Commit |
 |---------|-------|--------|
 | `cuda_memory_model_and_hierarchy`, `cuda_programming_model_and_kernels`, `debugging_correctness_and_numerics`, `gpu_computing_foundations`, `gpu_hardware_architecture` | **Audited.** 175 claims checked, verdicts recorded | `b223d21` |
-| `memory_coalescing_and_access_patterns`, `memory_management_and_data_transfer`, `occupancy_and_launch_configuration`, `parallel_patterns_reduction_scan_histogram`, `profiling_and_performance_analysis` | **INTERRUPTED partial batch.** Real corrections, but stopped mid-section with **no verdict record** — **re-audit from the top** | `2fca64f` |
+| `memory_coalescing_and_access_patterns`, `memory_management_and_data_transfer`, `occupancy_and_launch_configuration`, `parallel_patterns_reduction_scan_histogram`, `profiling_and_performance_analysis` | **Audited.** Re-done from §1 treating `2fca64f` as unverified; ~360 assertions, 12 corrections, verdict recorded | `312d0b4` |
 | everything else | Never audited | — |
 
-The middle row is the hazard: those files *look* audited in `git log` and are not. The
-commit message says so explicitly. Do not mark those units done on the strength of it.
+**Why the re-audit was necessary, since it will look like duplicated work in `git log`.**
+`2fca64f` was an interrupted partial batch: real corrections applied, then stopped
+mid-pass with no verdict record, so nobody could tell which claims had been checked. Its
+visible legacy — nvprof and the legacy Visual Profiler gone from all five files — was
+genuine but incomplete: `memory_coalescing` still had six sites instructing the reader to
+find "Global Load/Store Efficiency" in Nsight Compute, which is an nvprof-era metric name
+that does not exist in ncu. A pass that looks finished because its most visible edit
+landed is exactly what the re-audit was for.
+
+**Two items left open on purpose, needing an owner decision:**
+- NVIDIA's Programming Guide and Blackwell Tuning Guide **disagree on compute capability
+  12.x** — 24 vs 32 resident blocks/SM, and 100 KB vs 128 KB shared memory per SM.
+  `occupancy_and_launch_configuration` follows the Programming Guide. No side was picked.
+- The capability enumerations in that module omit **CC 10.3 and 11.0**, which now exist in
+  the Programming Guide table. Incomplete rather than wrong; not filled in because
+  guessing a hardware number is the failure mode this audit exists to prevent.
 
 One correction to record while it is fresh: this file has claimed the section missed the
 repo-wide `Q: ` prefix sweep. All five audited modules already carry the prefix, so that
