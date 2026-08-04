@@ -417,8 +417,8 @@ def reverse_list_fixed(head):
 
 - Concept module: [linked_lists_stacks_and_queues](../linked_lists_stacks_and_queues/linked_lists_stacks_and_queues.md) — linked list node structure, dummy heads, sentinel patterns
 - [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md) — recursive reversal as a recursion-mechanics example
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — why `LinkedList` is rarely used in practice (cache-unfriendly), but the pointer-manipulation skills transfer to tree/graph node manipulation
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../java/collections_internals/`](../../java/collections_internals/collections_internals.md) — why `LinkedList` is rarely used in practice (cache-unfriendly), but the pointer-manipulation skills transfer to tree/graph node manipulation
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 
@@ -440,7 +440,7 @@ The problem states leftover nodes (fewer than `k`) at the end should remain in t
 Push every node (or value) onto a stack while traversing, then pop to build the reversed list (or overwrite values in place in reverse order). This is O(n) space but conceptually simpler and less error-prone. Mentioning it shows you understand the *space-time tradeoff explicitly* — you're choosing the O(1)-space pointer-rewiring approach deliberately, not because it's the only option, which is the kind of articulation L5 interviewers look for.
 
 **Q: For "Reorder List" (`L0->L1->...->Ln` becomes `L0->Ln->L1->Ln-1->...`), what are the three sub-routines and in what order are they applied?**
-(1) **Find the middle** using fast/slow pointers — splits the list into two halves. (2) **Reverse the second half** using the standard `prev/curr/next_temp` triple. (3) **Merge the two halves alternately** — a two-pointer "zip" that interleaves nodes from the first half and the (now-reversed) second half. Each sub-routine is O(n)/O(1), and they compose to O(n) time, O(1) space overall — a great example of pattern composition (see the Pattern Interaction Map in [dsa_patterns/README.md](dsa_patterns.md) §8).
+(1) **Find the middle** using fast/slow pointers — splits the list into two halves. (2) **Reverse the second half** using the standard `prev/curr/next_temp` triple. (3) **Merge the two halves alternately** — a two-pointer "zip" that interleaves nodes from the first half and the (now-reversed) second half. Each sub-routine is O(n)/O(1), and they compose to O(n) time, O(1) space overall — a great example of pattern composition (see the Pattern Interaction Map in [dsa_patterns](dsa_patterns.md) §8).
 
 **Q: Is recursive linked-list reversal ever preferable to iterative, despite the O(n) space cost?**
 In an interview, rarely — O(1) space is almost always preferred when achievable, and the iterative version isn't meaningfully harder to write once memorized. However, recursive reversal can be clearer when reversal is *combined* with other recursive logic already operating on the list (e.g., some tree-to-linked-list conversion algorithms), where the call stack is "already there" for other reasons and adding reversal logic to it avoids a second pass.

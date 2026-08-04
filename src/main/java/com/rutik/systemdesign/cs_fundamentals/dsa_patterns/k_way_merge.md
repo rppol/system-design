@@ -531,7 +531,7 @@ shapes above fits better.
 - Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `PriorityQueue` as the heap implementation; `Comparator` for tie-breaking
   without raw tuples.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
+- Master recognition engine: [dsa_patterns](dsa_patterns.md).
 - Sibling patterns: [top_k_elements.md](top_k_elements.md),
   [two_heaps.md](two_heaps.md), [two_pointers.md](two_pointers.md).
 
@@ -586,8 +586,10 @@ pre-built array.
 **Q: Kth Smallest in a Sorted Matrix — heap-based partial merge vs. binary search on the answer: when is each better?**
 The heap approach (`kth_smallest_in_sorted_matrix`) is `O(k log n)` — great
 when `k` is small relative to `n^2`. Binary search on the value range is
-`O(n log(max-min))` (using a per-row binary search to count elements `<=
-mid`) — its cost is *independent of k*, so it wins when `k` is large (close
+`O(n log(max-min))` — each candidate `mid` is scored by walking the staircase
+from the top-right corner, which counts the elements `<= mid` in `O(n)`, not
+by a per-row binary search (that would cost `O(n log n)` per count) — and its
+cost is *independent of k*, so it wins when `k` is large (close
 to `n^2`). If asked "what if k is `n^2 / 2`?", binary search on the answer is
 the better follow-up.
 

@@ -427,8 +427,9 @@ you cannot tell which half is sorted — fall back to `lo += 1` (LC 81).
 
 **3. Peak finding.**
 "Go uphill": if `arr[mid] < arr[mid+1]`, a peak must exist to the right
-(because the array either keeps climbing into a peak, or the boundary
-`arr[n-1] = -inf` guarantees one). This finds *a* peak, not necessarily the
+(because the array either turns over into a peak, or keeps climbing to
+`arr[n-1]`, which is a peak against the conceptual out-of-bounds sentinel
+`arr[n] = -inf`). This finds *a* peak, not necessarily the
 global maximum — O(log n) instead of O(n).
 
 **4. Binary search on the answer — minimize the maximum / maximize the minimum.**
@@ -445,9 +446,10 @@ are balanced and cross-sorted (`max(left) <= min(right)`). This is the
 hardest common variant — O(log(min(m, n))).
 
 **6. 2D matrix search.**
-If a matrix is row-sorted *and* column-sorted such that it can be viewed as
-one flattened sorted array (`matrix[i][j]` corresponds to flat index
-`i * cols + j`), run classic binary search on the flattened index
+If a matrix is *fully* sorted — every row sorted, and each row's first element
+greater than the previous row's last — it is one flattened sorted array
+(`matrix[i][j]` corresponds to flat index `i * cols + j`), so run classic
+binary search on the flattened index
 ([Search a 2D Matrix (LC 74)](https://leetcode.com/problems/search-a-2d-matrix/)).
 For matrices sorted only row-wise *and* column-wise independently (LC 240),
 binary search per row, or use a staircase walk from the top-right corner
@@ -587,7 +589,7 @@ pattern that actually fits the shape.
 - Applied: [python/collections_and_data_structures](../../python/collections_and_data_structures/collections_and_data_structures.md)
   — the `bisect` module (`bisect_left`, `bisect_right`, `insort`) is a direct,
   production-ready implementation of `lower_bound`/`upper_bound`.
-- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md) — see the
+- Master recognition engine: [dsa_patterns](dsa_patterns.md) — see the
   Constraints -> Complexity -> Pattern table (large `n` with small answer
   range is the strongest "binary search on the answer" tell).
 - Sibling patterns: [two_pointers.md](two_pointers.md),

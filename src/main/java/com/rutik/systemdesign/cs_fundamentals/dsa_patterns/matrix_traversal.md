@@ -170,7 +170,9 @@ Pass 4  left col c=0, r=1..1     -> 5             left=1
 Loop check: top=1 bottom=1 left=1 right=2  -> still valid
 Pass 1  top row r=1, c=1..2      -> 6 7            top=2
 Pass 2  right col: range(2,2) empty                right=1
-        top(2) <= bottom(1)?  NO -> skip pass 3, skip pass 4
+        top(2) <= bottom(1)?  NO -> skip pass 3
+        left(1) <= right(1): pass 4's range(1,1,-1) is empty -> emits
+        nothing, left=2
 
 Loop check: top=2 > bottom=1 -> stop
 Result: 1 2 3 4 8 12 11 10 9 5 6 7
@@ -373,7 +375,7 @@ def set_zeroes_fixed(matrix: list[list[int]]) -> None:
                 matrix[r][c] = 0
 ```
 
-**Trigger**: `matrix = [[1,1,1],[1,0,1],[1,1,1]]`. Correct output zeros only the middle row and middle column, leaving the four corners as 1. The broken version zeros the middle cross, but when the scan reaches `(1,0)` — now a 0 it just wrote — it zeros row 1 and column 0 again, and the cascade eventually flips the entire matrix to 0. The same "mutate-while-scanning" bug is exactly why **Game of Life** must encode the next state in spare bits instead of overwriting cells live.
+**Trigger**: `matrix = [[1,1,1],[1,0,1],[1,1,1]]`. Correct output zeros only the middle row and middle column, leaving the four corners as 1 — `[[1,0,1],[0,0,0],[1,0,1]]`. The broken version zeros the middle cross when the row-major scan reads `(1,1)`; two cells later it *reads back* the zero it just wrote at `(1,2)` and zeros column 2 as well, then reads the written zero at `(2,1)` and zeros row 2. It ends at `[[1,0,0],[0,0,0],[0,0,0]]` — three corners wrongly zeroed by cells the scan itself created. The same "mutate-while-scanning" bug is exactly why **Game of Life** must encode the next state in spare bits instead of overwriting cells live.
 
 ---
 
@@ -423,7 +425,7 @@ flowchart TD
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(m·n) is optimal (you must read every cell at least once)
 - Sibling patterns: [graph_traversal.md](graph_traversal.md) (grid connectivity), [prefix_sum.md](prefix_sum.md) (2D summed-area table), [modified_binary_search.md](modified_binary_search.md) (sorted-matrix search)
 - Applied: [`../../cs_fundamentals/computer_architecture_and_memory_hierarchy/`](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — row-major vs column-major access and cache behavior (why iterating along rows is faster than along columns)
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 

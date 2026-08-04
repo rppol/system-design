@@ -282,8 +282,11 @@ after `jumps` jumps." The instant the scan index `i` reaches `current_end`,
 every index up to `farthest` is reachable with one more jump — so we commit
 to that jump (`jumps += 1`) and slide the boundary out to `farthest`. We
 never need to know *which* index within the level we jump from — only that
-the level transition happened. Two jumps (0 -> 1 -> 4, or 0 -> 2 -> 4 etc.)
-suffice, matching the expected answer of `2`.
+the level transition happened. Two jumps suffice — `0 -> 1 -> 4`, since
+`nums[1] = 3` covers the remaining three indices — matching the expected
+answer of `2`. (Jumping `0 -> 2` instead reaches only index 3 next, because
+`nums[2] = 1`, which is exactly why the algorithm tracks the level's
+`farthest` rather than committing to a particular index.)
 
 ---
 
@@ -641,7 +644,7 @@ flowchart TD
 
 - Concept module: [`greedy_and_divide_and_conquer/`](../greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) — formal treatment of the greedy-choice property, optimal substructure, and exchange-argument proofs; also covers divide-and-conquer (merge sort, quickselect) as a separate strategy
 - Complexity foundations: [`complexity_analysis_and_big_o/`](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(n log n) is the practical ceiling for sort-then-scan greedy algorithms
-- Applied cross-link: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — the Kubernetes default scheduler's bin-packing and priority-based pod placement are real-world greedy heuristics (best-fit / first-fit), including their known suboptimality versus exhaustive search
+- Applied cross-link: [`../../devops/kubernetes_scheduling_and_autoscaling/`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — the Kubernetes default scheduler's bin-packing and priority-based pod placement are real-world greedy heuristics (best-fit / first-fit), including their known suboptimality versus exhaustive search
 
 ---
 

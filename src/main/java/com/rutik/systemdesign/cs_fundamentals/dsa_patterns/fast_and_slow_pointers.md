@@ -142,7 +142,8 @@ flowchart LR
 ```
   step1: S=2, F=3
   step2: S=3, F=5
-  step3: F=None (fast.next.next is None) -> stop. S=3 is the middle.
+  step3: loop exits -- F=5 and F.next is None, so `while fast and fast.next`
+         fails before another advance. S=3 is the middle.
 
   For even-length lists [1,2,3,4]: fast reaches None after S=3
   (the SECOND of the two middle nodes) -- a common source of off-by-one
@@ -385,7 +386,7 @@ The gap goes `2 -> 1 -> 0`. It cannot do anything else: fast advances 2 and slow
 | [Circular Array Loop (LC 457)](https://leetcode.com/problems/circular-array-loop/) | Medium | Direction-constrained cycle | Cycle must be all-forward or all-backward, length > 1 |
 | [Reorder List (LC 143)](https://leetcode.com/problems/reorder-list/) | Medium | Middle + reversal + merge | Three sub-routines combined |
 | [Delete the Middle Node of a Linked List (LC 2095)](https://leetcode.com/problems/delete-the-middle-node-of-a-linked-list/) | Medium | Find middle, relink prev | Keep a `prev` of slow so you can splice it out |
-| [Sort List (LC 148)](https://leetcode.com/problems/sort-list/) | Medium | Fast/slow split for merge sort | Split at the middle, recurse, merge — O(n log n), O(1) extra |
+| [Sort List (LC 148)](https://leetcode.com/problems/sort-list/) | Medium | Fast/slow split for merge sort | Split at the middle, recurse, merge — O(n log n) time, O(log n) recursion stack (O(1) only with a bottom-up merge) |
 | [Convert Sorted List to Binary Search Tree (LC 109)](https://leetcode.com/problems/convert-sorted-list-to-binary-search-tree/) | Medium | Recursive fast/slow middle | Middle is the subtree root; recurse on the two halves |
 | [Maximum Twin Sum of a Linked List (LC 2130)](https://leetcode.com/problems/maximum-twin-sum-of-a-linked-list/) | Medium | Middle + reverse + pair | Fast/slow to mid, reverse 2nd half, max over twin pairs |
 
@@ -397,9 +398,10 @@ The gap goes `2 -> 1 -> 0`. It cannot do anything else: fast advances 2 and slow
 
 ```python
 # BROKEN — checks `fast` but not `fast.next` before accessing `fast.next.next`.
-# When the list has an even number of nodes and no cycle, fast eventually
-# becomes None, but on the step before that, fast.next could be None too,
-# and `fast.next.next` raises AttributeError: 'NoneType' has no attribute 'next'.
+# When the list has an ODD number of nodes and no cycle, fast eventually lands
+# ON the last node, where fast.next is None -- and `fast.next.next` then raises
+# AttributeError: 'NoneType' object has no attribute 'next'. (Even-length lists
+# survive by luck: fast steps straight onto None and the `while fast` guard fires.)
 def has_cycle_broken(head):
     slow = fast = head
     while fast:                      # BUG: only checks fast, not fast.next
@@ -439,8 +441,8 @@ def has_cycle_fixed(head):
 
 - Concept module: [linked_lists_stacks_and_queues](../linked_lists_stacks_and_queues/linked_lists_stacks_and_queues.md) — linked list fundamentals, node structure, dummy heads
 - [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md) — many linked-list problems have elegant recursive alternatives; fast/slow is the *iterative, O(1)-space* answer
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `LinkedList` internals, why Java's `LinkedList` is rarely the right default choice vs `ArrayDeque`
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../java/collections_internals/`](../../java/collections_internals/collections_internals.md) — `LinkedList` internals, why Java's `LinkedList` is rarely the right default choice vs `ArrayDeque`
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 

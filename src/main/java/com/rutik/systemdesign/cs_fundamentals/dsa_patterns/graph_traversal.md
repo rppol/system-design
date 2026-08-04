@@ -66,8 +66,9 @@ Grid (1 = land, 0 = water):          Island #1 (DFS flood fill from (0,0)):
 3 0 . 0 . 0 . 1                      3  0  .  0  . 0 . 1
 
 DFS from (0,0): visit (0,0) -> mark visited
-   -> push neighbors (0,1)? out of land -> skip
-   -> (1,0) is land, visited it too
+   -> neighbor (-1,0)? off the grid -> skip
+   -> (0,1) is land, visit it too
+   -> (1,0) is land, visit it too
    -> from (1,0): (1,1) is land too... etc.
 All four '1's connected to (0,0) get swallowed into ONE island.
 The lone '1' at (2,2) and the lone '1' at (3,3) are separate islands.
@@ -82,7 +83,7 @@ Rotting Oranges (2 = rotten, 1 = fresh, 0 = empty):
 
   Minute 0          Minute 1          Minute 2
   2 1 1             2 2 1             2 2 2
-  1 1 0      ->     2 2 0      ->     2 2 0
+  1 2 0      ->     2 2 0      ->     2 2 0
   0 1 1             0 2 1             0 2 2
 
 Queue starts with BOTH rotten oranges (multi-source).
@@ -240,7 +241,7 @@ dfs(0,0): grid[0][0]="1" -> sink to "0"
                  -> dfs(0,0): now "0" -> return
             -> dfs(1,2): "0" -> return
             -> dfs(1,0): now "0" -> return
-       -> dfs(0,0): now "0" -> return
+       -> dfs(1,-1): out of bounds -> return
   -> dfs(-1,0): out of bounds -> return
   -> dfs(0,1): now "0" -> return
   -> dfs(0,-1): out of bounds -> return
@@ -449,7 +450,7 @@ with `(1,1), (1,-1), (-1,1), (-1,-1)`.
 | [Walls and Gates (LC 286)](https://leetcode.com/problems/walls-and-gates/) | Medium | Multi-source BFS, in-place distance | Seed all gates (0s); fill INF cells with BFS distance |
 | [Surrounded Regions (LC 130)](https://leetcode.com/problems/surrounded-regions/) | Medium | Border-first DFS | Invert: mark border-connected 'O's as safe first |
 | [Pacific Atlantic Water Flow (LC 417)](https://leetcode.com/problems/pacific-atlantic-water-flow/) | Medium | Two multi-source traversals + intersection | Flow "uphill" from both oceans' borders |
-| [Shortest Bridge (LC 934)](https://leetcode.com/problems/shortest-bridge/) | Hard | DFS-mark + multi-source BFS | DFS to flood island A, then BFS outward until island B is hit |
+| [Shortest Bridge (LC 934)](https://leetcode.com/problems/shortest-bridge/) | Medium | DFS-mark + multi-source BFS | DFS to flood island A, then BFS outward until island B is hit |
 | [Word Ladder (LC 127)](https://leetcode.com/problems/word-ladder/) | Hard | Implicit graph BFS | Generate neighbors via 26-letter substitution, not pairwise comparison |
 
 ---

@@ -211,7 +211,7 @@ Each "swap" places at least one element into its correct home position permanent
 | Sort the array first, scan for gaps | O(n log n) | O(1) (in-place sort) or O(n) |
 | **Cyclic sort + second pass** | **O(n)** | **O(1)** (excluding output) |
 
-Cyclic sort is the *only* O(n) time **and** O(1) space approach for this family of problems (other than the fast/slow-pointer trick for the single-duplicate case, which trades mutation-avoidance for being limited to "exactly one duplicate, no missing").
+Cyclic sort is the *general-purpose* O(n) time **and** O(1) space approach for this family of problems. Three narrower alternatives hit the same bounds on specific variants: sign-marking (negate `nums[abs(v)-1]`, §6) when you only need to flag which values were seen; sum/XOR arithmetic when exactly one value is missing; and the fast/slow-pointer trick for the single-duplicate case, which trades mutation-avoidance for being limited to "exactly one duplicate, no missing".
 
 ### Decoding the complexity claim
 
@@ -272,17 +272,17 @@ Follow swap #1: the `3` it moved to index 2 is now home, and no later step ever 
 | [Missing Number (LC 268)](https://leetcode.com/problems/missing-number/) | Easy | Find missing, range [0,n] | n elements, values 0..n, one missing (XOR/sum also work) |
 | [Find All Numbers Disappeared in an Array (LC 448)](https://leetcode.com/problems/find-all-numbers-disappeared-in-an-array/) | Easy | Find all missing | Values 1..n, duplicates allowed; sign-marking also works |
 | [Set Mismatch (LC 645)](https://leetcode.com/problems/set-mismatch/) | Easy | Find duplicate AND missing | One pass after cyclic placement |
-| [Find the Missing and Repeated Values (LC 2965)](https://leetcode.com/problems/find-missing-and-repeated-values/) | Easy | 2D Set Mismatch | Flatten the n×n grid to values 1..n², then same logic |
+| [Find Missing and Repeated Values (LC 2965)](https://leetcode.com/problems/find-missing-and-repeated-values/) | Easy | 2D Set Mismatch | Flatten the n×n grid to values 1..n², then same logic |
 | [Kth Missing Positive Number (LC 1539)](https://leetcode.com/problems/kth-missing-positive-number/) | Easy | Related — counting / binary search | Not full cyclic sort; count gaps via `arr[i] - (i+1)` |
 | [Height Checker (LC 1051)](https://leetcode.com/problems/height-checker/) | Easy | Related — counting sort compare | Count positions that differ from the sorted order |
 | [Find All Duplicates in an Array (LC 442)](https://leetcode.com/problems/find-all-duplicates-in-an-array/) | Medium | Find all duplicates | Cyclic placement, or negate `nums[abs(v)-1]` to mark |
 | [Find the Duplicate Number (LC 287)](https://leetcode.com/problems/find-the-duplicate-number/) | Medium | Single duplicate, n+1 elements | Read-only? Use fast/slow pointers — see [fast_and_slow_pointers.md](fast_and_slow_pointers.md) |
 | [Array Nesting (LC 565)](https://leetcode.com/problems/array-nesting/) | Medium | Follow permutation cycles | Longest cycle in `i -> nums[i]`; mark visited in place |
-| [Smallest Missing Non-negative Integer After Operations (LC 2598)](https://leetcode.com/problems/smallest-missing-non-negative-integer-after-operations/) | Medium | Related — residue bucketing | Group by `value % value`, count per remainder class |
+| [Smallest Missing Non-negative Integer After Operations (LC 2598)](https://leetcode.com/problems/smallest-missing-non-negative-integer-after-operations/) | Medium | Related — residue bucketing | Group by `value % k` (the given step size), count per remainder class |
+| [Maximum Gap (LC 164)](https://leetcode.com/problems/maximum-gap/) | Medium | Contrast — bucket/radix sort | O(n) without comparison when the value range is large |
 | [Minimum Number of Operations to Make Array Continuous (LC 2009)](https://leetcode.com/problems/minimum-number-of-operations-to-make-array-continuous/) | Hard | Contrast — values are NOT a permutation | Dedup + sort + sliding window; shows the boundary of cyclic sort |
 | [First Missing Positive (LC 41)](https://leetcode.com/problems/first-missing-positive/) | Hard | Unbounded values, smallest missing positive | Pre-filter out-of-range, then standard cyclic sort |
 | [Couples Holding Hands (LC 765)](https://leetcode.com/problems/couples-holding-hands/) | Hard | Cyclic-swap greedy | Each couple to adjacent indices; swaps = n - cycle_count |
-| [Maximum Gap (LC 164)](https://leetcode.com/problems/maximum-gap/) | Hard | Contrast — bucket/radix sort | O(n) without comparison when the value range is large |
 
 ---
 
@@ -319,7 +319,7 @@ def cyclic_sort_fixed(nums: list[int]) -> None:
             i += 1
 ```
 
-**Trigger**: `nums = [1, 1]` (value 1 appears twice, in a size-2 array meant for values 1..2). With the broken version: `i=0`, `nums[0]=1`, `correct_index=0`, `nums[0] != 0+1`? `1 != 1` is `False` — actually this specific case happens to not trigger the bug at `i=0`. Try `nums = [3, 1, 1]` (n=3, value 3 present, 1 duplicated, 2 missing): `i=0`, `nums[0]=3`, `correct_index=2`. `nums[0] != 0+1` → `3 != 1` → True → swap `nums[0]` and `nums[2]`: both equal `1`... after swap `nums = [1, 1, 3]`. `i=0`: `nums[0]=1`, `correct_index=0`, `nums[0] != 0+1` → `1 != 1` → False → `i++`. `i=1`: `nums[1]=1`, `correct_index=0`. `nums[1] != 1+1` → `1 != 2` → True → swap `nums[1]` and `nums[0]`: both are `1` — **no change**, but the loop doesn't advance `i`, and the condition `nums[1] != 2` remains `True` forever — **infinite loop**. The fixed version checks `nums[i] != nums[correct_index]` (i.e., `1 != 1` is `False`) and correctly moves on with `i += 1`.
+**Trigger**: `nums = [1, 1]` (value 1 appears twice, in a size-2 array meant for values 1..2). With the broken version: `i=0`, `nums[0]=1`, `correct_index=0`, `nums[0] != 0+1`? `1 != 1` is `False` — so nothing goes wrong at `i=0`, but the loop still hangs one step later at `i=1`. Take the fuller example `nums = [3, 1, 1]` (n=3, value 3 present, 1 duplicated, 2 missing): `i=0`, `nums[0]=3`, `correct_index=2`. `nums[0] != 0+1` → `3 != 1` → True → swap `nums[0]` and `nums[2]`: both equal `1`... after swap `nums = [1, 1, 3]`. `i=0`: `nums[0]=1`, `correct_index=0`, `nums[0] != 0+1` → `1 != 1` → False → `i++`. `i=1`: `nums[1]=1`, `correct_index=0`. `nums[1] != 1+1` → `1 != 2` → True → swap `nums[1]` and `nums[0]`: both are `1` — **no change**, but the loop doesn't advance `i`, and the condition `nums[1] != 2` remains `True` forever — **infinite loop**. The fixed version checks `nums[i] != nums[correct_index]` (i.e., `1 != 1` is `False`) and correctly moves on with `i += 1`.
 
 ---
 
@@ -364,7 +364,7 @@ flowchart LR
 - Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array fundamentals, in-place algorithms
 - [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — counting sort, pigeonhole principle
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — amortized analysis (why total swaps are bounded by n)
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 

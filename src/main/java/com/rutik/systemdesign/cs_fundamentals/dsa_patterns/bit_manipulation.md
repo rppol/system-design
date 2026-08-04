@@ -688,7 +688,7 @@ the positions where the total isn't a multiple of `k`.
 ## 10. Cross-links
 
 - Concept module: [`number_systems_and_bit_manipulation/`](../number_systems_and_bit_manipulation/number_systems_and_bit_manipulation.md) — two's complement representation, signed/unsigned shift semantics, bitwise operator reference, floating-point bit layout
-- Applied cross-link: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `HashMap`'s resize/rehash uses `(n - 1) & hash` for bucket indexing and a bit-spread function (`h ^ (h >>> 16)`) to mix high and low bits of the hash code, a direct production use of the bit-masking ideas in this file
+- Applied cross-link: [`../../java/collections_internals/`](../../java/collections_internals/collections_internals.md) — `HashMap`'s resize/rehash uses `(n - 1) & hash` for bucket indexing and a bit-spread function (`h ^ (h >>> 16)`) to mix high and low bits of the hash code, a direct production use of the bit-masking ideas in this file
 
 ---
 

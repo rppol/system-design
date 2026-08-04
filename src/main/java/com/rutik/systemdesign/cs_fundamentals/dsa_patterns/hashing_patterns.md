@@ -95,7 +95,7 @@ Sub-pattern 4: Set-based existence (Longest Consecutive Sequence)
   For each num, only START counting if (num - 1) NOT in num_set
   (i.e., num is the start of its sequence -- avoids O(n^2) re-scans):
 
-  100: 99 not in set -> start. count: 100 -> 100 not+1 in set. length=1
+  100: 99 not in set -> start. count: 101 not in set. length=1
   4:   3 in set -> skip (not a sequence start)
   200: 199 not in set -> start. length=1
   1:   0 not in set -> start. count: 1,2,3,4 all in set. length=4  <- answer
@@ -414,10 +414,10 @@ flowchart LR
 ## 10. Cross-links
 
 - Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — hash table internals, collision resolution, load factor
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `HashMap`/`HashSet` internals: bucket array, treeification at 8 collisions (Java 8+), resize at load factor 0.75
-- Applied: [`../../python/collections_and_data_structures/README.md`](../../python/collections_and_data_structures/collections_and_data_structures.md) — Python `dict`/`set` implementation (open addressing, not chaining)
-- [`../../hld/caching/README.md`](../../hld/caching/caching.md) — hashmap + doubly linked list as the LRU cache implementation
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../java/collections_internals/`](../../java/collections_internals/collections_internals.md) — `HashMap`/`HashSet` internals: bucket array, treeification at 8 collisions (Java 8+), resize at load factor 0.75
+- Applied: [`../../python/collections_and_data_structures/`](../../python/collections_and_data_structures/collections_and_data_structures.md) — Python `dict`/`set` implementation (open addressing, not chaining)
+- [`../../hld/caching/`](../../hld/caching/caching.md) — hashmap + doubly linked list as the LRU cache implementation
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 
@@ -451,7 +451,7 @@ If the array is **unsorted** and indices must be preserved, O(1) space is *not* 
 A collision is when two different keys hash to the same bucket/slot. Two main resolution strategies: **chaining** (each bucket holds a linked list or, in Java 8+, a tree once it has 8+ entries, of all keys hashing there) and **open addressing** (probe for the next empty slot — used by Python's `dict`/`set`). Both add O(1) amortized overhead in the average case but can degrade toward O(n) per operation if collisions are frequent (e.g., adversarial inputs designed to collide, a known DoS vector mitigated by randomized hash seeds).
 
 **Q: How does a rolling hash (Rabin-Karp) avoid re-hashing the entire window on each shift?**
-A rolling hash is computed such that `hash(window[1:] + new_char) ` can be derived from `hash(window)` in O(1), typically via polynomial hashing: `hash = (hash - old_char * base^(k-1)) * base + new_char (mod M)`. This removes the contribution of the character leaving the window and adds the new character, all in O(1), instead of recomputing the hash of all `k` characters from scratch (O(k) per shift, O(n*k) total). This makes substring search/matching O(n + m) instead of O(n*m).
+A rolling hash is computed such that `hash(window[1:] + new_char) ` can be derived from `hash(window)` in O(1), typically via polynomial hashing: `hash = (hash - old_char * base^(k-1)) * base + new_char (mod M)`. This removes the contribution of the character leaving the window and adds the new character, all in O(1), instead of recomputing the hash of all `k` characters from scratch (O(k) per shift, O(n*k) total). This makes substring search/matching O(n + m) *on average* instead of O(n*m) — the worst case is still O(n*m), because a hash match must be confirmed by a character-by-character comparison and an adversarial input can force a false match at every position.
 
 **Q: If two objects are equal (`==`), must their hash values be equal? What happens if you violate this?**
 Yes — this is the **hash-equality contract**: if `a == b`, then `hash(a) == hash(b)` must hold (the converse is not required — different objects can have the same hash, a collision). Violating this (e.g., overriding `__eq__` without overriding `__hash__` in Python, or `equals()` without `hashCode()` in Java) causes silent bugs: two "equal" objects could be placed in different buckets of a `dict`/`HashMap`, so `obj in some_set` could return `False` even when an "equal" object is present — a notoriously hard-to-debug class of issue.

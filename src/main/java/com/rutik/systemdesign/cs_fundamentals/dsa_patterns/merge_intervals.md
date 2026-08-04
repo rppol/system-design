@@ -116,7 +116,7 @@ flowchart LR
     r1 --> d2{"s=1: start 5<br/>before end 10?"}
     d2 -->|"yes"| r2["new room<br/>rooms = 2"]
     r2 --> d3{"s=2: start 15<br/>before end 10?"}
-    d3 -->|"no"| r3["room freed<br/>rooms stays 2"]
+    d3 -->|"no"| r3["room freed<br/>rooms back to 1<br/>peak stays 2"]
     r3 --> result(["max concurrent<br/>rooms = 2"])
 
     class raw,in,result io
@@ -305,7 +305,8 @@ That framing matters because it tells you exactly where to push. Shaving constan
     3    [8,10]    [1,6]     8 <= 6   no overlap      append           [1,6] [8,10]
     4    [15,18]   [8,10]   15 <= 10  no overlap      append           [1,6] [8,10] [15,18]
 
-  4 intervals in, 4 comparisons, 3 out -- one pass, zero backtracking
+  4 intervals in, 3 comparisons (the first is seeded), 3 out -- one pass,
+  zero backtracking
 ```
 
 **Why the sort dominates, quantified.** At LC 56's limit of `n = 10,000`: the sort costs about `n * log2(n) = 10,000 * 13.29 = 132,877` operations, while the merge scan costs `10,000`. The sort is roughly **13 times** the scan, so total work is about `142,877` and is ~93% sort. Against the brute-force "compare every pair" approach at `n^2 / 2 = 50,000,000`, the sort-then-scan approach is about **350 times cheaper**. And for Insert Interval, where the input arrives pre-sorted and the sort disappears, the cost drops from `142,877` to `10,000` — about **14 times faster** for free, purely from reading the constraints.
@@ -321,7 +322,7 @@ That framing matters because it tells you exactly where to push. Shaving constan
 - **Interval intersection (two lists)** — two-pointer merge of two *already-sorted, non-overlapping-within-each-list* interval lists, computing pairwise overlaps ([Interval List Intersections (LC 986)](https://leetcode.com/problems/interval-list-intersections/))
 - **Non-overlapping intervals (minimum removals)** — sort by **end** time, greedily keep intervals that don't conflict — this is the [greedy.md](greedy.md) variant ([Non-overlapping Intervals (LC 435)](https://leetcode.com/problems/non-overlapping-intervals/))
 - **Employee free time** — merge all intervals across all employees, then find gaps between consecutive merged intervals ([Employee Free Time (LC 759)](https://leetcode.com/problems/employee-free-time/) — premium)
-- **Car pooling / range-add problems** — convert intervals into "+1 at start, -1 at end+1" delta array, then prefix-sum to get concurrent counts at every point ([Car Pooling (LC 1094)](https://leetcode.com/problems/car-pooling/) — combines with [prefix_sum.md](prefix_sum.md))
+- **Car pooling / range-add problems** — convert intervals into a delta array (`+1` at start, `-1` at the first point past the range: at `end` for half-open `[start, end)` intervals such as Car Pooling's trips, at `end+1` for closed `[start, end]` ones), then prefix-sum to get concurrent counts at every point ([Car Pooling (LC 1094)](https://leetcode.com/problems/car-pooling/) — combines with [prefix_sum.md](prefix_sum.md))
 
 ---
 
@@ -405,8 +406,8 @@ def merge_intervals_fixed(intervals: list[list[int]]) -> list[list[int]]:
 
 - Concept module: [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — sort-then-sweep is the foundational technique; comparator/key functions
 - [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — list/array manipulation basics
-- Applied: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — resource scheduling and bin-packing share the "overlap/conflict detection" mental model with meeting-room problems
-- Master index: [dsa_patterns/README.md](dsa_patterns.md)
+- Applied: [`../../devops/kubernetes_scheduling_and_autoscaling/`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — resource scheduling and bin-packing share the "overlap/conflict detection" mental model with meeting-room problems
+- Master index: [dsa_patterns](dsa_patterns.md)
 
 ---
 

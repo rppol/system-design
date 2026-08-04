@@ -291,7 +291,6 @@ backtrack(row=0): try col=0,1,2,3 for row 0
           col=3: PRUNE (in cols)
           -- backtrack(row=2) returns with NO solution
         undo col=3
-    undo col=2 (from row=1) -- wait, already undone above; continue row=1 loop
     -- row=1 loop exhausted (col=0,1,2,3 all tried) -> backtrack(row=1) returns NO solution
   undo col=0 (row=0)
 
@@ -405,9 +404,9 @@ the table above is a worst-case *bound*, not a prediction — it assumes you
 discover a conflict only after placing all `n` queens. Checking `cols`,
 `diag1`, and `diag2` before recursing moves that discovery to the earliest
 possible row, and every row you catch it earlier removes a subtree of size
-`b^(remaining depth)`. Rejecting one bad placement at row 2 deletes roughly
-`8^6 = 262,144` nodes that would otherwise have been generated and thrown
-away. This is why N-Queens runs instantly at `n = 8` despite an `O(n!)` label:
+`b^(remaining depth)`. Rejecting one bad placement at row 2 deletes the entire
+subtree beneath it — rows 3 through 7, roughly `8^5 = 32,768` leaf boards (about
+37,000 nodes) that would otherwise have been generated and thrown away. This is why N-Queens runs instantly at `n = 8` despite an `O(n!)` label:
 the label describes the tree you *could* walk, and pruning is what stops you
 from walking it.
 
@@ -646,8 +645,9 @@ repeated swap values).
 make the search dramatically faster than checking the whole board at each
 step?**
 Without the sets, validating "can I place a queen at `(row, col)`?" requires
-scanning all previously-placed queens — `O(row)` per check, `O(n)` per row,
-`O(n^2)` total per leaf, `O(n^2 * n!)` overall. With the sets, each check is
+scanning all previously-placed queens — `O(row)` per check instead of `O(1)`,
+which multiplies the whole search by a factor of `n` (`O(n * n!)` rather than
+`O(n!)` over the same tree). With the sets, each check is
 `O(1)` (set membership), AND — more importantly — **invalid branches are
 pruned immediately** rather than being fully built and then rejected. The
 `row - col` and `row + col` invariants are the standard trick for identifying
