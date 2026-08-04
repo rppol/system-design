@@ -80,7 +80,11 @@ CuPy mirrors the NumPy (and a large slice of SciPy) API almost call-for-call, ex
 
 ### 4.2 Numba CUDA — Writing Kernels in Python
 
-Numba's `@cuda.jit` decorator JIT-compiles an ordinary Python function into a real CUDA kernel: the function body is lowered through LLVM's NVVM backend straight to PTX, the same target `nvcc` produces from CUDA C++. Inside a `@cuda.jit` kernel you write `cuda.grid()`/`cuda.threadIdx`/`cuda.blockIdx` for indexing and `cuda.shared.array()`/`cuda.syncthreads()` for on-chip staging — the identical memory-hierarchy mental model from `../cuda_memory_model_and_hierarchy/`, expressed in Python syntax rather than C++. Numba does not abstract away occupancy, coalescing, or bank conflicts; it only changes the authoring language.
+Numba's `@cuda.jit` decorator JIT-compiles an ordinary Python function into a real CUDA kernel: the function body is lowered through LLVM's NVVM backend straight to PTX, the same target `nvcc` produces from CUDA C++.
+
+The CUDA target no longer lives inside Numba core. It is developed and shipped by NVIDIA as a **separate `numba-cuda` package**, which supplies the `numba.cuda` module — so a GPU environment needs `pip install numba-cuda` (with a `[cu12]` or `[cu13]` extra to pull the matching CUDA runtime wheels) alongside `numba`. Nothing about the source changes: `from numba import cuda` and every decorator and API below are identical. The practical consequence is a packaging one — a `requirements.txt` that lists only `numba` and expects `@cuda.jit` to work is broken, and a library whose CUDA target is load-bearing should depend on `numba-cuda` rather than `numba`.
+
+Inside a `@cuda.jit` kernel you write `cuda.grid()`/`cuda.threadIdx`/`cuda.blockIdx` for indexing and `cuda.shared.array()`/`cuda.syncthreads()` for on-chip staging — the identical memory-hierarchy mental model from `../cuda_memory_model_and_hierarchy/`, expressed in Python syntax rather than C++. Numba does not abstract away occupancy, coalescing, or bank conflicts; it only changes the authoring language.
 
 ### 4.3 PyCUDA — Low-Level Driver Access
 
@@ -338,9 +342,9 @@ timeline
     2012 : Numba @cuda.jit (LLVM/NVVM to PTX)
     2015 : CuPy released (drop-in NumPy on GPU)
     2019 : PyTorch cpp_extension (hand-written fused ops)
-    2022 : torch.compile / TorchInductor ships (PyTorch 2.0)
-    2023 : Triton becomes Inductor's default codegen target
+    2023 : torch.compile / TorchInductor ships (PyTorch 2.0) : Triton is Inductor's default GPU codegen target
     2024 : __dlpack__ dunder protocol widely adopted
+    2025 : Numba's CUDA target moves to NVIDIA's numba-cuda package
 ```
 
 Each milestone raises the escape-hatch bar rather than replacing what came before — PyCUDA and hand-written extensions are still in daily use in 2026, but `torch.compile`/Triton mean far fewer workloads ever need to reach them.
@@ -391,6 +395,8 @@ The `RawKernel` call site should look identical to a CUDA C++ `<<<blocks, thread
 ### 6.2 Numba CUDA — Kernels Written in Python, Lowered to PTX
 
 ```python
+# requires: pip install numba numba-cuda[cu13]
+# numba.cuda is supplied by the separate numba-cuda package; the import is unchanged.
 from numba import cuda
 import numpy as np
 
@@ -661,13 +667,13 @@ The protocol is symmetric by design: whichever framework calls `from_dlpack` on 
 
 ## 7. Real-World Examples
 
-- **RAPIDS (cuDF, cuML)** — NVIDIA's GPU dataframe and ML-algorithm libraries are built on CuPy-compatible memory semantics; a `cudf.DataFrame` column can be handed to CuPy or PyTorch via `__cuda_array_interface__`/DLPack without a host round-trip.
+- **RAPIDS (cuDF, cuML)** — NVIDIA's GPU dataframe and ML-algorithm libraries are built on CuPy-compatible memory semantics; a `cudf.DataFrame` column can be handed to CuPy or PyTorch via `__cuda_array_interface__`/DLPack without a host round-trip. Both ship **zero-code-change accelerator modes** that make this stack reachable without importing a GPU library at all: `%load_ext cudf.pandas` (or `python -m cudf.pandas script.py`) proxies ordinary `pandas` calls onto cuDF and silently falls back to CPU pandas for anything unsupported, and `cuml.accel` does the same for scikit-learn. They are the clearest example of the module's thesis — the Python layer decides *which* kernels run, and here it does so without the user writing any GPU code.
 - **NVIDIA Apex / DeepSpeed fused optimizers** — `FusedAdam` and similar fused optimizer kernels are exactly the PyTorch-extension pattern in §6.4: a single hand-written CUDA kernel replaces what would otherwise be a dozen separate elementwise PyTorch ops (and a dozen kernel launches) per parameter update.
 - **FlashAttention's Python bindings** — the published FlashAttention kernel is written in CUDA C++/CUTLASS and exposed to PyTorch through the exact `pybind11` + `torch.utils.cpp_extension` mechanism shown in §6.4, because fusing softmax into the matmul is not expressible as composed ATen ops.
 - **PyTorch 2.x training loops with `torch.compile`** — enabled by default in many training recipes; Inductor's auto-generated Triton kernels routinely fuse normalization, activation, and residual-add chains that used to require dedicated fused kernels.
 - **Numba in scientific computing** — astrophysics N-body codes and Anaconda-accelerated pandas UDFs use `@cuda.jit` to GPU-accelerate custom per-element or per-row logic without leaving the Python/NumPy ecosystem.
 - **PyCUDA in legacy HPC and research codebases** — pre-dating CuPy, still found in academic simulation code that needs explicit CUDA context/stream control PyCUDA exposes directly.
-- **`cuda-python` / driver-level Python bindings** — NVIDIA's own low-level Python bindings for the driver and runtime APIs occupy the same niche as PyCUDA for teams that want an NVIDIA-maintained package rather than a community one, without giving up driver-level control.
+- **`cuda-python` / driver-level Python bindings** — NVIDIA's own low-level Python bindings occupy the same niche as PyCUDA for teams that want an NVIDIA-maintained package rather than a community one, without giving up driver-level control. `cuda-python` is a metapackage over `cuda.bindings` (thin one-to-one wrappers around the driver, runtime, and NVRTC APIs), `cuda.core` (a Pythonic layer over them), and `cuda.pathfinder` (locates the CUDA components at runtime). `numba-cuda` is itself built on these, which is how the Python stack now reaches the driver without a system CUDA install.
 
 ---
 
@@ -779,6 +785,7 @@ The vectorized version replaces 100,000 launches with one (or a small constant n
 - **Assuming a CuPy/Numba call is asynchronous-safe without a `synchronize()` when timing it.** CUDA kernel launches are asynchronous from the host's perspective; a naive `time.perf_counter()` around an un-synchronized call measures launch dispatch time, not actual kernel completion.
 - **Writing a Numba `@cuda.jit` kernel and expecting the compiler to auto-tile shared memory.** Numba does not add tiling, coalescing, or occupancy tuning for you — every optimization from `../memory_coalescing_and_access_patterns/` and `../shared_memory_and_bank_conflicts/` still has to be written by hand.
 - **Reaching for a custom PyTorch extension before checking `torch.compile`.** For ordinary pointwise/reduction fusion, Inductor frequently generates a kernel competitive with a hand-written one — check `TORCH_LOGS="output_code"` before spending engineering time on C++.
+- **Pinning `numba` in a requirements file and expecting `@cuda.jit` to work.** The CUDA target ships in the separate NVIDIA-maintained `numba-cuda` package now, so an environment built from `numba` alone has no working `numba.cuda`. Depend on `numba-cuda` (with the `[cu12]`/`[cu13]` extra matching your toolkit) in anything whose GPU path is load-bearing — the import line stays `from numba import cuda`, which is exactly why the omission is easy to miss in review.
 - **Forgetting that DLPack sharing requires the same device.** A CuPy array on GPU 0 cannot zero-copy-share with a PyTorch tensor expected on GPU 1 — cross-device sharing still requires an explicit copy; DLPack only removes the copy that was never necessary in the first place.
 
 ---
@@ -788,7 +795,7 @@ The vectorized version replaces 100,000 launches with one (or a small constant n
 | Tool | Role in the Python GPU stack |
 |------|-------------------------------|
 | **CuPy** | Drop-in NumPy/SciPy-API array library; every op dispatches a CUDA kernel (own generated kernels, cuBLAS, cuFFT, cuSPARSE, cuRAND under the hood) |
-| **Numba** (`numba.cuda`) | JIT-compiles Python functions decorated `@cuda.jit` through LLVM/NVVM straight to PTX; manual memory-hierarchy control |
+| **`numba-cuda`** (provides `numba.cuda`) | NVIDIA-maintained package supplying Numba's CUDA target; JIT-compiles Python functions decorated `@cuda.jit` through LLVM/NVVM straight to PTX; manual memory-hierarchy control. Installed separately from `numba` (`pip install numba-cuda[cu13]`) |
 | **PyCUDA** | Thin Python bindings onto the CUDA driver API; `SourceModule` compiles inline CUDA C via NVRTC; explicit context/memory management |
 | **`torch.utils.cpp_extension`** | JIT (`load()`) or ahead-of-time (`CUDAExtension`/`setup.py`) compilation of hand-written `.cu`/`.cpp` sources into a PyTorch-callable, `pybind11`-bound op |
 | **TorchInductor** (`torch.compile`) | PyTorch 2.x's default GPU compiler backend; traces the FX graph and emits fused Triton (or C++) kernels automatically |

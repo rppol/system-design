@@ -8,7 +8,7 @@ responsible for every `threadIdx`, every shared-memory buffer, every
 `__syncthreads()`. That control is exactly what makes CUDA C++ slow to iterate
 in: a hand-tuned tiled GEMM is 300+ lines, and re-tuning it for a new GPU
 generation or a new problem shape means re-deriving the tiling, the shared-memory
-layout, and the occupancy math by hand. **Triton** (OpenAI, 2021) is a
+layout, and the occupancy math by hand. **Triton** is a
 Python-embedded domain-specific language (DSL) that raises the abstraction level
 from *per-thread* to **per-block**: the programmer writes a kernel that operates
 on a tile of data at a time, and the Triton compiler — not the programmer —
@@ -30,6 +30,16 @@ shared-memory, and occupancy mental models from
 [shared_memory_and_bank_conflicts](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md), and
 [occupancy_and_launch_configuration](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) —
 Triton does not remove those concerns, it moves who is responsible for them.
+
+**Two unrelated products are called Triton — this module means the language.**
+The **Triton language and compiler** (`pip install triton`, `import triton`,
+`@triton.jit`, developed in the open at `triton-lang/triton`, originally from
+OpenAI and now maintained by a cross-vendor group including Meta, NVIDIA, AMD
+and Intel) is the subject of this module. **NVIDIA Triton Inference Server** is
+a completely different product — a model-serving daemon that loads TensorRT /
+ONNX / PyTorch models and answers HTTP/gRPC inference requests. They share
+nothing but the name: no code, no company, no layer of the stack. Every
+occurrence of "Triton" below is the language.
 
 ---
 
@@ -123,6 +133,12 @@ have most of what CUDA-C++ tiling gives you, at 5-10× less code.
   → PTX → `ptxas` → SASS — the same final instruction set a CUDA C++ kernel
   produces; Triton is a different front end to the same NVIDIA backend, not a
   separate execution model.
+- **Triton's NVIDIA floor is compute capability 8.0 (Ampere).** Volta and
+  Turing are not supported targets — a `tl.dot` lowers to Ampere-or-later
+  `mma` instructions, and there is no fallback path to older Tensor Cores.
+  This is a narrower hardware range than CUDA C++ itself covers, and it is the
+  first thing to check before proposing Triton for a fleet that still contains
+  T4s.
 
 ### Where the automation boundary sits
 
@@ -517,6 +533,13 @@ import triton
 import triton.language as tl
 
 
+# Tensor descriptors need a scratch allocator registered on the host side --
+# on TMA-capable hardware the descriptor itself lives in global memory.
+triton.set_allocator(
+    lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8)
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=3),
@@ -536,30 +559,32 @@ def matmul_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Block pointers describe a 2D tile view directly on the underlying tensor —
-    # the compiler uses this to emit vectorized, coalesced, boundary-aware loads.
-    a_block_ptr = tl.make_block_ptr(
-        base=a_ptr, shape=(M, K), strides=(stride_am, stride_ak),
-        offsets=(pid_m * BLOCK_M, 0), block_shape=(BLOCK_M, BLOCK_K), order=(1, 0),
+    # Tensor descriptors describe a 2D tile view directly on the underlying
+    # tensor. On Hopper and Blackwell they lower to hardware TMA copies; on
+    # Ampere the compiler emits ordinary vectorized, coalesced loads from the
+    # same description. Out-of-range lanes are padded (default: zero), so the
+    # descriptor carries the boundary handling that hand-rolled offsets need a
+    # separate mask for.
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[stride_am, stride_ak],
+        block_shape=[BLOCK_M, BLOCK_K],
     )
-    b_block_ptr = tl.make_block_ptr(
-        base=b_ptr, shape=(K, N), strides=(stride_bk, stride_bn),
-        offsets=(0, pid_n * BLOCK_N), block_shape=(BLOCK_K, BLOCK_N), order=(1, 0),
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[stride_bk, stride_bn],
+        block_shape=[BLOCK_K, BLOCK_N],
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[stride_cm, stride_cn],
+        block_shape=[BLOCK_M, BLOCK_N],
     )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_K):
-        a = tl.load(a_block_ptr, boundary_check=(0, 1), padding_option="zero")
-        b = tl.load(b_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        a = a_desc.load([pid_m * BLOCK_M, k])              # tile offsets, not pointer arithmetic
+        b = b_desc.load([k, pid_n * BLOCK_N])
         acc += tl.dot(a, b)                                # compiler dispatches to Tensor Cores
-        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
 
-    c_block_ptr = tl.make_block_ptr(
-        base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N), block_shape=(BLOCK_M, BLOCK_N), order=(1, 0),
-    )
-    tl.store(c_block_ptr, acc.to(tl.float16), boundary_check=(0, 1))
+    c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -610,11 +635,11 @@ __global__ void matmul_kernel(const half* A, const half* B, half* C,
 
 The CUDA version's `__shared__` arrays, the two `__syncthreads()` barriers per
 K-step, and the `threadIdx.y`/`threadIdx.x` coordinate math are exactly what
-`tl.make_block_ptr` + `tl.dot` + `triton.autotune` replace — the Triton compiler
+`tl.make_tensor_descriptor` + `tl.dot` + `triton.autotune` replace — the Triton compiler
 inserts equivalent shared-memory staging and double-buffered pipelining
 (`num_stages=3` above means 3 K-tiles are in flight, hiding the load latency the
 CUDA version's barriers make visible), and dispatches `tl.dot` to `mma.sync`
-Tensor-Core instructions on Volta+ automatically (see
+Tensor-Core instructions automatically (see
 [tensor_cores_and_mixed_precision](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) for
 what those instructions do underneath).
 
@@ -770,9 +795,10 @@ reporting 70 ms for an operation that steady-states at 0.708 ms — off by a fac
   `torch.compile`'d model that shows a speedup over eager mode is, underneath,
   running autogenerated Triton kernels for the fused pointwise/reduction ops.
   See [python_gpu_ecosystem](../python_gpu_ecosystem/python_gpu_ecosystem.md) for the Inductor pipeline.
-- **FlashAttention (Triton port) / `flash-attn` Triton backends** — the official
-  `triton.ops.attention` implementation and many downstream forks (used inside
-  vLLM, SGLang, and Unsloth's fine-tuning kernels) implement the tiled online-
+- **FlashAttention (Triton port) / `flash-attn` Triton backends** — the fused-
+  attention tutorial shipped in the Triton repository and the many downstream
+  forks derived from it (used inside vLLM, SGLang, and Unsloth's fine-tuning
+  kernels) implement the tiled online-
   softmax FlashAttention algorithm in Triton rather than CUDA C++/CUTLASS,
   trading a small amount of peak throughput for a kernel any PyTorch engineer
   can read, modify, and re-tune for a new head dimension in under an hour. See
@@ -805,7 +831,7 @@ reporting 70 ms for an operation that steady-states at 0.708 ms — off by a fac
 | Iteration speed (re-tune for new shape/GPU) | Minutes (`triton.autotune` re-search) | Hours-days (manual re-derivation) | Hours (re-instantiate templates, re-benchmark) |
 | Peak-perf ceiling vs. vendor library | ~80-95% of cuBLAS/CUTLASS on common shapes | ~90-98% achievable with expert tuning | ~95-100% (same codebase NVIDIA ships cuBLAS from) |
 | Best at | Fused pointwise/attention ops, fast iteration, PyTorch-native workflows | Exotic control flow, novel algorithms no DSL models well, learning the hardware | Peak dense/batched GEMM, production Tensor-Core kernels at scale |
-| Portability | NVIDIA GPUs (AMD backend exists, less mature); Python-only source | NVIDIA-only (HIP port needed for AMD — see [gpu_portability_hip_sycl_and_beyond](../gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md)) | NVIDIA-only; CUTLASS 3.x targets Hopper/Blackwell-specific features directly |
+| Portability | In-tree NVIDIA, AMD/HIP and Intel backends, all developed in the same repo; NVIDIA remains the most-exercised. Python-only source | NVIDIA-only (HIP port needed for AMD — see [gpu_portability_hip_sycl_and_beyond](../gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md)) | NVIDIA-only; CUTLASS 3.x targets Hopper/Blackwell-specific features directly |
 | Debuggability | `TRITON_INTERPRET=1` CPU interpreter mode; less mature than `cuda-gdb` | `cuda-gdb`, `compute-sanitizer` — most mature toolchain | Inherits CUDA C++ toolchain (it *is* C++) |
 
 The productivity and peak-perf-ceiling rows are the crux of the whole module:
@@ -859,10 +885,16 @@ control with the slowest iteration loop of all.
   exact shape — call the library; don't re-derive what's already
   hand-tuned to 95-100% of peak.
 - You need instruction-level control not exposed by the Triton language
-  (specific `mma` instruction variants, warp-specialized producer/consumer
-  pipelines, inline PTX, cooperative-groups-level grid synchronization) —
+  (specific `mma` instruction variants, hand-placed tile layouts,
+  warp-specialized producer/consumer pipelines, inline PTX,
+  cooperative-groups-level grid synchronization) —
   see [dynamic_parallelism_and_advanced_kernels](../dynamic_parallelism_and_advanced_kernels/dynamic_parallelism_and_advanced_kernels.md)
-  for the kind of control Triton does not expose.
+  for the kind of control Triton does not expose. Note the intermediate step
+  before CUDA C++: **Gluon**, a lower-level language on the same compiler
+  stack that ships in the Triton repository, exposes layouts, shared-memory
+  allocation and warp specialization explicitly while keeping the Python
+  authoring loop — reach for it when the missing control is layout or
+  pipelining rather than a specific PTX instruction.
 - You are shipping the single hottest, highest-request-volume kernel in a
   latency- or cost-critical production path, where the last 5-15% of
   throughput translates directly into GPU-fleet dollars — that gap is worth a
@@ -993,11 +1025,13 @@ multi-day CUDA C++ investment.
    hundreds of milliseconds. Benchmark harnesses that measure only the first
    call will report a misleadingly slow number; always warm up (call once per
    distinct shape) before timing.
-4. **Assuming Triton kernels are portable across GPU vendors by default.**
-   Triton's NVIDIA backend is the mature, production path; an AMD ROCm backend
-   exists but has historically lagged in feature parity and performance — do
-   not assume a kernel tuned and validated on NVIDIA hardware performs
-   comparably on AMD without separate validation. See
+4. **Assuming Triton kernels are performance-portable across GPU vendors.**
+   Correctness portability is real — the AMD/HIP and Intel backends are
+   in-tree and land fixes in the same releases as the NVIDIA one — but a
+   config list autotuned on an H100 encodes NVIDIA tile shapes, warp counts and
+   pipeline depths, and those numbers do not transfer. Re-run the autotuner and
+   re-validate on each vendor's hardware; treat the tuned `Config` set as
+   per-target data, not source. See
    [gpu_portability_hip_sycl_and_beyond](../gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md).
 5. **Forgetting that `tl.constexpr` parameters must be compile-time constants.**
    `BLOCK_SIZE`, `BLOCK_M/N/K`, and similar tile-shape parameters are
@@ -1018,12 +1052,13 @@ multi-day CUDA C++ investment.
 
 | Tool | Language / Model | Primary Use | Notes |
 |------|-------------------|-------------|-------|
-| **Triton** | Python DSL, block-level SPMD | Fused custom kernels, `torch.compile` backend | This module's focus; NVIDIA-primary, AMD backend maturing |
+| **Triton** (the language, `triton-lang/triton`) | Python DSL, block-level SPMD | Fused custom kernels, `torch.compile` backend | This module's focus. NVIDIA compute capability 8.0+; in-tree AMD/HIP and Intel backends. Distinct from NVIDIA Triton Inference Server, which is a model-serving daemon |
+| **Gluon** | Python, same compiler stack as Triton, explicit layouts | Expert kernels needing direct control over tile layouts, shared memory and warp specialization | Ships inside the Triton repo as a lower-level sibling language — CUTLASS-grade control without leaving Python, at the cost of Triton's automation |
 | **Numba CUDA** | Python, thread-level (mirrors CUDA C++) | Python-native kernels with full manual control | See [python_gpu_ecosystem](../python_gpu_ecosystem/python_gpu_ecosystem.md) — no block-level abstraction |
 | **CUTLASS** | C++ templates | Peak dense/batched GEMM & conv, custom epilogues | See [cuda_math_and_dnn_libraries](../cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md); same codebase NVIDIA builds cuBLAS from |
 | **Mojo** | New language, Python-superset syntax | Unified high-level + low-level GPU/CPU programming | MLIR-based; younger ecosystem, fewer production deployments to date |
 | **JAX / Pallas** | Python DSL, block-level (Triton-like) | Fused kernels inside JAX programs, TPU + GPU targets | Closest philosophical peer to Triton; JAX-native instead of PyTorch-native |
-| **ThunderKittens / CUTE (CUTLASS 3.x)** | C++ template libraries | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
+| **ThunderKittens / CuTe (CUTLASS 3.x and 4.x)** | C++ template libraries (CuTe also has a Python DSL in CUTLASS 4.x) | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
 | **`compute-sanitizer` / `cuda-gdb`** | N/A (CUDA C++ toolchain) | Race/memcheck, step debugging | Applies to Triton's *generated* SASS only indirectly — Triton's own error surface is less mature |
 | **Nsight Compute** | N/A (profiler) | Occupancy, memory-throughput, Tensor-Core utilization for ANY of the above | See [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the profiler doesn't care which DSL produced the SASS |
 
@@ -1058,8 +1093,8 @@ A: Roughly 80-95% of hand-tuned CUDA C++/CUTLASS throughput on common shapes, in
 **Q: Why does `torch.compile` matter to someone who has never written a Triton kernel by hand?**
 A: Because TorchInductor, `torch.compile`'s backend, generates fused Triton kernels — not CUDA C++ — for the graphs it captures. Every speedup a PyTorch user sees from `torch.compile` on eligible ops is, underneath, an autogenerated Triton kernel doing the fusion, so understanding Triton's cost model (fewer HBM round-trips, autotuned tile shapes) explains why `torch.compile` helps on some graphs and not others.
 
-**Q: What is a Triton block pointer (`tl.make_block_ptr`), and why use it over manual offset/mask arithmetic?**
-A: A block pointer describes a strided tile view directly on a tensor's memory — shape, strides, offset, block shape — that the compiler uses to emit vectorized, boundary-aware loads and stores via `boundary_check`. It is functionally equivalent to hand-rolled `offsets`/`mask` arithmetic for simple cases but scales more cleanly to multi-dimensional tiled kernels like matmul, where manually deriving the 2D offset and mask expressions is easy to get subtly wrong.
+**Q: What is a Triton tensor descriptor (`tl.make_tensor_descriptor`), and why use it over manual offset/mask arithmetic?**
+A: A tensor descriptor describes a strided tile view directly on a tensor's memory — base pointer, shape, strides, block shape — and you then read and write whole tiles by offset with `desc.load([m, n])` / `desc.store([m, n], value)`, with out-of-range lanes padded automatically instead of masked by hand. It is functionally equivalent to hand-rolled `offsets`/`mask` arithmetic for simple cases but scales more cleanly to multi-dimensional tiled kernels like matmul, and on Hopper and Blackwell it lowers to the hardware TMA copy engine rather than ordinary loads. It requires a host-side scratch allocator (`triton.set_allocator`). The older `tl.make_block_ptr` form, which you will still meet in existing kernels, expresses the same idea with `tl.advance`/`boundary_check` and now emits a deprecation warning.
 
 **Q: When would you deliberately choose hand-written CUDA C++ over Triton for a new kernel?**
 A: Choose CUDA C++ when the kernel needs instruction-level control Triton does not expose, or is the single hottest production kernel where the last few percent of throughput is worth dedicated engineering time. Concretely: specific `mma` instruction variants, warp-specialized pipelines, inline PTX, grid-level cooperative synchronization — or an operation already solved at 95-100% of peak by cuBLAS/cuDNN/CUTLASS, where there is nothing left to fuse.
@@ -1084,7 +1119,7 @@ A: Mojo aims to unify high-level tensor code and low-level thread/SIMD control i
 2. **Always declare a `triton.autotune` config list for any kernel with a shape-dependent performance profile** (matmul, attention, anything with a K-reduction dimension) — never ship a single hardcoded tile shape as the final version. Include at least one small config (fast compile/fallback) and one large config (peak throughput).
 3. **Key the autotune cache on the actual shape-driving arguments** (`key=["M", "N", "K"]` or equivalent), and warm up once per distinct shape before benchmarking — the first call per shape pays the full search cost.
 4. **Benchmark against the real baseline**, not the easiest one to beat — compare against the vendor library (cuBLAS/cuDNN/FlashAttention-CUTLASS) or a properly tuned CUDA C++ kernel, not naive PyTorch-eager.
-5. **Prefer `tl.make_block_ptr`/block pointers for multi-dimensional tiled kernels** (matmul, attention) over hand-rolled offset/mask arithmetic — it reduces the surface area for boundary-condition bugs as dimensionality grows.
+5. **Prefer `tl.make_tensor_descriptor` for multi-dimensional tiled kernels** (matmul, attention) over hand-rolled offset/mask arithmetic — it reduces the surface area for boundary-condition bugs as dimensionality grows, and it is what unlocks the TMA copy engine on Hopper and Blackwell.
 6. **Reach for Triton first for any new fusion idea, and only "graduate" to CUTLASS/CUDA C++ once profiling shows the gap is worth the investment** — validate the algorithm cheaply before paying for hand-tuned control.
 7. **Profile Triton kernels with Nsight Compute exactly as you would a CUDA C++ kernel** — occupancy, achieved memory bandwidth, and Tensor-Core utilization metrics apply identically, since both compile to the same SASS. See [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md).
 8. **Do not assume NVIDIA-tuned Triton kernels are performance-portable to AMD** without separate validation on the ROCm backend.

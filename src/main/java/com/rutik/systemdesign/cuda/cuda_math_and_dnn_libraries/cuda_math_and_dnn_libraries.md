@@ -338,57 +338,79 @@ This is the library ecosystem's own answer to "fusion is the only lever" — cuB
 
 ### cuDNN: a Convolution Call, With Algorithm Autotuning
 
-cuDNN's convolution API separates "describe the problem" from "pick and run an algorithm" — the same convolution shape can be executed by several different underlying algorithms (implicit GEMM, implicit precomputed GEMM, FFT-based, Winograd), and cuDNN either picks one via a heuristic or benchmarks all of them and caches the winner:
+cuDNN's API separates "describe the problem" from "pick and run an execution plan" — the same convolution shape can be executed by several different underlying engines (implicit GEMM, implicit precomputed GEMM, FFT-based, Winograd), and cuDNN either picks one via a heuristic or builds every candidate and times them so you can cache the winner. You describe the problem as a **graph** of tensors and operations, which is also what lets cuDNN fuse a convolution with its epilogue instead of only ever running one op:
 
 ```cpp
-#include <cudnn.h>
+#include <cudnn_frontend.h>
+namespace fe = cudnn_frontend;
 
-void run_convolution(cudnnHandle_t handle,
-                      cudnnTensorDescriptor_t xDesc, const void* d_x,
-                      cudnnFilterDescriptor_t wDesc, const void* d_w,
-                      cudnnConvolutionDescriptor_t convDesc,
-                      cudnnTensorDescriptor_t yDesc, void* d_y,
-                      void* d_workspace, size_t workspaceBytes)
+// Describe conv-fprop as a graph: FP16 tensors, FP32 accumulation.
+fe::graph::Graph build_conv_graph(cudnnHandle_t handle,
+                                  int64_t n, int64_t c, int64_t h, int64_t w,
+                                  int64_t k, int64_t r, int64_t s)
 {
-    // Ask cuDNN which algorithm it recommends for this exact shape --
-    // this is the DNN-primitive analogue of cuBLAS's kernel-selection
-    // heuristic, just scoped to convolution instead of dense GEMM.
-    cudnnConvolutionFwdAlgoPerf_t perfResults[8];
-    int returnedAlgoCount = 0;
-    cudnnFindConvolutionForwardAlgorithm(
-        handle, xDesc, wDesc, convDesc, yDesc,
-        8, &returnedAlgoCount, perfResults);
+    fe::graph::Graph graph;
+    graph.set_io_data_type(fe::DataType_t::HALF)
+         .set_compute_data_type(fe::DataType_t::FLOAT);
 
-    cudnnConvolutionFwdAlgo_t bestAlgo = perfResults[0].algo;
+    auto X = graph.tensor(fe::graph::Tensor_attributes()
+                              .set_name("image")
+                              .set_dim({n, c, h, w})
+                              .set_stride({c * h * w, 1, c * w, c}));   // NHWC
+    auto W = graph.tensor(fe::graph::Tensor_attributes()
+                              .set_name("filter")
+                              .set_dim({k, c, r, s})
+                              .set_stride({c * r * s, 1, c * s, c}));
 
-    const float alpha = 1.0f, beta = 0.0f;
-    cudnnConvolutionForward(handle,
-                             &alpha, xDesc, d_x, wDesc, d_w, convDesc,
-                             bestAlgo, d_workspace, workspaceBytes,
-                             &beta, yDesc, d_y);
+    auto conv_opts = fe::graph::Conv_fprop_attributes()
+                         .set_padding({0, 0}).set_stride({1, 1}).set_dilation({1, 1});
+    auto Y = graph.conv_fprop(X, W, conv_opts);
+    Y->set_output(true);
+
+    graph.validate();
+    graph.build_operation_graph(handle);
+
+    // HeurMode_t::A is the cheap heuristic: cuDNN ranks candidate engines from
+    // its own tuning tables without running anything. This is the DNN-primitive
+    // analogue of cuBLAS's kernel-selection heuristic.
+    graph.create_execution_plans({fe::HeurMode_t::A});
+    graph.check_support();
+    graph.build_plans();                       // builds the top-ranked plan only
+    return graph;
 }
 ```
 
-`cudnnFindConvolutionForwardAlgorithm` is the explicit-search API — it actually times every candidate algorithm on your real input and picks the fastest, which is the mechanism `torch.backends.cudnn.benchmark = True` triggers underneath a PyTorch `nn.Conv2d` call. The cheaper alternative, `cudnnGetConvolutionForwardAlgorithm_v7`, returns a heuristic recommendation without running anything — faster to call, occasionally slower at runtime than the benchmarked winner.
+Executing it is a variant pack — a map from each tensor's uid to its device pointer — plus a workspace:
+
+```cpp
+std::unordered_map<int64_t, void*> variant_pack = {
+    {X->get_uid(), d_x}, {W->get_uid(), d_w}, {Y->get_uid(), d_y}};
+
+int64_t workspace_size = 0;
+graph.get_workspace_size(workspace_size);
+graph.execute(handle, variant_pack, d_workspace);
+```
+
+`build_plans()` with the default policy compiles only the heuristic's first choice. The explicit-search path is `build_plans(fe::BuildPlanPolicy_t::ALL)`, which compiles *every* candidate plan so you can time them yourself with `execute_plan_at_index(handle, variant_pack, workspace, i)` and cache the winning index — this is the mechanism `torch.backends.cudnn.benchmark = True` triggers underneath a PyTorch `nn.Conv2d` call. The heuristic path is far cheaper to set up and occasionally slower at runtime than the benchmarked winner.
 
 ```mermaid
 sequenceDiagram
     participant App as App / PyTorch
-    participant cuDNN as cuDNN handle
+    participant cuDNN as cuDNN graph
     participant Gemm as Implicit GEMM
     participant Fft as FFT-based
     participant Wino as Winograd
 
-    App->>cuDNN: Find(shape, dtype)
-    cuDNN->>Gemm: benchmark candidate
+    App->>cuDNN: build_plans(ALL) for this shape
+    cuDNN->>Gemm: time plan
     Gemm-->>cuDNN: 0.41 ms
-    cuDNN->>Fft: benchmark candidate
+    cuDNN->>Fft: time plan
     Fft-->>cuDNN: 0.38 ms
-    cuDNN->>Wino: benchmark candidate
+    cuDNN->>Wino: time plan
     Wino-->>cuDNN: 0.52 ms
-    cuDNN-->>App: cache winner: FFT-based
-    App->>cuDNN: ConvolutionForward()
-    Note over App,cuDNN: Reuses the cached choice -- no re-search
+    cuDNN-->>App: winner index -- FFT-based
+    App->>cuDNN: graph.execute(variant_pack)
+    Note over App,cuDNN: Reuses the cached plan index -- no re-search
 ```
 
 This is why the first call on a new shape is measurably slower than every call after it — the benchmarked winner gets cached, and only the first iteration pays the search cost across all candidate algorithms.
@@ -469,6 +491,8 @@ void run_cutlass_gemm(int M, int N, int K,
 ```
 
 Note CUTLASS accepts **row-major** layouts directly as a template parameter (`cutlass::layout::RowMajor`) — this is the crucial difference from raw cuBLAS, which is hard-wired to column-major and forces you to reason about the transpose manually (Section 5's gotcha). CUTLASS reaches *near*-cuBLAS performance, not always identical, because cuBLAS's closed-source heuristics have been tuned against a broader internal benchmark set across more shape/architecture combinations than any one CUTLASS instantiation typically covers — but for a fused or non-standard op cuBLAS's fixed API can't express, CUTLASS is the standard way to get 90-95%-of-peak performance without hand-writing a tiled kernel from zero.
+
+The `device::Gemm` form above is the original, still-supported 2.x entry point and the clearest way to see what a CUTLASS instantiation *is*. New kernels — and everything targeting Hopper `Sm90` or Blackwell `Sm100`/`Sm120` — are written against the 3.x interface instead: you build a mainloop and an epilogue with `CollectiveBuilder`, compose them into a `kernel::GemmUniversal`, and wrap that in `device::GemmUniversalAdapter`, which is the common device-level entry point for both generations. The tile and pipeline descriptions there are expressed in **CuTe** layout algebra rather than the 2.x fixed template parameters. CUTLASS 4.x additionally ships the **CuTe DSL**, a Python-native front end for authoring the same kernels without a C++ template instantiation at all.
 
 ```mermaid
 xychart-beta
@@ -655,7 +679,7 @@ No matmul or convolution loop lives anywhere between the Python call and the lib
 ## 7. Real-World Examples
 
 - **PyTorch's ATen backend** dispatches `torch.matmul`/`torch.mm`/`torch.addmm` to cuBLAS or cuBLASLt depending on shape and dtype, and `nn.Conv2d`/`nn.LSTM`/`nn.MultiheadAttention` to cuDNN — the vast majority of a training step's GPU time is spent inside these two libraries, not in any PyTorch-authored kernel.
-- **NVIDIA's FasterTransformer and TensorRT-LLM** build their fused transformer-layer kernels (fused attention, fused GEMM+bias+activation) directly on CUTLASS templates, choosing it specifically because cuBLAS's fixed API can't express the custom epilogues these inference-optimized kernels need.
+- **NVIDIA's TensorRT-LLM**, and the open-source serving engines built alongside it (vLLM, SGLang), build their fused transformer-layer kernels (fused attention, fused GEMM+bias+activation, low-precision quantized matmul) directly on CUTLASS templates, choosing it specifically because cuBLAS's fixed API can't express the custom epilogues these inference-optimized kernels need.
 - **FlashAttention** is the canonical "beat the library via fusion" case study: naive attention is three separate near-optimal library calls (QK^T matmul, softmax, attention-weights times V matmul) that round-trip the full attention-score matrix through HBM twice; FlashAttention fuses all three into one kernel using online softmax, trading a library call's near-peak-per-op performance for eliminating the HBM round-trips entirely.
 - **RAPIDS cuDF** (GPU dataframes) builds its groupby/sort/join operations on Thrust and CUB primitives rather than hand-written kernels for every operator, because the algorithmic building blocks (radix sort, segmented reduce) are exactly what Thrust/CUB already provide.
 - **JAX/XLA** compiles `jnp.dot`/`jax.lax.conv` down to the same cuBLAS/cuDNN calls via XLA's CUDA backend — the framework differs, but the library floor is identical to PyTorch's.
@@ -721,7 +745,7 @@ The decision collapses to two questions in sequence: does a fixed-API library al
 
 **Reach for CUTLASS when:**
 - cuBLAS/cuDNN's fixed API cannot express the op you need (a custom epilogue, an unusual quantization scheme, a non-standard data layout) but you still want near-library performance instead of a from-scratch kernel.
-- You are building a reusable, source-level-customizable GEMM/conv component for a framework or inference engine (this is exactly why FasterTransformer/TensorRT-LLM chose it).
+- You are building a reusable, source-level-customizable GEMM/conv component for a framework or inference engine (this is exactly why TensorRT-LLM, vLLM and SGLang chose it).
 
 **Write a fully custom kernel only when:**
 - You can fuse two or more operations that would otherwise round-trip an intermediate tensor through HBM, and the fusion's bandwidth savings measurably outweigh the engineering cost — the FlashAttention case.
@@ -862,22 +886,23 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 |------|---------|-------|
 | `cuBLAS` (`cublas_v2.h`) | Dense BLAS L1/L2/L3 | Column-major; `cublasSgemm`/`cublasGemmEx`; link `-lcublas` |
 | `cuBLASLt` (`cublasLt.h`) | Fused/mixed-precision GEMM | Descriptor-based API; algorithm heuristic search (`cublasLtMatmulAlgoGetHeuristic`); link `-lcublasLt` |
-| `cuDNN` (`cudnn.h`) | Convolution, pooling, RNN, normalization, fused attention | Algorithm-search (`benchmark`) mode vs heuristic mode; link `-lcudnn` |
-| `CUTLASS` (header-only) | Template GEMM/convolution building blocks | No separate runtime library — pure templates, compiled into your binary; open source on GitHub |
+| `cuDNN` (`cudnn_frontend.h`) | Convolution, pooling, RNN, normalization, fused attention | Graph API (`cudnn_frontend::graph::Graph`) is the supported surface; the pre-cuDNN-8 imperative API is deprecated. Heuristic (`HeurMode_t::A`) vs `BuildPlanPolicy_t::ALL` plan search; link `-lcudnn` |
+| `CUTLASS` (header-only) | Template GEMM/convolution building blocks | No separate runtime library — pure templates, compiled into your binary; open source on GitHub. CUTLASS 4.x also ships **CuTe DSL**, a Python-native front end for authoring the same kernels |
 | `cuFFT` (`cufft.h`) | FFT (1D/2D/3D, real/complex) | Plan-based API (`cufftPlan*`, reused across calls); link `-lcufft` |
 | `cuSPARSE` (`cusparse.h`) | Sparse matrix operations | CSR/COO/blocked-sparse formats; link `-lcusparse` |
 | `cuRAND` (`curand.h`) | Device and host RNG | Host-API and device-API (per-thread generator) variants; link `-lcurand` |
-| `Thrust` (header-only, ships with CUDA Toolkit) | STL-like parallel algorithms | `thrust::device_vector`, iterator-based; no separate link step |
-| `CUB` (header-only, ships with CUDA Toolkit) | Block/warp cooperative primitives | `cub::BlockReduce`, `cub::WarpScan`, `cub::DeviceRadixSort`; underlies Thrust |
+| `Thrust` (header-only, ships with CUDA Toolkit inside CCCL) | STL-like parallel algorithms | `thrust::device_vector`, iterator-based; no separate link step |
+| `CUB` (header-only, ships with CUDA Toolkit inside CCCL) | Block/warp cooperative primitives | `cub::BlockReduce`, `cub::WarpScan`, `cub::DeviceRadixSort`; underlies Thrust |
+| `CCCL` (CUDA Core Compute Libraries) | The single repo/package Thrust, CUB and libcu++ are now developed and versioned in | Headers keep their old paths (`thrust/`, `cub/`, `cuda/std/`); the change is where they come from, not how you include them |
 | `nvJPEG` / `NPP` | Image/signal preprocessing | JPEG decode, resize, color-space conversion on-GPU; link `-lnvjpeg`/`-lnppi*` |
-| `CuPy` | Python array API over cuBLAS/cuDNN/cuFFT/cuSPARSE/cuRAND | `pip install cupy-cudaXXx`; NumPy/SciPy-shaped surface |
+| `CuPy` | Python array API over cuBLAS/cuDNN/cuFFT/cuSPARSE/cuRAND | `pip install cupy-cuda13x` (or `cupy-cuda12x`); NumPy/SciPy-shaped surface |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: Why does a hand-written naive GEMM kernel typically reach only around 5% of a GPU's peak FLOP/s?**
-Every thread re-reads its row/column of the input matrices directly from global memory with no data reuse and no shared-memory tiling, so the kernel is bound by global-memory bandwidth rather than compute. cuBLAS reaches a few percent of peak on the identical hardware and shape because it applies shared-memory tiling, register blocking, and Tensor-Core dispatch that a naive implementation has none of.
+Every thread re-reads its row/column of the input matrices directly from global memory with no data reuse and no shared-memory tiling, so the kernel is bound by global-memory bandwidth rather than compute. cuBLAS lands within a few percent of peak on the identical hardware and shape because it applies shared-memory tiling, register blocking, and Tensor-Core dispatch that a naive implementation has none of.
 
 **Q: Why did calling `cublasSgemm` on ordinary row-major C/NumPy/PyTorch data produce a transposed result with no error message?**
 cuBLAS assumes column-major storage for every input, while C/C++/NumPy/PyTorch default to row-major, and the exact same flat memory buffer represents a different logical matrix under each convention. There is no runtime check for this mismatch — it silently computes the transpose of the intended product, which is why the standard fix is to swap operand order and dimensions (`C^T = B^T @ A^T`) rather than physically transposing any data.
@@ -993,9 +1018,9 @@ nsys stats ffn_trace.nsys-rep --report cuda_gpu_kern_sum
 ```
 Kernel name                              Duration (avg)   Calls
 ----------------------------------------  ---------------  -----
-volta_sgemm_128x128_nn (Linear 1)          412 us            1
+ampere_sgemm_128x128_nn (Linear 1)         412 us            1
 gelu_elementwise_kernel                    186 us            1   <- extra launch + HBM round-trip
-volta_sgemm_128x128_nn (Linear 2)          409 us            1
+ampere_sgemm_128x128_nn (Linear 2)         409 us            1
 ```
 
 **BROKEN (first instinct -- hand-write a replacement GEMM):**

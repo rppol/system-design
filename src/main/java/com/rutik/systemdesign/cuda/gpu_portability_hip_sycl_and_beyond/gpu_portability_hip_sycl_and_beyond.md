@@ -66,7 +66,7 @@ each arrived later specifically to close a reach gap CUDA never had to solve.
 
 AMD's **ROCm** (Radeon Open Compute) platform is the CUDA-equivalent software stack; **HIP** (Heterogeneous-computing Interface for Portability) is its C++ programming model, engineered to mirror CUDA's runtime API almost function-for-function. `hipMalloc`/`hipMemcpy`/`hipFree` mirror `cudaMalloc`/`cudaMemcpy`/`cudaFree`; kernel launch uses `hipLaunchKernelGGL(kernel, gridDim, blockDim, sharedMem, stream, args...)` as the portable equivalent of CUDA's `<<<grid, block>>>` syntax (HIP also supports the triple-chevron syntax directly when compiled with `hipcc`). Because the mapping is so direct, **HIP source compiles on NVIDIA GPUs too** (HIP's NVIDIA backend is a thin wrapper over the CUDA runtime) — so a single HIP codebase can target both vendors from one source tree, which is the opposite direction of `hipify` (CUDA → HIP) but equally real.
 
-`hipify-perl` and `hipify-clang` mechanically translate CUDA source into HIP source: `cudaMalloc` becomes `hipMalloc`, `cudaMemcpyDeviceToHost` becomes `hipMemcpyDeviceToHost`, `<<<...>>>` launches are rewritten, and most straightforward CUDA C++ ports with a >90% automated translation rate for typical kernels — the remainder needs hand-fixing for CUDA-only library calls (cuBLAS/cuDNN calls need their rocBLAS/MIOpen equivalents) or intrinsics without a direct HIP mapping.
+`hipify-perl` and `hipify-clang` mechanically translate CUDA source into HIP source: `cudaMalloc` becomes `hipMalloc`, `cudaMemcpyDeviceToHost` becomes `hipMemcpyDeviceToHost`, `<<<...>>>` launches are rewritten (optionally into the `hipLaunchKernelGGL` macro form), and most straightforward CUDA C++ kernels port with a >90% automated translation rate — the remainder needs hand-fixing for CUDA-only library calls (cuBLAS/cuDNN calls need their rocBLAS/MIOpen equivalents) or intrinsics without a direct HIP mapping.
 
 **The idea behind it.** `manual_lines = total_lines x (1 - automation_rate)` says: "a translation rate is a claim about the *residue*, and the residue is what your engineers actually spend the quarter on."
 
@@ -105,7 +105,9 @@ That last contrast is the honest reading of any translation-rate claim. `hipify`
 
 ### 4.2 SYCL / oneAPI (Intel, open standard) — single-source, multi-backend C++
 
-**SYCL** is a Khronos-group open standard for single-source heterogeneous C++; **oneAPI** is Intel's concrete implementation and toolchain built on SYCL (via the DPC++ compiler). A SYCL program expresses parallelism through a `sycl::queue` and `parallel_for` submitted with a kernel lambda, using either **buffers** (a managed, dependency-tracked abstraction where the SYCL runtime schedules data movement automatically) or **USM** (Unified Shared Memory — explicit pointers via `malloc_device`/`malloc_shared`, closer to CUDA's mental model). SYCL backends exist for Intel GPUs natively, and via community/vendor plugins for NVIDIA (through a CUDA backend) and AMD (through a ROCm/HIP backend) — genuinely one source targeting three vendors, at the cost of the abstraction overhead described in §2.
+**SYCL** is a Khronos-group open standard for single-source heterogeneous C++; **oneAPI** is Intel's concrete implementation and toolchain built on SYCL (its compiler is the DPC++/C++ compiler, invoked as `icpx -fsycl`). A SYCL program expresses parallelism through a `sycl::queue` and `parallel_for` submitted with a kernel lambda, using either **buffers** (a managed, dependency-tracked abstraction where the SYCL runtime schedules data movement automatically) or **USM** (Unified Shared Memory — explicit pointers via `malloc_device`/`malloc_shared`, closer to CUDA's mental model). SYCL backends exist for Intel GPUs natively, and via plugins for NVIDIA (through a CUDA backend) and AMD (through a ROCm/HIP backend) — genuinely one source targeting three vendors, at the cost of the abstraction overhead described in §2.
+
+SYCL is a *standard*, so "SYCL" names a spec rather than one program, and there are two implementations worth telling apart. Intel's oneAPI DPC++ is the vendor-backed one, first-class on Intel hardware with Intel-published plugins for NVIDIA and AMD. **AdaptiveCpp** is the independent, community-driven one, and it targets NVIDIA, AMD, Intel and CPUs from a single compiler with several selectable compilation flows — including a generic single-pass flow that defers final code generation to runtime, so one binary can adapt to whatever hardware it finds. It is the same project that used to be called **hipSYCL**, then briefly **Open SYCL**; both older names still turn up in build scripts, distribution package names and papers, and all three refer to this one implementation.
 
 Intel also ships a **migration tool** for the CUDA-to-SYCL direction — the **DPC++ Compatibility Tool** (`dpct`, also distributed as the open-source **SYCLomatic** project) — the SYCL-world analog of `hipify`. It parses CUDA source and emits SYCL source mechanically, but because SYCL's abstraction (buffers/accessors, a `queue` object, no triple-chevron launch syntax at all) sits further from CUDA's API shape than HIP's does, `dpct`/SYCLomatic output typically needs proportionally more manual cleanup than a `hipify` pass on the same kernel — a direct consequence of where SYCL sits on the translate-vs-abstract dial in §2.
 
@@ -115,7 +117,7 @@ Intel also ships a **migration tool** for the CUDA-to-SYCL direction — the **D
 
 ### 4.4 WebGPU / WGSL — the browser's portable GPU API
 
-**WebGPU** is a browser-native GPU API (the spiritual successor to the deprecated WebGL-compute and the abandoned NVIDIA/browser-specific "WebCUDA" ideas that never shipped), with **WGSL** (WebGPU Shading Language) as its kernel language. It runs inside the browser sandbox on top of whatever native API the platform actually has underneath (Metal on macOS, Vulkan or Direct3D 12 on Linux/Windows, translated transparently by the browser engine) — so a WGSL compute shader is portable across operating systems and GPU vendors *and* requires no install, no driver toolchain, nothing beyond visiting a URL. The cost is a stricter, more limited feature set (no raw pointers, a validation layer that rejects unsafe patterns by construction) reflecting the sandboxed, security-first constraints of running arbitrary code from an arbitrary website.
+**WebGPU** is a browser-native GPU API (the successor to two efforts that never landed: Khronos's **WebCL**, standardized in 2014 but never shipped by any browser, and **WebGL 2.0 Compute**, which Chrome abandoned mid-implementation in favour of WebGPU), with **WGSL** (WebGPU Shading Language) as its kernel language. It ships by default in Chrome, Edge, Firefox and Safari, so "any modern browser" is now a literal claim rather than an aspiration. It runs inside the browser sandbox on top of whatever native API the platform actually has underneath (Metal on macOS, Vulkan or Direct3D 12 on Linux/Windows, translated transparently by the browser engine) — so a WGSL compute shader is portable across operating systems and GPU vendors *and* requires no install, no driver toolchain, nothing beyond visiting a URL. The cost is a stricter, more limited feature set (no raw pointers, a validation layer that rejects unsafe patterns by construction) reflecting the sandboxed, security-first constraints of running arbitrary code from an arbitrary website.
 
 ### 4.5 OpenCL — the legacy, verbose, genuinely-portable ancestor
 
@@ -124,6 +126,8 @@ Intel also ships a **migration tool** for the CUDA-to-SYCL direction — the **D
 ### 4.6 Framework-level portability — what most engineers actually use
 
 The layer nearly everyone touches directly: **PyTorch's device abstraction**. `torch.cuda.is_available()` / `torch.backends.mps.is_available()` / a ROCm-built PyTorch where `torch.device("cuda")` transparently dispatches to HIP under the hood let the overwhelming majority of model code — tensor ops, autograd, standard layers — run unmodified across NVIDIA, AMD, and Apple Silicon. **CuPy** similarly ships a ROCm-compatible build so NumPy-like array code runs on AMD GPUs with the same `cupy.ndarray` API. This is portability by *not writing a portable kernel at all* — you write once against a high-level framework, and the framework's own backend engineers absorbed the HIP/Metal/CUDA translation cost once, centrally, instead of every application team paying it independently.
+
+The HPC world reaches the same conclusion through two different libraries, worth knowing because they dominate national-lab codebases the way PyTorch dominates ML ones. **Kokkos** is a C++ performance-portability library: you express a loop as `Kokkos::parallel_for` over an execution space and your arrays as `Kokkos::View`s with a policy-chosen memory layout, and one source compiles to CUDA, HIP, SYCL, OpenMP or serial CPU — crucially including the *layout* switch (row-major on CPU, column-major on GPU) that a hand-ported kernel has to make by hand. **OpenMP target offload** is the pragma-based route: `#pragma omp target teams distribute parallel for` annotates an existing loop nest, and a supporting compiler (nvc++, `clang`, `icpx`, AMD's `amdclang`) generates GPU code from it. It is the lowest-effort option for an existing CPU code and generally the lowest ceiling, because the compiler is inferring a parallel decomposition you never stated. Both are the same bargain as PyTorch — someone else already absorbed the per-vendor work — applied to hand-written numerical kernels instead of tensor ops.
 
 ---
 
@@ -240,7 +244,7 @@ The bug is invisible in the source because the number `32` never appears. It is 
     lanes folded  =  2^6  =  64   ==  64 lanes   -> CORRECT on CDNA.
 ```
 
-The 50% coverage number is the one to carry into §14: `rocprof` reports **49% wavefront efficiency** on the naive port, which is this arithmetic showing up in a profiler almost exactly. Half the lanes of every wavefront are doing work that is then discarded — and because a partial sum is a perfectly well-typed float, nothing crashes, nothing warns, and the output is simply wrong.
+The 50% coverage number is the one to carry into §14: `rocprofv3` reports **49% wavefront efficiency** on the naive port, which is this arithmetic showing up in a profiler almost exactly. Half the lanes of every wavefront are doing work that is then discarded — and because a partial sum is a perfectly well-typed float, nothing crashes, nothing warns, and the output is simply wrong.
 
 ### Portability vs. Peak Performance — the Central Tradeoff
 
@@ -566,7 +570,7 @@ The `__kernel`/`__global` qualifiers and `get_global_id(0)` indexing are directl
 | Vendor | NVIDIA only | AMD (+ NVIDIA via backend) | Open standard (Intel-led); NVIDIA/AMD backends exist | Apple only | Open standard (all major browsers) | Open standard (NVIDIA/AMD/Intel/mobile/FPGA) |
 | Kernel language | CUDA C++ | HIP C++ (near-identical to CUDA) | Single-source ISO C++ (SYCL kernel lambdas) | MSL (C++14-based) | WGSL | OpenCL C (C99-based) |
 | Portability | None (NVIDIA-only) | High to AMD; compiles to NVIDIA too via backend | High — one source, multiple backends | None outside Apple ecosystem | High — any GPU any supporting browser can see | Highest — broadest vendor/device-class support |
-| Maturity / tooling | Deepest (Nsight, cuBLAS/cuDNN/CUTLASS, two decades of libraries) | Mature for AMD; rocBLAS/MIOpen mirror cuBLAS/cuDNN | Maturing; DPC++ solid on Intel, community backends elsewhere | Mature within Apple's ecosystem | Newest; still stabilizing across browsers | Oldest; broad but less actively advanced for new hardware |
+| Maturity / tooling | Deepest (Nsight, cuBLAS/cuDNN/CUTLASS, two decades of libraries) | Mature for AMD; rocBLAS/MIOpen mirror cuBLAS/cuDNN | Maturing; DPC++ solid on Intel, plugin and AdaptiveCpp backends elsewhere | Mature within Apple's ecosystem | Youngest; shipping by default in every major browser, still gaining compute features | Oldest; broad but less actively advanced for new hardware |
 | Peak-perf gap vs. native-tuned CUDA-equivalent | Baseline (0%, this *is* native) | Low once re-tuned for wavefront/LDS; higher if left untouched post-`hipify` | Commonly 5-20%+, workload-dependent | Low within Apple hardware (native API) | Higher — sandboxed, no raw pointers, validation overhead | Commonly among the largest gaps for a hand-tuned target |
 | Ecosystem / library depth | cuBLAS, cuDNN, CUTLASS, Thrust, TensorRT | rocBLAS, MIOpen, rocThrust (mirrors, less mature) | oneMKL, oneDNN (Intel-focused) | Metal Performance Shaders, MPSGraph | Growing (ONNX Runtime Web, WebLLM-class projects) | Broad but thinner high-level library layer than CUDA |
 
@@ -620,7 +624,7 @@ Reading the bar chart as *retained* percentages flatters the portable layers; co
     OpenCL 47% vs HIP-tuned 89%  ->  42 points, i.e. nearly 2x the hardware
 ```
 
-The 21-point HIP tuning gain and the 24-point SYCL gap are the same size — but they are entirely different kinds of number. The first is recoverable by one engineer with `rocprof` and a week (that is precisely §14). The second is structural: no amount of profiling closes it, because it is the cost of an API that must compile for hardware it is forbidden to assume anything about. Confusing a tuning gap for an abstraction floor is how teams end up burning a quarter trying to profile their way out of a language choice.
+The 21-point HIP tuning gain and the 24-point SYCL gap are the same size — but they are entirely different kinds of number. The first is recoverable by one engineer with `rocprofv3` and a week (that is precisely §14). The second is structural: no amount of profiling closes it, because it is the cost of an API that must compile for hardware it is forbidden to assume anything about. Confusing a tuning gap for an abstraction floor is how teams end up burning a quarter trying to profile their way out of a language choice.
 
 ---
 
@@ -699,7 +703,7 @@ __device__ float warpReduceSum_portedNaive(float val) {
 }
 ```
 
-Nsight-equivalent AMD profiling (`rocprof`) on this kernel shows correct results only for reductions whose semantics happen to tolerate a partial sum (they usually don't) — the bug is silent, not a crash, because 32 of the 64 lanes simply never contribute and nothing signals an error.
+Nsight-equivalent AMD profiling (`rocprofv3`) on this kernel shows correct results only for reductions whose semantics happen to tolerate a partial sum (they usually don't) — the bug is silent, not a crash, because 32 of the 64 lanes simply never contribute and nothing signals an error.
 
 **FIX — re-tune the reduction for the actual target wavefront width**
 
@@ -767,9 +771,14 @@ Other common pitfalls:
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `hipify-perl` / `hipify-clang` | Mechanical CUDA → HIP source translation | `hipify-clang` parses real AST (more accurate); `hipify-perl` is a lighter text-pattern tool |
-| ROCm (rocBLAS, MIOpen, rocThrust, rocProfiler) | AMD's CUDA-library-equivalent stack + profiler | Mirrors cuBLAS/cuDNN/Thrust/Nsight roles respectively |
-| Intel oneAPI / DPC++ compiler | SYCL implementation + toolchain, Intel-first-class | `icpx`/`dpcpp` compile SYCL source; oneMKL/oneDNN are the math/DNN library mirrors |
-| Codeplay / community SYCL backends | SYCL-for-CUDA, SYCL-for-HIP plugins | Let a single SYCL source target NVIDIA/AMD hardware, not only Intel |
+| ROCm (rocBLAS, MIOpen, rocThrust) | AMD's CUDA-library-equivalent stack | Mirrors cuBLAS/cuDNN/Thrust respectively |
+| `rocprofv3` (ROCprofiler-SDK) | AMD's kernel tracing and hardware-counter collector | The current CLI; the older `rocprof`/`rocprofv2` and ROCTracer are retired. Writes a SQLite database that `rocpd` converts to CSV/Perfetto/OTF2 |
+| ROCm Compute Profiler (`rocprof-compute`) / ROCm Systems Profiler | Per-kernel analysis, and whole-application tracing | The closest analogues of Nsight Compute and Nsight Systems. Formerly named Omniperf and Omnitrace — both old names are still widely cited |
+| Intel oneAPI / DPC++ compiler | SYCL implementation + toolchain, Intel-first-class | `icpx -fsycl` compiles SYCL source (the older standalone `dpcpp` driver is deprecated); oneMKL/oneDNN are the math/DNN library mirrors |
+| oneAPI plugins for NVIDIA / AMD GPUs | SYCL-for-CUDA, SYCL-for-HIP backends, built by Codeplay (an Intel subsidiary) | Let a single SYCL source target NVIDIA/AMD hardware, not only Intel |
+| **AdaptiveCpp** (formerly hipSYCL, then Open SYCL) | Independent community SYCL implementation | Targets NVIDIA, AMD, Intel and CPUs from one compiler with several compilation flows, including a generic flow that finalizes code generation at runtime. Both old names still appear in package managers and papers |
+| Kokkos | C++ performance-portability library (`parallel_for`, `View`) | One source to CUDA/HIP/SYCL/OpenMP/serial; switches memory layout per backend, which a hand port has to do manually. Heavily used in DOE/HPC codebases |
+| OpenMP target offload | Pragma-based GPU offload of existing loop nests | `#pragma omp target teams distribute parallel for`; supported by nvc++, clang, `icpx`, `amdclang`. Lowest porting effort, generally the lowest performance ceiling |
 | Xcode + Metal / Metal Performance Shaders (MPS) | Apple's compute toolchain + tuned kernel library | MPSGraph gives a higher-level graph API above raw MSL kernels |
 | `wgpu` / browser DevTools | WebGPU implementations (native Rust `wgpu`, and each browser's built-in) | `wgpu` also lets native (non-browser) apps use WebGPU as a portable compute API |
 | Khronos OpenCL SDK / vendor ICDs | OpenCL platform/device enumeration and runtime | Each vendor ships an Installable Client Driver (ICD); host code enumerates all available ICDs at runtime |
@@ -819,7 +828,7 @@ Rarely as a first choice for data-center ML, but yes for embedded, mobile, or le
 Yes — HIP's NVIDIA backend is a thin wrapper over the CUDA runtime, so a single HIP codebase can build for both AMD and NVIDIA from one source tree. This is attractive for a team that wants one maintained kernel language across both major discrete-GPU vendors without adopting a fuller abstraction like SYCL.
 
 **Q: A `hipify`-ported kernel passes correctness tests on AMD hardware but runs at only 60% of a hand-tuned native HIP kernel's throughput on the same GPU. What would you check first?**
-Check the launch configuration and any hardcoded 32-wide assumptions first. Block/wavefront sizing tuned for CUDA's warp=32, shared-memory tiling padded against CUDA's bank-conflict numbers, and shuffle-based reduction loop bounds are the usual culprits, because `hipify` translates API calls correctly but cannot re-derive tuning constants for AMD's different wavefront width and LDS layout — profile with `rocprof` to confirm which constant is costing the gap.
+Check the launch configuration and any hardcoded 32-wide assumptions first. Block/wavefront sizing tuned for CUDA's warp=32, shared-memory tiling padded against CUDA's bank-conflict numbers, and shuffle-based reduction loop bounds are the usual culprits, because `hipify` translates API calls correctly but cannot re-derive tuning constants for AMD's different wavefront width and LDS layout — profile with `rocprofv3` to confirm which constant is costing the gap.
 
 **Q: Why is "write everything in the most portable API available" usually the wrong default for a new GPU project?**
 Because portability and peak performance trade off, and defaulting to the most portable option (typically OpenCL) pays that tax on every kernel even when most of the fleet runs on one vendor. The better default is framework-level portability for the majority of code, with a deliberate, per-kernel decision to add a vendor-specific fast path only where profiling shows the hot path actually needs it.
@@ -838,7 +847,7 @@ No — unified memory removes the explicit host↔device copy CUDA/HIP require, 
 ## 13. Best Practices
 
 1. **Start any CUDA-to-AMD port with `hipify-clang`, not a manual rewrite.** It achieves a high automated-translation rate on straightforward kernels; spend manual effort only on the library calls and intrinsics it flags as unmapped.
-2. **Never assume a `hipify`-ported kernel is tuned — profile it on the target with `rocprof` before shipping.** Re-derive every hardware-constant-dependent value (wavefront width, LDS bank count, occupancy limits) for AMD explicitly; do not copy CUDA's 32-wide and 32-bank numbers across.
+2. **Never assume a `hipify`-ported kernel is tuned — profile it on the target with `rocprofv3` before shipping.** Re-derive every hardware-constant-dependent value (wavefront width, LDS bank count, occupancy limits) for AMD explicitly; do not copy CUDA's 32-wide and 32-bank numbers across.
 3. **Decide portability per-kernel, not per-project.** Keep a native CUDA (or hand-tuned HIP) fast path for the hot kernels serving the majority of your fleet's capacity, and accept a portable SYCL/OpenCL/WebGPU implementation's overhead only for the minority-hardware or reach-first cases.
 4. **Default to framework-level portability (PyTorch/CuPy) for the majority of application code.** Reserve hand-written vendor-specific kernels for the profiled-hot minority, rather than hand-porting every kernel in a codebase preemptively.
 5. **Budget for a feature-lag delay on any cross-vendor roadmap.** A brand-new CUDA capability will not have a HIP/SYCL/Metal/WebGPU equivalent on day one; plan multi-vendor feature parity around that lag, not around CUDA's release date.
@@ -864,7 +873,7 @@ hipify-clang tiled_gemm.cu -o tiled_gemm.hip.cpp
 **Step 2 — the naive port "works" but underperforms:**
 
 ```
-rocprof summary on tiled_gemm.hip.cpp (unmodified from hipify output):
+rocprofv3 summary on tiled_gemm.hip.cpp (unmodified from hipify output):
 
   Achieved throughput:        31% of MI300X theoretical FP16 peak
   Warp/wavefront efficiency:  49%   <- the tell: something is only using
@@ -919,7 +928,7 @@ __device__ float reduceRow(float val) {
 
 **What this actually says.** The recovery decomposes as `final_peak = naive_peak x lane_efficiency_gain x everything_else` — "the wavefront fix and the LDS/tile re-derivation are two separate multipliers, and reporting only the combined 31% -> 74% jump hides which one you actually still need."
 
-Decomposing it matters because the two fixes cost wildly different amounts of engineering time. The lane fix is a three-line `#define`; the LDS re-derivation is days of `rocprof` work. Knowing which bought what tells you where to start on the next port.
+Decomposing it matters because the two fixes cost wildly different amounts of engineering time. The lane fix is a three-line `#define`; the LDS re-derivation is days of `rocprofv3` work. Knowing which bought what tells you where to start on the next port.
 
 | Symbol | What it is |
 |--------|------------|
@@ -961,7 +970,7 @@ The reason this ratio is worth computing is that the mechanical step is the visi
 | Symbol | What it is |
 |--------|------------|
 | `mechanical step` | `hipify-clang` + compile. **~1 day**, zero manual edits, fully automatable |
-| `tuning step` | Profiling with `rocprof` + wavefront/LDS/tile re-derivation. **~1 additional week** (5 workdays) |
+| `tuning step` | Profiling with `rocprofv3` + wavefront/LDS/tile re-derivation. **~1 additional week** (5 workdays) |
 | `performance_delivered` | Share of the *final* 74%-of-peak result each step is responsible for |
 | `effort_leverage` | Performance share divided by effort share. Above 1 = better than proportional return |
 | Hidden term | The tuning step's output is invisible without a profiler — it produces no compiler output at all |
@@ -991,7 +1000,7 @@ The leverage numbers explain why so many AMD ports stall at "it works." The mech
 1. Why did the naive `hipify` port compile and produce *correct* results but still only reach 31% of peak — what does that gap tell you about which parts of a port are automatable and which are not?
 2. If this team's fleet were 95% MI300X and 5% NVIDIA instead of the reverse, would you recommend maintaining two hand-tuned native kernels (CUDA + HIP) or writing the whole thing in SYCL for one shared source? Justify using the reach-vs-peak tradeoff from §2 and §9.
 3. The fixed kernel still hardcodes a compile-time `#if` branch on `__HIP_PLATFORM_AMD__` rather than querying wavefront width at runtime — what would change if this kernel needed to run correctly on both AMD RDNA (which supports 32-wide "wave32" mode) and CDNA (fixed 64-wide) without a recompile?
-4. The re-tuned kernel still uses AMD's LDS with a bank layout different from CUDA's 32-bank model — what would you check in `rocprof` (the AMD analog of Nsight Compute) to confirm the shared-memory tiling is actually conflict-free on this specific target, rather than assuming the fix worked because throughput improved?
+4. The re-tuned kernel still uses AMD's LDS with a bank layout different from CUDA's 32-bank model — what would you check in `rocprof-compute` (ROCm Compute Profiler, the AMD analog of Nsight Compute) to confirm the shared-memory tiling is actually conflict-free on this specific target, rather than assuming the fix worked because throughput improved?
 
 ---
 

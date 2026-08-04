@@ -38,10 +38,10 @@ This module covers that whole toolchain: how `nvcc` invokes the two-pass compile
 
 **Compilation strategies, from least to most forward-compatible:**
 
-1. **Single real target, no PTX** — `nvcc -arch=sm_90 ...`. Smallest binary, fastest to build, zero JIT overhead, but the binary is a hard-fail on any GPU that isn't `sm_90` (or a compatible variant within the same major family in some cases).
+1. **Single real target, no PTX** — `nvcc -gencode arch=compute_90,code=sm_90 ...`. Smallest binary, fastest to build, zero JIT overhead, but the binary is a hard-fail on any GPU that isn't `sm_90` (or a compatible variant within the same major family — a `sm_80` cubin, for instance, runs on every Ampere and Ada part). Note that this requires the *explicit* `-gencode` form: the `-arch=sm_90` shorthand quietly adds a `compute_90` PTX entry as well, so it is not this strategy.
 2. **Multiple real targets, no PTX** — several `-gencode arch=compute_XX,code=sm_XX` pairs. Runs natively (no JIT) on every listed GPU, still hard-fails on anything not listed.
 3. **Multiple real targets + one PTX fallback** — the production-standard pattern: real SASS for every GPU you validated in CI, plus one `-gencode arch=compute_XX,code=compute_XX` entry (note: `code=compute_XX`, not `code=sm_XX`) for the newest architecture family you support, embedded as PTX so the driver can JIT it for GPUs released after your build.
-4. **PTX-only** — `nvcc -arch=compute_XX -ptx ...` with no `code=sm_XX` at all. Maximum portability, guaranteed a JIT compile (and its latency) on every launch on a fresh machine, though the driver caches the JIT result after the first run.
+4. **PTX-only** — `nvcc -arch=compute_XX ...` with no `code=sm_XX` at all (a *virtual* `-arch` value expands to `--gpu-code=compute_XX` only, emitting no cubin). Maximum portability, guaranteed a JIT compile (and its latency) on every launch on a fresh machine, though the driver caches the JIT result after the first run.
 
 ```mermaid
 quadrantChart
@@ -142,9 +142,15 @@ Example: -gencode arch=compute_90,code=compute_90
   -> use Hopper-level PTX features, embed as PTX (no SASS at all).
      Runs on sm_90 and later via JIT; will NOT run unmodified on sm_80 or earlier
      (compute_90 PTX can use instructions sm_80 hardware/JIT cannot support).
+
+Example: -arch=sm_80          (the shorthand -- expands to BOTH)
+  -> -gencode arch=compute_80,code=[sm_80,compute_80]
+     real Ampere SASS *and* an embedded compute_80 PTX fallback.
 ```
 
-The shorthand `-arch=sm_80` (no explicit `-gencode`) is nvcc silently expanding to `-gencode arch=compute_80,code=sm_80` — real SASS only, **no PTX embedded**, which is exactly the gotcha in §10.
+The `-arch=sm_XX` shorthand is more generous than it looks: nvcc expands `-arch=sm_80` to `--gpu-architecture=compute_80 --gpu-code=sm_80,compute_80`, so it embeds a `compute_80` PTX fallback alongside the cubin. The gotcha in §10 is the *opposite* one — the moment you switch to an explicit `-gencode arch=compute_80,code=sm_80` (or CMake's `80-real`, or a `TORCH_CUDA_ARCH_LIST` entry with no `+PTX`), you take that fallback back out and have to re-add it by hand.
+
+The set of legal values is also finite and shrinks over time: current `nvcc` accepts `compute_75`/`sm_75` (Turing) at the low end through the Blackwell `1xx` targets at the high end, and anything older is a hard `nvcc fatal : Unsupported gpu architecture` at build time rather than a runtime surprise. Two suffixes appear on the newer targets: `sm_90a`/`sm_100a` are *architecture-specific* (they unlock instructions such as the Hopper and Blackwell tensor-core `mma` families but produce code that runs on that exact architecture only), and `sm_100f`/`sm_120f` are *family-specific* (the subset of those features common to a whole family, forward-compatible within it — `compute_120f` covers `sm_120` and `sm_121`, but the 10.x and 12.x families are not cross-compatible). Plain `sm_XX` remains the portable default.
 
 ### Fatbinary Load: the Driver's SASS-or-JIT Decision
 
@@ -193,7 +199,7 @@ nvcc -arch=compute_80 -ptx vecadd.cu -o vecadd.ptx
 The resulting PTX (trimmed of the version/target preamble comments) looks like this — this is the **virtual ISA**, still architecture-independent at the `compute_80` feature level:
 
 ```ptx
-.version 8.4
+.version 9.3
 .target sm_80
 .address_size 64
 
@@ -303,9 +309,11 @@ nvdisasm vecadd.cubin
 
 ```bash
 # WRONG for a shipped library: real SASS for one architecture only, no PTX.
-# Runs great on an A100 (sm_80). Fails outright on an H100 (sm_90) or any GPU
-# newer than the one you built for -- see the BROKEN example in Section 10.
-nvcc -arch=sm_80 -O3 -o libkernel.so --shared -Xcompiler -fPIC vecadd.cu
+# The explicit -gencode form is what strips the fallback -- code=sm_80 alone
+# emits a cubin and nothing else. Runs great on an A100 (sm_80). Fails outright
+# on an H100 (sm_90) or any newer GPU -- see the BROKEN example in Section 10.
+nvcc -gencode arch=compute_80,code=sm_80 \
+     -O3 -o libkernel.so --shared -Xcompiler -fPIC vecadd.cu
 
 # RIGHT for a shipped library: real SASS for every GPU generation you validated
 # in CI, PLUS one embedded PTX (code=compute_90) as a JIT fallback for anything
@@ -346,9 +354,11 @@ This is the number that makes `-gencode` lists feel expensive in CI long before 
   ptxas passes     : 3      (only the real code=sm_XX targets)
   fatbin artifacts : 3 cubins + 1 PTX
 
-  Compare the shorthand build:  nvcc -arch=sm_80
+  Compare the single-target build:  nvcc -gencode arch=compute_80,code=sm_80
   host passes 1, NVVM 1, ptxas 1, artifacts 1 cubin + 0 PTX
   -> ~4x cheaper to build, and exactly the configuration that hard-fails in §10.
+     (The -arch=sm_80 shorthand costs the same but ships 1 cubin + 1 PTX,
+      because -gencode is the only form that lets you drop the PTX entry.)
 ```
 
 The relationship worth internalizing is that build time scales with `N` while *runtime* safety comes from only one of those entries — the `code=compute_XX` PTX blob, which is the cheapest entry in the list. Dropping real `sm_XX` targets to speed up CI is a legitimate tradeoff; dropping the PTX entry to speed up CI saves the least time and removes the most safety.
@@ -376,8 +386,8 @@ __global__ void adaptiveKernel(float* data, int n)
     // This branch is compiled only into the sm_80/sm_90 cubins -- Ampere+
     // async-copy-eligible path, using the read-only-cache load intrinsic.
     data[i] = __ldg(&data[i]) * 2.0f;
-#elif __CUDA_ARCH__ >= 700
-    // Volta/Turing fallback -- no async copy available.
+#elif __CUDA_ARCH__ >= 750
+    // Turing fallback -- no async copy available.
     data[i] = data[i] * 2.0f;
 #else
     // Also reached on the host compilation pass in some code layouts --
@@ -395,8 +405,8 @@ The whole point of the encoding is that a preprocessor cannot compare `8.6 >= 8.
 
 | Symbol | What it is |
 |--------|------------|
-| `major` | The compute capability's first digit — the GPU *generation* (7 = Volta/Turing, 8 = Ampere/Ada, 9 = Hopper, 10 = Blackwell) |
-| `minor` | The second digit — the SKU variant inside that generation (`8.0` A100 vs `8.6` RTX 30xx vs `8.9` L40S) |
+| `major` | The compute capability's major number — the GPU *generation* (7 = Turing, 8 = Ampere/Ada, 9 = Hopper, 10 and 12 = Blackwell) |
+| `minor` | The minor number — the SKU variant inside that generation (`8.0` A100 vs `8.6` RTX 30xx vs `8.9` L40S) |
 | `100 x major` | Generation weight. Guarantees any `9.x` part outranks every `8.x` part |
 | `10 x minor` | Variant weight. Leaves the ones digit unused, so `860` and `800` never collide |
 | `__CUDA_ARCH__` | The resulting integer, defined once **per `-gencode` target** during the device pass; undefined on the host pass |
@@ -414,7 +424,7 @@ The whole point of the encoding is that a preprocessor cannot compare `8.6 >= 8.
 
   Now the guard  #if __CUDA_ARCH__ >= 800  reads as an ordinary integer test:
 
-    sm_75 -> 750 >= 800 ?  NO   -> compiles the Volta/Turing fallback branch
+    sm_75 -> 750 >= 800 ?  NO   -> compiles the Turing fallback branch
     sm_80 -> 800 >= 800 ?  YES  -> compiles the Ampere+ __ldg path
     sm_86 -> 860 >= 800 ?  YES  -> same Ampere+ path (variant of the same gen)
     sm_90 -> 900 >= 800 ?  YES  -> same path, inherited by a newer generation
@@ -630,7 +640,7 @@ This is also where the `compute_XX`/`sm_XX` decisions in Sections 5-6 get valida
 
 ## 7. Real-World Examples
 
-- **PyTorch wheels** are built with an explicit `TORCH_CUDA_ARCH_LIST` (e.g. `"7.5;8.0;8.6;9.0+PTX"`) that expands to exactly the pattern in Section 6 — real SASS for each listed compute capability, plus a `+PTX` suffix on the newest one to embed a JIT fallback for future GPUs the wheel author never tested against.
+- **PyTorch wheels** are built with an explicit `TORCH_CUDA_ARCH_LIST` (the CUDA 13 builds use `"7.5;8.0;8.6;9.0;10.0;12.0+PTX"`) that expands to exactly the pattern in Section 6 — real SASS for each listed compute capability, plus a `+PTX` suffix on the newest one to embed a JIT fallback for future GPUs the wheel author never tested against.
 - **NVIDIA's own cuBLAS/cuDNN shared libraries** ship fatbinaries containing SASS for every currently-supported GPU generation simultaneously, which is a large part of why those `.so` files are hundreds of megabytes.
 - **llama.cpp's CUDA backend** exposes a `CMAKE_CUDA_ARCHITECTURES` build flag so users self-compiling for their exact card (e.g. a single `sm_86` RTX 3090) get a smaller, faster-to-build binary than the multi-arch releases.
 - **TensorRT** takes the opposite extreme from PTX portability: it builds an "engine" file that is SASS-specific to the exact GPU (sometimes the exact SKU) it was built on, trading all forward/cross-device portability for maximum optimization — engines are explicitly documented as non-portable across GPU models.
@@ -723,8 +733,11 @@ Caption: the only branch that reaches a fully safe outcome is the one that alway
 - **BROKEN: compiling for one architecture with no PTX fallback, then running on newer hardware.**
 
 ```bash
-# BROKEN -- ships to production with only sm_70 (Volta) real SASS and no PTX.
-nvcc -arch=sm_70 -O3 -o libkernel.so --shared -Xcompiler -fPIC vecadd.cu
+# BROKEN -- ships to production with only sm_80 (Ampere) real SASS and no PTX.
+# The explicit -gencode form is what strips the fallback: code=sm_80 on its own
+# emits one cubin and nothing else.
+nvcc -gencode arch=compute_80,code=sm_80 \
+     -O3 -o libkernel.so --shared -Xcompiler -fPIC vecadd.cu
 ```
 
   On an H100 (`sm_90`), the driver finds no matching SASS in the fatbinary and no PTX to JIT from, and the launch fails at runtime with:
@@ -734,21 +747,21 @@ CUDA error: no kernel image is available for execution on the device
 (cudaErrorNoKernelImageForDevice)
 ```
 
-  The build succeeded, unit tests on the Volta CI runner passed, and the failure only surfaces on hardware the author never tested — a classic "worked in CI, broke in prod" GPU bug.
+  The build succeeded, unit tests on the Ampere CI runner passed, and the failure only surfaces on hardware the author never tested — a classic "worked in CI, broke in prod" GPU bug.
 
 ```bash
 # FIX -- embed real SASS for every architecture actually validated, plus one
 # PTX (code=compute_XX, not code=sm_XX) as a JIT fallback for anything newer.
-nvcc -gencode arch=compute_70,code=sm_70 \
-     -gencode arch=compute_80,code=sm_80 \
+nvcc -gencode arch=compute_80,code=sm_80 \
      -gencode arch=compute_90,code=sm_90 \
-     -gencode arch=compute_90,code=compute_90 \
+     -gencode arch=compute_100,code=sm_100 \
+     -gencode arch=compute_100,code=compute_100 \
      -O3 -o libkernel.so --shared -Xcompiler -fPIC vecadd.cu
 ```
 
-  Now an H100 falls back to JIT-compiling the `compute_90` PTX (a one-time, driver-cached cost) instead of failing outright, and any future architecture with compute capability >= 9.0 gets the same safety net.
+  Now an H100 finds its native `sm_90` cubin, and anything newer than the listed set falls back to JIT-compiling the embedded `compute_100` PTX (a one-time, driver-cached cost) instead of failing outright.
 
-- **Assuming `-arch=sm_XX` alone embeds a PTX fallback.** It does not — `nvcc -arch=sm_80` is shorthand for `-gencode arch=compute_80,code=sm_80` only. If you want both the real SASS *and* a PTX fallback for the same virtual architecture, you must add a second explicit `-gencode arch=compute_80,code=compute_80`.
+- **Assuming an explicit `-gencode arch=compute_XX,code=sm_XX` behaves like the `-arch=sm_XX` shorthand.** It does not. `nvcc -arch=sm_80` expands to `--gpu-code=sm_80,compute_80` and quietly embeds a PTX fallback; the moment you spell the target out as `-gencode arch=compute_80,code=sm_80` — which is what every multi-architecture build, every `CUDA_ARCHITECTURES "80-real"`, and every `TORCH_CUDA_ARCH_LIST` entry without `+PTX` does — the PTX disappears and you must re-add it as a separate `-gencode arch=compute_80,code=compute_80` entry.
 - **Forgetting to update the PTX target when adding new hardware support.** Adding `-gencode arch=compute_90,code=sm_90` for H100 support but leaving the fallback PTX at the old `compute_80` means GPUs newer than Hopper can still JIT from `compute_80` PTX, but miss any Hopper-only PTX instruction the rest of your build now emits — keep the fallback PTX at your *newest* supported virtual architecture.
 - **Benchmarking a `-G` (device debug) build.** `-G` disables nearly all `ptxas`/NVVM optimizations to preserve debuggability and can be 10-100x slower than a `-O3` release build; a debug build's timings are meaningless for performance decisions.
 - **Ignoring `ptxas -v` output.** Register/shared-memory usage is only visible with `--ptxas-options=-v`; without it, a kernel can silently regress to register spilling (`spill stores`/`spill loads` > 0) after an innocuous code change, quietly cutting occupancy and throughput with no compiler warning.
@@ -775,8 +788,8 @@ nvcc -gencode arch=compute_70,code=sm_70 \
 
 ## 12. Interview Questions with Answers
 
-**Q: What happens if you compile a CUDA binary only for `sm_70` and run it on an `sm_90` GPU with no PTX embedded?**
-The launch fails at runtime with `cudaErrorNoKernelImageForDevice` ("no kernel image is available for execution on the device"). The driver found no SASS matching `sm_90` in the fatbinary and no PTX to JIT-compile as a fallback, even though the build itself succeeded and any testing on `sm_70` hardware passed cleanly.
+**Q: What happens if you compile a CUDA binary only for `sm_80` and run it on an `sm_100` GPU with no PTX embedded?**
+The launch fails at runtime with `cudaErrorNoKernelImageForDevice` ("no kernel image is available for execution on the device"). The driver found no SASS matching `sm_100` in the fatbinary and no PTX to JIT-compile as a fallback, even though the build itself succeeded and any testing on `sm_80` hardware passed cleanly.
 
 **Q: What is the difference between PTX and SASS?**
 PTX (Parallel Thread Execution) is NVIDIA's stable, architecture-independent virtual instruction set; SASS (Streaming Assembly) is the real machine code for one specific `sm_XX` GPU generation. PTX can be JIT-compiled by the driver to run on GPU generations that postdate it, while SASS is tied to the exact architecture `ptxas` assembled it for.
@@ -787,8 +800,8 @@ A fatbinary is a single container bundling SASS `cubin`s for several concrete `s
 **Q: What is the practical difference between `-gencode arch=compute_80,code=sm_80` and `-gencode arch=compute_80,code=compute_80`?**
 The first assembles real SASS machine code for exactly an `sm_80` GPU using Ampere-level PTX features; the second embeds the PTX itself (no SASS) so the driver can JIT-compile it for `sm_80` or any newer-generation GPU. The `code=` half of the flag is what decides real-vs-virtual output, not `arch=`.
 
-**Q: Why does `nvcc -arch=sm_80` alone not give you a forward-compatible binary?**
-That shorthand expands only to `-gencode arch=compute_80,code=sm_80`, which produces real `sm_80` SASS and embeds no PTX at all. Forward compatibility requires an additional explicit `-gencode arch=compute_XX,code=compute_XX` entry to embed a JIT-able PTX fallback.
+**Q: Does `nvcc -arch=sm_80` embed a PTX fallback, and where does the fallback actually get lost?**
+Yes — `-arch=sm_80` is shorthand for `--gpu-architecture=compute_80 --gpu-code=sm_80,compute_80`, so it ships a cubin *and* a `compute_80` PTX blob. The fallback is lost the moment you move to the explicit `-gencode arch=compute_80,code=sm_80` form (which is what any multi-architecture build, CMake's `80-real`, or a `TORCH_CUDA_ARCH_LIST` entry without `+PTX` produces), because there `code=` lists exactly what gets emitted — so you have to add `-gencode arch=compute_XX,code=compute_XX` back by hand.
 
 **Q: What does `__CUDA_ARCH__` do, and when is it undefined?**
 It is a preprocessor macro `nvcc` defines during each device-code compilation pass, set to `100 * major + 10 * minor` (e.g. `800` for `sm_80`), letting a single kernel source branch to different code per target architecture. It is undefined during the host-code compilation pass, so guarding device-only intrinsics with it protects the host build but only if there's no unguarded fallback path referencing them directly.
@@ -1002,4 +1015,4 @@ The last block is the practical lesson: the cache makes JIT cheap, but it does n
 
 ---
 
-**See also:** [gpu_hardware_architecture](../gpu_hardware_architecture/gpu_hardware_architecture.md) for the compute-capability generations (`sm_70` through `sm_100`) this module's `-gencode` targets map onto, and [cuda_programming_model_and_kernels](../cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) for the kernel/grid/block syntax the `<<<...>>>` Runtime API launch in Section 6 assumes.
+**See also:** [gpu_hardware_architecture](../gpu_hardware_architecture/gpu_hardware_architecture.md) for the compute-capability generations (`sm_75` through `sm_121`) this module's `-gencode` targets map onto, and [cuda_programming_model_and_kernels](../cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) for the kernel/grid/block syntax the `<<<...>>>` Runtime API launch in Section 6 assumes.
