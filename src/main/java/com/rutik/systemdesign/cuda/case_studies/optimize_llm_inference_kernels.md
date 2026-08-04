@@ -21,7 +21,7 @@
 ### Non-Functional Requirements
 - Single-stream decode latency: < 30 ms/token for a 13B-class model on an H100 (targets ~33+ tokens/sec even unbatched)
 - Kernel-level HBM bandwidth utilization ("achieved / peak" in Nsight Compute) > 80% for the GEMV and attention-decode kernels
-- CUDA Graph replay overhead < 10 microseconds per captured step (vs. 20-50 microseconds of CPU launch overhead per kernel without graphs)
+- CUDA Graph replay overhead < 10 microseconds per captured step (against ~5 microseconds of CPU-side launch overhead for each of the ~320 kernels a decode step would otherwise issue individually)
 - INT8/FP8 weight-only kernels must not regress decode throughput below the FP16 baseline at any batch size (dequant cost must be fully hidden behind the memory load it enables)
 - Numerical drift from FP16 baseline: < 0.5% perplexity increase on a held-out eval set for INT8, < 0.3% for FP8 (finer quantization granularity)
 
@@ -64,7 +64,8 @@ Worked example — 13B-param dense model, H100 SXM5
 
 This is why single-stream decode throughput scales almost linearly with 1/bytes_per_param
 and barely at all with the GPU's FLOP/s -- an H100's ~990 TFLOP/s FP16 dense Tensor Core
-throughput is > 100x more than a 13B GEMV needs (2 x 13e9 FLOPs / 115 tok/s ~= 3 TFLOP/s used).
+throughput is ~330x more than a 13B GEMV needs:
+  2 x 13e9 FLOPs/token x 115 tok/s ~= 3.0 TFLOP/s actually used.
 The other ~987 TFLOP/s of Tensor Core capacity sits idle. THIS is the memory-bandwidth wall.
 ```
 
@@ -114,17 +115,24 @@ across B concurrent sequences' activation vectors (an M=B GEMM instead of M=1 GE
 Per-token KV-cache bytes (one layer, FP16):
   bytes = 2 (K and V) x num_kv_heads x head_dim x 2 bytes
   13B model (40 heads, head_dim=128, GQA with 8 KV heads):
-  bytes/token/layer = 2 x 8 x 128 x 2 = 4,096 bytes = 4 KB
-  Full model (40 layers): 4 KB x 40 = 160 KB per token, per sequence
+  bytes/token/layer = 2 x 8 x 128 x 2 = 4,096 bytes = 4 KiB
+  Full model (40 layers): 4 KiB x 40 = 163,840 B = 160 KiB per token, per sequence
 
   At batch=128, context=4,096 tokens already generated:
   Does this amortize across the step like weight reads do? NO -- read every step.
   Each decode step re-reads the FULL KV history for every active sequence:
-  128 x 4,096 x 160 KB = 83.9 GB READ PER DECODE STEP just for KV, at batch=128/ctx=4K.
+  128 x 4,096 x 163,840 B = 85.9 GB READ PER DECODE STEP just for KV, at batch=128/ctx=4K.
 
-  At 3 TB/s: 83.9 GB / 3e12 B/s = 28 ms just to stream KV cache -- this alone caps
+  At 3 TB/s: 85.9e9 / 3e12 B/s = 28.6 ms just to stream KV cache -- this alone caps
   the achievable batch x context product and is why paged, coalesced KV-cache layout
   (Section 4.2) matters as much as the GEMV weight-read problem.
+
+  Note what that same figure says about CAPACITY, which bites first: 85.9 GB is 80 GiB
+  of resident KV cache, more than an H100's entire 80 GB of HBM before a single byte of
+  the model's 26 GB of FP16 weights is loaded. batch=128 at 4K context is not merely
+  bandwidth-infeasible on one H100 -- it does not fit. The realistic ceiling is derived
+  in Section 10 (batch ~44 at 4K context), where 4K-context KV for 44 sequences is
+  29.5 GB (27.5 GiB) and does coexist with the 26 GB of weights inside 80 GB.
 ```
 
 ---
@@ -175,7 +183,7 @@ flowchart TD
     class LOGIT,SAMPLE frozen
 ```
 
-This is one decode *step* — the whole subgraph inside `LAYER` runs once per token, per active sequence, per layer. Solid arrows are the per-token dataflow; the dotted `KVW -.-> ATT` edge is the paged KV-cache read that must coalesce non-contiguous physical blocks (§4.2); the dotted `OUT -.-> TOK` edge is the autoregressive feedback loop that CUDA Graphs capture as a single replay unit (§4.5) instead of re-launching ~15-20 kernels from the CPU every token. Every box drawn in the `train` color (QKV, ATT, MLP) is a candidate for weight-only quantization — they hold the vast majority of the model's parameter bytes; the `mathOp` boxes (RMSNorm, residual) are cheap (O(hidden_dim), not O(hidden_dim²)) and are fusion *targets* rather than fusion *problems*.
+This is one decode *step* — the whole subgraph inside `LAYER` runs once per token, per active sequence, per layer. Solid arrows are the per-token dataflow; the dotted `KVW -.-> ATT` edge is the paged KV-cache read that must coalesce non-contiguous physical blocks (§4.2); the dotted `OUT -.-> TOK` edge is the autoregressive feedback loop that CUDA Graphs capture as a single replay unit (§4.5) instead of re-launching ~320 kernels (about 8 per layer, 40 layers) from the CPU every token. Every box drawn in the `train` color (QKV, ATT, MLP) is a candidate for weight-only quantization — they hold the vast majority of the model's parameter bytes; the `mathOp` boxes (RMSNorm, residual) are cheap (O(hidden_dim), not O(hidden_dim²)) and are fusion *targets* rather than fusion *problems*.
 
 ### Prefill vs. Decode Architectural Split
 
@@ -192,7 +200,7 @@ Optimization axis:  Occupancy, tiling, TC utilization    Bandwidth, batch, quant
 Owning case study:  optimize_matrix_multiplication_kernel.md  THIS FILE
 ```
 
-See also: [`../cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for the roofline chart that visualizes exactly where prefill and decode sit relative to the H100 ridge point, and [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md) §3 for how the *platform* schedules prefill and decode requests together (chunked prefill, continuous batching) around this architectural split.
+See also: [`./cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for the roofline chart that visualizes exactly where prefill and decode sit relative to the H100 ridge point, and [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md) §3 for how the *platform* schedules prefill and decode requests together (chunked prefill, continuous batching) around this architectural split.
 
 ---
 
@@ -233,10 +241,10 @@ The fix has two independent levers, and production kernels apply both: (1) vecto
 
 ```cuda
 // FIX (lever 1): coalesced, vectorized GEMV with warp-level reduction.
-// Each WARP (not thread) computes one output row -- 32 lanes cooperatively stream
-// 128 bytes (32 x float4-loaded half2 pairs = 32 x 4 halves = 128 elements) per
-// iteration, matching the 128-byte coalesced transaction size, then reduce with
-// __shfl_down_sync (no shared memory, no __syncthreads -- warp-synchronous).
+// Each WARP (not thread) computes one output row -- 32 lanes each load one half2
+// (4 B = 2 FP16 elements), so a warp moves 32 x 4 B = 128 B per iteration, exactly
+// one coalesced transaction covering 64 weight elements. The partial products are
+// then reduced with __shfl_down_sync (no shared memory, no __syncthreads).
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -267,7 +275,7 @@ __global__ void gemv_warp_coalesced(
     }
 
     // Warp-level tree reduction -- no shared memory, no __syncthreads (see
-    // ../warp_level_primitives_and_cooperative_groups/README.md for the shuffle ladder)
+    // ../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md for the shuffle ladder)
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
@@ -278,7 +286,7 @@ __global__ void gemv_warp_coalesced(
 // of peak HBM bandwidth (uncoalesced 2-byte loads); the warp-coalesced version
 // above reaches ~86% of peak (3.0 TB/s achievable ceiling) -- a 1.65x speedup with
 // ZERO change to the arithmetic, purely from fixing the access pattern. This is
-// the same coalescing lesson as ../memory_coalescing_and_access_patterns/README.md,
+// the same coalescing lesson as ../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md,
 // applied to the single highest-frequency kernel shape in LLM inference.
 ```
 
@@ -316,7 +324,7 @@ Paged KV-cache layout (vLLM PagedAttention-style):
   pointer-chase through the block table), never WITHIN a block.
 ```
 
-The block table itself is small enough (a handful of `int` block indices per sequence) to live in shared memory or even registers for the duration of one decode step, so the "pointer chase" is a single shared-memory read per block, not a global-memory indirection — the expensive traffic is entirely the K/V tile reads themselves. See [`../cross_cutting/cuda_memory_hierarchy_reference.md`](./cross_cutting/cuda_memory_hierarchy_reference.md) for the full register/shared/L2/HBM latency table this design leans on: staging the block table in shared memory (tens-of-nanoseconds latency) versus re-reading it from global memory on every tile (400-800 cycles) is the difference between the block-table indirection being free and it becoming its own bottleneck at long context.
+The block table itself is small enough (a handful of `int` block indices per sequence) to live in shared memory or even registers for the duration of one decode step, so the "pointer chase" is a single shared-memory read per block, not a global-memory indirection — the expensive traffic is entirely the K/V tile reads themselves. See [`./cross_cutting/cuda_memory_hierarchy_reference.md`](./cross_cutting/cuda_memory_hierarchy_reference.md) for the full register/shared/L2/HBM latency table this design leans on: staging the block table in shared memory (tens-of-nanoseconds latency) versus re-reading it from global memory on every tile (400-800 cycles) is the difference between the block-table indirection being free and it becoming its own bottleneck at long context.
 
 ```cuda
 // Fused decode-attention kernel sketch: one query vector, paged KV, online
@@ -379,16 +387,14 @@ __global__ void fused_decode_attention(
             running_max = new_max;
         }
     }
-    if (tid < HEAD_DIM) {
-        #pragma unroll
-        for (int i = 0; i < HEAD_DIM / 32; ++i) {
-            if (i * 32 + (tid % 32) == tid % HEAD_DIM) { /* index bookkeeping simplified */ }
-        }
-        out[tid] = __float2half(acc[tid / 32] / running_sum);
-    }
+    // acc[i] holds output dim (i*32 + tid%32), so thread `tid` owns acc[tid/32].
+    // Note the redundancy this sketch accepts for clarity: all four warps carry a
+    // full copy of the accumulator, so the V-weighted sum is computed 4x over.
+    // A production kernel splits HEAD_DIM across warps instead.
+    if (tid < HEAD_DIM) out[tid] = __float2half(acc[tid / 32] / running_sum);
 }
 // block_reduce_sum: standard __shfl_down_sync warp reduction + shared-memory
-// cross-warp combine, per ../warp_level_primitives_and_cooperative_groups/README.md.
+// cross-warp combine, per ../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md.
 ```
 
 The measurable win from fusion here is not FLOPs saved (the arithmetic is identical) — it is HBM round-trips avoided. An unfused implementation writes the full `[num_kv_tokens]` score vector to global memory after QK^T and reads it back for the softmax-weighted V-sum: at 4,096 tokens of context, that is `4096 x 4 bytes x 2 (write+read) = 32 KB` of *extra* traffic per query, per head, per layer — multiplied by 40 layers x 40 heads x batch size, this becomes the dominant cost at long context. The fused kernel keeps the running max/sum/accumulator entirely in registers and shared memory, touching HBM only for the K/V tiles themselves (which must be read regardless).
@@ -433,7 +439,8 @@ __global__ void gemv_int8_dequant_fused(
     float acc = 0.0f;
     // Vectorized int8 load: 4 int8 values packed into one int32 (char4), so 32
     // lanes reading char4 = 128 bytes/step -- same coalescing discipline as 4.1,
-    // but now moving 4x more elements per transaction (1 byte vs. 2 byte dtype).
+    // but now covering 2x the elements per transaction (4 per lane at 1 byte vs.
+    // 2 per lane at 2 bytes), because the same 128 B holds twice as many weights.
     int n_char4 = in_dim / 4;
     const char4* row4 = reinterpret_cast<const char4*>(row);
     const half2* x2   = reinterpret_cast<const half2*>(x);
@@ -443,31 +450,39 @@ __global__ void gemv_int8_dequant_fused(
         half2 xv0 = x2[i * 2];
         half2 xv1 = x2[i * 2 + 1];
         // Dequantize in registers -- this is the "dequant-in-the-kernel" pattern:
-        // int8 -> float multiply by scale happens here, fused into the same FMA
-        // chain, NEVER written back out. The ALU cost is negligible because the
-        // kernel is memory-bound: these extra multiplies are hidden entirely
-        // behind the (now half-sized) HBM load latency.
-        acc += (float(w4.x) * scale) * __half2float(xv0.x);
-        acc += (float(w4.y) * scale) * __half2float(xv0.y);
-        acc += (float(w4.z) * scale) * __half2float(xv1.x);
-        acc += (float(w4.w) * scale) * __half2float(xv1.y);
+        // the int8 value becomes a float and is consumed by the FMA chain in the
+        // same register lifetime, NEVER written back out.
+        // Note where the scale is NOT applied: it is per-OUTPUT-CHANNEL, i.e.
+        // constant along this entire row, so it hoists out of the inner loop and
+        // is applied once at the end. Multiplying by it 4x per iteration here (a
+        // common first draft) is pure waste.
+        acc += float(w4.x) * __half2float(xv0.x);
+        acc += float(w4.y) * __half2float(xv0.y);
+        acc += float(w4.z) * __half2float(xv1.x);
+        acc += float(w4.w) * __half2float(xv1.y);
     }
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-    if (lane == 0) y[warp_id] = __float2half(acc);
+    if (lane == 0) y[warp_id] = __float2half(acc * scale);   // dequant scale, applied once
 }
 // Measured effect (13B model, same shape as 4.1): HBM traffic drops from 141.6 MB
 // (FP16) to 70.8 MB (INT8) per matmul -- tokens/sec for this layer roughly doubles,
-// matching the closed-form prediction in Section 2. The dequant multiply-add adds
-// ~0.3 extra FLOP/byte to arithmetic intensity -- still nowhere near the ridge
-// point, so the kernel remains memory-bound and the speedup is "free" (bound by
-// the SAME roofline region, just with less numerator).
+// matching the closed-form prediction in Section 2. Arithmetic intensity goes UP,
+// from 1.0 FLOP/byte (FP16: 2 FLOPs per 2-byte weight) to 2.0 (INT8: the same
+// 2 FLOPs per 1-byte weight) -- still ~165x below the ~330 FLOP/byte ridge point,
+// so the kernel stays in the SAME roofline region with a smaller numerator, which
+// is exactly why the speedup is close to the full 2x.
+//
+// GROUP-WISE scales (the GPTQ/AWQ default, group_size=128 along in_dim) do not
+// hoist all the way out: apply the group's scale once per 128-element group --
+// one extra multiply per 32 char4 loads, still negligible against the HBM load.
 ```
 
 Triton makes the same dequant-fused pattern considerably shorter to express and auto-tunes the block size across GPU generations — this is the pattern behind Marlin (used by vLLM) and the AWQ/GPTQ CUDA kernels in production:
 
 ```python
+import torch
 import triton
 import triton.language as tl
 
@@ -506,11 +521,14 @@ def int8_weight_only_gemv_kernel(
         ).to(tl.float32)
         x_tile = tl.load(x_ptr + offs_k, mask=mask, other=0.0).to(tl.float32)
 
-        # Dequant-fused: int8 -> float32 via per-row scale, immediately multiplied
-        # against the fp16-loaded (upcast) activation -- no intermediate write.
-        acc += tl.sum(w_tile * scale * x_tile)
+        # Dequant-fused: the int8 tile is upcast and consumed in-register against
+        # the fp16-loaded activation -- no intermediate write. The per-row scale is
+        # constant across the whole reduction, so it is applied once after the loop
+        # (same hoist as the CUDA C++ kernel above), not per element.
+        acc += tl.sum(w_tile * x_tile)
 
-    tl.store(y_ptr + row, acc.to(tl.float16))
+    # Shape-matched store: a (1,)-shaped value needs a (1,)-shaped pointer block.
+    tl.store(y_ptr + row + tl.arange(0, 1), (acc * scale).to(tl.float16))
 
 
 def int8_weight_only_gemv(w_int8, scales, x, out_dim, in_dim):
@@ -525,7 +543,7 @@ def int8_weight_only_gemv(w_int8, scales, x, out_dim, in_dim):
     return y
 ```
 
-FP8 (E4M3/E5M2, native on Hopper/Ada Tensor Cores) achieves the same 2x bandwidth reduction as INT8 but with a wider dynamic range and no explicit per-channel scale multiply required in the common case — the Tensor Core's FP8 MMA path handles the format natively, so FP8 is generally preferred over INT8 on Hopper+ when accuracy at low bit-width is a concern (see [`../cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) for the format's mantissa/exponent tradeoff and when E4M3 vs. E5M2 is the right choice). INT4 (used by AWQ/GPTQ/Marlin) packs two 4-bit weights per byte and needs an explicit unpack step (bit-shift + mask) fused into the same load — the extra ALU work is still hidden behind the now-quartered HBM traffic, but only up to the point where unpack overhead itself becomes non-negligible relative to the (very small) remaining memory cost; this is why INT4 kernels see 3-3.5x speedup in practice rather than the theoretical 4x.
+FP8 (E4M3/E5M2, native on Hopper/Ada Tensor Cores) achieves the same 2x bandwidth reduction as INT8, and the Tensor Core MMA path consumes the format natively rather than through an integer conversion. What it does *not* do is remove scaling: E4M3 has a maximum magnitude of 448, so FP8 pipelines still carry scale factors (per-tensor with an amax history in NVIDIA's Transformer Engine; per-channel or per-block in weight-only recipes). The real difference from INT8 is granularity — a 4-bit exponent gives FP8 dynamic range *within* each scaling group, so it tolerates the outlier channels of §9's pitfall without INT8's need to shrink the group down to 128 elements or fewer. That is why FP8 is generally preferred over INT8 on Hopper+ when accuracy at low bit-width is a concern (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) for the format's mantissa/exponent tradeoff and when E4M3 vs. E5M2 is the right choice). INT4 (used by AWQ/GPTQ/Marlin) packs two 4-bit weights per byte and needs an explicit unpack step (bit-shift + mask) fused into the same load — the extra ALU work is still hidden behind the now-quartered HBM traffic, but only up to the point where unpack overhead itself becomes non-negligible relative to the (very small) remaining memory cost; this is why INT4 kernels see 3-3.5x speedup in practice rather than the theoretical 4x.
 
 ### 4.4 Kernel Fusion: RMSNorm+Matmul, SwiGLU, Dequant+GEMV
 
@@ -580,26 +598,52 @@ __global__ void fused_rmsnorm_gemv(
 }
 ```
 
-The SwiGLU MLP (`down_proj(SiLU(gate_proj(x)) * up_proj(x))`) fuses similarly: `gate_proj` and `up_proj` are computed from the *same* input `x`, so a fused kernel loads `x` once and streams both weight matrices in the same pass, applying `SiLU(gate) * up` in registers before writing only the (much smaller, hidden_dim-sized) intermediate to shared memory for `down_proj` — avoiding two separate reads of `x` and one HBM round-trip for the elementwise `SiLU(gate)*up` intermediate (which is `intermediate_dim`-sized, often 3-4x `hidden_dim`, so skipping this round-trip is worth more than the RMSNorm fusion above). FasterTransformer and TensorRT-LLM both ship a fused-gated-MLP kernel for exactly this reason (§6).
+**Read that grid before copying it.** With `grid.x = out_dim`, *every* block recomputes the
+entire normalization of `x` — at `out_dim=13824, hidden_dim=5120` that is 13,824 redundant
+5,120-element sum-of-squares reductions per matmul, roughly doubling the kernel's arithmetic
+and re-reading `x` 13,824 times. It survives contact with reality for exactly one reason:
+`x` is 10 KB, so every re-read after the first hits L2 (50 MB on an H100) rather than HBM,
+and the redundant ALU work hides behind a kernel that is still memory-bound on the weight
+row. Both conditions are load-bearing. Widen the hidden dimension or narrow the weight
+matrix and the fusion inverts — at which point the answer is to fold the normalization into
+the *previous* kernel's epilogue, where it is computed once, instead of into the consumer's
+prologue, where it is computed `out_dim` times.
+
+The SwiGLU MLP (`down_proj(SiLU(gate_proj(x)) * up_proj(x))`) fuses similarly: `gate_proj` and `up_proj` are computed from the *same* input `x`, so a fused kernel loads `x` once and streams both weight matrices in the same pass, applying `SiLU(gate) * up` in registers before writing only the (much smaller, hidden_dim-sized) intermediate to shared memory for `down_proj` — avoiding two separate reads of `x` and one HBM round-trip for the elementwise `SiLU(gate)*up` intermediate (which is `intermediate_dim`-sized, often 3-4x `hidden_dim`, so skipping this round-trip is worth more than the RMSNorm fusion above). TensorRT-LLM and vLLM both ship a fused-gated-MLP kernel for exactly this reason (§6).
 
 ### 4.5 CUDA Graphs for the Decode Loop: From Launch-Bound to Graph-Replayed
 
-A single decode step for a 40-layer model issues on the order of 15-20 kernels per layer (RMSNorm, QKV GEMV, attention-decode, O-proj GEMV, RMSNorm, gate/up GEMV, SiLU-mul, down-proj GEMV, residual adds) — 40 layers x ~8 kernels = 320 kernel launches for one token. Each CPU-side launch costs 20-50 microseconds of driver/runtime overhead (parameter marshaling, stream enqueue). At the memory-bound decode throughput computed in §2 (115 tok/s for 13B FP16, i.e. ~8.7 ms/token *available* time budget), 320 launches x 30 microseconds = 9.6 ms of PURE LAUNCH OVERHEAD — comparable to or exceeding the actual memory-bound compute time. The decode loop becomes launch-bound, not memory-bound, defeating every optimization in §4.1-4.4.
+A single decode step for a 40-layer model issues roughly 8 kernels per layer (RMSNorm, QKV GEMV, attention-decode, O-proj GEMV, RMSNorm, gate/up GEMV, SiLU-mul, down-proj GEMV, residual adds) — 40 layers x ~8 kernels = 320 kernel launches for one token. Each launch costs on the order of **5 microseconds** of host and driver work (parameter marshaling, command-buffer processing, stream enqueue; NVIDIA documents ~1-5 us of driver and hardware overhead per kernel, and measured host-side submission lands around 4-6 us). So one token carries ~1.6 ms of CPU-side issue work.
+
+The number that decides whether that matters is not the total — launches are asynchronous, so the CPU is allowed to run ahead of the GPU — it is the **per-kernel** comparison:
+
+```
+Regime                      GPU time/kernel        CPU issue/kernel   Verdict
+13B FP16, 115 tok/s         8.7 ms / 320 = 27 us   ~5 us              CPU runs ahead; the
+                                                                       1.6 ms hides, but it is
+                                                                       still 18% of the budget
+                                                                       and any CPU hiccup shows
+7B INT4, ~660 tok/s (S10)   1.5 ms / 320 = 4.7 us  ~5 us              CPU CANNOT keep up ->
+                                                                       LAUNCH-BOUND
+```
+
+That is the real shape of the problem: every optimization in §4.1-4.4 shrinks GPU time per kernel while leaving CPU issue time fixed, so **success at making the kernels fast is what drives the loop into the launch-bound regime.** A quantized small model is exactly where the decode loop stops being memory-bound and starts waiting on the CPU.
 
 ```
 BROKEN: naive decode loop, one CPU-driven launch per kernel per token
 
   for token in range(max_new_tokens):
       for layer in model.layers:
-          rmsnorm_kernel<<<...>>>(...)      # ~30 us CPU launch overhead
-          qkv_gemv_kernel<<<...>>>(...)     # ~30 us
-          attention_decode_kernel<<<...>>>(...)  # ~30 us
+          rmsnorm_kernel<<<...>>>(...)      # ~5 us CPU issue cost
+          qkv_gemv_kernel<<<...>>>(...)     # ~5 us
+          attention_decode_kernel<<<...>>>(...)  # ~5 us
           # ... 5 more kernels ...
       sample_kernel<<<...>>>(...)
-  # 320 launches/token x 30us = 9.6ms/token JUST IN LAUNCH OVERHEAD --
-  # this can exceed the ~8.7ms memory-bound compute budget from Section 2,
-  # meaning the GPU spends more wall-clock time waiting on the CPU to issue
-  # the next kernel than it spends actually reading weights from HBM.
+  # 320 launches/token x ~5us = ~1.6ms/token of CPU issue work. Against the
+  # ~8.7ms budget of a 13B FP16 model that hides; against the ~1.5ms budget of
+  # a 7B INT4 model (Section 10) it does not, and the GPU starts idling between
+  # kernels waiting for the CPU to issue the next one. Nsight Systems shows this
+  # directly as gaps on the GPU timeline with a saturated CPU launch thread.
 ```
 
 ```cuda
@@ -615,27 +659,32 @@ cudaStreamCreate(&capture_stream);
 cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal);
 run_one_decode_step(model, kv_cache, capture_stream);  // same 320-kernel sequence
 cudaStreamEndCapture(capture_stream, &decode_graph);
-cudaGraphInstantiate(&decode_graph_exec, decode_graph, nullptr, nullptr, 0);
+// CUDA 12+ signature: (pGraphExec, graph, flags). The old five-argument form
+// (pErrorNode, pLogBuffer, bufferSize) was removed and does not compile.
+cudaGraphInstantiate(&decode_graph_exec, decode_graph, 0);
 
 // --- Replay phase: the actual generation loop ---
 for (int token = 0; token < max_new_tokens; ++token) {
     // Update only the small set of graph-node parameters that change per
     // token (input token id, KV-cache write offset, block-table pointer) via
-    // cudaGraphExecKernelNodeSetParams -- NOT a re-capture. Static shapes
-    // (batch size, sequence of kernels) must be identical every replay, which
-    // is why CUDA Graphs pair naturally with fixed-shape decode (one new
-    // token per step) but need re-capture on any batch-size change.
+    // cudaGraphExecKernelNodeSetParams -- NOT a re-capture. The graph's TOPOLOGY
+    // and its kernels' shapes are fixed at capture, which is why CUDA Graphs pair
+    // naturally with fixed-shape decode (one new token per step) but need a
+    // separate captured graph per batch size. (Device-side data-dependent
+    // branching is no longer excluded -- conditional IF/WHILE nodes landed in
+    // CUDA 12.4 and IF-ELSE/SWITCH in 12.8 -- but a change of SHAPE still means
+    // a different graph.)
     update_graph_dynamic_params(decode_graph_exec, token, kv_cache_offset);
     cudaGraphLaunch(decode_graph_exec, capture_stream);   // ONE launch call
 }
 cudaStreamSynchronize(capture_stream);
-// Measured: replay overhead drops from ~320 x 30us = 9,600us to a SINGLE
-// cudaGraphLaunch call at ~5-10us total -- effectively eliminating launch
+// Measured: the ~1.6 ms of per-token CPU issue work (320 x ~5us) collapses into
+// a SINGLE cudaGraphLaunch call at ~5-10us total -- effectively eliminating launch
 // overhead from the decode critical path. This is the single highest-ROI
 // non-numerical optimization available once the memory-bound kernels
 // themselves (4.1-4.4) are already bandwidth-efficient -- it does not reduce
 // bytes moved, it removes CPU/GPU synchronization stalls sitting BETWEEN
-// those byte-moving kernels. See ../cuda_graphs/README.md for graph-update
+// those byte-moving kernels. See ../cuda_graphs/cuda_graphs.md for graph-update
 // APIs and when re-capture vs. in-place parameter update is required.
 ```
 
@@ -669,7 +718,7 @@ The two fixes compose: quantization (4.3) shrinks the bytes each kernel must mov
 
 **AWQ (Activation-aware Weight Quantization)** and **GPTQ (Post-Training Quantization for GPT)** are the two dominant scale-computation algorithms feeding the dequant-fused kernels in §4.3 — both determine, offline, the per-channel or per-group scale factors that the kernel applies at inference time; this file's kernels are agnostic to which algorithm produced `scales[]`, consuming only the resulting quantized weights and scale tensor.
 
-**FasterTransformer** (NVIDIA, predecessor to parts of TensorRT-LLM) was among the first production LLM-serving codebases to publish a fused gated-MLP (SwiGLU) kernel and a fused-bias-RMSNorm kernel matching the pattern in §4.4, establishing the fusion boundary (normalize-then-project, not project-then-normalize-separately) that later frameworks adopted.
+**FasterTransformer** (NVIDIA) was among the first production LLM-serving codebases to publish a fused gated-MLP (SwiGLU) kernel and a fused-bias-RMSNorm kernel matching the pattern in §4.4, establishing the fusion boundary (normalize-then-project, not project-then-normalize-separately) that later frameworks adopted. Its development has ended and the work moved into TensorRT-LLM — cite it for the lineage of these kernels, not as something to deploy.
 
 **llama.cpp** takes weight-only quantization furthest into the sub-byte regime with its GGUF "k-quant" formats (Q4_K, Q5_K, Q2_K and variants), which group weights into small blocks (typically 32 or 256 elements) each with their own scale and, for the K-variants, a second-level "super-block" scale — a finer-grained generalization of the per-channel scale used in §4.3's INT8 kernel, aimed specifically at running large models on consumer GPUs and CPUs where HBM/DRAM capacity, not just bandwidth, is the binding constraint.
 
@@ -783,11 +832,11 @@ at production batch sizes                every batch-size change instead of logs
 
 **Pitfall: FP8 weight-only quantization applied uniformly, tanking accuracy on outlier channels.** A model's down-projection weight matrix had a small number of channels with activation magnitudes 20-30x the median (a well-documented "outlier feature" phenomenon in transformer models beyond ~6B parameters). Per-tensor FP8 quantization (single scale for the whole matrix) forced the scale to accommodate the outliers, driving the effective precision for the remaining 99%+ of channels below usable resolution — perplexity regressed by 4.2%, far outside the 0.3% budget. Fix: per-channel (or per-group-of-128) scales, as used throughout §4.3's kernels, isolate each outlier channel's scale from the rest; this is precisely why AWQ and GPTQ compute *per-channel or per-group* scales rather than one global scale, and why the kernel signature in §4.3 takes a `scales[out_dim]` array, not a single float.
 
-**Pitfall: measuring "tokens/sec" only at batch=1 and concluding a kernel change didn't help.** An engineer benchmarked a new fused-attention kernel exclusively in single-stream (batch=1) mode and saw only a 3% improvement, nearly within noise, and nearly shelved the change. The kernel's actual benefit was in the KV-cache read path at high batch/long-context (§2's 83.9 GB/step example), which batch=1 benchmarks never exercise (a single sequence's KV read is comparatively tiny). Re-benchmarking at batch=64/context=4K showed a 22% throughput improvement, because that configuration is where KV-cache bandwidth — not weight bandwidth — dominates. Lesson: decode kernel benchmarks must span the batch x context-length space the production autoscaler (see `design_gpu_inference_platform.md` §4.4) actually targets (65% MBU), not just the batch=1 case that is easiest to reason about.
+**Pitfall: measuring "tokens/sec" only at batch=1 and concluding a kernel change didn't help.** An engineer benchmarked a new fused-attention kernel exclusively in single-stream (batch=1) mode and saw only a 3% improvement, nearly within noise, and nearly shelved the change. The kernel's actual benefit was in the KV-cache read path at high batch/long-context (§2's 85.9 GB/step example), which batch=1 benchmarks never exercise (a single sequence's KV read is comparatively tiny). Re-benchmarking at batch=64/context=4K showed a 22% throughput improvement, because that configuration is where KV-cache bandwidth — not weight bandwidth — dominates. Lesson: decode kernel benchmarks must span the batch x context-length space the production autoscaler (see `design_gpu_inference_platform.md` §4.4) actually targets (65% MBU), not just the batch=1 case that is easiest to reason about.
 
 **Pitfall: forgetting that Tensor Cores need shape-aligned tiles, not just "quantized data."** A team assumed switching a GEMV to INT8 would automatically engage the Tensor Cores' INT8 MMA path (2nd-gen Tensor Cores support INT8 since Turing). The scalar-per-thread kernel in §4.1's BROKEN example, even after swapping the dtype to INT8, never issues an `mma.sync` instruction — Tensor Cores require data staged into warp-level matrix fragments via `wmma`/`mma` intrinsics, which only make sense for GEMM-shaped (M > 1) operations. A batch=1 GEMV, regardless of precision, structurally cannot use Tensor Cores at the fragment level; the win from quantization at batch=1 is *purely* the memory-bandwidth reduction (§2), not compute-path acceleration. Tensor Cores only re-enter the picture once continuous batching raises the effective M dimension high enough to justify a tiled GEMM kernel — the crossover point discussed in Section 2's batching analysis.
 
-**Pitfall: profiling in isolation and missing that the fused kernel needs more shared memory, capping occupancy.** The fused RMSNorm+GEMV kernel in §4.4 uses `extern __shared__` for the `hidden_dim`-sized normalized buffer. At `hidden_dim=8192` in FP32 accumulation (32 KB), combined with the GEMV phase's own shared-memory needs, occupancy dropped to 25% (2 blocks/SM instead of the 8+ achievable with the unfused kernels) on an SM with 164 KB shared memory per SM (Hopper) split across resident blocks. The fusion's HBM-traffic win was real, but the occupancy regression partially offset it in the initial rollout. Fix: reduce the shared-memory buffer to FP16 (halves the footprint) since the normalized value's precision requirement is no stricter than the surrounding FP16 pipeline, restoring occupancy to 50%+. See [`../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the general register/shared-memory occupancy tradeoff this pitfall instantiates.
+**Pitfall: profiling in isolation and missing that the fused kernel needs more shared memory, capping occupancy.** The fused RMSNorm+GEMV kernel in §4.4 uses `extern __shared__` for the `hidden_dim`-sized normalized buffer. At `hidden_dim=8192` in FP32 accumulation (32 KB), combined with the GEMV phase's own shared-memory needs, occupancy dropped to 25% (2 blocks/SM instead of the 8+ achievable with the unfused kernels). The instructive part is where that ceiling came from, because it is *not* the raw capacity: Hopper carries **228 KB of shared memory per SM** (164 KB is A100), which at 32 KB per block would allow seven resident blocks. The binding limit was the L1/shared **carveout** actually in effect for the kernel, which is selected from a fixed ladder of supported sizes rather than sized to the request — so a request that lands just past a rung costs far more occupancy than its byte count suggests. Check `cudaFuncAttributePreferredSharedMemoryCarveout` and Nsight Compute's "Shared Memory Configuration Size" before blaming the 228 KB ceiling. The fusion's HBM-traffic win was real, but the occupancy regression partially offset it in the initial rollout. Fix: reduce the shared-memory buffer to FP16 (halves the footprint) since the normalized value's precision requirement is no stricter than the surrounding FP16 pipeline, restoring occupancy to 50%+. See [`../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the general register/shared-memory occupancy tradeoff this pitfall instantiates.
 
 ---
 
@@ -810,14 +859,16 @@ Where:
 ### Worked Capacity Table (H100 SXM5, 3.0 TB/s achievable ceiling)
 
 ```
-Model size    FP16 tok/s (batch=1)   INT8/FP8 tok/s (batch=1)   INT4 tok/s (batch=1, ~3.2x actual)
+Model size    FP16 tok/s (batch=1)   INT8/FP8 tok/s (batch=1)   INT4 tok/s (batch=1, ~3.1x actual)
 7B            ~214                    ~428                       ~660
 13B           ~115                    ~230                       ~355
 30B           ~50                     ~100                       ~155
 70B           ~21                     ~43                        ~66
 
-  (at achieved_fraction = 0.85; naive/unfused kernels at 0.55 achieved_fraction
-   would show roughly 65% of these numbers -- this is the Section 4.1 coalescing win.)
+  (Computed against the 3.0 TB/s ACHIEVABLE ceiling, which is itself ~90% of the
+   3.35 TB/s nameplate peak -- do not then multiply by achieved_fraction again, or
+   the derate is applied twice. A naive uncoalesced kernel reaching only ~55% of
+   nameplate (1.84 TB/s) shows ~61% of these numbers: the Section 4.1 coalescing win.)
 ```
 
 ### Batching Capacity Planning
@@ -834,19 +885,22 @@ Worked example (13B model, 40 layers, GQA 8 KV heads, head_dim=128, context=4096
 target L=10ms, H100 3.0 TB/s):
 
   kv_bytes_per_token_per_layer = 2 x 8 x 128 x 2 = 4096 bytes (Section 2)
-  kv_bytes_per_token_full_model = 4096 x 40 = 163,840 bytes ~= 160 KB
+  kv_bytes_per_token_full_model = 4096 x 40 = 163,840 bytes = 160 KiB
 
-  max_batch ~= (3.0e12 * 0.010) / (4096 * 160e3)
-             = 3.0e10 / 6.554e8
-             ~= 45.8  -> round down to 45
+  max_batch ~= (3.0e12 * 0.010) / (4096 * 163,840)
+             = 3.0e10 / 6.711e8
+             ~= 44.7  -> round down to 44
 
-  Interpretation: beyond batch~45 at 4K context, KV-cache reads alone consume
+  Interpretation: beyond batch~44 at 4K context, KV-cache reads alone consume
   the full 10ms/token budget, regardless of how well-quantized or fused the
   weight-read kernels are. This is the kernel-level derivation of the same
-  ceiling design_gpu_inference_platform.md's autoscaler targets via MBU
-  (Section 2, Component 4.4 of that file) -- MBU crossing 80-85% IS this
-  KV-bandwidth ceiling, observed from the platform's vantage point instead
-  of the kernel's.
+  ceiling design_gpu_inference_platform.md's autoscaler targets (Section 2,
+  Component 4.4 of that file). Keep the two quantities distinct, though: that
+  file's "MBU" is KV-cache PAGE OCCUPANCY (a capacity metric), while the
+  formula above is a KV-cache BANDWIDTH bound. They move together because both
+  scale with batch x context, and page occupancy is the cheap operational
+  proxy -- but a deployment with short contexts and many sequences can hit one
+  without the other. Neither is the literature's "Model Bandwidth Utilization".
 ```
 
 ### Fleet Sizing Implication
@@ -861,7 +915,7 @@ for a fixed token-throughput target should compute BOTH ceilings:
      by shorter context, GQA/MQA (fewer KV heads), or paged eviction of cold
      KV blocks; largely independent of weight quantization.
 Quantizing weights alone (Section 4.3) does NOT raise the KV-bandwidth ceiling
--- a fully INT4-quantized 13B model still hits the SAME batch~45 KV-cache wall
+-- a fully INT4-quantized 13B model still hits the SAME batch~44 KV-cache wall
 at 4K context on the same GPU, because KV-cache is stored and read at its own
 precision (typically FP16 or a separate INT8 KV-cache quantization scheme),
 independent of weight precision. Capacity planning must budget both ceilings
@@ -875,7 +929,7 @@ accordingly is a common estimation error.
 
 **Q: Why is a single-token (batch=1) decode step memory-bound while prefill is compute-bound, given that both are "just matrix multiplication"?**
 
-The distinction is the M dimension of the underlying matmul, which sets arithmetic intensity (FLOPs read per byte moved). Decode multiplies a `[out_dim, in_dim]` weight matrix against a single `[in_dim]` activation vector — a GEMV, where every weight element is read exactly once and used in exactly one multiply-add, giving arithmetic intensity around 1-2 FLOP/byte regardless of matrix size. Prefill multiplies the same weight matrix against `[seq_len, in_dim]` activations for hundreds of tokens at once — each weight element is now reused across `seq_len` rows, pushing arithmetic intensity to `2 x seq_len` FLOP/byte, which for seq_len=512 already exceeds the H100's roofline ridge point (~330 FLOP/byte) and puts the kernel in the compute-bound region where Tensor Cores saturate. The practical consequence: decode optimization is about reducing bytes moved (quantization) or increasing effective reuse (batching); prefill optimization is about tiling and Tensor Core utilization — two almost entirely different kernel-engineering disciplines applied to the "same" operation.
+The distinction is the M dimension of the underlying matmul, which sets arithmetic intensity (FLOPs read per byte moved). Decode multiplies a `[out_dim, in_dim]` weight matrix against a single `[in_dim]` activation vector — a GEMV, where every weight element is read exactly once and used in exactly one multiply-add, giving arithmetic intensity around 1-2 FLOP/byte regardless of matrix size. Prefill multiplies the same weight matrix against `[seq_len, in_dim]` activations for hundreds of tokens at once — each weight element is now reused across `seq_len` rows, pushing arithmetic intensity to `seq_len` FLOP/byte for FP16 weights (`2 x params x seq_len` FLOPs over `2 x params` bytes), which for seq_len=512 already exceeds the H100's roofline ridge point (~330 FLOP/byte) and puts the kernel in the compute-bound region where Tensor Cores saturate. The practical consequence: decode optimization is about reducing bytes moved (quantization) or increasing effective reuse (batching); prefill optimization is about tiling and Tensor Core utilization — two almost entirely different kernel-engineering disciplines applied to the "same" operation.
 
 **Q: A 13B FP16 model reads 26 GB of weights per decode token. Walk through why, and what happens if you quantize to INT8.**
 
@@ -895,11 +949,11 @@ A naive attention implementation computes the full row of QK^T scores across all
 
 **Q: Why do CUDA Graphs matter specifically for the LLM decode loop, more than for many other GPU workloads?**
 
-A single decode step for a multi-layer transformer issues on the order of 15-20 kernels per layer — RMSNorm, QKV projection, attention, output projection, MLP components — so a 40-layer model launches roughly 300+ kernels for one generated token. Each CPU-side kernel launch costs 20-50 microseconds of driver and runtime overhead; at 300+ launches, that overhead alone can reach several milliseconds, which is directly comparable to (or larger than) the memory-bound compute time itself for a well-quantized model (tens of milliseconds available per token at realistic throughput targets). CUDA Graphs capture the entire fixed sequence of kernels once and replay it with a single `cudaGraphLaunch` call, collapsing hundreds of microseconds of launch overhead into single-digit microseconds — converting a launch-bound loop back into a purely memory-bound one, which is the regime every other optimization in this file assumes.
+A single decode step for a multi-layer transformer issues roughly 8 kernels per layer — RMSNorm, QKV projection, attention, output projection, MLP components, residual adds — so a 40-layer model launches on the order of 320 kernels for one generated token. Each launch costs about 5 microseconds of host and driver work (NVIDIA documents ~1-5 us of driver and hardware overhead per kernel), giving ~1.6 ms of CPU-side issue work per token. Because launches are asynchronous, the total is not what decides the outcome — the per-kernel comparison is. At 13B FP16 the GPU spends ~27 us per kernel against ~5 us of CPU issue time, so the CPU comfortably runs ahead and the overhead hides. Quantize down to a 7B INT4 model at ~660 tok/s and the GPU is down to ~4.7 us per kernel, at which point the CPU can no longer keep up and the loop is launch-bound. The uncomfortable implication is that succeeding at §4.1-4.4 is what creates this problem: shrinking GPU time per kernel while CPU issue time stays fixed walks the loop straight into it. CUDA Graphs capture the fixed sequence once and replay it with a single `cudaGraphLaunch` — single-digit microseconds for the whole step — restoring the memory-bound regime every other optimization in this file assumes.
 
 **Q: How does continuous batching interact with the memory-bandwidth wall, and where does it stop helping?**
 
-Continuous batching turns what would be many separate batch=1 GEMVs into a single batch=B GEMM by grouping concurrently-active sequences' activation vectors together, so each weight matrix read from HBM is reused across all B sequences in that step instead of being read once per sequence — this raises effective arithmetic intensity roughly linearly with B (Section 2), directly multiplying achievable tokens/sec across the batch. The benefit is bounded by two independent ceilings: first, once arithmetic intensity crosses the GPU's roofline ridge point, further batching yields diminishing FLOP/s returns because the kernel is now compute-bound rather than memory-bound; second, and typically hit first in practice, each sequence in the batch carries its own independent KV-cache that must still be read per-step (KV-cache does not benefit from cross-sequence reuse the way weights do), so KV-cache read bandwidth becomes the new bottleneck at moderate batch sizes (Section 10's worked example shows this ceiling near batch=45 for a 13B model at 4K context on an H100).
+Continuous batching turns what would be many separate batch=1 GEMVs into a single batch=B GEMM by grouping concurrently-active sequences' activation vectors together, so each weight matrix read from HBM is reused across all B sequences in that step instead of being read once per sequence — this raises effective arithmetic intensity roughly linearly with B (Section 2), directly multiplying achievable tokens/sec across the batch. The benefit is bounded by two independent ceilings: first, once arithmetic intensity crosses the GPU's roofline ridge point, further batching yields diminishing FLOP/s returns because the kernel is now compute-bound rather than memory-bound; second, and typically hit first in practice, each sequence in the batch carries its own independent KV-cache that must still be read per-step (KV-cache does not benefit from cross-sequence reuse the way weights do), so KV-cache read bandwidth becomes the new bottleneck at moderate batch sizes (Section 10's worked example shows this ceiling near batch=44 for a 13B model at 4K context on an H100).
 
 **Q: Why would you choose FP8 over INT8 for weight-only quantization on an H100, given both halve the byte count identically?**
 
@@ -911,11 +965,11 @@ It refers to performing the integer-or-FP8-to-floating-point dequantization arit
 
 **Q: How would you use Nsight Compute to determine whether a decode-step kernel is actually reaching its achievable memory bandwidth, versus being bottlenecked by something else?**
 
-Nsight Compute's "Speed of Light" (Memory Workload Analysis) section reports Memory Throughput as a percentage of the GPU's peak HBM bandwidth alongside Compute (SM) Throughput; for a well-implemented decode GEMV or attention kernel, Memory Throughput should read 80%+ while Compute Throughput reads in the single digits, confirming the kernel is where the roofline model (Section 2) predicts it should be. If Memory Throughput is well below 80% (e.g. 50-55%), the next diagnostic step is the Memory Access Pattern metrics — specifically checking for uncoalesced global loads (low "L2 Cache Hit Rate" combined with a high count of small, non-128-byte-aligned transactions) — which is exactly the failure mode the naive §4.1 GEMV exhibits before the warp-coalesced fix. If Compute Throughput is unexpectedly high for a claimed memory-bound kernel, that often signals an accidental precision upcast (e.g. FP32 accumulation happening in a wider, more expensive path than intended) or, more subtly, insufficient occupancy causing the SM to stall on latency rather than bandwidth — a distinct problem requiring the register/shared-memory occupancy analysis in `../occupancy_and_launch_configuration/README.md` rather than a memory-access-pattern fix.
+Nsight Compute's "Speed of Light" (Memory Workload Analysis) section reports Memory Throughput as a percentage of the GPU's peak HBM bandwidth alongside Compute (SM) Throughput; for a well-implemented decode GEMV or attention kernel, Memory Throughput should read 80%+ while Compute Throughput reads in the single digits, confirming the kernel is where the roofline model (Section 2) predicts it should be. If Memory Throughput is well below 80% (e.g. 50-55%), the next diagnostic step is the Memory Access Pattern metrics — specifically checking for uncoalesced global loads (low "L2 Cache Hit Rate" combined with a high count of small, non-128-byte-aligned transactions) — which is exactly the failure mode the naive §4.1 GEMV exhibits before the warp-coalesced fix. If Compute Throughput is unexpectedly high for a claimed memory-bound kernel, that often signals an accidental precision upcast (e.g. FP32 accumulation happening in a wider, more expensive path than intended) or, more subtly, insufficient occupancy causing the SM to stall on latency rather than bandwidth — a distinct problem requiring the register/shared-memory occupancy analysis in `../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md` rather than a memory-access-pattern fix.
 
-**Q: Why does the platform-level "MBU" (model buffer utilization) metric used for autoscaling correspond to a kernel-level phenomenon described in this file?**
+**Q: The platform autoscaler in `design_gpu_inference_platform.md` scales on "MBU". What kernel-level phenomenon is it actually tracking, and where does the analogy break?**
 
-MBU, as used in `design_gpu_inference_platform.md`'s autoscaler, measures the fraction of KV-cache pages occupied across a GPU pod — from the platform's vantage point, it is a proxy for "how saturated is this GPU." At the kernel level, that saturation is precisely the KV-cache-bandwidth ceiling derived in Section 10: once batch size and context length push per-step KV-cache reads high enough to consume the full per-token latency budget, additional concurrent sequences cannot be served without violating latency SLAs, regardless of how well-optimized the weight-read kernels are. The platform's empirically-tuned 65% MBU autoscaling target and this file's `max_batch_before_kv_bound` formula are two views of the identical physical constraint — one observed operationally via a dashboard metric, the other derived analytically from HBM bandwidth and per-token KV-cache byte counts.
+Start by disambiguating the acronym, because two different quantities share it. In the published literature MBU means **Model Bandwidth Utilization** — achieved memory bandwidth divided by peak, which is the §2 quantity this whole file optimizes. In `design_gpu_inference_platform.md`, MBU is used as shorthand for something else: the fraction of PagedAttention KV-cache *pages occupied* across a pod (vLLM's `gpu_cache_usage_perc`), which is a capacity measure, not a bandwidth one. The autoscaler uses the capacity metric because it is cheap to read from every replica and it correlates with saturation: both KV page occupancy and the KV-bandwidth bound of Section 10 scale with the same batch x context product, so a pod near 65-85% page occupancy is usually also near its per-step KV read budget. The analogy breaks wherever pages are resident but not read on every step: retained prefix-cache blocks, sequences preempted without eviction, or a prefill-heavy phase all inflate occupancy without adding per-step KV read traffic. So a kernel engineer diagnosing a latency regression should measure the bandwidth directly in Nsight Compute rather than inferring it from the autoscaler's dashboard.
 
 ---
 

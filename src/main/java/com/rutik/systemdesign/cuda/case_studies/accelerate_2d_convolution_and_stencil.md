@@ -12,8 +12,9 @@
 > reusing it in progressively cheaper memory.
 
 **Key insight for this design**: a stencil's arithmetic intensity is brutally low — a 5x5
-filter does 50 FLOPs per output against 100+ bytes of naive global traffic, two orders of
-magnitude below the H100's compute/bandwidth ridge point. That means the win is never "make
+filter does 50 FLOPs per output against 100+ bytes of naive global traffic, roughly **45x
+below** the H100's compute/bandwidth ridge point (0.48 vs. ~22 FLOPs/byte, Section 2). That
+means the win is never "make
 the math faster"; it is "move fewer bytes through HBM to do the same math." Shared-memory
 tiling with a **halo** (the ghost/apron border around the output tile) is the mechanism that
 converts N-times-redundant global reads into a single cooperative load per tile — and the
@@ -57,8 +58,8 @@ common case.
 - Shared-memory footprint per block must respect the **48 KB static default** (`__shared__`
   arrays), with an explicit, documented opt-in path (`cudaFuncSetAttribute` +
   `cudaFuncAttributeMaxDynamicSharedMemorySize`) for tiles that need more, up to the
-  architecture ceiling (up to ~227 KB per SM on Hopper when the L1/shared split is
-  reconfigured) — see [CUDA Memory Hierarchy Reference](./cross_cutting/cuda_memory_hierarchy_reference.md).
+  architecture ceiling (227 KB per thread block on Hopper, out of the 228 KB shared-memory
+  capacity per SM, when the unified L1/shared split is reconfigured) — see [CUDA Memory Hierarchy Reference](./cross_cutting/cuda_memory_hierarchy_reference.md).
 - Every kernel launch and allocation is wrapped in the `CUDA_CHECK` macro — see
   [CUDA Error Handling & Launch-Config Patterns](./cross_cutting/cuda_error_handling_and_launch_config_patterns.md).
 
@@ -103,8 +104,8 @@ halo_overhead_ratio = (B + 2r)^2 / B^2  - 1        (fraction of loaded bytes tha
 
   B=16, r=2:  400/256 - 1 = 0.5625   ->  56% extra bytes loaded beyond the output tile itself
   B=16, r=4:  576/256 - 1 = 1.25     -> 125% extra bytes loaded (halo now costs more than the tile)
-  B=32, r=2:  1156/1024 - 1 = 0.129  ->  13% extra   (larger tiles amortize the halo much better)
-  B=32, r=4:  1600/1024 - 1 = 0.5625 ->  56% extra
+  B=32, r=2:  1296/1024 - 1 = 0.266   ->  27% extra   (larger tiles amortize the halo much better)
+  B=32, r=4:  1600/1024 - 1 = 0.5625  ->  56% extra
 
   Rule of thumb: halo overhead shrinks as B grows (fixed r) and grows quadratically as r
   grows (fixed B) — this is why large-radius filters push toward bigger tiles or separable
@@ -151,30 +152,30 @@ outputs, a thread block must load a `(B + 2r) x (B + 2r)` region of input into s
 HALO / APRON TILE FOR A 2D CONVOLUTION -- B=16 output tile, r=2 radius (5x5 filter)
 SHARED_DIM = B + 2r = 20            h = halo/ghost cell (apron)   . = output cell
 
-   +----------------------+
-   |hhhhhhhhhhhhhhhhhhhhhh|  <- halo row  (apron rows 0-1,  r=2 wide)
-   |hhhhhhhhhhhhhhhhhhhhhh|  <- halo row
-   |hh..................hh|  <- output row 0   (16 output columns, apron cols 2-17)
-   |hh..................hh|  <- output row 1
-   |hh..................hh|  <- output row 2
-   |hh..................hh|  <- output row 3
-   |hh..................hh|  <- output row 4
-   |hh..................hh|  <- output row 5
-   |hh..................hh|  <- output row 6
-   |hh..................hh|  <- output row 7
-   |hh..................hh|  <- output row 8
-   |hh..................hh|  <- output row 9
-   |hh..................hh|  <- output row 10
-   |hh..................hh|  <- output row 11
-   |hh..................hh|  <- output row 12
-   |hh..................hh|  <- output row 13
-   |hh..................hh|  <- output row 14
-   |hh..................hh|  <- output row 15  (16 rows total: B=16)
-   |hhhhhhhhhhhhhhhhhhhhhh|  <- halo row  (apron rows 18-19, r=2 wide)
-   |hhhhhhhhhhhhhhhhhhhhhh|  <- halo row
-   +----------------------+
-    ^^                  ^^
-    left halo (r=2)     right halo (r=2)
+   +--------------------+
+   |hhhhhhhhhhhhhhhhhhhh|  <- halo row  (apron rows 0-1,  r=2 rows deep)
+   |hhhhhhhhhhhhhhhhhhhh|  <- halo row
+   |hh................hh|  <- output row 0   (16 output columns, apron cols 2-17)
+   |hh................hh|  <- output row 1
+   |hh................hh|  <- output row 2
+   |hh................hh|  <- output row 3
+   |hh................hh|  <- output row 4
+   |hh................hh|  <- output row 5
+   |hh................hh|  <- output row 6
+   |hh................hh|  <- output row 7
+   |hh................hh|  <- output row 8
+   |hh................hh|  <- output row 9
+   |hh................hh|  <- output row 10
+   |hh................hh|  <- output row 11
+   |hh................hh|  <- output row 12
+   |hh................hh|  <- output row 13
+   |hh................hh|  <- output row 14
+   |hh................hh|  <- output row 15  (16 rows total: B=16)
+   |hhhhhhhhhhhhhhhhhhhh|  <- halo row  (apron rows 18-19, r=2 rows deep)
+   |hhhhhhhhhhhhhhhhhhhh|  <- halo row
+   +--------------------+
+    ^^                ^^
+    left halo (r=2)   right halo (r=2)
 
 Every output cell (.) is surrounded on all four sides by enough loaded apron (h) data to
 evaluate the full 5x5 stencil (2 cells in every direction) without a single extra trip to
@@ -277,7 +278,8 @@ the same bytes cross the PCIe-of-the-chip (HBM) boundary 25 times instead of onc
 The filter coefficients are read identically by every thread in a warp at each step of the
 inner loop (`filter[fr][fc]` does not depend on `row`/`col`) — the textbook case for
 **constant memory**'s broadcast fast path: one fetch serves all 32 lanes in a single
-cycle-equivalent access, backed by a dedicated 64 KB constant cache per SM. See
+cycle-equivalent access, served out of the per-SM constant cache that backs the device's
+64 KB `__constant__` space. See
 [`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) Section 4
 for the general mechanics of the broadcast fast path.
 
@@ -423,10 +425,18 @@ not a multiple of 32. For `fr=0`, lanes with `ty=0` read shared addresses `tx` (
 banks 0-15); lanes with `ty=1` read addresses `20+tx` (20..35, which wrap to banks
 20..31,0,1,2,3 modulo the 32 banks) — the last 4 lanes of the `ty=1` half collide with the
 first 4 lanes of the `ty=0` half on banks 0-3, a measurable 2-way partial conflict visible in
-Nsight Compute's shared-memory bank-conflict counter. See
+Nsight Compute's shared-memory bank-conflict counter.
+
+**The reflexive `+1` row padding is the wrong fix for this particular shape.** Two
+half-warps read two 16-word runs separated by the row stride `S`, so they land on disjoint
+banks only when `S % 32 == 16`. `S = 20` collides on 4 banks; `S = 21` collides on **5**
+(strictly worse); the smallest padded stride that is actually conflict-free here is `S = 48`,
+which triples the tile's shared-memory footprint. The fix that costs nothing is the one this
+shape is really asking for: make `blockDim.x >= 32` (e.g. a `32 x 8` tile) so every warp
+stays inside a single tile row and the stride drops out of the analysis entirely. See
 [`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for the
-general padding fix (`SHARED_DIM + 1` row stride) and why `blockDim.x >= 32` (e.g. a
-`32 x 8` tile) sidesteps the issue entirely by keeping every warp inside one tile row.
+general padding technique and the cases where `+1` *is* the right answer (a warp striding
+down a column, where the conflict is 32-way rather than 2-way).
 
 ### 4.4 Separable Filters — O(K^2) to O(2K)
 
@@ -449,16 +459,21 @@ __global__ void conv_row_separable(const float* __restrict__ in, float* __restri
 
     int row = blockIdx.y * ROW_TILE_H + threadIdx.y;
     int col0 = blockIdx.x * ROW_TILE_W - radius;
-    if (row >= height) return;
 
-    for (int sx = threadIdx.x; sx < shared_w; sx += ROW_TILE_W) {
-        int gc = min(max(col0 + sx, 0), width - 1);   // clamp-to-edge, correct bound
-        s_row[threadIdx.y * shared_w + sx] = in[row * width + gc];
+    // NOTE: no early `return` for row >= height. An out-of-range thread must still reach
+    // the __syncthreads() below -- a barrier that only part of the block arrives at is
+    // undefined behavior (Section 9), and `height % ROW_TILE_H != 0` makes it happen on
+    // the last row of blocks for every image whose height is not a multiple of 8.
+    if (row < height) {
+        for (int sx = threadIdx.x; sx < shared_w; sx += ROW_TILE_W) {
+            int gc = min(max(col0 + sx, 0), width - 1);   // clamp-to-edge, correct bound
+            s_row[threadIdx.y * shared_w + sx] = in[row * width + gc];
+        }
     }
     __syncthreads();
 
     int out_col = blockIdx.x * ROW_TILE_W + threadIdx.x;
-    if (out_col < width) {
+    if (row < height && out_col < width) {
         float acc = 0.0f;
         for (int k = -radius; k <= radius; ++k)
             acc += s_row[threadIdx.y * shared_w + (threadIdx.x + radius + k)] * d_filter_1d[k + radius];
@@ -509,9 +524,14 @@ read-only data cache) across them.
 ```cuda
 // Each thread computes TWO vertically-adjacent outputs, halving the number of thread
 // blocks needed (and the per-block halo-loading overhead paid) for the same output area.
+#define APRON_H (2 * TILE + 2 * RADIUS)                    // 36 rows: two stacked output tiles + halo
+
 __global__ void conv2d_tiled_regtile(const float* __restrict__ in, float* __restrict__ out,
                                       int width, int height) {
-    __shared__ float s_tile[SHARED_DIM + 1][SHARED_DIM];   // +1 row padding, see 4.3's bank-conflict note
+    // The apron is TALLER than it is wide here, because one block now covers 2*TILE output
+    // rows. Sizing this [SHARED_DIM][SHARED_DIM] (as the single-output kernel does) would
+    // let the load loop below write 16 rows past the end of the array.
+    __shared__ float s_tile[APRON_H][SHARED_DIM];          // 36*20*4B = 2,880 B/block
 
     int tx = threadIdx.x, ty = threadIdx.y;
     int out_col  = blockIdx.x * TILE + tx;
@@ -520,14 +540,13 @@ __global__ void conv2d_tiled_regtile(const float* __restrict__ in, float* __rest
 
     int apron_col0 = blockIdx.x * TILE - RADIUS;
     int apron_row0 = blockIdx.y * (2 * TILE) - RADIUS;
-    int apron_h = 2 * TILE + 2 * RADIUS;
 
-    for (int sy = ty; sy < apron_h; sy += TILE) {
+    for (int sy = ty; sy < APRON_H; sy += TILE) {
         for (int sx = tx; sx < SHARED_DIM; sx += TILE) {
             int gr = min(max(apron_row0 + sy, 0), height - 1);
             int gc = min(max(apron_col0 + sx, 0), width - 1);
-            // __ldg routes this load through the read-only data cache -- safe here because
-            // `in` is never written by this kernel (aliased only for reads).
+            // __ldg forces the non-coherent (read-only) global load path -- safe here
+            // because `in` is never written by this kernel (aliased only for reads).
             s_tile[sy][sx] = __ldg(&in[gr * width + gc]);
         }
     }
@@ -549,9 +568,15 @@ __global__ void conv2d_tiled_regtile(const float* __restrict__ in, float* __rest
 ```
 
 Computing 2 outputs per thread amortizes the apron-loading overhead (the fixed halo cost
-from Section 2) over twice as many outputs per block, and `__ldg` hints the compiler to
-route the clamped boundary loads through the dedicated read-only cache rather than the
-general L1 path. **Measured: ~2,780 GB/s effective (93% of peak, 4.34x over naive)** — this
+from Section 2) over twice as many outputs per block, and `__ldg` forces the clamped apron
+loads onto the non-coherent read-only path (`LDG.E.CI`). Be honest about the size of that
+second effect: since Maxwell, and on Hopper, the read-only/texture cache is **the same
+physical unified L1 cache** as every other global load uses (the Hopper SM's combined
+L1 + texture + shared capacity is 256 KB), so `__ldg` is not routing traffic to a separate
+pool of capacity — it drops coherence bookkeeping the compiler would otherwise have to
+preserve. And with `in` already declared `const ... __restrict__`, nvcc usually emits the
+same instruction on its own; the explicit `__ldg` is a guarantee, not a new optimization.
+**Measured: ~2,780 GB/s effective (93% of peak, 4.34x over naive)** — this
 is close to the practical ceiling for HBM3; real kernels rarely exceed ~90-95% of nameplate
 bandwidth once ECC, refresh, and row-buffer overhead are accounted for.
 
@@ -624,7 +649,10 @@ def run_tiled_conv(d_in: cp.ndarray, d_filter: cp.ndarray, width: int, height: i
     d_out = cp.empty_like(d_in)
     block = (TILE, TILE)
     grid = ((width + TILE - 1) // TILE, (height + TILE - 1) // TILE)
-    _conv2d_tiled(grid, block, (d_in, d_out, width, height, d_filter))
+    # np.int32, NOT a bare Python int: CuPy maps Python `int` to `long long` and performs no
+    # argument-type validation, so a bare int silently mis-feeds an `int width` parameter.
+    _conv2d_tiled(grid, block,
+                  (d_in, d_out, np.int32(width), np.int32(height), d_filter))
     cp.cuda.runtime.deviceSynchronize()   # equivalent of CUDA_CHECK(cudaDeviceSynchronize())
     return d_out
 
@@ -642,11 +670,17 @@ def verify_against_references(width: int = 512, height: int = 512) -> None:
     # Reference 1: scipy.ndimage on CPU (clamp-to-edge == mode="nearest")
     cpu_ref = scipy.ndimage.convolve(h_in, h_filter, mode="nearest")
 
-    # Reference 2: cuDNN via torch.nn.functional.conv2d (note: conv2d cross-correlates by
-    # default in most DL frameworks -- flip the kernel to match true convolution semantics).
+    # Reference 2: cuDNN via torch.nn.functional.conv2d. Two traps, both of which silently
+    # produce a "mismatch" that is really a semantics difference, not a kernel bug:
+    #   (a) conv2d cross-correlates in most DL frameworks -- flip the kernel for true
+    #       convolution semantics;
+    #   (b) conv2d's own `padding=` is ZERO-padding. Our kernel clamps to the edge, so the
+    #       input must be replicate-padded FIRST and the conv then run with padding=0,
+    #       or every border pixel disagrees.
     t_in = torch.from_numpy(h_in).cuda().view(1, 1, height, width)
     t_filter = torch.from_numpy(np.flip(h_filter, axis=(0, 1)).copy()).cuda().view(1, 1, FILTER_DIM, FILTER_DIM)
-    cudnn_ref = F.conv2d(t_in, t_filter, padding=FILTER_RADIUS).squeeze().cpu().numpy()
+    t_pad = F.pad(t_in, (FILTER_RADIUS,) * 4, mode="replicate")   # clamp-to-edge, matches ours
+    cudnn_ref = F.conv2d(t_pad, t_filter, padding=0).squeeze().cpu().numpy()
 
     assert np.allclose(gpu_result, cpu_ref, rtol=1e-4, atol=1e-4), "mismatch vs scipy.ndimage"
     assert np.allclose(gpu_result, cudnn_ref, rtol=1e-3, atol=1e-3), "mismatch vs cuDNN"
@@ -691,7 +725,7 @@ DRAM-throughput metric rather than trusting the wall-clock figure alone.
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|----------------|------------------------|-----------|
-| Output tile shape | `16x16` (256 threads/block) for `r<=2`; `32x8` for separable passes | `32x32` (1024 threads) | `32x32` maximizes halo amortization (13% overhead at r=2) but a `20x20`/`36x36` apron at higher radius pushes shared-memory-per-block up fast; `16x16` balances occupancy and halo cost for the common `r<=4` range |
+| Output tile shape | `16x16` (256 threads/block) for `r<=2`; `32x8` for separable passes | `32x32` (1024 threads) | `32x32` maximizes halo amortization (27% overhead at r=2 vs. 56% at `16x16`) but a `20x20`/`36x36` apron at higher radius pushes shared-memory-per-block up fast; `16x16` balances occupancy and halo cost for the common `r<=4` range |
 | Boundary handling | Clamp-to-edge (`min/max`) as the default, with zero-pad and periodic-wrap as compile-time variants | Branching per-thread boundary checks (`if row/col in range`) | Clamp via `min/max` is branch-free (no warp divergence at the boundary) and matches the semantics of `scipy.ndimage.convolve(mode="nearest")`, the reference this kernel is verified against |
 | Separable vs. non-separable | Separable (fused single-kernel) for any filter that factors (Gaussian, box); non-separable tiled kernel otherwise (Sobel-combined, arbitrary learned kernels) | Always non-separable | Separable cuts FMAs `K^2 -> 2K`; the win compounds with radius (2.5x at r=2, 7.5x at r=7) but only applies when the filter is mathematically separable — most learned/arbitrary kernels are not |
 | Filter coefficient storage | `__constant__` memory (broadcast, 64 KB cache) | Global memory pointer passed to the kernel | Every thread in a warp reads the identical coefficient at each loop step — the textbook constant-memory broadcast case; global memory would waste L1/L2 capacity on data with zero spatial locality benefit |
@@ -710,8 +744,9 @@ DRAM-throughput metric rather than trusting the wall-clock figure alone.
   `nppiFilter`, and Sobel/Laplacian variants used throughout NVIDIA's video and imaging SDKs,
   including the **DeepStream** video-analytics pipeline (camera pre-processing before
   detection/tracking models) and Jetson-based embedded camera pipelines.
-- **OpenCV's CUDA module** (`cv::cuda::createGaussianFilter`, `cv::cuda::filter2D`,
-  `cv::cuda::Sobel`) is the workhorse for GPU-accelerated classical computer vision,
+- **OpenCV's CUDA module** (`cv::cuda::createGaussianFilter`, `cv::cuda::createLinearFilter`,
+  `cv::cuda::createSobelFilter` — the `cudafilters` module is factory-based, returning a
+  `Ptr<cv::cuda::Filter>` you then `apply()`) is the workhorse for GPU-accelerated classical computer vision,
   commonly used as the pre-processing stage ahead of feature detectors and deep
   detectors/segmenters in robotics and autonomous-vehicle perception stacks (e.g. NVIDIA
   DRIVE's camera pipeline uses CUDA-accelerated filtering before its perception networks).
@@ -738,7 +773,7 @@ DRAM-throughput metric rather than trusting the wall-clock figure alone.
 |------|----------------------------|--------------------------------------------------|
 | **cuDNN** | Production convolution (im2col+GEMM, Winograd, FFT algorithm selection) | Any convolution that is a training/inference layer in a DL model — cuDNN is within a few percent of peak and handles every shape/stride/dilation combination |
 | **NPP** | Hand-tuned image-processing primitives (Gaussian, Sobel, morphology) | Off-the-shelf image filters in a video/imaging pipeline with no custom fusion need |
-| **OpenCV CUDA module** | GPU classical CV (filter2D, Sobel, resize) with a familiar CPU-OpenCV-compatible API | Rapid prototyping or when the rest of the pipeline is already OpenCV-based |
+| **OpenCV CUDA module** | GPU classical CV (`createLinearFilter`, `createSobelFilter`, `cuda::resize`) with a familiar CPU-OpenCV-compatible API | Rapid prototyping or when the rest of the pipeline is already OpenCV-based |
 | **Halide** | Auto-scheduled stencil/image-processing DSL — separates algorithm from schedule (tiling, fusion, vectorization) | When you need to explore many tiling/fusion schedules for a stencil pipeline without hand-writing each variant |
 | **Triton** | Python-embedded kernel DSL; good fit for a fused, tunable custom stencil kernel without hand-written PTX-level tiling logic | When you want autotuned tile sizes without maintaining raw CUDA C++ (see [`triton_and_kernel_dsls`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md)) |
 | **CUB / CUTLASS** | Building blocks for the GEMM path if you choose im2col+GEMM instead of direct convolution | Large-batch, large-channel-count convolutions where GEMM's Tensor-Core throughput outweighs direct-convolution's simplicity |
@@ -759,9 +794,12 @@ shared-memory budget.
 
 Diagnosis:
 1. Compute the requested static `__shared__` footprint: `SHARED_DIM^2 * 4 bytes` — for
-   `TILE=16, r=7` that is `(16+14)^2 * 4 = 3,600 bytes`, fine; but the register-tiled variant
-   (4.5) with a taller apron and a wider filter can cross 48 KB well before it looks obviously
-   large.
+   `TILE=16, r=7` that is `(16+14)^2 * 4 = 3,600 bytes`, nowhere near the limit. The 2D FP32
+   apron is simply hard to overflow; what overflows it is a change of *shape* or *type*, and
+   both look innocuous in a diff: an FP64 PDE stencil at `TILE=64` with 2 outputs/thread
+   needs `(128+8) * (64+8) * 8 B = 78,336 B`, and a 3D apron crosses even faster — a
+   `32x32x8` tile at `r=2` is `36 * 36 * 12 * 4 = 62,208 B`. Both blow the 48 KB static
+   ceiling while every individual dimension still reads as small.
 2. Check whether the kernel exceeded the **48 KB static default** without opting into
    dynamic shared memory.
 
@@ -872,12 +910,16 @@ theoretical maximum the team expected from "1024 threads per block." Nsight Comp
 "Registers Per Thread" and "Achieved Occupancy" metrics caught it; the fix was
 `__launch_bounds__` plus dropping to a `16x16` tile for this filter radius.
 
-**Assuming the boundary case is rare enough to ignore.** For a `4096x4096` image tiled at
-`TILE=16`, boundary tiles (any tile touching one of the four image edges) are a full `~8%`
-of all tiles processed (`(2*256 + 2*256 - 4) / 256^2` for a `256x256` tile grid) — not a
-rare corner case, but a meaningful fraction of every image processed. Treating boundary
-handling as an afterthought rather than a first-class, separately-tested code path is how
-the off-by-one bug above shipped in the first place.
+**Assuming the boundary case is rare enough to ignore.** Run the number and it looks
+reassuring, which is the trap. For a `4096x4096` image tiled at `TILE=16` into a `256x256`
+tile grid, boundary tiles (any tile touching one of the four image edges) are
+`4*256 - 4 = 1,020` of `65,536` tiles — only **1.6%** of the work. But *rarity of the tile
+is not rarity of the defect*: those 1,020 tiles own **every pixel of the image border**, the
+most-looked-at part of the frame, and they are hit on `100%` of images rather than on some
+unlucky 1.6% of them. A boundary bug is therefore a defect with a 1.6% performance
+footprint and a 100% visibility footprint. Treating boundary handling as an afterthought
+rather than a first-class, separately-tested code path is how the off-by-one bug above
+shipped in the first place.
 
 ---
 
@@ -890,23 +932,24 @@ comparable platform case studies: 50M images/day, average 12 MP (4000x3000).
 ```
 Per-image effective HBM traffic (fused separable+tiled kernel, ~87-93% of peak reused):
   12M pixels x 4 bytes x 3 channels x 2 (read + write, single logical pass per filter)
-  x 2 filters (blur + sharpen) = 12e6 * 4 * 3 * 2 * 2 = 1,152 MB per image
+  x 2 filters (blur + sharpen) = 12e6 * 4 * 3 * 2 * 2 = 576 MB per image
 
 Traffic demand:
   Average:  50,000,000 images/day / 86,400 s/day = 579 images/sec
-            579 * 1,152 MB = 667 GB/sec  (average)
-  Peak (3x): 1,737 images/sec * 1,152 MB = 2,001 GB/sec  (peak)
+            579 * 576 MB = 334 GB/sec  (average)
+  Peak (3x): 1,737 images/sec * 576 MB = 1,001 GB/sec  (peak)
 
 Per-GPU capacity (H100 SXM5, fused separable kernel at 93% of 3 TB/s peak, 65% target
 utilization headroom, matching this repo's standard MBU-style planning convention):
   3,000 GB/s * 0.93 * 0.65 = 1,814 GB/sec usable per GPU
 
 GPUs required at peak:
-  2,001 / 1,814  ~= 1.1  ->  round up to 2 H100s for this stencil stage alone, with HA headroom
+  1,001 / 1,814  ~= 0.55 ->  a single H100 absorbs the 3x peak with 45% of its stencil-stage
+                             capacity still free; provision 2 for HA/failover, not for load
 ```
 
 At this scale, the stencil stage itself is inexpensive relative to a full perception/edit
-pipeline: 2 H100s dedicated to filtering leaves enormous headroom compared to, say, a
+pipeline: 2 H100s dedicated to filtering (one for load, one for HA) leaves enormous headroom compared to, say, a
 70B-parameter model-serving fleet (hundreds of GPUs, see
 [`llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)).
 In practice this stencil stage is co-scheduled on the same GPUs as heavier CNN-based
@@ -968,9 +1011,9 @@ war story in Section 9 (11 days, ~4.2M images, caught only by an SSIM regression
 **Q: When is a stencil/convolution kernel memory-bound versus compute-bound?**
 
 Almost always memory-bound at the radii most real filters use — a 5x5 filter's arithmetic
-intensity is roughly 0.5 FLOPs/byte naive (up to ~5 FLOPs/byte tiled), two orders of
-magnitude below the H100's ~22 FLOPs/byte roofline ridge point, so bandwidth is the ceiling,
-not FLOP throughput. But the *inner loop's* shared-memory-read-plus-FMA cost is not free,
+intensity is roughly 0.5 FLOPs/byte naive (up to ~5 FLOPs/byte tiled) against the H100's
+~22 FLOPs/byte roofline ridge point, so it sits ~45x below the ridge naive and still ~4x
+below it after tiling: bandwidth is the ceiling, not FLOP throughput. But the *inner loop's* shared-memory-read-plus-FMA cost is not free,
 and it scales `O(K^2)` for a non-separable filter — at large radius (`r>=4`-`6`) that
 inner-loop cost can grow large enough that a non-separable tiled kernel becomes bound by
 shared-memory/ALU issue throughput rather than HBM, even though the overall problem is still
@@ -1010,7 +1053,7 @@ recovering the single-pass HBM behavior while keeping the `O(2K)` compute advant
 **Q: How would you decide the output tile size (B) for a given filter radius?**
 
 Balance three things using the halo-overhead formula `(B+2r)^2/B^2 - 1`: a larger `B`
-amortizes the fixed halo cost better (13% overhead at `B=32, r=2` vs. 56% at `B=16, r=2`),
+amortizes the fixed halo cost better (27% overhead at `B=32, r=2` vs. 56% at `B=16, r=2`),
 but a larger `B` also means a larger shared-memory footprint per block (`(B+2r)^2 * 4`
 bytes), which can reduce the number of resident blocks per SM and hurt occupancy, and a
 larger `B` at a large radius can push register pressure up in the unrolled inner loop. In
@@ -1020,13 +1063,18 @@ picking `B` from the formula alone.
 
 **Q: What does `__ldg` actually do, and when does it matter here?**
 
-`__ldg` explicitly routes a global-memory load through the GPU's dedicated read-only data
-cache (a separate cache from L1/L2, historically exposed as the "texture" path) instead of
-the general load path; the compiler often infers this automatically for pointers marked
-`const __restrict__`, but an explicit `__ldg` is a reliable way to guarantee it. It matters
-in the register-tiled kernel (Section 4.5) specifically for the boundary-clamped apron loads,
-which are read-only from the kernel's perspective and benefit from the read-only cache's
-independent capacity rather than competing with other L1 traffic.
+`__ldg` forces a global load onto the non-coherent read-only path (`LDG.E.CI` in SASS),
+which the compiler already infers for most pointers marked `const __restrict__` — the
+explicit intrinsic is a guarantee, not a new optimization. The common wrong answer is that
+it moves the load into a *separate* read-only cache: that was true on Kepler, but from
+Maxwell onward — and on Hopper — the texture/read-only cache and L1 are one unified
+L1/texture cache (256 KB combined with shared memory on an H100 SM), so there is no
+independent pool of capacity to escape into. What you actually buy is dropped coherence
+bookkeeping on data the kernel provably never writes. In the register-tiled kernel
+(Section 4.5) that applies to the boundary-clamped apron loads, and the honest expectation
+is a small gain, not a step change — if `__ldg` transforms your numbers, the real finding is
+that the compiler was failing to prove non-aliasing and your `__restrict__` annotations are
+incomplete.
 
 **Q: How do you verify a custom convolution kernel is numerically correct, not just fast?**
 
@@ -1042,9 +1090,11 @@ might miss.
 
 **Q: Why is boundary handling a first-class design decision here, and not an edge case?**
 
-Because boundary tiles are not rare: for a `4096x4096` image tiled at `TILE=16` into a
-`256x256` grid of tiles, tiles touching an image edge are roughly 8% of all tiles processed
-— a meaningful fraction of total work, not a corner case worth deferring. The three
+Because "rare" is the wrong axis to measure it on. For a `4096x4096` image tiled at
+`TILE=16` into a `256x256` grid, tiles touching an image edge are `4*256 - 4 = 1,020` of
+`65,536` — just 1.6% of the work, which is exactly why teams defer it. But those tiles own
+every pixel of the image border on 100% of images, so a boundary bug is 1.6% of the compute
+and 100% of the blast radius, in the region a human eye checks first. The three
 boundary-handling modes (clamp-to-edge, zero-pad, periodic-wrap) also have genuinely
 different correct semantics for different consumers — image processing almost always wants
 clamp-to-edge, while a PDE solver on a periodic domain needs wrap — so the API has to expose

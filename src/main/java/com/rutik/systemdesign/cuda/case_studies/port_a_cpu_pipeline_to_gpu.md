@@ -123,13 +123,24 @@ Naive ("copy every step") pilot, profiled end-to-end with nsys:
     5,000 options x 252 steps x 32 MB = 40.32 TB round-trip
   At the pageable-memory achieved rate measured on this system (~9 GB/s,
   far below the 64 GB/s pinned/peak rate — see the pinned-vs-pageable
-  gotcha in ../memory_management_and_data_transfer/README.md):
+  gotcha in ../memory_management_and_data_transfer/memory_management_and_data_transfer.md):
     40.32 x 10^12 bytes / 9 x 10^9 B/s = 4,480 s (~75 min) of transfer ALONE
-  Fully synchronous, zero overlap, one option at a time -> nsys showed the
-  GPU idle 70%+ of wall time.  Measured full-portfolio wall time: 5.6 h.
+  Fully synchronous, zero overlap, one option at a time.
+  Measured full-portfolio wall time: 5.6 h = 20,160 s. Account for it:
+    memcpy   4,480 s   (the traffic above)
+    kernels     15 s   (1.26e12 path-steps @ 85e9/s -- the GPU is barely used)
+    the rest 15,665 s  apply_barrier_check_cpu STILL walks all 1,000,000 paths
+                        on the host, once per step, for every option
+  -> nsys showed the GPU idle ~78% of wall time (4,495 s of the 20,160 s had
+     any device activity at all, and almost all of that was memcpy).
 
   RESULT: 5.6 h (naive GPU port) vs. 4.2 h (CPU baseline) --
           the "optimized" version is 33% SLOWER than the code it replaced.
+          Read the breakdown again: this design ADDED 40 TB of PCIe traffic
+          WITHOUT REMOVING the per-path CPU work it was supposed to replace.
+          That is the antipattern in one sentence, and it is why "port one
+          iteration of the hot loop" is not a smaller version of "port the
+          hot loop" -- it is a different, losing design.
 
 Fixed (data-resident, on-device RNG, whole-loop-per-kernel, sharded+
 streamed) design, same hardware:
@@ -138,7 +149,9 @@ streamed) design, same hardware:
   Serial CPU remainder (aggregation/discount/Greeks/I/O, unchanged):
     756 s
   Transfer + shard-boundary overhead (see streams pipeline in §4):
-    ~1 s (dominated by the tail shard's un-hidden D2H copy)
+    ~1 s (8 launch/shard boundaries plus the tail shard's un-hidden D2H --
+          2.5 GB at pinned-memory rates is only ~40 ms of that; the bucket is
+          rounded generously so the 19.6x below is a floor, not a best case)
   ------------------------------------------------------------------
   Total new wall time:  756 + 14.8 + 1 ~= 772 s (~12.9 minutes)
 
@@ -393,7 +406,11 @@ void launch_simulate_asian_paths(const GpuOptionParams* d_options, int num_optio
                                   float* d_payoffs, cudaStream_t stream) {
     const long total_paths = (long)num_options * paths_per_option;
     const int  threads = 256;
-    const long max_blocks = 65535L * 32;   // see occupancy_and_launch_configuration
+    // Launch-shaping cap, NOT a hardware limit: gridDim.x maxes at 2^31-1 (the
+    // familiar 65,535 is the y/z limit). 5e9 paths / 256 = 19.5M blocks would be
+    // legal but pointless -- the grid-stride loop above covers the remainder with
+    // a grid sized to the device. See occupancy_and_launch_configuration.
+    const long max_blocks = 65535L * 32;   // ~2.1M blocks
     const int  blocks = (int)min((total_paths + threads - 1) / threads, max_blocks);
 
     simulate_asian_paths<<<blocks, threads, 0, stream>>>(
@@ -497,6 +514,10 @@ def simulate_asian_paths_numba(s0, k, r, sigma, t, num_steps, paths_per_option,
         vol_dt = sigma[opt_idx] * math.sqrt(dt)
 
         S = s0[opt_idx]
+        # GOTCHA: `0.0` is a float64 literal to Numba, so running_sum -- and every
+        # expression it touches, including the S update below -- gets promoted to
+        # FP64. That costs 2x on an H100 (34 vs. 67 TFLOP/s) and up to 64x on a
+        # consumer card. Use numba.float32(0.0) once the prototype's timing matters.
         running_sum = 0.0
         for _step in range(num_steps):
             z = xoroshiro128p_normal_float32(rng_states, i)   # on-device RNG draw
@@ -532,7 +553,11 @@ def price_portfolio_gpu_prototype(s0, k, r, sigma, t, num_steps, paths_per_optio
 
 ### 4.5 Sharded Stream Pipeline — Overlap Transfer With Compute
 
-Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for two independent reasons: (1) **resilience** — a mid-run GPU fault (driver reset, ECC error) only costs the ~2 minutes of the current shard, not the whole 12.9-minute run, satisfying the non-functional requirement in §1; and (2) **pipelining** — shard boundaries are the natural place to overlap the next shard's (now small) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute. See [`../streams_events_and_concurrency/streams_events_and_concurrency.md`](../streams_events_and_concurrency/streams_events_and_concurrency.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
+Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for three reasons — and it is worth being precise about their relative weight, because the obvious one is the weakest:
+
+1. **Device memory** (the binding reason). The payoff array for the whole book is `5,000 x 1,000,000 x 4 B = 20 GB`. Sharded, it is `625 x 1,000,000 x 4 B = 2.5 GB` per shard, and the double buffer holds two of them: 5 GB instead of 20 GB. That is what makes the design portable down to the 24 GB L4 in §10's sensitivity table.
+2. **Pipelining.** Shard boundaries are the natural place to overlap the next shard's (tiny) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute.
+3. **Resilience** — real, but small once you do the arithmetic. The entire GPU phase is 14.8 s, so one shard is ~1.9 s; a mid-run fault costs ~1.9 s of recompute, not the 12.9-minute run. The §1 requirement ("a fault must not force a full 4.2-hour re-run") is satisfied by the port itself, not by the sharding: after the port there is no multi-hour GPU phase left to lose. See [`../streams_events_and_concurrency/streams_events_and_concurrency.md`](../streams_events_and_concurrency/streams_events_and_concurrency.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
 
 ```cuda
 // stream_pipeline.cu -- double-buffered, two-stream pipeline across 8 shards.
@@ -564,6 +589,9 @@ void price_portfolio_pipelined(const std::vector<GpuOptionParams>& book,
     for (int shard = 0; shard < NUM_SHARDS; ++shard) {
         const int buf = shard % 2;
         cudaStream_t s = streams[buf];
+        // `book` is a pageable std::vector, so this H2D is not truly async --
+        // acceptable ONLY because it is 625 * 24 B = 15 KB. The 2.5 GB payoff
+        // buffer on the way back is the one that had to be pinned.
         const GpuOptionParams* chunk = &book[shard * options_per_shard];
 
         // H2D for THIS shard's params overlaps the PREVIOUS shard's D2H below --
@@ -578,8 +606,12 @@ void price_portfolio_pipelined(const std::vector<GpuOptionParams>& book,
         CUDA_CHECK(cudaMemcpyAsync(h_payoffs_pinned[buf], d_payoffs[buf],
             (long)options_per_shard * paths_per_option * sizeof(float),
             cudaMemcpyDeviceToHost, s));
-        // Checkpoint: persist h_payoffs_pinned[buf] for this shard before moving on,
-        // so a fault on shard N+1 does not lose shards 0..N.
+        // Checkpoint -- but NOT here. The D2H above is asynchronous, so reading
+        // h_payoffs_pinned[buf] on this line would persist a half-written buffer,
+        // silently, with no error anywhere. Record a cudaEvent after the copy and
+        // wait on it (or use cudaLaunchHostFunc) before writing the checkpoint, so
+        // a fault on shard N+1 does not lose shards 0..N -- and so shard N's
+        // checkpoint is actually shard N's data.
     }
     for (int b = 0; b < 2; ++b) CUDA_CHECK(cudaStreamSynchronize(streams[b]));
 }
@@ -594,7 +626,7 @@ void price_portfolio_pipelined(const std::vector<GpuOptionParams>& book,
 | Which stages to port | RNG + SDE stepping + payoff (95%) as one fused kernel | Port only the 68% SDE-stepping hotspot | Porting only 68% caps the Amdahl ceiling at 3.1x; porting the full 95% raises it to 20x -- the extra engineering effort to also fuse RNG and payoff pays for itself many times over |
 | Where random numbers are generated | On-device, cuRAND Philox inside the kernel | Generate on host (existing Mersenne Twister), transfer to device | Host-generated randoms would need to cross PCIe every step; on-device generation eliminates an entire transfer category and removes the RNG stage from the critical path entirely |
 | Per-step state placement | Registers, resident for the kernel's whole 252-step lifetime | Global-memory array of per-path state, updated each step | Registers cost zero extra memory traffic; the global-memory version would still be transfer-bound against HBM even without PCIe in the picture |
-| Portfolio granularity | 8 shards (625 options each), double-buffered across 2 streams | One kernel launch for the entire 5,000-option portfolio | A single giant launch has no natural checkpoint boundary -- a fault mid-run loses the whole 12.9-minute run; sharding bounds the blast radius to ~2 minutes and creates overlap boundaries for streams |
+| Portfolio granularity | 8 shards (625 options each), double-buffered across 2 streams | One kernel launch for the entire 5,000-option portfolio | A single launch needs the full 20 GB payoff array resident; sharding cuts that to 5 GB (2 x 2.5 GB double-buffered), which is what keeps the design runnable on a 24 GB card. It also creates the stream-overlap boundaries and bounds fault blast radius to ~1.9 s -- in that order of importance |
 | Prototype language | Numba CUDA first, hand-written CUDA C++ second | Skip the Python prototype, write CUDA C++ directly | The Numba prototype validated the algorithm and produced a first speedup estimate in under a day; committing to hand-written CUDA C++ only after the algorithm was proven avoided debugging two unknowns (algorithm correctness and kernel mechanics) simultaneously |
 | Precision | FP32 throughout the simulation, FP64 only for the final discount/aggregation on CPU | FP64 throughout to match the CPU reference bit-for-bit | Risk Validation's tolerance is 1e-4 relative (statistical, not bit-exact); FP32 comfortably clears that bar for this SDE and roughly doubles achievable throughput -- see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) |
 | Serial-fraction handling | Leave aggregation/discount/Greeks/I/O on CPU, unported | Port the netting and reporting logic to CUDA as well | It is 5% of runtime but would require replicating a large legacy accounting codebase in CUDA for a return capped at 5% of 4.2h = 756s -- a poor engineering trade relative to the 95% already captured |
@@ -681,7 +713,7 @@ Cutover criteria: 21 consecutive shadow nights with a tolerance-breach rate unde
 
 ### Monitoring
 
-- **Wall-clock time per shard and per full run** — alert if any single shard exceeds 3 minutes (2x the ~90-second expected shard time), which would indicate a stall (transfer regression, thermal throttling, or an unexpectedly large option in that shard).
+- **Wall-clock time per shard and per full run** — a shard is ~1.9 s of GPU work (14.8 s of compute over 8 shards), so alert at 5 s per shard, and separately at 900 s for the full run (the 772 s total is dominated by the 756 s CPU tail, which is what a full-run alert is really watching). Do not size the shard alert off the total: the two numbers measure different stages, and a threshold derived from `772 / 8` would let a 40x GPU-side stall pass unnoticed.
 - **GPU utilization (DCGM `dcgm_gpu_utilization`) and idle-time fraction** — the fixed pipeline should show near-100% SM utilization during the compute phase; a return to the 70%+ idle pattern seen in the broken pilot is the earliest signal of a transfer-overlap regression.
 - **Shadow-mode tolerance breach rate** (above) — continues to run indefinitely, even after cutover, as a standing correctness canary comparing a 5% CPU-priced sample against the GPU-priced full book every night.
 - **Fallback trigger**: if the GPU node reports unhealthy at job start, the orchestrator automatically falls back to the CPU pipeline for that night and pages the on-call engineer — satisfying the "no hard GPU dependency" requirement from §1.
@@ -704,11 +736,11 @@ ALERT GpuIdleDuringComputePhase
 
 # Fires if any single shard misses its expected wall-clock budget.
 ALERT ShardWallTimeRegression
-  IF mc_pricer_shard_duration_seconds > 180
+  IF mc_pricer_shard_duration_seconds > 5
   FOR 0m
   LABELS { severity = "page" }
   ANNOTATIONS {
-    summary = "Shard exceeded 2x its ~90s expected duration",
+    summary = "Shard exceeded 2.6x its ~1.9s expected GPU duration",
     description = "Check nsys trace for the affected shard; likely a
                    transfer-overlap or pinned-memory regression (Section 2)."
   }
@@ -722,7 +754,7 @@ Symptoms: one shard's kernel launch never returns; `cudaGetLastError` reports `c
 
 Diagnosis: check `dcgm_ecc_sbe_volatile_total` / `dcgm_ecc_dbe_volatile_total` for the affected GPU; check whether the fault is isolated to one shard's memory region or system-wide.
 
-Mitigation (immediate): the orchestrator re-runs only the failed shard (checkpointed independently per §4.5) — cost is ~2 minutes, not the full 12.9-minute run. If the GPU itself is unhealthy, the remaining shards fail over to a second GPU in the 4-GPU box.
+Mitigation (immediate): the orchestrator re-runs only the failed shard (checkpointed independently per §4.5) — cost is ~1.9 s of recompute. Even re-running the entire GPU phase from scratch would only cost 14.8 s, so the operational judgment call here is not "how do we avoid recompute" but "is the GPU healthy enough to trust the next shard's numbers". If it is not, the remaining shards fail over to a second GPU in the 4-GPU box.
 
 Resolution: if ECC errors recur on the same GPU across multiple nights, flag it for hardware replacement; log the incident against the capacity-planning headroom in §10 (a lost GPU temporarily removes ~25% of the box's throughput).
 
@@ -738,9 +770,9 @@ Mitigation: do not promote to production this cycle; extend the shadow period; i
 
 Symptoms: wall-clock time creeps toward the 5-hour window despite the GPU port; portfolio size has grown beyond the headroom projected in §10.
 
-Mitigation (immediate): add a second GPU shard-worker (the 4-GPU box has 3 idle GPUs at the 1-GPU baseline used throughout this case study — see §10) to halve or quarter shard processing time.
+Mitigation (immediate): **do not reach for the 3 idle GPUs first.** By the time the window is threatened, 98% of wall time is the serial CPU stage, so a fourfold increase in GPU capacity moves the total by ~1.4% (§10). The immediate levers that actually apply are reducing `paths_per_option` for the least-sensitive option classes (Monte Carlo error falls as `1/sqrt(N)`, so halving paths costs ~1.4x standard error — a Risk Validation conversation, not an engineering one) or starting the batch earlier in the window.
 
-Resolution: re-run the capacity-planning projection in §10 with the new portfolio size and update the multi-GPU scale-out timeline.
+Resolution: re-run the capacity-planning projection in §10 with the new portfolio size, and reopen the §9 decision to leave the aggregation/discount/Greeks stage on CPU — that 756-second stage, not the GPU count, is what the next capacity increment has to come from.
 
 ---
 
@@ -782,31 +814,50 @@ Compare to the CPU-only baseline at the same growth rate:
   n = ln(1.19) / ln(1.2) ~= 0.95 quarters ~= 3 months
 
 CONCLUSION: the GPU port converts a capacity problem with ~3 months of
-runway into one with ~4.3 years of runway on a single GPU -- and the box
-has 4 GPUs, not 1 (see below), pushing real runway well past that.
+runway into one with ~4.3 years of runway on a single GPU. Note what does
+NOT extend it: the box's other 3 GPUs (see below -- they add about a week,
+because the runway is now set by the serial CPU remainder, not the GPU).
 ```
 
 ### Multi-GPU Scale-Out Path (Deferred, Not Needed Yet)
 
 ```
 4-GPU box, current 1-GPU design:        3 of 4 GPUs idle during the nightly run
+
+The tempting arithmetic is "772 s / 4 = 193 s". It is wrong, and it is wrong
+in exactly the way Section 2's Amdahl budget said it would be -- 756 of those
+772 seconds are the serial CPU remainder, and no number of GPUs divides it:
+
 Naive 4-GPU shard distribution (2 shards/GPU instead of 8 shards/1 GPU):
-  Wall time ~= 772 s / 4 ~= 193 s (~3.2 min), before accounting for the
-  small fixed per-run overhead that does not shrink with GPU count
+  GPU compute:            14.8 s / 4  =   3.7 s
+  Serial CPU remainder:                  756   s   <- UNCHANGED
+  Overhead:                             ~  1   s
+  ------------------------------------------------
+  Wall time:                            ~761   s  (~12.7 min)
 
-At 20%/quarter growth, a 4-GPU distribution pushes the re-breach point
-past 8.6 years -- comfortably beyond any reasonable planning horizon,
-which is why multi-GPU scale-out is explicitly deferred (Section 1,
-Out of Scope) rather than built now: it would not be exercised for years,
-and building it today trades real engineering time for headroom nobody
-will use before this project is revisited anyway.
+  4x the hardware buys 11 s, a 1.4% improvement.
 
-If/when multi-GPU IS needed, NVLink (900 GB/s per H100, vs. 64 GB/s PCIe
-Gen5) would carry inter-GPU traffic for any future cross-GPU reduction
+Growth makes it no better, because BOTH terms scale with the option book:
+  1 GPU:  772 x 1.2^n = 18,000  ->  n = 17.3 quarters (~4.3 years)
+  4 GPU:  761 x 1.2^n = 18,000  ->  n = 17.4 quarters (~4.3 years)
+  Four GPUs buy roughly ONE WEEK of additional runway.
+
+That is the real argument for deferring multi-GPU scale-out (Section 1,
+Out of Scope) -- not "we have years of headroom" but "GPUs are no longer
+the constraint at all." The next real capacity lever on this pipeline is
+the 756 s CPU tail, which is precisely the work Section 9 costed at three
+engineer-weeks and correctly declined while it was only 5% of 4.2 hours.
+It is now 98% of the run. When the window is genuinely threatened, revisit
+THAT decision, not the GPU count.
+
+If/when multi-GPU IS needed, NVLink 4 (900 GB/s bidirectional per H100 --
+450 GB/s per direction, against PCIe Gen5 x16's 64 GB/s per direction, so
+~7x, not the ~14x an unmatched bidirectional-vs-unidirectional comparison
+suggests) would carry inter-GPU traffic for any future cross-GPU reduction
 step (e.g., netting exposures that span options assigned to different
 GPUs) without PCIe becoming the new bottleneck this case study just
-eliminated -- see multi_gpu_programming_and_nccl in the module README for
-the mechanics.
+eliminated -- see ../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md
+for the mechanics.
 ```
 
 ### GPU Choice Sensitivity
@@ -882,7 +933,7 @@ The finished pipeline achieved roughly 19.6x against a 20x theoretical ceiling �
 
 **Q: How would you decide whether this workload needs multi-GPU scale-out now versus later?**
 
-Project the current single-GPU wall time forward at the portfolio's actual growth rate and compare against the batch-window budget: this case study's pipeline uses only 4.3% of its 5-hour window today and, at a 20%/quarter growth rate, would not re-breach that window on a single GPU for roughly 4.3 years — comfortably beyond any reasonable planning horizon, and evidence that building multi-GPU sharding now would be spending engineering effort on headroom nobody will use for years. The right call is to defer it and revisit the projection each time the portfolio's growth rate materially changes, not to build for a scale that is not yet needed.
+Project the current single-GPU wall time forward at the portfolio's actual growth rate and compare against the batch-window budget: this pipeline uses 4.3% of its 5-hour window today and, at 20%/quarter growth, would not re-breach it on a single GPU for roughly 4.3 years. But the decisive test is not the runway — it is whether the GPU is still the constraint, and here it is not. Of the 772-second run, 756 seconds are the serial CPU remainder, so distributing across all four GPUs in the box cuts total wall time by 1.4% and extends the runway by about a week (§10). That is Amdahl's law from §2 arriving on schedule: once you are within a few percent of the ceiling, more of the resource you already optimized buys nothing, and the honest answer to "do we need multi-GPU" becomes "multi-GPU is not what this workload needs next — the unported 5% is." Reach for scale-out only when the projection shows the *parallel* fraction, not the serial tail, driving the breach.
 
 **Q: What would you check first if the shadow-mode comparison started failing after a routine driver or CUDA toolkit upgrade?**
 
