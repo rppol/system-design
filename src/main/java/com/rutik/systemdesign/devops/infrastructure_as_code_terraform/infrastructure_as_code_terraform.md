@@ -42,7 +42,7 @@ Terraform's lineage matters for naming: HashiCorp relicensed Terraform from MPL 
 1. **Declarative desired state** — describe the end state in HCL; Terraform computes the path.
 2. **State is the identity map** — it binds config addresses to real resource IDs; guard it like a database.
 3. **Plan before apply** — `plan` is a dry run; review the diff (especially `-/+` replacements) before applying.
-4. **Remote state + locking for teams** — never share `terraform.tfstate` over a shared drive; use S3 + DynamoDB (or equivalent) with locking.
+4. **Remote state + locking for teams** — never share `terraform.tfstate` over a shared drive; use S3 with native lockfile locking (or the equivalent on your cloud).
 5. **Modules for reuse** — encapsulate a pattern (a VPC, an EKS cluster) once, instantiate many times with inputs.
 6. **Immutability over mutation** — many changes force *replacement* (destroy + recreate), not in-place edits; design for it.
 7. **Idempotency** — applying the same config twice yields no changes the second time (a clean `plan` shows "No changes").
@@ -56,9 +56,9 @@ Terraform's lineage matters for naming: HashiCorp relicensed Terraform from MPL 
 | Backend | Locking | Use case |
 |---------|---------|----------|
 | Local (`terraform.tfstate` on disk) | None | Solo experiments only |
-| S3 + DynamoDB | DynamoDB lock table | AWS teams (most common) |
-| S3 native lock (`use_lockfile`) | S3 conditional writes (Terraform 1.10+) | Drop the DynamoDB table |
-| Terraform Cloud / Enterprise (HCP) | Built-in | Managed runs, policy, RBAC |
+| S3 with native locking (`use_lockfile = true`) | S3 conditional writes | AWS teams (most common) |
+| S3 + DynamoDB | DynamoDB lock table | Older configs; DynamoDB locking is deprecated in favour of `use_lockfile` |
+| HCP Terraform / Terraform Enterprise | Built-in | Managed runs, policy, RBAC |
 | GCS / Azure Blob | Built-in (GCS object lock / Azure lease) | GCP / Azure teams |
 
 ### Environment isolation strategies
@@ -104,7 +104,7 @@ flowchart LR
     Replace("-/+ replace")
     Destroy("- destroy")
     Apply(terraform apply<br/>walk DAG, parallelism 10)
-    State[("terraform.tfstate (S3)<br/>release DynamoDB lock")]
+    State[("terraform.tfstate (S3)<br/>release the S3 lockfile")]
 
     HCL --> Init --> Plan
     Plan --> Create --> Apply
@@ -126,16 +126,16 @@ flowchart LR
 
 *The reconciliation diff at the heart of every `plan`: desired HCL minus refreshed state classifies each resource into create, update, replace, or destroy; `-/+ replace` (destroy then recreate) is the dangerous outcome to scrutinize before `apply` executes the diff with parallelism 10 and writes state back to S3.*
 
-**Remote state with locking (S3 + DynamoDB)**
+**Remote state with S3-native locking**
 
 ```mermaid
 sequenceDiagram
     participant A as Engineer A
-    participant L as DynamoDB Lock
+    participant L as S3 Lockfile
     participant C as AWS + S3 State
     participant B as Engineer B
 
-    A->>L: terraform apply, request lock
+    A->>L: terraform apply, PutObject If-None-Match
     L-->>A: lock acquired
     B->>L: terraform apply, request lock
     L-->>B: lock held, wait
@@ -147,7 +147,7 @@ sequenceDiagram
     Note over A,B: without the lock, concurrent writes<br/>would corrupt the single state file
 ```
 
-*Engineer B's `apply` blocks on the DynamoDB lock until Engineer A releases it, so writes to the single S3 state file always serialize — the exact mechanism that prevents Pitfall 1's state corruption.*
+*Engineer B's `apply` blocks on the `.tflock` object until Engineer A releases it — S3 conditional writes make the lock acquisition atomic — so writes to the single S3 state file always serialize, the exact mechanism that prevents Pitfall 1's state corruption.*
 
 **Dependency graph (Terraform builds a DAG, applies in topological order)**
 
@@ -186,16 +186,16 @@ flowchart LR
 
 ```hcl
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.11"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.40" }   # pin major; allow minor+patch (>= 5.40.0, < 6.0.0)
+    aws = { source = "hashicorp/aws", version = "~> 6.57" }   # pin major; allow minor+patch (>= 6.57.0, < 7.0.0)
   }
   backend "s3" {
-    bucket         = "acme-tfstate-prod"
-    key            = "network/terraform.tfstate"     # one key per state slice
-    region         = "us-east-1"
-    dynamodb_table = "tf-locks"                       # state locking
-    encrypt        = true                             # SSE on state at rest
+    bucket       = "acme-tfstate-prod"
+    key          = "network/terraform.tfstate"      # one key per state slice
+    region       = "us-east-1"
+    use_lockfile = true                             # S3-native state locking (no DynamoDB table)
+    encrypt      = true                             # SSE on state at rest
   }
 }
 
@@ -277,17 +277,17 @@ The subtlety that trips people: the ceiling depends on *how many components you 
 | `>=` (loose) | No upper bound at all — a new major provider can land in CI unannounced |
 | `.terraform.lock.hcl` | Records the exact version *resolved*, so machines agree even within the range |
 
-**Walk one example.** The `~> 5.40` pin used in this config, against the alternatives:
+**Walk one example.** The `~> 6.57` pin used in this config, against the alternatives:
 
 ```
-   constraint      allowed range                 5.40.7?   5.41.0?   6.0.0?
-   ~> 5.40         >= 5.40.0  and  < 6.0.0         yes       yes       no
-   ~> 5.40.1       >= 5.40.1  and  < 5.41.0        yes        no       no
-   ~> 5.0          >= 5.0.0   and  < 6.0.0         yes       yes       no
-   >= 5.0          >= 5.0.0   and  no ceiling      yes       yes      yes
+   constraint      allowed range                 6.57.3?   6.58.0?   7.0.0?
+   ~> 6.57         >= 6.57.0  and  < 7.0.0         yes       yes       no
+   ~> 6.57.1       >= 6.57.1  and  < 6.58.0        yes        no       no
+   ~> 6.0          >= 6.0.0   and  < 7.0.0         yes       yes       no
+   >= 6.0          >= 6.0.0   and  no ceiling      yes       yes      yes
 ```
 
-Read the first row carefully: `~> 5.40` is a *major* pin, not a patch pin — it still admits `5.41.0`, `5.42.0`, and every later minor. Only the three-component form `~> 5.40.1` restricts you to patches within `5.40.x`. If pitfall 5's "a new provider changes a default and proposes surprise diffs" is the risk you actually care about, the two-component form does not close it on its own — the committed `.terraform.lock.hcl` is what makes every machine resolve the identical version inside whichever range you chose.
+Read the first row carefully: `~> 6.57` is a *major* pin, not a patch pin — it still admits `6.58.0`, `6.59.0`, and every later minor. Only the three-component form `~> 6.57.1` restricts you to patches within `6.57.x`. If pitfall 5's "a new provider changes a default and proposes surprise diffs" is the risk you actually care about, the two-component form does not close it on its own — the committed `.terraform.lock.hcl` is what makes every machine resolve the identical version inside whichever range you chose.
 
 ### Reading the plan output (the four operation symbols)
 
@@ -300,10 +300,10 @@ terraform plan
 #
 # Example dangerous line:
 #   aws_db_instance.main must be replaced
-#   ~ engine_version = "15.4" -> "16.1"   # forces replacement -> data loss risk!
+#   + storage_encrypted = true   # forces replacement -> data loss risk!
 ```
 
-The `-/+` (replace) is where production incidents are born. A change to an immutable attribute (an EC2 AMI, an RDS engine version on some engines, an S3 bucket name) destroys and recreates the resource.
+The `-/+` (replace) is where production incidents are born. A change to an immutable attribute (an EC2 AMI, `storage_encrypted` or `kms_key_id` on an RDS instance, an S3 bucket name) destroys and recreates the resource. Note which RDS changes are *not* immutable: `engine_version` is an in-place modify (a major bump additionally needs `allow_major_version_upgrade = true`), and so is renaming via `identifier` — the provider docs' "Forces new resource" marker is the authority, not intuition.
 
 ### Modules — reuse a pattern
 
@@ -311,12 +311,23 @@ The `-/+` (replace) is where production incidents are born. A change to an immut
 # modules/vpc/main.tf -- the reusable unit
 variable "name"  { type = string }
 variable "cidr"  { type = string }
-resource "aws_vpc" "this" { cidr_block = var.cidr, tags = { Name = var.name } }
+resource "aws_vpc" "this" {
+  cidr_block = var.cidr
+  tags       = { Name = var.name }
+}
 output "id" { value = aws_vpc.this.id }
 
 # root usage -- instantiate the module twice
-module "vpc_dev"  { source = "./modules/vpc", name = "dev",  cidr = "10.1.0.0/16" }
-module "vpc_prod" { source = "./modules/vpc", name = "prod", cidr = "10.2.0.0/16" }
+module "vpc_dev" {
+  source = "./modules/vpc"
+  name   = "dev"
+  cidr   = "10.1.0.0/16"
+}
+module "vpc_prod" {
+  source = "./modules/vpc"
+  name   = "prod"
+  cidr   = "10.2.0.0/16"
+}
 # reference outputs:  module.vpc_prod.id
 ```
 
@@ -472,7 +483,7 @@ terraform state pull > backup.tfstate                 # ALWAYS back up before su
 ## 7. Real-World Examples
 
 - **Multi-account AWS landing zone**: a platform team uses one state slice per account-and-domain (`network`, `iam`, `eks`), with S3 + DynamoDB per account. A new team gets an account provisioned by a `terraform apply` of an account-factory module — repeatable, reviewed, audited.
-- **EKS cluster + node groups as a module**: the `terraform-aws-modules/eks` community module (10M+ downloads) is instantiated per environment; upgrading Kubernetes is a version bump in the module input plus a reviewed `plan`. Cross-link [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md).
+- **EKS cluster + node groups as a module**: the `terraform-aws-modules/eks` community module (165M+ registry downloads) is instantiated per environment; upgrading Kubernetes is a version bump in the module input plus a reviewed `plan`. Cross-link [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md).
 - **Drift remediation in CI**: a nightly `terraform plan -detailed-exitcode` runs in CI; exit code 2 (changes present) opens a ticket — catching console hot-fixes before they cause surprise replacements.
 - **Disaster recovery**: because the entire VPC/RDS/EKS topology is in HCL with remote state, rebuilding a destroyed region is `terraform apply` against a fresh backend — see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md).
 
@@ -482,13 +493,13 @@ terraform state pull > backup.tfstate                 # ALWAYS back up before su
 
 | Decision | Option A | Option B | Key factor |
 |----------|----------|----------|-----------|
-| State location | Local file | Remote (S3+DynamoDB) | Team collaboration & locking |
+| State location | Local file | Remote (S3 + `use_lockfile`) | Team collaboration & locking |
 | Env isolation | Workspaces | Directory/account per env | Convenience vs blast-radius isolation |
 | Resource fan-out | `count` | `for_each` | Stable addressing (avoid re-index churn) |
 | State granularity | One big state | Many small states | Plan speed/blast radius vs cross-ref complexity |
 | Provider version | Loose (`>=`) | Pinned (`~>`) | Latest features vs reproducible plans |
 | Secrets | Variables in state | External (Vault/SSM) | Convenience vs leakage (state stores plaintext) |
-| Apply driver | Local CLI | Atlantis / TFC / CI | Simplicity vs policy + audit + locking |
+| Apply driver | Local CLI | Atlantis / HCP Terraform / CI | Simplicity vs policy + audit + locking |
 
 ---
 
@@ -517,11 +528,11 @@ terraform {
 # FIX: remote backend with locking so applies serialize and state is shared.
 terraform {
   backend "s3" {
-    bucket         = "acme-tfstate-prod"
-    key            = "app/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "tf-locks"     # DynamoDB lock -> second apply waits, no corruption
-    encrypt        = true
+    bucket       = "acme-tfstate-prod"
+    key          = "app/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true    # S3 lockfile -> second apply waits, no corruption
+    encrypt      = true
   }
 }
 ```
@@ -550,9 +561,9 @@ resource "aws_instance" "node" {
 # Removing "worker" leaves "api" and "cron" completely untouched.
 ```
 
-**Pitfall 4 — Ignoring `-/+ replace` in the plan.** Engineers skim the plan, miss that a `~ engine_version` change *forces replacement* of an RDS instance, and `apply` destroys the production database. FIX: read every `-/+` line, add `lifecycle { prevent_destroy = true }` to critical stateful resources, and require plan review in CI.
+**Pitfall 4 — Ignoring `-/+ replace` in the plan.** Engineers skim the plan, miss that adding `storage_encrypted = true` to an existing unencrypted RDS instance *forces replacement* (AWS cannot encrypt a live volume in place), and `apply` destroys the production database. FIX: read every `-/+` line, add `lifecycle { prevent_destroy = true }` to critical stateful resources, and require plan review in CI — the real remedy for that particular change is a snapshot-restore into a new encrypted instance, not an in-place edit.
 
-**Pitfall 5 — Provider version drift.** Using `>= 5.0` lets a CI run pick up a new provider that changes a default and proposes surprise diffs. FIX: pin with `~> 5.40` and commit `.terraform.lock.hcl` so every machine resolves identical provider versions.
+**Pitfall 5 — Provider version drift.** Using `>= 6.0` lets a CI run pick up a new provider that changes a default and proposes surprise diffs. FIX: pin with `~> 6.57` and commit `.terraform.lock.hcl` so every machine resolves identical provider versions.
 
 ---
 
@@ -561,12 +572,13 @@ resource "aws_instance" "node" {
 | Tool | Purpose |
 |------|---------|
 | Terraform CLI | Core `init`/`plan`/`apply`/`destroy` engine |
-| OpenTofu | Open-source (MPL) fork; drop-in CLI (see [terraform_advanced_and_alternatives](../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md)) |
-| S3 + DynamoDB | Remote state + locking on AWS |
+| OpenTofu | Linux Foundation fork under MPL 2.0; drop-in CLI (see [terraform_advanced_and_alternatives](../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md)) |
+| S3 (`use_lockfile`) | Remote state + native locking on AWS |
 | `.terraform.lock.hcl` | Provider version + checksum lockfile (commit it) |
 | `terraform fmt` / `validate` | Canonical formatting + syntax/type checks |
+| `terraform test` | Native unit/integration tests for modules (`.tftest.hcl` run blocks) |
 | `tflint` | Linter catching provider-specific mistakes |
-| `tfsec` / `checkov` | Static security scanning of HCL |
+| Trivy (`trivy config`) / Checkov | Static security scanning of HCL |
 | `terraform-docs` | Auto-generate module docs from variables/outputs |
 | Atlantis | PR-driven plan/apply with locking and audit |
 | Terragrunt | DRY backends/inputs across many states |
@@ -583,13 +595,13 @@ The state file is a JSON document mapping each resource in your config (e.g., `a
 `init` downloads providers and modules and configures the backend; `plan` refreshes state against the cloud, diffs it against your HCL, and prints proposed creates/updates/replaces/destroys; `apply` walks the dependency graph and executes that diff via provider APIs, then writes back state. `plan` is a safe dry run — the place you catch dangerous `-/+` replacements before they happen. In CI you save the plan (`terraform plan -out=tfplan`) and apply exactly that artifact so what's reviewed is what runs.
 
 **Q3: Why is remote state with locking necessary for teams?**
-Local state can't be safely shared, and concurrent applies against one state file corrupt it — two engineers each write a partial state, producing duplicated or orphaned resources. Remote backends (S3 + DynamoDB) serialize applies via a lock: the second `apply` waits until the first releases, and everyone reads the same authoritative state. This is the single most important step to move Terraform from solo use to team use.
+Local state can't be safely shared, and concurrent applies against one state file corrupt it — two engineers each write a partial state, producing duplicated or orphaned resources. A remote backend (S3 with `use_lockfile = true`) serializes applies via a lock: the second `apply` waits until the first releases the `.tflock` object, and everyone reads the same authoritative state. This is the single most important step to move Terraform from solo use to team use.
 
 **Q4: What's the difference between `count` and `for_each`, and which is safer?**
 `count` creates resources indexed by integer (`[0]`, `[1]`), so removing a middle element re-indexes the rest — Terraform destroys and recreates resources that merely shifted position. `for_each` keys instances by a stable map/set key (`["api"]`, `["worker"]`), so adding or removing one leaves the others untouched. Prefer `for_each` for anything where identities matter; reserve `count` for simple "N identical copies" or conditional creation (`count = var.enabled ? 1 : 0`).
 
 **Q5: What does it mean when a plan shows `-/+` (replace), and why is it dangerous?**
-`-/+` means Terraform will destroy the existing resource and create a new one because you changed an immutable attribute (an AMI, certain RDS engine settings, a resource name). For stateless resources it's fine; for stateful ones (databases, EBS volumes) it can mean data loss and downtime. Always scrutinize `-/+` lines, protect critical resources with `lifecycle { prevent_destroy = true }`, and use `create_before_destroy` where a replacement must avoid a gap.
+`-/+` means Terraform will destroy the existing resource and create a new one because you changed an attribute the provider marks "Forces new resource" (an EC2 AMI, `storage_encrypted` or `kms_key_id` on an RDS instance, an S3 bucket name). For stateless resources it's fine; for stateful ones (databases, EBS volumes) it can mean data loss and downtime. Always scrutinize `-/+` lines, protect critical resources with `lifecycle { prevent_destroy = true }`, and use `create_before_destroy` where a replacement must avoid a gap.
 
 **Q6: How do you handle secrets in Terraform given that state stores them in plaintext?**
 Any sensitive value passed to a resource is written unencrypted into the state JSON — `sensitive = true` only masks CLI output, not the stored value. So you encrypt state at rest (KMS on the S3 bucket), lock down bucket access, and never commit state to Git. Better, source secrets at apply time from an external store like Vault or AWS Secrets Manager (see [secrets_management](../secrets_management/secrets_management.md)) so the secret of record lives outside Terraform, and use dynamic credentials where possible.
@@ -610,7 +622,7 @@ Workspaces give one config multiple state files (`terraform workspace select pro
 Terraform builds a directed acyclic graph from references — `aws_subnet.app` referencing `aws_vpc.main.id` creates an implicit dependency, so the VPC is created first; independent nodes run in parallel (default `-parallelism=10`). When there's no reference but a real ordering need (an IAM policy that must exist before a resource uses it indirectly), add explicit `depends_on`. Avoid overusing `depends_on`; prefer real references so the graph stays accurate.
 
 **Q12: What's the purpose of `.terraform.lock.hcl` and should you commit it?**
-It's the dependency lockfile recording the exact provider versions and their checksums that were selected, analogous to `package-lock.json`. Commit it so every engineer and CI runner resolves identical provider versions and gets byte-identical plans — without it, a `>= 5.0` constraint could silently pull a newer provider that changes defaults and proposes surprise diffs. Update it deliberately with `terraform init -upgrade` and review the resulting plan.
+It's the dependency lockfile recording the exact provider versions and their checksums that were selected, analogous to `package-lock.json`. Commit it so every engineer and CI runner resolves identical provider versions and gets byte-identical plans — without it, a `>= 6.0` constraint could silently pull a newer provider that changes defaults and proposes surprise diffs. Update it deliberately with `terraform init -upgrade` and review the resulting plan.
 
 **Q13: How do `terraform state mv` and `terraform state rm` differ, and when do you use them?**
 `state mv` renames or moves a resource within state (e.g., after refactoring `aws_instance.old` to `aws_instance.new`) so Terraform updates the address instead of destroying and recreating the real resource. `state rm` removes a resource from state without deleting it in the cloud — used to hand a resource off to another config or stop managing it. Both are state surgery: always `terraform state pull > backup.tfstate` first, because a mistake can orphan or duplicate real infrastructure.
@@ -625,13 +637,13 @@ In August 2023 HashiCorp relicensed Terraform from MPL 2.0 to the BUSL (a source
 
 ## 13. Best Practices
 
-- Use a **remote backend with locking** (S3 + DynamoDB or native S3 lock in 1.10+) from day one; encrypt state and lock down bucket access.
+- Use a **remote backend with locking** (S3 with `use_lockfile = true`) from day one; encrypt state and lock down bucket access.
 - **Pin provider versions** with `~>` and **commit `.terraform.lock.hcl`** for reproducible plans.
 - **Always review the plan**, especially `-/+ replace` lines; in CI, `plan -out=tfplan` then `apply tfplan` so reviewed == applied.
 - Prefer **`for_each` over `count`** for stable addressing; protect stateful resources with `prevent_destroy`.
 - **Never store secrets in HCL/state**; source them from [secrets_management](../secrets_management/secrets_management.md) and KMS-encrypt state.
 - **Split state by lifecycle/ownership** to bound blast radius and speed up plans.
-- Run **`fmt`, `validate`, `tflint`, `tfsec`/`checkov`, and Infracost** in CI on every PR; gate with policy (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)).
+- Run **`fmt`, `validate`, `tflint`, `trivy config`/Checkov, and Infracost** in CI on every PR; gate with policy (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)).
 - **Detect drift on a schedule** (`plan -detailed-exitcode`) and treat console changes as incidents to fold back into HCL.
 
 ---
@@ -640,7 +652,7 @@ In August 2023 HashiCorp relicensed Terraform from MPL 2.0 to the BUSL (a source
 
 ### Scenario: A startup outgrows local state and nearly destroys its production database
 
-A 6-person startup runs Terraform from laptops with local state, sharing `terraform.tfstate` over a shared Dropbox. Two engineers apply on the same afternoon; their local states diverge, and the next apply orphans a NAT gateway and double-creates a load balancer. Worse, a junior engineer bumps an RDS `engine_version`, skims past the `-/+` replace line, and `apply` begins destroying the production database before they `Ctrl-C`.
+A 6-person startup runs Terraform from laptops with local state, sharing `terraform.tfstate` over a shared Dropbox. Two engineers apply on the same afternoon; their local states diverge, and the next apply orphans a NAT gateway and double-creates a load balancer. Worse, a junior engineer closes a compliance ticket by adding `storage_encrypted = true` to the production database, skims past the `-/+` replace line, and `apply` begins destroying it before they `Ctrl-C`.
 
 ```hcl
 # BROKEN: local state, no locking, no protection on the database, secret in plaintext.
@@ -648,10 +660,11 @@ terraform {
   # no backend -> local terraform.tfstate, shared via Dropbox (corruption + race)
 }
 resource "aws_db_instance" "main" {
-  engine         = "postgres"
-  engine_version = "15.4"          # bumping this forces -/+ replace (data loss)
-  username       = "admin"
-  password       = "Sup3rSecret!"  # plaintext in HCL AND in state file
+  engine            = "postgres"
+  engine_version    = "17"
+  username          = "admin"
+  password          = "Sup3rSecret!"  # plaintext in HCL AND in state file
+  storage_encrypted = true            # added later -> forces -/+ replace (data loss)
   # no lifecycle protection
 }
 ```
@@ -659,14 +672,14 @@ resource "aws_db_instance" "main" {
 ```hcl
 # FIX: remote locked state, KMS encryption, secret from Secrets Manager, destroy protection.
 terraform {
-  required_version = ">= 1.6"
-  required_providers { aws = { source = "hashicorp/aws", version = "~> 5.40" } }
+  required_version = ">= 1.11"
+  required_providers { aws = { source = "hashicorp/aws", version = "~> 6.57" } }
   backend "s3" {
-    bucket         = "acme-tfstate-prod"
-    key            = "data/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "tf-locks"       # serialize applies -> no corruption
-    encrypt        = true             # SSE-KMS on state at rest
+    bucket       = "acme-tfstate-prod"
+    key          = "data/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true               # serialize applies -> no corruption
+    encrypt      = true               # SSE-KMS on state at rest
   }
 }
 
@@ -675,24 +688,25 @@ data "aws_secretsmanager_secret_version" "db" {
 }
 
 resource "aws_db_instance" "main" {
-  engine         = "postgres"
-  engine_version = "15.4"
-  username       = "admin"
-  password       = jsondecode(data.aws_secretsmanager_secret_version.db.secret_string)["password"]
+  engine            = "postgres"
+  engine_version    = "17"
+  storage_encrypted = true
+  username          = "admin"
+  password          = jsondecode(data.aws_secretsmanager_secret_version.db.secret_string)["password"]
 
   lifecycle {
-    prevent_destroy = true            # apply errors out instead of destroying the DB
-    ignore_changes  = [engine_version]  # version upgrades go through a controlled process
+    prevent_destroy = true              # apply errors out instead of destroying the DB
+    ignore_changes  = [engine_version]  # auto minor upgrades move the live version; upgrades go through a controlled process
   }
 }
 ```
 
-With remote locking, concurrent applies serialize and state stays consistent. `prevent_destroy` turns the accidental RDS replacement into a hard error rather than a deleted database, and the version upgrade is now a deliberate, reviewed process. The password is pulled from AWS Secrets Manager at apply time, so it no longer sits in HCL (though it still lands in state — hence KMS encryption and locked-down bucket access, with rotation handled per [secrets_management](../secrets_management/secrets_management.md)).
+With remote locking, concurrent applies serialize and state stays consistent. `prevent_destroy` turns the accidental RDS replacement into a hard error rather than a deleted database, so encryption gets enabled the only way AWS allows — snapshot, restore into a new encrypted instance, cut over — and version upgrades become a deliberate, reviewed process. The password is pulled from AWS Secrets Manager at apply time, so it no longer sits in HCL (though it still lands in state — hence KMS encryption and locked-down bucket access, with rotation handled per [secrets_management](../secrets_management/secrets_management.md)).
 
 **Outcome:** state corruption incidents went to zero (locking), the near-miss database deletion became impossible (`prevent_destroy`), and the secret stopped living in version control. The team added a CI pipeline (`fmt` → `validate` → `tflint` → `plan -out`) with required review on the plan, so a dangerous `-/+` line can never reach `apply` unseen again.
 
 **Discussion questions:**
-1. Why does sharing local state over a file drive inevitably corrupt it, and exactly how does DynamoDB locking prevent that?
+1. Why does sharing local state over a file drive inevitably corrupt it, and exactly how does the S3 lockfile prevent that?
 2. The password still appears in the state file even when sourced from Secrets Manager — what protects it, and what's the residual risk?
 3. How would you safely perform the `engine_version` upgrade that `ignore_changes` now suppresses?
 

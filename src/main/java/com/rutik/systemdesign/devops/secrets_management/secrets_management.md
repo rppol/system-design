@@ -58,8 +58,9 @@ In Kubernetes specifically, native `Secret` objects are only **base64-encoded (n
 
 | Tool | Dynamic secrets | Rotation | K8s integration | Notable |
 |------|-----------------|----------|-----------------|---------|
-| HashiCorp Vault | Yes (DB, AWS, PKI, SSH) | Lease-based + rotation | Vault Agent / CSI / ESO | Most powerful; self-hosted ops cost |
-| AWS Secrets Manager | No (rotation via Lambda) | Built-in (RDS rotation) | ESO / Secrets Store CSI | Native AWS, ~$0.40/secret/mo |
+| HashiCorp Vault | Yes (DB, AWS, PKI, SSH) | Lease-based + rotation | Vault Agent / CSI / ESO | Most powerful; self-hosted ops cost; BUSL source-available |
+| OpenBao | Yes (same engines as the fork point) | Lease-based + rotation | Vault Agent / CSI / ESO | Linux Foundation fork of Vault under MPL 2.0; API-compatible |
+| AWS Secrets Manager | No (rotation via Lambda) | Built-in (RDS rotation) | ESO / Secrets Store CSI | Native AWS, $0.40/secret/mo + $0.05 per 10k API calls |
 | GCP Secret Manager | No | Manual/scheduled | ESO / CSI | Versioned, IAM-scoped |
 | Azure Key Vault | No (managed identities help) | Built-in | ESO / CSI | Keys + secrets + certs |
 | AWS SSM Parameter Store | No | Manual | ESO / CSI | Cheap (free standard tier) |
@@ -71,7 +72,7 @@ In Kubernetes specifically, native `Secret` objects are only **base64-encoded (n
 | External Secrets Operator (ESO) | A `SecretStore` + `ExternalSecret` CR; operator pulls from Vault/cloud and syncs a native K8s Secret (default `refreshInterval` e.g. 1h) | No — only a *reference* |
 | Sealed Secrets | `kubeseal` encrypts a Secret to a cluster-specific public key; the controller decrypts | Yes — ciphertext only |
 | SOPS | Encrypt YAML/JSON files with KMS/age; Flux/ArgoCD decrypt at apply | Yes — ciphertext only |
-| Secrets Store CSI Driver | Mounts secrets from Vault/cloud as a volume | No — mounted at runtime |
+| Secrets Store CSI Driver | Mounts secrets from Vault/cloud as a volume (auto-rotation is opt-in, off by default) | No — mounted at runtime |
 | Vault Agent Injector | Sidecar/init injects secrets into a file/env from Vault | No — fetched at runtime |
 
 ### Static vs dynamic
@@ -226,7 +227,7 @@ vault write auth/kubernetes/role/app \
 
 ```yaml
 # SecretStore: how the cluster talks to Vault (auth + path)
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: SecretStore
 metadata: { name: vault-backend, namespace: prod }
 spec:
@@ -241,7 +242,7 @@ spec:
           role: "app"
 ---
 # ExternalSecret: the only thing committed to Git (a reference, not the value)
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata: { name: app-db, namespace: prod }
 spec:
@@ -446,6 +447,7 @@ spec:
 | Tool | Purpose |
 |------|---------|
 | HashiCorp Vault | Central secrets, dynamic secrets, PKI, transit encryption |
+| OpenBao | MPL-2.0 Linux Foundation fork of Vault; API-compatible drop-in |
 | AWS Secrets Manager | Managed AWS secret store with built-in rotation |
 | GCP Secret Manager / Azure Key Vault | Cloud-native managers (GCP/Azure) |
 | AWS SSM Parameter Store | Cheap parameter/secret store on AWS |
@@ -482,10 +484,10 @@ Use a dual-secret (overlap) window: create the new credential while the old one 
 Any sensitive value Terraform manages is written unencrypted into the state JSON, and `sensitive = true` only masks CLI output, not the stored value — so anyone who can read the state bucket can read the password. Mitigate by KMS-encrypting the state backend, locking down bucket access, never committing state to Git, and sourcing secrets at runtime from Vault/Secrets Manager instead of passing them through Terraform (see [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)). The residual risk is why state access must be treated as secret access.
 
 **Q8: How should a workload authenticate to a secrets manager without a bootstrap secret?**
-Use platform identity rather than a stored credential: on AWS, attach an IAM role to the instance/pod (IRSA) so the workload's identity is the auth; in Kubernetes, Vault's Kubernetes auth verifies the pod's projected service-account token against the cluster API and issues a Vault token. This avoids the "secret-zero" chicken-and-egg problem where you'd otherwise need a secret to fetch secrets. The platform's existing identity becomes the trust anchor, scoped by least-privilege policy.
+Use platform identity rather than a stored credential: on EKS, associate an IAM role with the pod's service account — EKS Pod Identity is what AWS recommends for new clusters, with IRSA (OIDC-based) still the option for EKS Anywhere, OpenShift, and self-managed clusters — so the workload's identity is the auth; in Kubernetes generally, Vault's Kubernetes auth verifies the pod's projected service-account token against the cluster API and issues a Vault token. This avoids the "secret-zero" chicken-and-egg problem where you'd otherwise need a secret to fetch secrets. The platform's existing identity becomes the trust anchor, scoped by least-privilege policy.
 
 **Q9: Vault vs cloud-native secret managers — how do you choose?**
-Vault is the most powerful — dynamic secrets, PKI, transit encryption, multi-cloud — but you operate it (unsealing, HA, storage backend), which is real cost; cloud managers (AWS Secrets Manager, GCP/Azure) are fully managed with native IAM integration and built-in rotation but are single-cloud and lack Vault's dynamic-secret breadth. Choose a cloud manager when you're single-cloud and want minimal ops; choose Vault when you need dynamic secrets, multi-cloud neutrality, or advanced features and can invest in running it. Many orgs use the cloud manager for storage and Vault where dynamic credentials matter.
+Vault is the most powerful — dynamic secrets, PKI, transit encryption, multi-cloud — but you operate it (unsealing, HA, storage backend), which is real cost; cloud managers (AWS Secrets Manager, GCP/Azure) are fully managed with native IAM integration and built-in rotation but are single-cloud and lack Vault's dynamic-secret breadth. Choose a cloud manager when you're single-cloud and want minimal ops; choose Vault when you need dynamic secrets, multi-cloud neutrality, or advanced features and can invest in running it. There is a third axis worth naming: HashiCorp relicensed Vault from MPL 2.0 to the BUSL in August 2023, so if you need an OSI-approved licence, OpenBao is the Linux Foundation fork that stayed on MPL 2.0 and keeps API compatibility, which is the usual escape hatch for organizations whose policy forbids source-available software. Many orgs use the cloud manager for storage and Vault or OpenBao where dynamic credentials matter.
 
 **Q10: What's the principle of least privilege applied to secrets, and how do you enforce it?**
 Each workload should be able to read only the specific secrets it needs and nothing else, so a compromise of one service can't read another's credentials. Enforce it with scoped policies (Vault policies bound to a specific path and auth role, IAM policies limiting `secretsmanager:GetSecretValue` to specific secret ARNs) and per-service identities rather than a shared "app" role. Combined with short TTLs and audit logging, least privilege keeps the blast radius of any single compromise small.
@@ -500,7 +502,7 @@ You never commit plaintext, so you use one of three patterns: ESO commits only a
 Secrets Manager costs about $0.40 per secret per month and includes built-in rotation, while SSM Parameter Store's standard tier is free but requires you to build rotation yourself. Both integrate with ESO/CSI and IAM for access control, but Secrets Manager adds native rotation Lambdas (e.g., RDS rotation) and versioning designed specifically for credentials, whereas Parameter Store is a general-purpose key-value store often reused for non-secret config too. Pick Parameter Store for a large number of low-sensitivity values where the per-secret fee would add up, and Secrets Manager when you want managed rotation without building it. Many teams use both: Parameter Store for app config, Secrets Manager for anything that needs automatic rotation.
 
 **Q14: How does the Secrets Store CSI Driver differ from the Vault Agent Injector for getting secrets into a pod?**
-The CSI Driver mounts secrets from Vault or a cloud manager as a volume with no application code changes, while the Agent Injector adds a sidecar/init container that writes secrets to a file or env var. CSI Driver secrets appear as files in a mounted volume the driver refreshes on a poll interval, requiring only a volume mount in the pod spec, whereas Vault Agent Injector runs alongside the app container, authenticates to Vault itself, and renders templates or raw values before or during the app's lifecycle. Neither, by default, creates a native Kubernetes Secret object the way ESO does, which reduces exposure via `kubectl get secret -o yaml`. Choose the CSI Driver for the simplest no-app-change mounting, and the Agent Injector when you need Vault-specific features like automatic renewal or templated secret files.
+The CSI Driver mounts secrets from Vault or a cloud manager as a volume with no application code changes, while the Agent Injector adds a sidecar/init container that writes secrets to a file or env var. CSI Driver secrets appear as files in a mounted volume, requiring only a volume mount in the pod spec — but they are fetched once at mount time unless you turn on auto-rotation (`--enable-secret-rotation`, default off, `--rotation-poll-interval` 2m), which is the setting teams most often forget — whereas Vault Agent Injector runs alongside the app container, authenticates to Vault itself, and renders templates or raw values before or during the app's lifecycle. Neither, by default, creates a native Kubernetes Secret object the way ESO does, which reduces exposure via `kubectl get secret -o yaml`. Choose the CSI Driver for the simplest no-app-change mounting, and the Agent Injector when you need Vault-specific features like automatic renewal or templated secret files.
 
 **Q15: What is Vault's default lease TTL, and why do dynamic secrets typically use a much shorter one?**
 Vault's platform default lease TTL is 768 hours (32 days), but dynamic secrets like database credentials are typically issued with TTLs of minutes to hours. That 768h figure is a generic ceiling meant for tokens and leases broadly, not a recommendation — leaving a dynamic DB credential's `default_ttl` anywhere near it would recreate the long-lived-secret problem dynamic secrets exist to avoid. Production roles instead set `default_ttl=1h` with a `max_ttl` ceiling like 24h, so credentials auto-expire quickly and the app simply re-fetches on expiry. The gap between the platform default and the deliberately short role-level TTL is the tuning knob that makes dynamic secrets valuable.
@@ -575,7 +577,7 @@ spec:
 
 ```yaml
 # FIX part 2: ESO syncs a UNIQUE, rotated DB secret from Vault dynamic creds (per-service, 1h TTL).
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata: { name: app-db, namespace: prod }
 spec:

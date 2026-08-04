@@ -10,7 +10,7 @@ Policy as Code (PaC) expresses governance rules — "no privileged containers," 
 
 The dominant engine is the Open Policy Agent (OPA) with its Rego language, which evaluates JSON input against declarative rules. On Kubernetes, two enforcement layers wrap OPA-style policy: **Gatekeeper** (OPA-based, ConstraintTemplate + Constraint CRDs) and **Kyverno** (Kubernetes-native YAML policies that validate, mutate, and generate resources). For pipeline-time checks on IaC and configuration files, **Conftest** runs Rego against any structured file before it ever reaches a cluster.
 
-This module covers writing and testing Rego, the Gatekeeper and Kyverno enforcement models, Conftest in CI, mapping policies to the CIS Kubernetes Benchmark (~120 controls) and to SOC2/PCI-DSS/HIPAA controls, the admission-time vs CI-time tradeoff, and the human side: exceptions, waivers, and policy testing. It builds on the pod-security controls in [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md) and the IaC workflows in [`../infrastructure_as_code_terraform/README.md`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md).
+This module covers writing and testing Rego, the Gatekeeper and Kyverno enforcement models, Conftest in CI, mapping policies to the CIS Kubernetes Benchmark (~120 controls) and to SOC2/PCI-DSS/HIPAA controls, the admission-time vs CI-time tradeoff, and the human side: exceptions, waivers, and policy testing. It builds on the pod-security controls in [kubernetes_security](../kubernetes_security/kubernetes_security.md) and the IaC workflows in [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md).
 
 ---
 
@@ -76,10 +76,11 @@ Conftest sits top-left — seconds-fast PR feedback that is bypassable by editin
 
 | Policy | CIS K8s | SOC2 | PCI-DSS | HIPAA |
 |--------|---------|------|---------|-------|
-| No privileged containers | 5.2.1 | CC6.1 | 2.2 | §164.312(a) |
-| Image from approved registry | 5.4.1 | CC6.8 | 6.3 | §164.312(c) |
-| Encryption at rest required | — | CC6.7 | 3.4 | §164.312(a)(2)(iv) |
+| No privileged containers | 5.2.2 | CC6.1 | 2.2 | §164.312(a) |
+| Image from approved registry | 5.5.1 | CC6.8 | 6.3 | §164.312(c) |
+| Secret encryption at rest | 1.2.27, 1.2.28 | CC6.7 | 3.4 | §164.312(a)(2)(iv) |
 | Audit logging enabled | 3.2.1 | CC7.2 | 10.2 | §164.312(b) |
+| Owner/cost-centre tag on every resource | — | — | — | — |
 
 ```mermaid
 stateDiagram-v2
@@ -158,19 +159,21 @@ One `ConstraintTemplate` — the reusable Rego plus its parameter schema — is 
 ```rego
 package k8sprivileged
 
-violation[{"msg": msg}] {
+violation contains {"msg": msg} if {
   c := input.review.object.spec.containers[_]
   c.securityContext.privileged == true
   msg := sprintf("privileged container not allowed: %v", [c.name])
 }
 ```
 
+The `contains` and `if` keywords are mandatory in Rego v1, the syntax OPA and Conftest evaluate by default. Gatekeeper still parses ConstraintTemplates as Rego v0 unless the template opts in with `source.version: "v1"`, shown below — so a policy copied between the two gates needs the opt-in to keep one dialect everywhere.
+
 **Read it like this.** "Build the set of all reasons to reject this object; if that set is non-empty, reject it."
 
 Rego rules of this shape are not functions returning true or false — they are *set comprehensions*. The rule body is a filter, and every combination of variable bindings that satisfies every line contributes one element to the set.
 
 ```
-violation[msg] { line1; line2; line3 }
+violation contains msg if { line1; line2; line3 }
 
   read as:  msg is IN the violation set  IF  line1 AND line2 AND line3 all hold
   the [_]:  "for SOME element of this array" -- one set entry per element that matches
@@ -179,7 +182,7 @@ violation[msg] { line1; line2; line3 }
 
 | Symbol | What it is |
 |--------|------------|
-| `violation[...]` | A partial set rule — each satisfying binding adds one element, not a boolean |
+| `violation contains ...` | A partial set rule — each satisfying binding adds one element, not a boolean |
 | `input` | The JSON handed to OPA: the admission review, manifest, or Terraform plan |
 | `[_]` | Anonymous iteration variable — "try every element of this array in turn" |
 | `;` / newline | Implicit AND between conditions inside a rule body |
@@ -227,14 +230,18 @@ spec:
             repos: { type: array, items: { type: string } }
   targets:
     - target: admission.k8s.gatekeeper.sh
-      rego: |
-        package k8sallowedrepos
-        violation[{"msg": msg}] {
-          image := input.review.object.spec.containers[_].image
-          not startswith_any(image, input.parameters.repos)
-          msg := sprintf("image %v not from an approved registry", [image])
-        }
-        startswith_any(s, prefixes) { startswith(s, prefixes[_]) }
+      code:
+        - engine: Rego
+          source:
+            version: "v1"      # opt in to Rego v1; Gatekeeper parses v0 without this
+            rego: |
+              package k8sallowedrepos
+              violation contains {"msg": msg} if {
+                image := input.review.object.spec.containers[_].image
+                not startswith_any(image, input.parameters.repos)
+                msg := sprintf("image %v not from an approved registry", [image])
+              }
+              startswith_any(s, prefixes) if { startswith(s, prefixes[_]) }
 ---
 apiVersion: constraints.gatekeeper.sh/v1beta1
 kind: K8sAllowedRepos
@@ -307,11 +314,11 @@ spec:
 
 ```rego
 package k8sprivileged
-test_denies_privileged {
+test_denies_privileged if {
   count(violation) == 1 with input as {"review": {"object": {"spec":
     {"containers": [{"name": "x", "securityContext": {"privileged": true}}]}}}}
 }
-test_allows_unprivileged {
+test_allows_unprivileged if {
   count(violation) == 0 with input as {"review": {"object": {"spec":
     {"containers": [{"name": "x", "securityContext": {"privileged": false}}]}}}}
 }
@@ -331,7 +338,7 @@ conftest test plan.json --policy ./policies/terraform
 
 ```rego
 package terraform.sg
-deny[msg] {
+deny contains msg if {
   r := input.resource_changes[_]
   r.type == "aws_security_group_rule"
   r.change.after.cidr_blocks[_] == "0.0.0.0/0"
@@ -340,14 +347,14 @@ deny[msg] {
 }
 ```
 
-These admission policies complement the Pod Security Standards covered in [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md); the Conftest-against-Terraform pattern above extends the IaC workflow in [`../infrastructure_as_code_terraform/README.md`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md).
+These admission policies complement the Pod Security Standards covered in [kubernetes_security](../kubernetes_security/kubernetes_security.md); the Conftest-against-Terraform pattern above extends the IaC workflow in [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md).
 
 ---
 
 ## 7. Real-World Examples
 
 - **Capital One** open-sourced its Cloud Custodian usage and uses OPA-style policy to enforce encryption and tagging across thousands of AWS accounts continuously rather than via quarterly audits.
-- **CNCF projects** standardized on Gatekeeper and Kyverno as graduated/incubating admission tools; many regulated enterprises run both in audit mode before enforcement.
+- **CNCF projects** standardized on Gatekeeper and Kyverno as the two admission engines — Kyverno graduated in March 2026, and Gatekeeper ships under the graduated Open Policy Agent project; many regulated enterprises run both in audit mode before enforcement.
 - **Netflix** built policy gates into its CI/CD (Spinnaker) so a non-compliant deployment is stopped before it reaches a cluster, shifting compliance left.
 - **PCI-DSS audited fintechs** use Conftest to assert "no security group allows 0.0.0.0/0 on port 22" against the Terraform plan, blocking the change at PR time and producing the evidence the QSA needs.
 - **kube-bench** (Aqua) automates the full CIS Kubernetes Benchmark (~120 controls) as a Job, outputting pass/fail per control for SOC2 evidence collection.
@@ -442,7 +449,8 @@ The fix prevents a webhook outage from blocking the very system namespaces that 
 | Gatekeeper | K8s admission | Rego (templates) | validate, audit | Rego-fluent teams, OPA reuse |
 | Kyverno | K8s admission | YAML | validate, mutate, generate | Teams avoiding Rego, defaults injection |
 | Conftest | CI / files | Rego | validate any structured file | Terraform/K8s/Dockerfile in pipeline |
-| Checkov | CI / IaC | Python rules | IaC misconfig scan, ~1000 built-ins | Fast out-of-box Terraform coverage |
+| Checkov | CI / IaC | Python rules | IaC misconfig scan, 1000+ built-ins | Fast out-of-box Terraform coverage |
+| Trivy (`trivy config`) | CI / IaC | Built-in rules | IaC, Dockerfile, Helm, K8s scan; absorbed the tfsec rule set | One scanner across IaC and images |
 | kube-bench | Audit | Go | CIS benchmark (~120 controls) | SOC2 evidence, node hardening checks |
 
 ---
@@ -468,7 +476,7 @@ With `failurePolicy: Fail`, if the webhook pod is unavailable, every matching cr
 Deploy it first in audit/dryrun mode so it records violations in status without denying anything, then work through the existing violation backlog and fix or waive each. Once violations are near zero, flip `enforcementAction` to deny, ideally per-namespace starting with low-risk environments. This staged approach surfaces pre-existing non-compliance safely instead of breaking deploys the moment enforcement is enabled.
 
 **Q: How does policy as code map to frameworks like SOC2 or PCI-DSS?**
-Each policy is tagged to specific control IDs — for example "no privileged containers" maps to CIS K8s 5.2.1, SOC2 CC6.1, and PCI-DSS 2.2 — in a maintained traceability matrix. This lets auditors see exactly which automated control satisfies which requirement and lets you prove continuous enforcement rather than a snapshot. The practical payoff is that audit evidence becomes a query against policy results instead of a manual document hunt.
+Each policy is tagged to specific control IDs — for example "no privileged containers" maps to CIS Kubernetes Benchmark 5.2.2, SOC2 CC6.1, and PCI-DSS 2.2 — in a maintained traceability matrix. This lets auditors see exactly which automated control satisfies which requirement and lets you prove continuous enforcement rather than a snapshot. The practical payoff is that audit evidence becomes a query against policy results instead of a manual document hunt.
 
 **Q: How do you test Rego policies?**
 Write unit tests using OPA's built-in test runner, providing mock `input` for both an allowed case and a denied case and asserting the violation count. For example, a privileged-container test feeds a privileged pod and asserts exactly one violation, plus a clean pod asserting zero. Run `opa test` in CI so an untested or broken policy — which can silently allow everything — fails the build before it ships.
@@ -495,7 +503,7 @@ Every policy evaluated at admission adds to that latency budget on every matchin
 The audit re-scans every existing object in etcd on a fixed interval, independent of any request, so it surfaces resources that predate a constraint or were created while the webhook was briefly down. Neither CI-time Conftest, which only sees a proposed change, nor admission, which only fires on new requests, can detect non-compliant objects already sitting in the cluster; the audit closes exactly that gap by continuously re-evaluating live state. This is why "audit found zero violations" is a meaningful health signal even in enforce mode — it proves nothing has drifted since the last scan.
 
 **Q: What do you do when a policy has no clean equivalent across every compliance framework you map to?**
-Not every control maps one-to-one — "encryption at rest required" has a clear SOC2, PCI-DSS, and HIPAA mapping but no single CIS Kubernetes Benchmark line item. That's because CIS focuses on cluster and workload hardening rather than data-at-rest cryptography, so the traceability matrix should record the gap explicitly with a dash rather than a guessed control ID, and the policy's enforcement doesn't depend on having every framework represented. This matters operationally because an auditor querying "show me every control this policy satisfies" needs an honest answer, not a fabricated cross-reference that later fails scrutiny.
+Not every control maps one-to-one — an internal rule like "every resource carries an owner and cost-centre tag" is real governance you enforce and audit, but it corresponds to no CIS Kubernetes Benchmark, SOC2, PCI-DSS, or HIPAA line item at all. That's because the frameworks scope themselves to security and privacy outcomes rather than an organization's own operational hygiene, so the traceability matrix should record the gap explicitly with a dash rather than a guessed control ID, and the policy's enforcement doesn't depend on having every framework represented. This matters operationally because an auditor querying "show me every control this policy satisfies" needs an honest answer, not a fabricated cross-reference that later fails scrutiny.
 
 ---
 
@@ -539,7 +547,7 @@ kind: K8sPSPPrivilegedContainer
 metadata:
   name: no-privileged
   annotations:
-    compliance.io/control: "HIPAA-164.312(a); CIS-5.2.1"
+    compliance.io/control: "HIPAA-164.312(a), CIS-5.2.2"
 spec:
   enforcementAction: dryrun      # observe violations first; flip to deny after backlog cleared
   match:
@@ -548,4 +556,4 @@ spec:
     namespaces: ["team-a", "team-b"]
 ```
 
-**Outcome.** Over a 2-week dryrun, Gatekeeper's audit (every 60s) surfaces 23 privileged pods and 11 public-registry images across teams; each is fixed or given an expiring, version-controlled waiver. After flipping to deny, the next attempt to deploy a privileged pod is rejected at the API server in ~12ms with a HIPAA-mapped message, and a direct `kubectl apply` of a Docker Hub image is blocked identically. Quarterly audit prep drops from a 3-day manual sweep to a single query over policy results plus the weekly kube-bench report. See [`../kubernetes_security/README.md`](../kubernetes_security/kubernetes_security.md) for the pod-runtime baseline these policies enforce and [`../infrastructure_as_code_terraform/README.md`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) for the Conftest-against-Terraform integration.
+**Outcome.** Over a 2-week dryrun, Gatekeeper's audit (every 60s) surfaces 23 privileged pods and 11 public-registry images across teams; each is fixed or given an expiring, version-controlled waiver. After flipping to deny, the next attempt to deploy a privileged pod is rejected at the API server in ~12ms with a HIPAA-mapped message, and a direct `kubectl apply` of a Docker Hub image is blocked identically. Quarterly audit prep drops from a 3-day manual sweep to a single query over policy results plus the weekly kube-bench report. See [kubernetes_security](../kubernetes_security/kubernetes_security.md) for the pod-runtime baseline these policies enforce and [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) for the Conftest-against-Terraform integration.
