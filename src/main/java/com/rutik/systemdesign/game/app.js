@@ -274,7 +274,7 @@ const STUDY_ORDER = {
     "lld/pattern_comparisons","lld/anti_patterns","lld/concurrency_patterns","lld/system_design_problems",
   ],
   llm: [
-    "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search",
+    "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search","llm/faiss_deep_dive",
     "llm/pre_training","llm/training_infrastructure","llm/synthetic_data_generation","llm/fine_tuning","llm/alignment_and_rlhf","llm/constitutional_ai",
     "llm/prompt_engineering","llm/rag_fundamentals","llm/advanced_rag","llm/context_engineering","llm/reasoning_models","llm/code_generation",
     "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/agentic_frameworks","llm/multi_agent_systems","llm/mcp_model_context_protocol","llm/coding_agents","llm/voice_agents","llm/browser_agents_deep_dive",

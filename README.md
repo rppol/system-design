@@ -111,6 +111,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Foundations & Architecture](src/main/java/com/rutik/systemdesign/llm/foundations_and_architecture/foundations_and_architecture.md) | Transformers, self-attention, MoE, scaling laws, GPT/LLaMA/DeepSeek — with 4 deep-dive sub-files (Flash Attention, RoPE, training dynamics, state-space/linear-attention alternatives) |
 | [Tokenization & Embeddings](src/main/java/com/rutik/systemdesign/llm/tokenization_and_embeddings/tokenization_and_embeddings.md) | BPE, WordPiece, SentencePiece, tiktoken, vocabulary design |
 | [Embeddings & Similarity Search](src/main/java/com/rutik/systemdesign/llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md) | Sentence embeddings, contrastive learning, HNSW, FAISS, Matryoshka |
+| [FAISS Deep Dive](src/main/java/com/rutik/systemdesign/llm/faiss_deep_dive/faiss_deep_dive.md) | Index-factory grammar, coarse quantizers, PQ/SQ/RaBitQ encodings, training, GPU limits, mmap and on-disk lists, filtered search |
 
 #### Training
 | Topic | Key Concepts |
@@ -647,7 +648,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 24 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 45 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 24 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 46 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -696,6 +697,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Data Pipelines and Processing](src/main/java/com/rutik/systemdesign/ml/data_pipelines_and_processing/data_pipelines_and_processing.md) | PySpark, Great Expectations, DVC, schema evolution, data validation, Lambda vs Kappa |
 | [Distributed Training](src/main/java/com/rutik/systemdesign/ml/distributed_training/distributed_training.md) | PyTorch DDP, FSDP, DeepSpeed ZeRO stages, gradient accumulation, mixed precision BF16 |
 | [Experiment Tracking and Versioning](src/main/java/com/rutik/systemdesign/ml/experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) | MLflow, W&B, Optuna TPE, DVC, reproducibility checklist, hyperparameter sweeps |
+| [MLflow Deep Dive](src/main/java/com/rutik/systemdesign/ml/mlflow_deep_dive/mlflow_deep_dive.md) | Tracking server and schema, `MLmodel` format, signatures, registry aliases vs stages, autolog gaps, MLflow 3 migration, tracing and prompt registry |
 | [GPU and Hardware Optimization](src/main/java/com/rutik/systemdesign/ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) | CUDA, tensor cores, memory hierarchy, profiling, gradient checkpointing, DataLoader tuning |
 | [Active Learning and Weak Supervision](src/main/java/com/rutik/systemdesign/ml/active_learning_and_weak_supervision/active_learning_and_weak_supervision.md) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, pseudo-labeling, data-centric AI |
 

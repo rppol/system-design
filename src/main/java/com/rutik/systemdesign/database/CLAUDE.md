@@ -125,7 +125,7 @@ and a 6-week Study Plan (prose; no path impact).
 | CAP theorem | `database_fundamentals/` | `../hld/cap_theorem/`, `consistency_models_and_consensus/` |
 | Cache patterns | `database_caching_patterns/` | `../backend/caching_strategies_deep_dive/`, `key_value_stores/`, `redis_internals/` |
 | Redis internals | `redis_internals/` | `key_value_stores/`, `in_memory_databases/`, `database_caching_patterns/` |
-| Vector search | `vector_databases/` | `../llm/embeddings_and_similarity_search/` |
+| Vector search | `vector_databases/` | `../llm/embeddings_and_similarity_search/`, `../llm/faiss_deep_dive/` — the in-process library and the library-vs-service argument |
 | N+1 query | `sql_query_optimization/` | `../spring/spring_data_jpa/`, `../backend/query_optimization/` |
 | Schema migration | `database_migrations_zero_downtime/` | `../backend/database_migrations/` |
 

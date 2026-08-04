@@ -766,6 +766,15 @@ client.query_points(
 - All queries use exact filters with no semantic component
 - Dataset is small (< 10K vectors) — brute force is fast enough
 
+**Use an in-process ANN library instead of any database when** the workload is offline or
+batch (deduplication, candidate generation, k-NN graph construction), the index is embedded in
+one process, and you need none of durability, replication, metadata filtering, multi-tenancy,
+auth or a query language. That is the library-versus-service decision, and it is argued
+capability by capability — with the twelve things you would have to build yourself — in
+[FAISS Deep Dive §9](../../llm/faiss_deep_dive/faiss_deep_dive.md). The short version: a
+vector database is FAISS plus those twelve things, so count how many of them your workload
+needs before choosing.
+
 ---
 
 ## 10. Common Pitfalls
@@ -804,7 +813,7 @@ Query embedded with model A, documents embedded with model B → completely diff
 | Qdrant | Rust-based, high-performance, rich filtering |
 | Milvus | Distributed vector database for billion-scale |
 | Chroma | Embedded vector DB for prototyping and development |
-| FAISS (Facebook AI) | Research library for ANN algorithms (CPU + GPU) |
+| FAISS (Meta AI) | In-process ANN library (CPU + GPU) — the algorithms without the service; see [FAISS Deep Dive](../../llm/faiss_deep_dive/faiss_deep_dive.md) |
 | Annoy (Spotify) | Tree-based ANN, read-only index |
 | LangChain VectorStores | Abstraction layer over multiple vector DBs |
 | LlamaIndex VectorStoreIndex | Index abstraction for RAG pipelines |

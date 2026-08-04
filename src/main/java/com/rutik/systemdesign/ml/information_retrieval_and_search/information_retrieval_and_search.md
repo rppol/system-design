@@ -696,7 +696,7 @@ print("mean NDCG@10:", sum(per_query_ndcg) / len(per_query_ndcg))   # 0.61 -- th
 | Inverted-index search engines | Apache Lucene, Elasticsearch, OpenSearch, Solr, Typesense, Meilisearch |
 | Sparse retrieval libraries | rank_bm25 (Python), Pyserini / Anserini, SPLADE |
 | Dense retrieval / embeddings | sentence-transformers, Cohere Embed, OpenAI embeddings, E5, BGE |
-| ANN / vector search | FAISS, HNSWlib, ScaNN (Google), Annoy, Milvus, Qdrant, Weaviate, Pinecone |
+| ANN / vector search | FAISS (parameter surface and index-factory grammar: [FAISS Deep Dive](../../llm/faiss_deep_dive/faiss_deep_dive.md)), HNSWlib, ScaNN (Google), Annoy, Milvus, Qdrant, Weaviate, Pinecone |
 | Cross-encoder rerankers | Cohere Rerank, sentence-transformers CrossEncoder, ms-marco-MiniLM |
 | Learning to rank | LightGBM (LGBMRanker), XGBoost (rank:pairwise / rank:ndcg), RankLib |
 | Offline evaluation | pytrec_eval, trec_eval, ranx |

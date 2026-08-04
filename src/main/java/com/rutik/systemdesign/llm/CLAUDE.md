@@ -5,13 +5,14 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 53 Modules
+## Module List — 54 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
 | `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | attention_mechanisms, positional_encoding, training_dynamics, state_space_models_and_linear_attention |
 | `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | byte_level_and_tokenizer_free |
 | `embeddings_and_similarity_search/` | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | — |
+| `faiss_deep_dive/` | The FAISS library itself — index factory grammar, coarse quantizers, encodings/transforms/refinement, training, GPU limits, mmap and on-disk lists, `remove_ids` renumbering, filtered search, why it is not a database | — |
 | `pre_training/` | CLM, MLM, data curation, training dynamics, compute | — |
 | `training_infrastructure/` | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | — |
 | `synthetic_data_generation/` | Self-Instruct, Evol-Instruct, quality filtering, LIMA | — |
@@ -104,8 +105,8 @@ cosmetic in the reader only.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 53 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (31 modules) and **Principal** (30). They are
+`README.md` documents the **Full Path** (all 54 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (32 modules) and **Principal** (30). They are
 different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly
@@ -178,6 +179,7 @@ Principal case studies must cross-reference at least 4 of these files via relati
 | `evaluation_and_benchmarks/` | `../../ml/model_evaluation_and_selection/` — calibration, ROC/PR, cross-validation |
 | `deployment_and_mlops/` | `../../devops/ml_platform_and_gpu_infrastructure/` — GPU infra; `../../ml/mlops_and_ci_cd/` |
 | `embeddings_and_similarity_search/` | `../../database/vector_databases/` — pgvector, HNSW at DB level |
+| `faiss_deep_dive/` | `../../database/vector_databases/` — the operated-product side of the same algorithms; `../../ml/natural_language_processing/text_representation_and_retrieval.md` — a worked `build_faiss_index()` inside a retrieval stack |
 
 ---
 

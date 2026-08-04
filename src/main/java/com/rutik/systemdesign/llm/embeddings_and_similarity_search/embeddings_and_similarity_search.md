@@ -38,6 +38,12 @@ Together, embeddings + similarity search power the retrieval component in [RAG s
 
 ## 4. Types / Strategies
 
+> This section and §6 derive **why** the index families work — the HNSW layer assignment, the
+> `nlist = sqrt(N)` minimisation, PQ's compression arithmetic, and the measured SIFT1M curves.
+> For the **library** that implements them — the `index_factory` grammar, the training
+> lifecycle, GPU limits, `remove_ids` semantics, filtered search and persistence — see
+> [FAISS Deep Dive](../faiss_deep_dive/faiss_deep_dive.md).
+
 ### 4.1 Sentence Embeddings
 
 **all-MiniLM-L6-v2** (SentenceTransformers)
@@ -709,6 +715,9 @@ Embeddings in production can drift when:
 - Used for recommendation systems (find similar content to what user engaged with)
 - Powers content moderation (find near-duplicate violating content)
 - Ships flat, IVF, HNSW and PQ indexes with both CPU and GPU implementations
+- Full treatment of the library — index-factory grammar, parameter surface, GPU limits,
+  persistence, and why it is not a database — in
+  [FAISS Deep Dive](../faiss_deep_dive/faiss_deep_dive.md)
 
 ---
 
@@ -773,7 +782,7 @@ Embeddings in production can drift when:
 
 | Tool | Type | Notes |
 |------|------|-------|
-| **FAISS** | ANN library | Facebook; flat/IVF/HNSW/PQ; CPU + GPU |
+| **FAISS** | ANN library | Meta; flat/IVF/HNSW/PQ; CPU + GPU — deep dive: [FAISS Deep Dive](../faiss_deep_dive/faiss_deep_dive.md) |
 | **Pinecone** | Managed vector DB | Serverless; object-storage index, not HNSW; `top_k` <= 10,000 |
 | **Weaviate** | Vector DB | Built-in hybrid search; GraphQL API; open source |
 | **Qdrant** | Vector DB | Rust-based; high performance; open source + cloud |

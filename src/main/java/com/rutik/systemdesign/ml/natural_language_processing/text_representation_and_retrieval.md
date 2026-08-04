@@ -1134,6 +1134,10 @@ def tune_hybrid_alpha(
 
 ### Pitfall 4: FAISS index staleness
 
+The detector and the rebuild policy for this — per-list length skew, the frozen-centroid
+failure mode, and the distributed `merge_ondisk` rebuild that makes a scheduled rebuild cheap
+— are in [FAISS Deep Dive](../../llm/faiss_deep_dive/faiss_deep_dive.md) §6.3 and §6.9.
+
 ```python
 # BROKEN: Add documents to FAISS without rebuilding when using IVF
 # IVF clusters are computed at train() time; new documents fall into

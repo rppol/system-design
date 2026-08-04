@@ -51,6 +51,16 @@ A domain is a managed cluster: you choose data-node instance types and counts, o
 
 Reach for it when you are already on AWS and want search or log analytics without running nodes yourself. The costs are that capacity is provisioned and billed by the hour whether or not you query it, engine versions trail upstream OpenSearch, and shard sizing mistakes are still entirely yours to make. A serverless collection removes the sizing decision at a different price shape, and self-managed OpenSearch stays cheaper if you have the operational appetite.
 
+### ann-benchmarks
+**Short:** The standard harness plotting recall against QPS for approximate-nearest-neighbour libraries on shared datasets.
+**Kind:** tech
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1, ml-lifecycle/evaluation-and-benchmarks @2
+
+It runs every library through one interface over the same corpora, sweeps each one's parameters, and plots the resulting recall-versus-throughput frontier, which is the only comparable unit in this field. A single QPS number is a point on an unnamed curve because any index gets arbitrarily fast by lowering its recall dial, so the harness forces both axes to be reported together and pins the dataset, the metric and the machine so two results mean something side by side.
+
+Reach for it to choose between libraries, to sanity-check a vendor's benchmark, or as the template for your own sweep. The trap is treating its published plots as your answer: recall is a property of your embedding distribution and its datasets are mostly small, low-dimensional academic corpora, so reproduce the methodology on your own vectors rather than transferring the numbers.
+
 ### Annoy
 **Short:** Spotify's tree-based approximate nearest-neighbour library; memory-mapped, read-only after build.
 **Kind:** tech
@@ -70,6 +80,16 @@ The cost of that design is immutability — adding vectors means rebuilding and 
 It wraps Lucene behind command-line indexers and searchers built around the standard IR file formats, so a document collection, a topics file and a qrels file go in and a run file comes out ready for `trec_eval`. Beyond plain BM25 it covers pseudo-relevance feedback such as RM3 and impact-scored indexes for learned sparse models, and its regression harness pins the expected effectiveness numbers for known collections, so a change that quietly degrades retrieval fails a test instead of being discovered in someone's paper.
 
 Reach for it when you need a defensible lexical baseline, which is the number every dense retriever must beat before it is worth deploying, or when reproducing published results. It is a JVM research toolkit rather than a serving system; from Python, pyserini exposes the same indexes with less ceremony, and production lexical search belongs in Elasticsearch, OpenSearch or Solr.
+
+### autofaiss
+**Short:** Builder that reads a corpus and a memory budget and emits the FAISS index-factory string and search parameters for it.
+**Kind:** tech
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1
+
+FAISS makes the index type the entire design decision and gives no guidance at the API, so this wraps the sizing rules: given the vector count, the dimension and a RAM ceiling, it picks a factory string, trains it, adds the vectors in batches, and tunes the recall dial against a held-out sample. It is the sizing table and the parameter sweep turned into one call.
+
+Reach for it for a first index on a corpus you have not benchmarked, or to stop a team hand-choosing `nlist` from a blog post. It is a starting point rather than a result, because the recall that matters is the one measured on your own queries against an exact index, and its choices are conservative by design. Once the index is in production, tune it directly.
 
 ### BAAI/bge
 **Short:** BAAI's open BGE text-embedding family: strong open-source English retrieval embeddings in several sizes.
@@ -201,6 +221,16 @@ It is a six-layer distilled BERT fine-tuned on MS MARCO relevance pairs and publ
 
 Reach for it as the default self-hosted reranker for English text when a hosted API is unwanted. Two limits decide whether it helps: the 512-token window must hold query and passage together, so long chunks are truncated, and it inherits MS MARCO's short web-question flavour, which transfers poorly to legal, medical or code corpora. Test on your own queries, and move to a larger BGE or Jina cross-encoder where the extra latency is affordable.
 
+### cuVS
+**Short:** NVIDIA's CUDA vector-search library, home of the CAGRA GPU graph index and the GPU backend FAISS delegates to.
+**Kind:** tech
+**Lang:** cpp, python
+**Roles:** search-retrieval/ann-index-library @1, gpu/gpu-math-libraries @2
+
+It packages GPU implementations of the vector-search primitives — brute force, IVF-flat, IVF-PQ, and the `CAGRA` graph index built for the GPU's memory-access pattern rather than ported from a CPU design. FAISS replaced its earlier RAFT integration with this library, so a GPU FAISS build can hand index construction and search to it and reach index families the classic CUDA backend never had, notably a graph index where `IndexHNSW` has no GPU path at all.
+
+Reach for it when the workload is batched and the corpus fits in GPU memory: index building, offline deduplication, candidate generation, ground-truth computation. The costs are the ones every GPU library carries — a single-query request path is often slower than CPU once kernel launch and transfer are counted, and the memory ceiling is the card's.
+
 ### deepset Cloud
 **Short:** Hosted deployment and evaluation surface for Haystack RAG pipelines.
 **Kind:** tech
@@ -210,6 +240,16 @@ Reach for it as the default self-hosted reranker for English text when a hosted 
 It is the commercial platform around Haystack: pipelines are defined with the same components and YAML the open-source framework uses, then deployed as managed endpoints with model and store connections handled for you. The surface that justifies it is evaluation, with labelled question sets, ground-truth answers and side-by-side comparison of pipeline variants, so a change to the chunker or the retriever is judged by numbers on a held-out set rather than by trying three prompts and forming an impression.
 
 Reach for it when a team needs a shared, governed place to iterate on retrieval quality and cannot staff the platform work itself. Because the pipelines are portable Haystack definitions, the lock-in is mostly operational rather than structural. If the pipeline is already stable and only needs hosting, deploying the open-source framework on your own infrastructure is considerably cheaper.
+
+### DiskANN
+**Short:** Microsoft's SSD-resident graph index (Vamana), built for billion-scale nearest-neighbour search on a small RAM budget.
+**Kind:** tech
+**Lang:** cpp, python
+**Roles:** search-retrieval/ann-index-library @1
+
+Its `Vamana` graph is constructed so that a search touches few enough nodes for the whole traversal to be served by a handful of SSD reads, with a compressed copy of the vectors held in RAM to guide the walk and full-precision vectors fetched from disk only for the candidates that survive. That inverts the usual graph-index assumption that the entire structure must be resident, which is what lets a billion vectors be searched from a machine sized for a hundred million.
+
+Reach for it when the index cannot fit in memory and you want a graph's recall curve rather than an inverted file's cell scan. The costs are a long build, an operational dependence on SSD latency rather than RAM bandwidth, and a much narrower feature surface than a general library — FAISS reaches the same family through its own Vamana index classes if you want it alongside everything else.
 
 ### dspy.Retrieve
 **Short:** DSPy module fetching passages from a configured retriever (Chroma, Pinecone, Weaviate, ColBERT).
@@ -273,6 +313,36 @@ In FAISS the index type is the entire design decision. `IndexFlat` is exact brut
 
 It is a library, not a service, and the gap is the point: no metadata filtering, no updates in place beyond add and remove-by-id, no replication, no query language — just an index you can write to a file and load again. That is what a vector database wraps and operates for you. Reach for FAISS directly for offline retrieval, for benchmarking recall against exact search, and for embedding a searchable index inside a process.
 
+### faiss-cpu
+**Short:** The default FAISS PyPI distribution: the full CPU index surface, requiring Python 3.10 or newer.
+**Kind:** tech
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1
+
+This is the wheel almost everyone installs, carrying the whole CPU index surface — flat, IVF, HNSW, NSG, product and scalar quantizers, RaBitQ, on-disk inverted lists and the SIMD fast-scan kernels — with no CUDA dependency. It is a separate PyPI project from the GPU distributions rather than an extra of one package, so switching backends means changing the requirement line, not adding a marker.
+
+Reach for it unless you have a batched GPU workload, which is most of the time: a request-path similarity search is usually faster on CPU once kernel launch and transfer are counted. Pin the exact version, because the index file format is a serialised object graph with no compatibility contract across feature releases.
+
+### faiss-gpu
+**Short:** FAISS's classic CUDA distribution on PyPI, with a five-year publishing gap between 1.7.2 and 1.14.3.
+**Kind:** tech
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1, gpu/gpu-math-libraries @3
+
+It ships the classic CUDA backend, which implements only four index classes — flat, IVF-flat, IVF scalar-quantizer and IVF-PQ — with hard ceilings of 2048 on both `k` and `nprobe`, a fixed list of legal PQ code sizes, and no graph index at all. The packaging history is the part that catches people: Meta published no PyPI wheel between January 2022 and June 2026, shipping GPU builds through conda instead, so a loose requirement can resolve to a 2022 library on one machine and a 2026 one on another.
+
+Reach for it for batched work where the GPU is saturated — index building, deduplication, candidate generation, computing exact ground truth. Pin the version rather than avoiding the project: these are the official Meta-maintained wheels, not community rebuilds, and a GPU index must be converted back to CPU before it can be written to disk.
+
+### faiss-gpu-cuvs
+**Short:** FAISS's GPU distribution built on NVIDIA cuVS, which is where the CAGRA graph index becomes available.
+**Kind:** tech
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1, gpu/gpu-math-libraries @3
+
+It is the third and newest FAISS distribution, delegating GPU work to NVIDIA's cuVS rather than to the classic hand-written CUDA backend, which is what brings the `CAGRA` graph index within reach of a FAISS program — the graph index the CPU library has in HNSW and the classic GPU backend has never had. Wheel packaging landed alongside the 1.14 line, and the requirements are stricter than the other two distributions on both the Python and the CUDA side.
+
+Reach for it when you want graph-index recall on a GPU, or when you are already standing up a RAPIDS-flavoured stack. It is the least mature of the three packaging routes, with the shortest release history on PyPI, so treat a version bump as something to re-benchmark rather than to take on trust.
+
 ### FAISS HNSW
 **Short:** FAISS's graph-based approximate index: navigable small-world layers give log-ish search over millions of vectors.
 **Kind:** tech
@@ -283,6 +353,16 @@ It builds a layered proximity graph where each vector links to `M` neighbours, a
 
 Reach for it when the index fits in RAM and you want high recall without a training step. The costs are real: memory is well above the raw vectors, builds are slow at scale, and deletes are tombstones rather than true removals. For billion-scale or memory-bound work an IVF-PQ index or a dedicated vector database is the better shape.
 
+### FAISS index_factory
+**Short:** FAISS's string grammar for building a nested index in one call, ordering transform, coarse quantizer, encoding and refinement.
+**Kind:** api
+**Lang:** python, cpp
+**Roles:** search-retrieval/ann-index-library @1
+
+The string is read left to right as pipeline stages separated by commas: an optional id-map prefix, an optional learned transform such as `OPQ32_128` or `PCAR64`, an optional coarse level such as `IVF65536_HNSW32`, a mandatory encoding such as `Flat`, `SQ8`, `PQ32x4fs` or `RaBitQ`, and an optional refinement. Each token both selects a class and fixes a cost, so the string is simultaneously the design, the memory budget and the list of things that must be trained.
+
+Reach for it instead of constructing index objects by hand, because it keeps the nesting consistent and is the form every FAISS document and benchmark quotes. The trap is that it silently accepts combinations that will not build until `train` runs, notably the divisibility rule linking an `OPQ` transform's output dimension to the following quantizer's sub-vector count.
+
 ### FAISS IndexFlatIP
 **Short:** FAISS's exact inner-product index: brute-force scan of every vector, so recall is 100% by construction.
 **Kind:** tech
@@ -292,6 +372,16 @@ Reach for it when the index fits in RAM and you want high recall without a train
 It stores vectors uncompressed and compares the query against all of them, which makes it the only FAISS index with no accuracy/latency knob to tune and no training step before you can add vectors. On normalized vectors inner product is cosine similarity, so this is the usual choice when embeddings are already L2-normalized.
 
 Reach for it up to roughly a hundred thousand vectors, and always as the ground truth you measure an approximate index against - without an exact baseline a recall number means nothing. Beyond that the linear scan dominates latency and `IndexHNSWFlat` or `IndexIVFPQ` is the answer.
+
+### FAISS IndexIVFPQ
+**Short:** FAISS's workhorse at scale: k-means cells plus product-quantized residual codes, tuned by nprobe.
+**Kind:** tech
+**Lang:** python, cpp
+**Roles:** search-retrieval/ann-index-library @1
+
+It partitions the corpus into `nlist` k-means cells and stores each vector as a product-quantization code of the residual from its cell centroid, which is why the same code budget buys far more accuracy here than product quantization applied to the raw vector. A query scores only the `nprobe` nearest cells, using a per-query lookup table so each candidate costs table reads rather than distance arithmetic. Both stages must be trained on a representative sample before the first vector is added.
+
+Reach for it above roughly ten million vectors, or wherever memory rather than recall is the binding constraint: a few dozen bytes per vector puts a billion-vector index on one machine. Two properties decide designs around it — the inverted lists store explicit ids, so removal preserves them, and the centroids are frozen at training time, so a drifting corpus needs a scheduled rebuild.
 
 ### FlashRank
 **Short:** Tiny, fast cross-encoder reranking library for resource-constrained RAG deployments.
@@ -792,6 +882,16 @@ Reach for it for instant search over a catalogue or documentation site when you 
 **Roles:** search-retrieval/rag-and-document-processing @1
 
 It routes a file by type, using layout models and OCR for a scanned PDF and native parsers for `.docx`, HTML, email and slides, and returns a list of typed elements such as `Title`, `NarrativeText`, `Table` and `ListItem`, each carrying metadata like page number and source, instead of one undifferentiated blob of text. Those types are what make structure-aware chunking possible, so a section stays with its heading and a table survives as a unit rather than being sliced through the middle, which is one of the most common causes of nonsense context in RAG. Reach for it when the corpus is real-world documents in mixed formats. The high-resolution strategies are slow and model-backed, so partition once into a store rather than on every query.
+
+### Vespa
+**Short:** Yahoo's search and serving engine combining lexical retrieval, vector search and tensor ranking in one query plan.
+**Kind:** tech
+**Lang:** java, cpp
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, data-stores/vector-store @2, applied-ml/recommenders-and-graph-ml @3
+
+Its distinguishing idea is that ranking is a first-class computation rather than a score you post-process: a ranking expression evaluates tensors, model inferences and lexical features over the matched set inside the content node, so a learned ranker runs where the data is instead of on candidates shipped to a service. Matching combines a filterable document schema, a BM25-style lexical index and an approximate nearest-neighbour operator in a single query, with the phased ranking model deciding how much computation each surviving candidate earns.
+
+Reach for it when retrieval, filtering and a learned ranking function must be one system at large scale and low latency — recommendation, personalised search, ads. The cost is a genuinely steep learning curve: an application package, a schema language and a ranking expression language, all of which must be understood before the first useful query.
 
 ### Voyage AI
 **Short:** Managed embedding provider whose voyage-4 family includes domain models for code, finance and legal text.
