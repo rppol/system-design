@@ -878,57 +878,75 @@ That is what makes this pitfall so easy to hit: the input that kills you can be 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the comparison-sort lower bound and how is it proved?**
+**Short:** A decision tree needs n! leaves to distinguish all permutations, giving comparison sorts a worst-case Ω(n log n) bound that doesn't bind non-comparison sorts like counting or radix.
 Ω(n log n). Any comparison-based sort's execution can be modeled as a decision tree where each internal node is a comparison and each leaf is a permutation outcome. To distinguish all n! permutations, the tree needs n! leaves, so height ≥ log₂(n!) ≈ n log₂ n − 1.443n = Ω(n log n) (the 1.443 is log₂ e, from Stirling). This is a worst-case bound on *comparison* sorts — counting and radix sort are not bound by it, because they never compare two elements.
 
 **Q2: Why does quicksort perform better than merge sort in practice despite the same asymptotic complexity?**
+**Short:** Quicksort partitions in-place on contiguous memory for better cache locality, while merge sort's O(n) auxiliary buffer and cross-buffer copies cause more cache misses.
 Two reasons: cache behaviour and constant factors. Quicksort partitions in-place on contiguous memory — the inner loop accesses sequential addresses, which maximises L1/L2 cache hits. Merge sort allocates an O(n) auxiliary array and copies data across two buffers, causing more cache misses. Additionally, quicksort has no memory allocation overhead, and modern CPUs can pipeline its comparisons efficiently. Measured constant factor for quicksort is ~2–3× smaller than merge sort's.
 
 **Q3: What is a stable sort, which standard algorithms are stable, and why does it matter?**
+**Short:** A stable sort preserves the input order of equal elements, like merge sort, insertion sort, and TimSort, which matters when sorting by multiple keys in successive passes.
 A sort is stable if equal elements preserve their input order. Stable: merge sort, insertion sort, counting sort (with right-to-left scan), LSD radix sort, TimSort. Not stable: quicksort, heapsort. Stability is required for multi-key sort (e.g., sort records by name then by department — sort by department first with a stable sort, then sort by name; the department order is preserved within equal names).
 
 **Q4: When does counting sort beat merge sort and when does it not?**
+**Short:** Counting sort's O(n+k) beats merge sort's O(n log n) only while the key range k stays roughly within 10n-100n; a huge range like 64-bit integers makes it infeasible.
 Counting sort is O(n + k) where k is the key range. It beats merge sort's O(n log n) when k = O(n log n), i.e., roughly k ≤ 10n–100n. For sorting 1M integers in [0, 10M], counting sort uses 40 MB (10M × 4B) and completes in one pass — faster than O(n log n). For sorting 1K 64-bit integers, k = 2^64 — completely infeasible; use comparison sort.
 
 **Q5: What is the difference between lower_bound and upper_bound, and when do you need each?**
+**Short:** `lower_bound` finds the first index where `arr[i] >= target` and `upper_bound` finds the first where `arr[i] > target`, so their difference counts target's occurrences.
 `lower_bound(target)` returns the first index where `arr[i] >= target` — the leftmost position target could be inserted to keep order. `upper_bound(target)` returns the first index where `arr[i] > target` — one past the last occurrence. Number of occurrences = `upper_bound - lower_bound`. Use `lower_bound` to find the first occurrence or an insertion point; use `upper_bound` to find the end of a range or count duplicates.
 
 **Q6: How does randomised quicksort avoid the O(n²) worst case on sorted input?**
+**Short:** Randomizing the pivot choice makes the O(n^2) worst case depend on unlucky randomness rather than adversarial input, giving expected O(n log n) with about 1.39 n log2 n comparisons.
 By randomly shuffling the pivot choice. In each partition call, swap a random element into the pivot position before partitioning. The expected depth of the recursion tree becomes O(log n): hitting the fully degenerate case requires picking the minimum or maximum of every subarray, which has probability ∏(2/k) for k = n down to 2, i.e. 2^(n−1)/n! — astronomically small. The expected number of comparisons is 2n ln n ≈ 1.39 n log₂ n, matching the best-case performance of deterministic quicksort. Note this makes the bound independent of the *input*, not of luck: randomised quicksort still has an O(n²) worst case, it just cannot be triggered by an adversary choosing the data.
 
 **Q7: What is 3-way quicksort and when should you use it?**
+**Short:** 3-way (Dutch flag) partitioning splits into less-than, equal-to, and greater-than pivot sections and skips recursing into the equal section, becoming O(n) on arrays of identical values.
 3-way quicksort (Dutch National Flag partition) partitions the array into three sections: < pivot, == pivot, > pivot. Recursion only proceeds on the < and > sections, skipping all equal elements. If the input has many duplicates (e.g., sorting 10M integers where values are in [0, 1000]), standard 2-way quicksort still recurses into equal-element sub-arrays — O(n log n). 3-way quicksort improves to O(n) for fully identical arrays and to O(n log k) where k is the number of distinct values (Bentley-McIlroy; the sharper entropy bound is ~2 ln 2 · n·H comparisons, H being the Shannon entropy of the key distribution) — a significant practical win for low-cardinality data.
 
 **Q8: Explain the answer-space binary search pattern with a concrete example.**
+**Short:** Binary search over a monotone feasibility function, like minimum ship capacity to finish in D days, turns an O(sum) linear scan into an O(n log(sum)) search.
 Instead of searching for a value in an array, binary search over the space of possible answers. The condition: "is X a feasible answer?" must be monotone (if X works, X+1 works). Example: "Find the minimum ship capacity that gets all packages delivered within D days." Feasibility check: simulate loading packages day by day with capacity mid — if it finishes in ≤ D days, mid is feasible. Binary search over capacity [max(weight), sum(weights)] in O(log(sum) × n) = O(n log(sum)) — far faster than linear scan over O(sum) values.
 
 **Q9: What is TimSort and why is it the practical choice for general-purpose sorting?**
+**Short:** TimSort merges naturally occurring ascending or descending runs, running in O(n) on already-sorted input and O(n log n) on random data, fitting real-world partially ordered data well.
 TimSort is a hybrid merge + insertion sort. It scans the input for "natural runs" (ascending or descending sequences) and merges them with a strategy that is O(n) for already-sorted input and O(n log n) for random input. The galloping mode accelerates merges when one run dominates the other. Invented by Tim Peters for CPython in 2002. Also used in Java (for object arrays), V8 (JavaScript), and Swift. Rust's `slice::sort` is a different adaptive stable merge sort (driftsort), not TimSort. Its advantage is adaptive behaviour: real-world data is rarely random — logs, timestamps, and records often have significant existing order.
 
 **Q10: How does binary search apply to database index lookups?**
+**Short:** A B+Tree trades comparisons for I/O: its high branching factor keeps a 10-million-row index at height 4, so a lookup costs only 4 disk reads instead of 23 comparisons.
 A B+Tree index on 10 million rows with branching factor 100 has height ≤ 4. Each lookup is 4 node reads (4 disk I/Os or 4 cache lookups). Equivalent to binary search on a sorted 10M-element array (log₂(10M) ≈ 23 comparisons) — but B+Tree is better because each node is a full 4–8 KB disk page; the branching factor trades comparisons for I/O. The leaf page contains the sorted values, so range queries walk the leaf level sequentially rather than doing repeated binary searches.
 
 **Q11: Can you sort a linked list in O(n log n) with O(1) extra space?**
+**Short:** Yes — bottom-up merge sort with doubling run widths sorts it in O(n log n) time using only O(1) extra pointers, since relinking needs no auxiliary array.
 Yes — bottom-up merge sort. Instead of top-down recursive splitting (which requires O(log n) call stack), iterate with run widths 1, 2, 4, 8, ... Scan the list in pairs of runs of current width and merge in-place by pointer relinking. Each level takes O(n), log n levels → O(n log n) total, O(1) extra space (just a few pointers). Quicksort can be made to work on a linked list too, but it is the wrong tool: without random access you cannot sample a pivot (median-of-three costs a traversal), so the O(n²) worst case is much easier to hit, and the recursion is O(log n) stack at best.
 
 **Q12: What is the expected number of comparisons in quicksort and how is it derived?**
+**Short:** About 2n ln n, or roughly 1.39 n log2 n, because each pair of elements is compared only if one becomes the pivot before they're separated into different partitions.
 2n ln n ≈ 1.39 n log₂ n. Each pair (i, j) where i < j is compared at most once (when one of them is chosen as a pivot before the other). The probability that element i is compared with element j equals 2/(j − i + 1) (either i or j is the first pivot chosen among them). Summing over all pairs (substituting k = j−i+1, of which there are n−k+1 pairs for each k): Σ_{i<j} 2/(j−i+1) = 2 Σ_{k=2}^{n} (n−k+1)/k ≈ 2n Σ 1/k ≈ 2n ln n.
 
 **Q13: How do you handle integer overflow in the midpoint calculation for binary search?**
+**Short:** `mid = (lo + hi) / 2` can overflow 32-bit integers; the safe form is `mid = lo + (hi - lo) / 2`, a bug that sat in Java's `Arrays.binarySearch` for years.
 The naive `mid = (lo + hi) / 2` overflows when `lo + hi > INT_MAX` (2^31 − 1 in 32-bit integers). Fix: `mid = lo + (hi - lo) / 2`. In Python this is not a practical concern (arbitrary precision integers), but in Java/C/C++ it is critical. Overflow-safe alternative: `mid = (lo + hi) >>> 1` (unsigned right shift in Java). This is a famous bug that sat in Java's standard library `Arrays.binarySearch` from JDK 1.2 (1998) until Joshua Bloch reported it in 2006.
 
 **Q14: When should you use radix sort over counting sort?**
+**Short:** Radix sort applies counting sort digit by digit, making it the right choice when keys have a large range but few digits, such as 64-bit integers as 8 base-256 digits.
 Radix sort is counting sort applied digit-by-digit. Use radix sort when: keys have a large range but small number of digits (e.g., 64-bit integers have 8 bytes = 8 radix-256 digits); you need a stable sort of multi-field keys (LSD radix sort: sort by least significant field first, then more significant — stability propagates the order). Counting sort is simpler and sufficient when the range k is small enough directly (e.g., grades 0–100). Radix sort's complexity is O(d × (n + b)) where b is the base (256 is typical); for 32-bit integers with b=256, d=4 passes.
 
 **Q15: How do you find the k-th smallest element efficiently?**
+**Short:** Quickselect partitions around a random pivot and recurses into only the side containing rank k, giving expected O(n) time versus O(n log k) for a streaming max-heap of size k.
 Quickselect: partition around a random pivot; if pivot lands at position k, return it; otherwise recurse only on the side containing rank k. Expected O(n) time, O(n²) worst case. Median-of-medians pivot selection guarantees O(n) worst case but with large constants — rarely used in practice. For streaming k-th smallest, use a max-heap of size k: push each element; if size > k, pop the max. After the stream, the heap root is the k-th smallest. Cost: O(n log k).
 
 **Q16: What is the significance of the merge step in external sort?**
+**Short:** Merging sorted runs with a min-heap of size k costs O(N log k) while keeping disk access sequential, which is why merge sort rather than quicksort drives external sorting.
 In external sort, sorted runs are written to disk and then k-way merged using a min-heap of size k. Each heap operation is O(log k); the total number of elements is N, so merge cost is O(N log k). The I/O benefit: sequential reads from k files into a small buffer — the I/O pattern is sequential (fast), not random. This is why merge sort, not quicksort, is used for external sorting: merge can be driven by sequential I/O, while quicksort's partitioning requires random writes.
 
 **Q17: How does Python's `bisect` module work and what are its pitfalls?**
+**Short:** `bisect_left`/`bisect_right` implement lower_bound/upper_bound but silently assume the list is already sorted, returning a meaningless index with no error if it isn't.
 `bisect.bisect_left(arr, x)` returns the leftmost index where x could be inserted to keep arr sorted — equivalent to `lower_bound`. `bisect.bisect_right(arr, x)` (or `bisect.bisect(arr, x)`) returns one past the rightmost — equivalent to `upper_bound`. Pitfall: `bisect` assumes the list is already sorted; it does not check. Calling `bisect_left` on an unsorted list returns a meaningless result with no error. Second pitfall: `bisect` works on any comparable type, but the comparison must be consistent with the sort key used.
 
 **Q18: How does dual-pivot quicksort (Java's Arrays.sort for primitives) differ from single-pivot?**
+**Short:** Dual-pivot quicksort splits into three sections with two pivots, cutting average comparisons to about 1.9n ln n, though it makes more swaps and isn't stable, so Objects still use TimSort.
 Dual-pivot quicksort uses two pivots (p1 ≤ p2) to partition into three sections: < p1, between p1 and p2, > p2. This reduces the average number of comparisons from 2n ln n to ~1.9n ln n and produces more balanced partitions. Java's implementation (by Vladimir Yaroslavskiy) is empirically 10–20% faster than single-pivot quicksort for primitive arrays. The win is fewer comparisons plus better memory/cache behaviour from the three-way scan — not fewer swaps: the standard analysis (Wild and Nebel) shows dual-pivot performs *more* swaps than single-pivot, roughly 0.6n ln n against 0.33n ln n. It is not stable and cannot be used for Object[] (where stability is required by Java spec — hence Objects use TimSort).
 
 ---

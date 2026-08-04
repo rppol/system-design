@@ -359,37 +359,49 @@ def two_sum_sorted_fixed(nums: list[int], target: int) -> list[int]:
 ## 11. Interview Q&A
 
 **Q: Why does two pointers require the array to be sorted (or sortable)?**
+**Short:** Correctness depends on monotonicity — moving `left` right can only raise the sum and moving `right` left can only lower it, which needs sorted order.
 Because the algorithm's correctness depends on monotonicity: moving `left` right can only increase the candidate sum, and moving `right` left can only decrease it (never strictly, since duplicates leave it unchanged — which is exactly why the 3Sum dedup checks compare against the *adjacent* element). Without sorted order, you cannot conclude that "the current pair sum is too small, so the *only* way to increase it is to move `left`" — there could be a larger value anywhere in the array. Sorting establishes the monotonic structure that lets you discard half the remaining search space at each step, which is what gives O(n) instead of O(n^2).
 
 **Q: If sorting costs O(n log n), how is two pointers ever better than a hashmap approach which is O(n)?**
+**Short:** A hashmap wins for a single pair query, but two pointers wins when data is already sorted, needs O(1) space, or requires easy triplet dedup.
 For a single pair-sum query, a hashmap *is* asymptotically better (O(n) vs O(n log n)). Two pointers wins when (a) the input is already sorted, (b) you need O(1) extra space (hashmap is O(n)), or (c) you need to find *all* pairs/triplets without duplicates — the sorted order makes deduplication trivial (skip adjacent equal elements), whereas deduplicating hashmap-based results requires extra set bookkeeping.
 
 **Q: In 3Sum, why do we break early when `nums[i] > 0`?**
+**Short:** In an ascending sorted array, once the smallest candidate is positive, every remaining triplet sum can only be positive and can never reach zero.
 Because the array is sorted ascending. If the smallest "first" element under consideration is already positive, then `nums[i] + nums[left] + nums[right]` (where `left > i` and `right > left`, both also positive or larger) can only be positive — it can never sum to zero. This is a monotonicity-based pruning step that avoids wasted iterations.
 
 **Q: How do you handle duplicates in 3Sum so the output has no duplicate triplets?**
+**Short:** Skip repeated `i` values, then advance `left` and retreat `right` past duplicates after each match, since sorted order keeps equal values adjacent.
 Three separate dedup checks: (1) skip `i` if `nums[i] == nums[i-1]` (don't reuse the same "first" value), (2) after finding a match, advance `left` past all values equal to the one just used, and (3) similarly retreat `right` past all equal values. All three checks compare to the *adjacent* element because the array is sorted — equal values are guaranteed to be contiguous.
 
 **Q: What's the difference between the "opposite ends" and "same direction" two-pointer shapes?**
+**Short:** Opposite-ends pointers converge to compare two elements, while same-direction pointers use a slow marker and fast explorer to compact in place.
 Opposite ends (`left=0, right=n-1`, converging) is for finding a *relationship between two elements* (pair sum, palindrome check, container area) — the search space shrinks from both sides. Same direction (`slow` and `fast`, both starting near 0) is for *in-place filtering/compaction* — `fast` explores, `slow` marks the boundary of the "good" region built so far. They solve different problem shapes and should not be confused.
 
 **Q: For Container With Most Water, why do you always move the pointer at the *shorter* line, not the taller one?**
+**Short:** Moving the taller pointer can only shrink width with no chance of a taller bound, while moving the shorter pointer has a chance to increase the area.
 The area is `min(height[left], height[right]) * (right - left)`. If you move the pointer at the *taller* line inward, the width decreases and the height is still bounded by the shorter line (or worse) — the area cannot increase. If you move the pointer at the *shorter* line, the width decreases but there's a *chance* the new height is taller, potentially increasing the area. Moving the shorter pointer is the only choice that doesn't provably make things worse, so it's the only direction that needs to be explored — this is itself a small greedy/exchange argument.
 
 **Q: Can two pointers be used on two different arrays/strings?**
+**Short:** Yes — the two-sequence shape advances each pointer independently based on comparing `seq1[i]` and `seq2[j]`.
 Yes — this is the "two-sequence" shape. Examples: merging two sorted arrays (LC 88), checking if one string is a subsequence of another (LC 392), or comparing two strings with backspace characters from the end (LC 844). Each pointer advances independently based on a comparison between `seq1[i]` and `seq2[j]`.
 
 **Q: Is two pointers always O(n)? What if there's a sort first?**
+**Short:** The scan itself is O(n) since each pointer moves at most n times, but the overall cost becomes O(n log n) once a sort is required first.
 The two-pointer scan itself is O(n) (each pointer moves at most n times total, so the loop body runs at most O(n) times even though there are two indices). If a sort is required first, the *overall* complexity is dominated by the sort: O(n log n). If the input is already guaranteed sorted (a common interview constraint), the overall complexity is O(n).
 
 **Q: How would you find the pair with the sum closest to a target (not exact)?**
+**Short:** Run the same opposite-ends scan, tracking the smallest absolute difference seen so far instead of returning immediately on an exact match.
 Same opposite-ends scan, but instead of returning immediately on `current == target`, track `best = min(best, abs(current - target))` on every iteration, and still move `left`/`right` based on whether `current < target` or `current > target` (this monotonicity still holds for "closest" — moving toward the target direction is still correct).
 
 **Q: What's the time/space complexity of 4Sum, and how does it generalize to kSum?**
+**Short:** 4Sum is O(n^3) from two fixed loops plus a two-pointer scan; kSum generalizes to O(n^(k-1)) with (k-2) nested loops bottoming out at twoSum.
 4Sum is O(n^3): two nested loops to fix the first two elements (O(n^2)), then O(n) two-pointer scan for the last pair. In general, kSum is O(n^(k-1)): (k-2) nested loops plus one O(n) two-pointer pass. Space is O(1) extra (excluding the sort and the output list). Many implementations write a recursive `kSum` that bottoms out at `twoSum` for k=2.
 
 **Q: When would "remove duplicates from sorted array" two-pointer solution fail if the array were NOT sorted?**
+**Short:** The slow/fast compaction assumes duplicates are adjacent, so an unsorted array with scattered duplicates would let repeats slip through undetected.
 The `slow`/`fast` compaction relies on duplicates being *adjacent* — `nums[fast] != nums[slow]` only correctly identifies "new" values if all instances of a value are grouped together. On an unsorted array, duplicates could be scattered (e.g., `[1, 2, 1]`), and the same in-place scan would fail to remove the second `1`. You'd need a hash set instead, which costs O(n) space.
 
 **Q: How do you adapt the pair-sum template if the array can contain negative numbers?**
+**Short:** No adaptation is needed — the template only relies on sorted order, which preserves the same monotonic increase and decrease regardless of sign.
 No adaptation needed — the two-pointer pair-sum template relies only on the array being *sorted*, not on values being non-negative. Negative numbers are handled naturally because sorted order still gives you the monotonicity guarantee (`nums[left] + nums[right]` still increases as `left` increases, decreases as `right` decreases). Where non-negativity *does* matter is in **sliding window** problems (e.g., subarray sum < k), where a negative value would break the "shrink when too big" invariant.

@@ -665,6 +665,7 @@ tentative distance, and **happily overwrote it** — there's no notion of
 
 **Q: Why doesn't Dijkstra work with negative edge weights — what specifically
 breaks?**
+**Short:** The "popped node is final" invariant needs non-negative weights; the visited-set Dijkstra variant can finalize a node before a cheaper negative-weight route appears.
 Dijkstra's correctness relies on the invariant "when a node is popped, its
 distance is final," which is proven using the fact that all *unpopped* nodes
 have `dist >= ` the popped node's distance, and edges are non-negative — so no
@@ -676,6 +677,7 @@ already-finalized distance — exactly the scenario traced in §8, where
 
 **Q: Dijkstra vs. Bellman-Ford — beyond "negative weights," what's the practical
 tradeoff?**
+**Short:** Dijkstra's O((V+E) log V) beats Bellman-Ford's O(V*E) but needs non-negative weights; Bellman-Ford tolerates negatives and detects negative cycles.
 Dijkstra is `O((V+E) log V)` — much faster for large graphs, but requires
 non-negative weights. Bellman-Ford is `O(V*E)` — works with negative weights
 and can *detect* negative cycles (a cycle whose total weight is negative,
@@ -684,6 +686,7 @@ cost). If you know weights are non-negative (the overwhelming majority of
 real-world "distance"/"time"/"cost" problems), always prefer Dijkstra.
 
 **Q: Why is 0-1 BFS O(V+E) instead of O((V+E) log V) like Dijkstra?**
+**Short:** A deque gives O(1) push/pop from both ends, replacing the heap's O(log V) while keeping the same non-decreasing distance-order invariant.
 A `deque` supports O(1) push/pop from both ends, vs. O(log V) for a heap.
 0-1 BFS maintains the same "process nodes in non-decreasing distance order"
 invariant as Dijkstra, but because weights are only 0 or 1, a 0-weight edge
@@ -694,6 +697,7 @@ full ordering capability.
 
 **Q: When is Floyd-Warshall's O(V^3) actually acceptable, and what extra
 information does it give you that running Dijkstra V times doesn't?**
+**Short:** O(V^3) suits V up to a few hundred and beats running Dijkstra from every node on dense graphs, where that approach costs O(V^3 log V).
 O(V^3) is fine for `V` up to a few hundred (10^6-10^8 operations). Running
 Dijkstra from every node is `O(V * (E log V))` — for dense graphs
 (`E ~ V^2`), that's `O(V^3 log V)`, actually *worse* than Floyd-Warshall's
@@ -703,6 +707,7 @@ cycles) more simply than running Bellman-Ford from every node
 
 **Q: Why doesn't plain Dijkstra directly solve "Cheapest Flights Within K
 Stops"?**
+**Short:** Dijkstra's "first pop is final" invariant ignores stop count, so a cheaper more-hops path can wrongly block a valid, pricier fewer-hops one.
 Dijkstra's greedy invariant assumes that once the cheapest path to a node is
 found, it's final — but here, the cheapest *overall* path to a node might use
 *more* stops than allowed, while a *more expensive* path uses fewer stops and
@@ -714,6 +719,7 @@ represents "best cost using at most `i` edges."
 
 **Q: Why use a min-heap in Dijkstra instead of just scanning all unvisited nodes
 for the minimum each iteration (the textbook O(V^2) version)?**
+**Short:** The O(V^2) scan wins on dense graphs (E~V^2), while the heap-based O((V+E) log V) wins on sparse graphs (E~V), which is why LeetCode defaults to the heap.
 Both are correct. The O(V^2) scan is actually *better* for **dense** graphs
 (`E ~ V^2`) because `O(V^2)` beats `O((V+E) log V) = O(V^2 log V)`. The
 heap-based version wins for **sparse** graphs (`E ~ V`), where
@@ -723,6 +729,7 @@ is a strong signal of depth in an interview.
 
 **Q: How does Bellman-Ford detect a negative cycle, and why does it take exactly
 `V-1 + 1` rounds?**
+**Short:** After `V-1` rounds every shortest simple path is settled, so any improvement found on the extra round can only come from a negative cycle.
 Any shortest *simple* path (no repeated nodes) in a graph with `V` nodes has
 at most `V-1` edges. So after `V-1` rounds of relaxing all edges, every
 shortest simple path's distance must be final — **unless** a negative cycle
@@ -733,6 +740,7 @@ improvement can only come from a negative cycle.
 
 **Q: Path with Maximum Probability uses a max-heap and multiplies probabilities
 — why does the greedy "pop is final" invariant still hold here?**
+**Short:** The invariant only needs "extending can't look better than stopping early," which holds for non-negative sums and for products of probabilities in [0,1].
 The invariant requires that extending a path can never *help* relative to
 stopping early — i.e., the "combine" operation must be monotonically
 non-improving. For sums with non-negative weights, `dist[u] + w >= dist[u]`.
@@ -741,6 +749,7 @@ For products of probabilities in `[0,1]`, `prob[u] * w <= prob[u]` (since
 already was" — which is the real requirement, not "addition" specifically.
 
 **Q: Is BFS a "special case" of Dijkstra? In what sense?**
+**Short:** Yes — BFS is Dijkstra with every edge weight equal to 1 (or 0/1), since each BFS layer already represents one unit of non-decreasing distance.
 Yes — BFS is Dijkstra where all edge weights equal 1 (or 0, for 0-1 BFS). A
 plain `deque`-based queue, where every node is appended to one end, IS
 implicitly maintaining "process in non-decreasing distance order" — because
@@ -750,6 +759,7 @@ implicit ordering with an explicit min-heap.
 
 **Q: The `if d > dist[u]: continue` line in Template 1 — what does it do, and
 does omitting it cause wrong answers or just inefficiency?**
+**Short:** It only discards stale heap entries for efficiency — omitting it never causes wrong answers, since the relaxation check already blocks stale updates.
 It skips "stale" heap entries — a node can be pushed onto the heap multiple
 times (once per relaxation that improved its distance), but only the
 *smallest* pushed distance for each node is still relevant once a smaller one
@@ -761,6 +771,7 @@ performance optimization, not a correctness requirement.
 
 **Q: For DAG shortest path via topological sort, why is it both faster AND more
 general (handles negative weights) than Dijkstra?**
+**Short:** A DAG can't have a negative cycle, so processing in topological order gives Dijkstra's "pop is final" guarantee in O(V+E) with no heap needed.
 A DAG has no cycles, so "negative cycle" is impossible by definition —
 Bellman-Ford's only advantage over Dijkstra (negative-weight tolerance) comes
 "for free" with no extra cost. Processing nodes in topological order

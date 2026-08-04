@@ -598,6 +598,7 @@ sort underneath.*
 ## 11. Interview Q&A
 
 **Q: Why does topological sort only make sense for DAGs?**
+**Short:** A cycle forces a contradictory ordering (u before v before ... before u), so no linear order can satisfy every edge in a cyclic graph.
 A topological order requires that for every edge `u -> v`, `u` comes before
 `v`. If the graph has a cycle `a -> b -> c -> a`, then `a` must come before
 `b`, `b` before `c`, and `c` before `a` — a contradiction. No linear ordering
@@ -607,6 +608,7 @@ can satisfy all three simultaneously, so a cycle makes topological order
 
 **Q: Kahn's (BFS) vs. DFS post-order — when would you prefer one over the
 other?**
+**Short:** Kahn's in-degree queue mirrors "what can I do now" and detects cycles with a single length check; DFS post-order fits an existing DFS pass.
 Kahn's algorithm is usually more intuitive to implement and explain in an
 interview because the in-degree-zero queue directly mirrors "what can I do
 right now" — and cycle detection is a single length check at the end. DFS
@@ -616,6 +618,7 @@ without a separate pass. Both are O(V+E); pick whichever maps more naturally
 to how you're already modeling the problem.
 
 **Q: How exactly does Kahn's algorithm detect a cycle?**
+**Short:** Nodes inside a cycle never reach in-degree zero, so they're never enqueued — a final order shorter than the node count reveals the cycle.
 Every node in a cycle has at least one incoming edge *from within the cycle*
 that can never be "removed" (because the node providing that edge can never
 reach in-degree 0 either — it's circular). So nodes inside a cycle (and
@@ -625,6 +628,7 @@ nodes are exactly those involved in or downstream of a cycle.
 
 **Q: What do the three colors (white/gray/black) mean in DFS-based cycle
 detection, and why isn't a simple boolean `visited` enough?**
+**Short:** GRAY marks a node still on the DFS stack, so an edge into a GRAY node is a back edge to an ancestor — exactly the signal a boolean visited can't give.
 WHITE = never visited; GRAY = currently on the DFS call stack (an ancestor of
 the current node in the DFS tree); BLACK = fully processed (this node and all
 its descendants are done). A boolean `visited` can't distinguish "currently
@@ -635,6 +639,7 @@ edge** — perfectly fine, just means you reached an already-finished subtree
 via a different path (not a cycle).
 
 **Q: Why must the DFS-based approach reverse the post-order list?**
+**Short:** A node finishes last in post-order exactly when everything depends on it, so reversing the list moves it to the front where it belongs.
 A node is appended to the post-order list only after *all* nodes reachable
 from it have been appended. So the node that "unlocks" the most other nodes
 (i.e., has the most things depending on it, transitively) finishes last and
@@ -645,6 +650,7 @@ for a concrete trace.
 
 **Q: If multiple valid topological orderings exist, how do you produce a
 specific one (e.g., the lexicographically smallest)?**
+**Short:** Replacing Kahn's FIFO queue with a min-heap greedily pops the smallest in-degree-zero node each step, giving the lexicographically smallest order.
 Replace the FIFO `deque` in Kahn's algorithm with a **min-heap** (`heapq`).
 At each step, instead of popping arbitrary order, pop the smallest-valued node
 currently at in-degree 0. This greedily picks the smallest available choice at
@@ -653,6 +659,7 @@ overall — a classic greedy-with-topo-sort combination.
 
 **Q: How do you build the graph for Alien Dictionary when you're not given edges
 directly?**
+**Short:** Compare adjacent sorted words and take only their first differing character pair as a directed edge; a word before its own longer prefix means no valid ordering exists.
 Compare each pair of *adjacent* words in the given (sorted) word list. Find
 the first index where the two words differ — that pair of characters gives
 you one directed edge (earlier-word's character -> later-word's character).
@@ -663,6 +670,7 @@ Special case: if word A is a prefix of word B but A is *longer* than B (e.g.,
 
 **Q: How does topological sort enable "longest path in a DAG" (Parallel
 Courses)?**
+**Short:** Because topo order guarantees u precedes v, `dist[v] = max(dist[v], dist[u]+1)` is correct in one pass since `dist[u]` is already final.
 Process nodes in topological order, maintaining `dist[node]` = the longest
 path ending at `node`. For each edge `u -> v` processed when you pop `u`,
 update `dist[v] = max(dist[v], dist[u] + 1)`. Because `u` is processed
@@ -672,6 +680,7 @@ order), `dist[u]` is already final by the time it's used to update `dist[v]`
 
 **Q: What's the time/space complexity, and why is it linear despite the nested
 loop structure (for each node, for each neighbor)?**
+**Short:** Each edge is examined only once, when processing its source node, so summing the inner loop across all nodes gives O(E), not O(V*E).
 O(V + E): the outer loop runs once per node (O(V)), and across *all*
 iterations of the outer loop, the inner loop examines each edge exactly once
 in total (not once per node) — because each edge `(u, v)` is only iterated
@@ -679,6 +688,7 @@ when processing `u`. Summing the inner-loop work across all nodes gives
 `sum(out_degree(u) for u in nodes) == E`, not `V * E`.
 
 **Q: A common bug: initializing `in_degree` incorrectly. What's the right way?**
+**Short:** Initialize `in_degree` to zero for every node and increment it once per edge, including duplicates, or the queue releases nodes too early.
 `in_degree[v]` must count *every* edge `(u, v)` in the input — initialize it
 to all zeros, then for each edge `(u, v)`, do `in_degree[v] += 1`. A common
 mistake is initializing `in_degree` to `1` for all nodes (confusing it with
@@ -689,6 +699,7 @@ duplicate must still increment in-degree, or the queue will release a node
 
 **Q: How would Sequence Reconstruction (LC 444) differ from Course Schedule II —
 both build a graph from pairwise orderings?**
+**Short:** Sequence Reconstruction must additionally check that exactly one node has in-degree zero at every step, proving the ordering is unique.
 Course Schedule II just needs *a* valid ordering. Sequence Reconstruction
 needs to verify the *unique* valid ordering equals a specific target sequence.
 This requires checking, at every step of Kahn's algorithm, that the queue
@@ -698,6 +709,7 @@ resulting order matches the target exactly.
 
 **Q: Why doesn't Union-Find work for detecting cycles in directed graphs the way
 it does for undirected graphs?**
+**Short:** Union-Find treats edges as bidirectional, so it can falsely flag a cycle when acyclic paths reconverge — directed cycles need the DFS GRAY state instead.
 Union-Find merges two nodes into the same set when an edge connects them,
 treating the edge as bidirectional for connectivity purposes. Because it can't
 distinguish edge *direction*, it reports a cycle on any DAG whose paths

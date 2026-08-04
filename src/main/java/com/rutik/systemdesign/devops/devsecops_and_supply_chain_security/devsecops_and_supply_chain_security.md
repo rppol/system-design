@@ -332,51 +332,67 @@ The fix pins the signer to one workflow on one branch, requires Rekor inclusion,
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between SAST, DAST, and SCA?**
+**Short:** SAST statically analyzes your own source code, DAST probes a running app with crafted requests, and SCA checks dependencies against a CVE database, catching the most real-world risk.
 SAST analyzes source code statically for vulnerable patterns; DAST probes a running application with crafted requests; SCA inspects your dependency manifests against a CVE database. SAST catches injection-style bugs in your own code early but produces false positives, DAST catches runtime-only issues like misconfigured auth but needs a deployed environment, and SCA catches the vast majority of real-world risk because most code is third-party. Run all three but gate hardest on SCA since vulnerable dependencies are the most common attack vector.
 
 **Q: Why is keyless signing considered more secure than key-based signing?**
+**Short:** Keyless signing eliminates the long-lived private key by using a short-lived Fulcio certificate bound to an OIDC identity, removing the most commonly stolen secret in signing systems.
 Keyless signing eliminates the long-lived private key, which is the single most stolen secret in signing systems. cosign requests a 10-minute certificate from Fulcio bound to an OIDC identity, signs with an ephemeral key, and records the event in Rekor; there is no key sitting in a vault to exfiltrate. The tradeoff is a runtime dependency on Sigstore infrastructure, so for critical paths you mirror Rekor or run a private Sigstore deployment.
 
 **Q: What is an SBOM and why does it matter operationally?**
+**Short:** An SBOM is a machine-readable component inventory that lets you query exactly which artifacts contain a vulnerable package in seconds instead of guessing during an incident.
 An SBOM is a machine-readable inventory of every component in an artifact, typically in CycloneDX or SPDX format. Its operational value appears during an incident like Log4Shell: instead of guessing which of 400 services are affected, you query your SBOM store for `log4j-core < 2.17` and get an exact list in seconds. Generate SBOMs with syft at build time and store them queryably; an SBOM you cannot search is compliance theater.
 
 **Q: Walk through the SLSA levels.**
+**Short:** SLSA's Build track runs L0 through L3, where L2 adds a hosted platform that signs provenance and L3 requires an isolated builder whose signing material user-controlled steps cannot reach.
 SLSA organizes requirements into tracks, and the Build track runs L0 to L3: L0 is the absence of SLSA, L1 requires a consistent build process that produces provenance, L2 adds a hosted build platform that generates and signs that provenance (resisting tampering after the build), and L3 requires a hardened builder whose runs are isolated from one another and whose signing material is unreachable from user-defined build steps (resisting tampering during the build). The jump from L2 to L3 is the most important because L3 means even a malicious build step cannot forge the provenance, and L3 is the top of the Build track. Source-side guarantees live in a separate Source track (L1 version-controlled through L4 two-party review), so quoting a build level says nothing about how the code got reviewed.
 
 **Q: What does Rekor provide that a signature alone does not?**
+**Short:** Rekor is an append-only transparency log giving tamper-evident, publicly auditable proof a signature existed at a point in time, so a signing event can't be forged retroactively.
 Rekor is an append-only transparency log that provides tamper-evident, publicly auditable proof that a signature existed at a point in time. A bare signature can be created and discarded silently; a Rekor entry (with its UUID and inclusion proof) means an attacker cannot retroactively sign a malicious artifact without leaving a permanent public record. Verifiers should require Rekor inclusion so that signing events are auditable and non-repudiable.
 
 **Q: How does GitHub Actions OIDC remove the need for stored cloud credentials?**
+**Short:** GitHub Actions requests an OIDC token that the cloud exchanges for short-lived, role-scoped credentials, eliminating long-lived stored secrets and binding trust to a specific repo or branch.
 The workflow requests an OIDC token from GitHub's identity provider, and the cloud (e.g., AWS via an IAM OIDC trust) exchanges it for temporary credentials scoped to a specific role, typically valid ~1 hour. There is no long-lived `AWS_SECRET_ACCESS_KEY` in repo secrets to leak, and the trust policy can restrict which repo, branch, or environment may assume the role. This same OIDC identity also feeds Fulcio, binding signatures to the exact workflow that produced them.
 
 **Q: Why must admission verification fail closed?**
+**Short:** Failing closed denies a pod when verification cannot confirm a signature, since failing open would let compromised images through silently during exactly the outage an attacker would exploit.
 Failing closed means that when the verifier cannot confirm a signature — Rekor is down, the cert is invalid, no signature exists — the pod is denied rather than admitted. Failing open creates false confidence: operators believe verification is protecting them while compromised images sail through during any outage, which is exactly when an attacker would strike. Pair fail-closed with a tested break-glass annotation and monitoring on Sigstore availability so you are not frozen during a legitimate outage.
 
 **Q: A dependency has a CRITICAL CVE but no fix is available. How do you handle the gate?**
+**Short:** Assess whether the vulnerable code path is reachable, and if not, suppress it with a documented, time-boxed VEX justification rather than blanket-ignoring every CRITICAL.
 First assess exploitability in your context — is the vulnerable code path reachable? If unreachable, use `--ignore-unfixed` or a documented VEX (Vulnerability Exploitability eXchange) statement to suppress it with a recorded justification, rather than blanket-ignoring all CRITICALs. The goal is to keep the gate meaningful: unconditional suppression trains developers to ignore the scanner, so every waiver must be time-boxed and reviewed.
 
 **Q: What is provenance and why is it stronger than scanning?**
+**Short:** Provenance is signed metadata proving how an artifact was built, letting you reject anything that didn't come from your trusted builder, defending against threats scanning can't catch.
 Provenance is signed metadata describing how an artifact was built — the source commit, builder identity, and inputs — bound to the artifact's digest. It is stronger than scanning because scanning only finds known-bad things present today, while provenance lets you reject any artifact that did not come from your trusted builder, defending against unknown and future threats. Scanning answers "is this dirty?"; provenance answers "is this even mine?".
 
 **Q: How do you prevent a single compromised CI step from poisoning all artifacts?**
+**Short:** Scope every CI token to least privilege with OIDC federation, and isolate the signing step in its own job under SLSA L3 so a compromised build step can't forge provenance or reach other repos.
 Scope every token to least privilege: a job that builds repo A should hold a token that can push only to repo A's registry path with a short TTL, not org-wide write. Use OIDC federation instead of static secrets, separate the signing step into an isolated job with its own narrow identity, and require SLSA L3 so the provenance itself is generated outside the user-controlled job. This way a compromised build step cannot forge provenance or reach other repositories.
 
 **Q: What is the practical difference between CycloneDX and SPDX?**
+**Short:** CycloneDX is security-focused with first-class vulnerability and VEX support, while SPDX is license-and-compliance-focused and broader in scope.
 Both are standard SBOM formats; CycloneDX (OWASP, standardized as ECMA-424) is security-focused with first-class vulnerability and VEX support, while SPDX (Linux Foundation, ISO/IEC 5962) is license-and-compliance-focused and broader in scope. In practice CycloneDX is more common in security tooling pipelines and SPDX in legal/compliance contexts. syft emits both, so generate the format your downstream consumers expect rather than betting on one.
 
 **Q: How would you roll out signature enforcement without breaking existing deploys?**
+**Short:** Start policy in `warn` mode to log violations without denying, sign everything in CI, then flip to `enforce` per namespace once warnings near zero and break-glass is tested.
 Start the policy in `warn` mode so it logs violations without denying, sign all artifacts in CI, then watch the warning rate drop toward zero as old unsigned images age out. Once warnings are near zero and a break-glass path is tested, flip the policy to `enforce` per-namespace, starting with low-risk namespaces. This staged rollout surfaces unsigned legacy workloads before they cause an outage and gives teams time to onboard their signing pipelines.
 
 **Q: What does IaC scanning catch that SAST and SCA don't?**
+**Short:** IaC scanning analyzes Terraform and Kubernetes manifests for misconfigurations like a public S3 bucket, catching infrastructure-level risk that neither SAST nor SCA inspects.
 IaC scanning (Checkov, Trivy's config/misconfiguration mode, Conftest) analyzes Terraform and Kubernetes manifests for misconfiguration, catching things like a public S3 bucket or an overly permissive security group. SAST looks at application source and SCA looks at dependency manifests, so neither would catch an `aws_s3_bucket_acl` resource set to `public-read`; IaC scanning is the category that treats infrastructure definitions as the attack surface they actually are. Run it as its own PR gate alongside SAST and SCA, not as a substitute for either.
 
 **Q: Why is pre-commit secret scanning not sufficient by itself?**
+**Short:** A pre-commit hook runs only on the developer's machine and can always be bypassed with `--no-verify`, so it must be paired with a server-side or CI re-scan as the real security boundary.
 A pre-commit hook runs entirely on the developer's machine, so it can always be bypassed with `git commit --no-verify` or by simply not installing it, meaning a leaked credential can still reach the remote repository. The fix is defense in depth: pre-commit for fast local feedback plus a server-side push-time check (or a CI job) that re-scans every commit regardless of what ran locally, so the control cannot be silently skipped. Treat pre-commit as a courtesy to developers, not the actual security boundary.
 
 **Q: What is a dependency-confusion attack, and how do you stop it from beating your internal package registry?**
+**Short:** A dependency-confusion attack publishes a public package under an internal package's exact name, betting the resolver picks the highest version, stopped by pinning an explicit registry scope.
 A dependency-confusion attack publishes a public package under the exact name of an internal, privately-hosted one, betting the resolver picks the highest version number across registries regardless of source. Security researcher Alex Birsan proved this in 2021 by uploading public counterfeits of internal package names from over 35 companies — including PayPal, Apple, and Microsoft — and collected more than $130,000 in bug bounties because build systems silently pulled his higher-versioned public package instead of the real internal one. Pin an explicit registry scope per package manager (npm's `.npmrc` scope mapping, pip's `--index-url` without a fallback `--extra-index-url`) so internal names can never resolve to the public registry, and reserve those exact names as empty placeholder packages on the public registry as a second line of defense.
 
 **Q: Why did Log4Shell become a board-level incident rather than just another CVE?**
+**Short:** Log4Shell scored a maximum CVSS 10.0 and sat transitively inside roughly 35,000 Java packages, making scanning your own code useless and only an SBOM query fast enough to find exposed services.
 Log4Shell (CVE-2021-44228) scored a maximum CVSS 10.0 and sat inside an estimated 35,000 Java packages, so it was transitively present across most of the Java ecosystem rather than confined to one application. Exploitation required only a single crafted string reaching a log statement, making it trivially remote-executable with no authentication, and it was often buried several dependency layers deep where teams didn't know it existed. It became the canonical case for supply chain tooling because scanning your own code was useless; only an SBOM or dependency-tree query could answer "which of our 400 services are exposed" fast enough to matter.
 
 ---

@@ -727,48 +727,63 @@ if math.isclose(x, 0.3, rel_tol=1e-9):
 ## 12. Interview Questions with Answers
 
 **Q1: What is two's complement, and why do modern CPUs use it?**
+**Short:** Two's complement lets the same adder circuit handle signed and unsigned addition, avoiding sign-magnitude's separate logic and its confusing negative-zero.
 Two's complement represents -k as 2ⁿ - k (equivalently: flip all bits of |k| and add 1). It is used because the same adder circuit works for both signed and unsigned addition — no special-casing. One's complement and sign-magnitude representations require different adder logic for positive and negative operands and have a confusing "-0" representation.
 
 **Q2: How do you check if a number is a power of 2 in O(1)?**
+**Short:** `n > 0 and (n & (n-1)) == 0` works because a power of 2 has exactly one set bit, which `n-1` clears, making the AND zero.
 `n > 0 and (n & (n-1)) == 0`. Powers of 2 have exactly one set bit (e.g., 8 = 0b1000). `n-1` clears that bit and sets all lower bits (7 = 0b0111). ANDing gives 0 if and only if n is a power of 2. The `n > 0` guard handles the n = 0 edge case (0 & -1 = 0 would be a false positive).
 
 **Q3: Given an array where every element appears exactly twice except one, find the unique element in O(n) time and O(1) space.**
+**Short:** XOR every element together; each duplicate pair cancels via `a^a=0`, leaving only the unique element, in O(n) time and O(1) space.
 XOR all elements. Each pair cancels (`a ^ a = 0`), leaving only the unique element. XOR is commutative and associative so order doesn't matter. Code: `result = 0; for x in arr: result ^= x; return result`.
 
 **Q4: How would you count the number of set bits in an integer?**
+**Short:** Loop-and-shift is O(log n), Kernighan's `n &= n-1` trick is O(k) for k set bits, and `bit_count()`/`Integer.bitCount` map to a single hardware POPCNT instruction.
 Three approaches: (a) loop and check last bit (`n & 1`), shift right — O(log n); (b) Kernighan's: `while n: n &= n-1; count += 1` — O(k) where k is the number of set bits; (c) built-in `n.bit_count()` in Python (3.10+) or `Integer.bitCount(n)` in Java — a single POPCNT CPU instruction per machine word. Note that the older Python idiom `bin(n).count('1')` returns the right answer but builds a string, so it is not the hardware popcount. Kernighan's is faster than (a) when set bits are sparse.
 
 **Q5: Explain endianness and when it matters.**
+**Short:** Endianness is the memory byte order for multi-byte values; little-endian stores the least-significant byte first, and it matters at serialization and binary-parsing boundaries.
 Endianness is the byte order for multi-byte values in memory. Little-endian (x86/x86-64) stores the least-significant byte at the lowest address. Big-endian stores the most-significant byte first. It matters when: serialising data to disk or network (use explicit byte-order convention, e.g., network byte order = big-endian, `htonl`/`ntohl`), writing binary file parsers (JPEG/PNG/WAV headers have specific endianness), or casting an integer pointer to a byte pointer.
 
 **Q6: What is `x & (x-1)`? What is `x & (-x)`?**
+**Short:** `x & (x-1)` clears the lowest set bit while `x & (-x)` isolates it — the first drives Kernighan's bit-count, the second drives Fenwick-tree index updates.
 `x & (x-1)` clears the lowest set bit of x. Used in Kernighan's bit-count and to check for powers of 2. `x & (-x)` (equivalently `x & (~x + 1)`) isolates (returns) the lowest set bit. Used in the Fenwick/Binary Indexed Tree for the "responsible range" computation: `i += i & (-i)` advances to the next update position.
 
 **Q7: How does Python handle integer overflow compared to Java/C?**
+**Short:** Python ints are arbitrary-precision and never overflow; Java's 32-bit `int` wraps silently; C signed-integer overflow is undefined behavior.
 Python integers are arbitrary-precision (backed by a C long array that grows as needed) — they never overflow. Java `int` is 32-bit two's complement and wraps silently on overflow (e.g., `Integer.MAX_VALUE + 1 == Integer.MIN_VALUE`). C integer overflow is *undefined behaviour* for signed types. This matters in interview problems: a Python solution `a + b` never overflows; the same Java solution might.
 
 **Q8: What is 0.1 + 0.2 in floating-point arithmetic?**
+**Short:** It equals 0.30000000000000004, because neither 0.1 nor 0.2 has an exact binary float representation, so their rounding errors compound on addition.
 0.30000000000000004, not 0.3. Neither 0.1 nor 0.2 has an exact binary float representation — they are rounded to the nearest representable value. Addition compounds the rounding error. Fix: use `math.isclose` for comparison, the `Decimal` module for exact decimal arithmetic, or integer arithmetic scaled by a power of 10 (store amounts in cents, not dollars).
 
 **Q9: How do you set, clear, and toggle the kth bit of an integer?**
+**Short:** Set with `n | (1<<k)`, clear with `n & ~(1<<k)`, toggle with `n ^ (1<<k)`, and check with `(n>>k) & 1` — all O(1) operations.
 Set: `n | (1 << k)`. Clear: `n & ~(1 << k)`. Toggle: `n ^ (1 << k)`. Check: `(n >> k) & 1`. These are O(1) operations. In Python, `~(1 << k)` produces a negative number (arbitrary-precision NOT), so for a 32-bit context use `n & ~(1 << k) & 0xFFFFFFFF` or use `IntFlag`.
 
 **Q10: What is a XOR swap and what are its limitations?**
+**Short:** The three-XOR swap avoids a temp variable but zeroes both values if `a` and `b` alias the same memory location, so production code should just use a temp.
 `a ^= b; b ^= a; a ^= b` swaps a and b without a temporary variable. Works because XOR is its own inverse. Limitation: if `a` and `b` point to the same memory location, all three operations produce 0 (XORing a value with itself). Always use a temp variable in production code — it is clearer and the compiler optimises it identically. XOR swap is only useful on systems with no temporary registers (rare).
 
 **Q11: How do you reverse the bits of a 32-bit integer?**
+**Short:** Repeatedly shift the result left, OR in n's low bit, and shift n right, 32 times — O(1) since the width is fixed.
 Shift result left and OR the last bit of n, then shift n right, repeating 32 times. O(32) = O(1). Can also be done with a lookup table (precompute 8-bit reversal for each byte) for higher throughput. Used in bit-reversal permutations in the FFT algorithm.
 
 **Q12: What is the difference between arithmetic and logical right shift?**
+**Short:** Arithmetic right shift fills the vacated high bit with the sign bit, preserving negativity, while logical right shift always fills with zero.
 Arithmetic right shift (`>>` in Java/Python for signed ints) fills the vacated high bit with the sign bit — preserving the sign for negative numbers. Logical right shift (`>>>` in Java) fills with zero regardless of sign. For positive numbers they are identical. In Python, `>>` is always arithmetic. Use `>>> 0` in JavaScript or `int32 >>> 0` to get unsigned semantics.
 
 **Q13: How are permissions encoded in Linux file modes, and how do you test them?**
+**Short:** A Unix mode is a 12-bit value: 3 special bits plus three read/write/execute triads for owner, group, and other, tested with masks like `stat.S_IRUSR`.
 A Unix file mode is a 12-bit number: 3 bits for setuid/setgid/sticky, then 3×3 bits for owner/group/other (read/write/execute). `0o755` = owner can do anything, group and other can read+execute. Test: `mode & stat.S_IRUSR` (0o400) is non-zero if owner has read permission. This is why `chmod 644` (= 0o644 = 0b110 100 100) is the standard for web files: owner read+write, group and other read-only.
 
 **Q14: You need to find two missing numbers from 1..n. How do you use XOR or math?**
+**Short:** XOR alone can't separate the two, so split elements by any set bit of the combined XOR of the array and 1..n, then XOR each half separately to recover both.
 With XOR alone you cannot distinguish two missing numbers (the XOR of the pair is ambiguous). Use two properties: (a) sum of 1..n = n(n+1)/2; subtract the array sum → sum of the two missing numbers. (b) product or XOR of the pair can partition them. The standard O(n) O(1)-space approach: compute XOR of all elements and all 1..n — call it `xor_all`. Find any set bit in `xor_all`. Use that bit to split elements into two groups; XOR each group with the corresponding half of 1..n → recovers each missing number.
 
 **Q15: What are IEEE-754 special values and when do they appear?**
+**Short:** IEEE-754 defines +/-Inf for overflow or division by zero, NaN for undefined results like 0.0/0.0, and a distinct -0.0 that still compares equal to 0.0.
 `+Inf` / `-Inf`: result of dividing by zero or overflow. `NaN` (Not a Number): result of `0.0/0.0`, `sqrt(-1)`, or `Inf - Inf`. `-0.0`: distinct from `0.0` in IEEE-754 but compares equal (`0.0 == -0.0` is True). `float('inf') > any_finite` is always True. `math.isnan(float('nan'))` required to check NaN — `x != x` is also True only for NaN but is obscure. These appear in scientific computing and ML (loss = NaN is a common gradient explosion symptom).
 
 ---

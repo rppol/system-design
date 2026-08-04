@@ -402,34 +402,45 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
 ## 11. Interview Q&A
 
 **Q: Why is the nested `while` loop inside a `for` loop still O(n) overall, not O(n^2)?**
+**Short:** `left` only ever increases across the run, so the while loop's total iterations over all outer steps are bounded by n.
 Because `left` only ever increases — it is never reset to a smaller value. Across the *entire* run of the algorithm, `left` moves from 0 to at most `n`, so the `while` loop body executes at most `n` times *in total* (summed across all iterations of the outer `for` loop), not `n` times *per* outer iteration. This is amortized analysis: the total cost is O(n) + O(n) = O(n), even though the code structurally looks like it could be O(n^2).
 
 **Q: How do you decide whether to shrink "while valid" or "while invalid"?**
+**Short:** Shrink while valid to find the minimum window; expand first and shrink only while invalid to find the maximum window.
 It depends on what you're optimizing. For "smallest subarray satisfying X" (e.g., sum ≥ target), you expand until valid, then shrink *while it remains valid* to find the minimum — record the length right before it becomes invalid. For "longest subarray satisfying X" (e.g., no repeating characters), you expand, and shrink *only when it becomes invalid* (i.e., while NOT valid) — record the length while it's valid, after each expansion.
 
 **Q: What's the `atMost(k) - atMost(k-1)` trick and when do you need it?**
+**Short:** Write a shrinkable `atMost(k)` helper and compute `exactly(k) = atMost(k) - atMost(k-1)`, since "exactly k" jumps non-monotonically.
 Some constraints (like "exactly k distinct elements") aren't directly shrinkable — adding one element can jump from "fewer than k distinct" to "more than k distinct" with no valid intermediate state to anchor a shrink on. Instead, write a helper `atMost(k)` that counts subarrays with *at most* `k` distinct elements (this *is* shrinkable — straightforward sliding window). Then `exactly(k) = atMost(k) - atMost(k-1)`, since every subarray counted in `atMost(k-1)` is also counted in `atMost(k)`.
 
 **Q: Why does "Longest Repeating Character Replacement" use `windowLen - maxFreq <= k` as the validity check?**
+**Short:** Keeping the most frequent character and replacing the rest costs `windowLen - maxFreq` replacements, so the window is valid when that's `<= k`.
 The window is valid if you can convert it to all-the-same-character using at most `k` replacements. The cheapest strategy is to keep the most frequent character (`maxFreq` occurrences) and replace everything else — that costs `windowLen - maxFreq` replacements. If that's `<= k`, the window is achievable. Note `maxFreq` is allowed to be "stale" (computed from a larger window that's since shrunk) — this doesn't break correctness because we're looking for the *maximum* valid window length, and a stale (too-large) `maxFreq` can only make the validity check *stricter*, never falsely permissive in a way that inflates the final answer.
 
 **Q: Can sliding window be used on a 2D grid?**
+**Short:** Not directly — reduce one dimension via prefix sums (e.g., column sums for a row band), then slide a 1D window across the other dimension.
 Directly, no — sliding window relies on the 1D notion of "contiguous range" with a single `left`/`right` pair. For 2D problems (e.g., "max sum of a k×k submatrix"), you typically apply sliding window along one dimension after reducing the other dimension via prefix sums (compute column-sums for a band of rows, then slide a 1D window across columns).
 
 **Q: What's the difference between a fixed-size and variable-size window in terms of code structure?**
+**Short:** Fixed-size windows move `left` and `right` in lockstep with no inner loop; variable-size windows advance `left` in a while loop driven by the window's aggregate.
 Fixed-size: a single `for` loop where `right` and `left = right - k + 1` move in lockstep — no inner loop needed, just "add `nums[right]`, remove `nums[right-k]`" each iteration. Variable-size: `right` is the outer loop variable, and `left` advances inside an inner `while` loop whose condition depends on the current window's aggregate — `left` and `right` are *not* synchronized by a fixed offset.
 
 **Q: How do you initialize the frequency map for "Permutation in String" and what do you compare?**
+**Short:** Build a frequency counter for the pattern, slide a same-length window over the text, and compare the two counters for equality at each step.
 Build a `Counter` (or 26-length array) for the pattern string `s1`. Slide a fixed-size window of length `len(s1)` over `s2`, maintaining a `Counter` of the current window. At each position, compare the two counters for equality (`==` on `Counter` objects works in Python, or compare the 26-length arrays). A match means the current window is a permutation of `s1`.
 
 **Q: What if the "contiguous subarray" constraint is actually about a circular array?**
+**Short:** Either scan `nums + nums` capped at length n, or take `total_sum - min_subarray_sum`, guarding the all-negative edge case.
 Two common approaches: (1) concatenate the array with itself (`nums + nums`) and run the sliding window with a window-length cap of `n`, or (2) for sum-based problems, compute `total_sum - min_subarray_sum` (the complement of the minimum non-circular subarray gives the maximum circular subarray), then take the better of that and the plain non-circular maximum. The second half is not optional: when every element is negative, `min_subarray_sum` is the whole array and the complement is the *empty* subarray, giving 0 — so guard with "if `min_subarray_sum == total_sum`, return the non-circular maximum." See [Maximum Sum Circular Subarray (LC 918)](https://leetcode.com/problems/maximum-sum-circular-subarray/).
 
 **Q: Is sliding window always O(n) space, or can it be O(1)?**
+**Short:** Space depends on what's tracked — a running sum is O(1), while a frequency map is O(alphabet size), never O(n) for this pattern.
 Space depends on what's tracked, not on the pointer mechanism itself. A running sum (fixed/variable window over numeric sums) is O(1) extra space. A frequency map (Counter) is O(|Σ|) — bounded by alphabet size, often treated as O(1) if the alphabet is fixed (e.g., 26 lowercase letters). It is *not* O(n) unless you're storing per-index data structures, which is unusual for this pattern.
 
 **Q: How would you find the *number* of subarrays satisfying a constraint, versus the *longest* one?**
+**Short:** For counting, add `right - left + 1` per valid window (every subarray ending there), not just increment by one as for longest-length.
 For "longest", you record `max(best, right - left + 1)` once the window is valid (or just before it becomes invalid). For "count", every time the window is valid for a given `right`, *all* subarrays ending at `right` with start `>= left` are valid — so you add `(right - left + 1)` to the count, not just 1. This is a common off-by-one source: counting "1 per valid window" vs "all valid windows ending at this position".
 
 **Q: Why might an interviewer say "the array is non-negative" as a hint?**
+**Short:** Non-negativity guarantees the window sum only grows or shrinks monotonically with the window, which is exactly what shrink/expand logic requires.
 Non-negativity is what guarantees the sliding window's monotonicity for sum-based constraints: adding an element to the window can only increase (or keep equal) the sum, and removing one can only decrease (or keep equal) it. This guarantee is *required* for the shrink/expand logic to be correct. If you see "non-negative" + "subarray sum", sliding window is very likely the intended pattern; if you see "can be negative" + "subarray sum", expect prefix sum + hashmap instead.

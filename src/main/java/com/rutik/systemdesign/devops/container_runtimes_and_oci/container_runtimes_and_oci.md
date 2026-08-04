@@ -305,51 +305,67 @@ crictl exec -it <id> sh        # exec (if the image has a shell)
 ## 12. Interview Questions with Answers
 
 **Q1: Walk through what happens when the kubelet starts a pod.**
+**Short:** The kubelet calls the CRI runtime over gRPC to prep an OCI bundle, then containerd spawns a shim that invokes runc, which clones namespaces, writes cgroup limits, and execs the entrypoint.
 The kubelet calls the CRI runtime (containerd/CRI-O) over gRPC to create a pod sandbox, pull/unpack the image into an OCI bundle (rootfs + config.json) via a snapshotter, and start containers. containerd spawns a shim for the pod and invokes the OCI runtime (runc), which makes the `clone()` syscall with namespace flags and writes cgroup limits, then `execve`s the entrypoint. The shim keeps the containers alive independent of the containerd daemon.
 
 **Q2: What is the CRI and why does it exist?**
+**Short:** The CRI is a gRPC API the kubelet uses to manage pods and images, decoupling Kubernetes from any specific runtime so compliant runtimes plug in interchangeably.
 The Container Runtime Interface is a gRPC API the kubelet uses to manage pods/containers/images, decoupling Kubernetes from any specific runtime. Before CRI, runtime support was hardcoded; with CRI, any compliant runtime (containerd, CRI-O) plugs in interchangeably. It's why "removing dockershim" was possible without breaking workloads.
 
 **Q3: Did "Docker removal from Kubernetes" break container images?**
+**Short:** No — images stayed OCI-standard and kept running unchanged; only dockershim, the kubelet's Docker-daemon adapter, was removed, so node-side `docker` CLI workflows had to move to `crictl`.
 No. Images are OCI-standard, and containerd (which Docker itself uses) already ran them. What was removed (1.24) was *dockershim* — the kubelet's special adapter to the Docker daemon. Clusters switched the kubelet to talk CRI directly to containerd/CRI-O; the same images run unchanged. Only `docker`-CLI-on-the-node workflows had to move to `crictl`.
 
 **Q4: What are the three OCI specifications?**
+**Short:** The image spec defines the layered content-addressed format, the runtime spec defines the bundle a low-level runtime consumes, and the distribution spec defines the registry pull/push API.
 The **image spec** (layered, content-addressed image format), the **runtime spec** (the bundle — rootfs + `config.json` — that a low-level runtime consumes to create a container), and the **distribution spec** (the registry pull/push HTTP API). Together they make images portable and runtimes interchangeable across the ecosystem.
 
 **Q5: runc vs gVisor vs Kata — how do they differ in isolation?**
+**Short:** runc shares the host kernel via namespaces for speed, gVisor interposes a user-space kernel to intercept syscalls, and Kata runs each container in a lightweight VM for hardware-level isolation.
 runc uses host-kernel namespaces/cgroups — fast but shares the kernel (a kernel exploit can escape). gVisor (runsc) interposes a user-space kernel that intercepts syscalls, isolating the host kernel at the cost of syscall overhead and partial compatibility. Kata runs each container in a lightweight VM (Firecracker/QEMU), giving hardware-virtualization isolation at the cost of VM boot time and per-container memory.
 
 **Q6: Why does a container runtime use a shim process?**
+**Short:** A shim parents the container process so it survives the containerd daemon restarting, letting the runtime upgrade without killing running pods, and reports exit status back to containerd.
 The shim is a small process that parents the container so it survives restarts/upgrades of the containerd daemon — you can upgrade the runtime without killing running pods. It also reports the container's exit status back to containerd and handles I/O streams. containerd's `runc.v2` shim groups on the CRI `io.kubernetes.cri.sandbox-id` label, so all containers in one pod share a single shim rather than paying for one process each. Without a shim, the container's lifecycle would be tied to the daemon's.
 
 **Q7: How do you run a specific workload under a different runtime?**
+**Short:** Define a `RuntimeClass` mapping to a handler like `runsc`, then set `runtimeClassName` on the Pod, letting one cluster run trusted workloads on runc and untrusted ones on gVisor or Kata.
 Define a `RuntimeClass` mapping to a containerd handler (e.g., `runsc` for gVisor), then set `runtimeClassName` on the Pod. This lets a single cluster run trusted workloads on runc and untrusted/multi-tenant ones on gVisor/Kata, choosing isolation per workload rather than per cluster.
 
 **Q8: You're on a node with no `docker` command — how do you inspect containers?**
+**Short:** Use `crictl` for CRI-level inspection or `ctr -n k8s.io` for containerd-native access, since both talk to the containerd socket directly.
 Use `crictl` (CRI-level: `crictl ps`, `crictl logs`, `crictl inspect`, `crictl exec`) or `ctr -n k8s.io` (containerd-native). These talk to the containerd socket directly. On distroless container images there's no shell, so you'd use `kubectl debug` ephemeral containers or host-side `nsenter` into the process namespaces.
 
 **Q9: What is a snapshotter and why does it matter?**
+**Short:** A snapshotter manages how image layers assemble into a container rootfs, with overlayfs the default, while lazy-pull snapshotters like stargz slash cold-start time.
 A snapshotter manages how image layers are assembled into a container rootfs — overlayfs is the default. Pluggable snapshotters enable features like lazy/"stargz" pulling (start the container before the whole image downloads), which slashes cold-start time for large images. The choice affects pull time, disk usage, and start latency.
 
 **Q10: crun vs runc — when would you switch?**
+**Short:** crun is a C implementation of the OCI runtime with lower memory per container and faster startup than runc, worth switching to on high pod-density or latency-sensitive nodes.
 crun is a C implementation of the OCI runtime (vs runc's Go), with lower memory per container and faster startup. On high pod-density nodes or latency-sensitive scale-up, crun's lower overhead measurably improves container start time and node capacity. Functionally it's a drop-in OCI runtime; you select it via the runtime handler.
 
 **Q11: What are the security tradeoffs of shared-kernel containers?**
+**Short:** All runc containers share the host kernel as the trust boundary, so a kernel escape bug compromises the host and every container on it, mitigated by seccomp and non-root users.
 All runc containers share the host kernel, so the kernel is the trust boundary: a privilege-escalation or container-escape kernel bug can compromise the host and every container on it. Mitigations include dropping capabilities, seccomp/AppArmor profiles, non-root users, and — for untrusted code — moving to gVisor/Kata which don't share the host kernel directly.
 
 **Q12: How does Firecracker enable both isolation and density?**
+**Short:** Firecracker boots a stripped microVM in about 125ms with a tiny footprint, giving hardware-level isolation without full-VM overhead, which is how Lambda and Fargate pack thousands per host.
 Firecracker is a minimal VMM that boots a stripped microVM in ~125 ms with a tiny memory footprint, giving hardware-level isolation without a full VM's overhead. It underpins AWS Lambda and Fargate, where each function/task gets VM-grade isolation yet the platform still packs thousands per host — bridging the container-density vs VM-isolation gap.
 
 **Q13: containerd vs CRI-O — what actually differs architecturally?**
+**Short:** Both are CRI-compliant and run OCI images identically, but containerd is general-purpose with a broader plugin ecosystem while CRI-O is scoped strictly to what Kubernetes needs.
 Both are CRI-compliant and run OCI images identically, but containerd is a general-purpose runtime with a broader plugin/snapshotter ecosystem, while CRI-O is purpose-built for Kubernetes only. containerd is also embedded inside Docker and is the default on EKS and GKE, while Red Hat drives CRI-O as the default on OpenShift, tracking the Kubernetes release cadence closely with a smaller feature surface (no independent CLI/API beyond CRI). Pick containerd for broad ecosystem/tooling reuse, CRI-O when you want a runtime whose scope is strictly "what Kubernetes needs."
 
 **Q14: How does the OCI distribution spec make an image pull portable across registries?**
+**Short:** The distribution spec defines a standard HTTP API for pulling and pushing content-addressed blobs and manifests, so any OCI client works identically against any compliant registry.
 The distribution spec defines a standard HTTP API for pulling and pushing content-addressed blobs and manifests, so any OCI-compliant client can pull from any compliant registry without registry-specific code. Each layer and the manifest are identified by a SHA-256 digest, and a manifest list (index) can point to per-architecture manifests so the same tag resolves to the right binary on amd64 vs arm64. This is why `docker pull`, `crictl pull`, and `ctr images pull` all work identically against any registry — the wire protocol is the standard, not the client.
 
 **Q15: How does a namespaced resource limit in the OCI runtime spec actually get enforced on the host?**
+**Short:** containerd translates pod resource requests into the OCI `config.json`'s resources block, and runc writes those into the container's cgroup files, so the kernel enforces the limit, not the runtime.
 containerd translates the pod's CPU and memory requests into the `linux.resources` block of the OCI `config.json`, and runc writes those values directly into the container's cgroup files before starting the process. A `cpu.quota: 50000` with `cpu.period: 100000` caps the container at 0.5 CPU-seconds of runtime per 100ms period — exceeding it throttles the process rather than killing it, while exceeding the memory limit triggers the kernel OOM killer against that cgroup specifically. This is why resource limits are enforced by the kernel, not by containerd or runc watching the process — once the cgroup is written, the runtime's job is done.
 
 **Q16: What is overlayfs and why is it the default snapshotter?**
+**Short:** overlayfs layers read-only image layers under a thin writable directory as one merged view, letting many containers share the same base-image layers while each keeps its own writable layer.
 overlayfs is a union filesystem that layers a container's read-only image layers under a thin writable "upper" directory, presenting them as one merged view without copying the read-only data. Multiple containers can share the same lower (image) layers on disk while each gets its own isolated upper layer for writes, which is why pulling a common base image once and starting 50 containers from it costs almost no extra disk. It's the default snapshotter because it's fast (no copy-on-first-write across whole layers, just directory merging) and built into the mainline Linux kernel, though pluggable alternatives like stargz trade this for lazy-pull startup latency instead.
 
 ---

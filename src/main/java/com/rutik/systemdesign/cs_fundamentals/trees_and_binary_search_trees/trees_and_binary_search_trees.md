@@ -885,57 +885,75 @@ def diameter(root):
 ## 12. Interview Questions with Answers
 
 **Q1: What is the in-order traversal of a BST and why is it important?**
+**Short:** In-order traversal (left-root-right) visits BST keys in ascending sorted order, which is why it validates BSTs, finds the k-th smallest, and produces a sorted array.
 In-order traversal visits nodes in left-root-right order. For a BST, this produces keys in ascending sorted order. This property is used to: (a) validate a BST (in-order should produce a strictly increasing sequence), (b) find the k-th smallest element (traverse until k elements visited), (c) convert a BST to a sorted array. It is also the basis for the in-order successor/predecessor operations.
 
 **Q2: What is the time complexity of BST search, insert, and delete?**
+**Short:** All three cost O(h), which is O(log n) only when the tree is balanced and degrades to O(n) on a degenerate, list-shaped tree.
 O(h) where h is the height. For a balanced BST (AVL, red-black): h = O(log n), so all operations are O(log n). For a degenerate BST (sorted insertion): h = O(n), so all operations are O(n). The key point: the BST is only O(log n) if balanced.
 
 **Q3: How does a BST degenerate, and how do self-balancing trees prevent it?**
+**Short:** Inserting sorted data always extends one path into a linked list of height n; AVL and red-black trees fix this with rotations after each insert or delete.
 Inserting elements in sorted (or reverse-sorted) order always adds to the rightmost (or leftmost) path, creating a linked list of height n. Self-balancing trees (AVL, red-black) perform rotations after each insert/delete to restore the height invariant. AVL rotates when a node's subtree height difference exceeds 1. Red-black rotates and recolors to maintain the 4-5 color invariants.
 
 **Q4: What is the difference between a B-tree and a B+tree?**
+**Short:** A B-tree stores key-value pairs in every node, while a B+tree stores data only in linked leaf nodes with keys-only routing internally, giving fast database range scans.
 In a B-tree, every node (internal and leaf) stores key-value pairs. In a B+tree, only leaf nodes store data pointers; internal nodes store only keys for routing. All leaf nodes in a B+tree are linked in a sorted doubly-linked list, enabling efficient range scans. Databases use B+trees because (a) higher branching factor (internal nodes can store more keys, fewer disk reads per lookup) and (b) range scans are O(k + log n) by following the leaf chain.
 
 **Q5: How do you find the lowest common ancestor (LCA) of two nodes in a binary tree?**
+**Short:** Post-order traversal finds the LCA where both children return non-null; in a BST it's simply the first node where the two search paths diverge.
 Post-order traversal with early termination. Base case: if the current node is null, p, or q, return it. Recurse on both children. If both return non-null, the current node is the LCA. If only one returns non-null, propagate that upward. O(n) time, O(h) space. For a BST, the LCA is the first node where p and q diverge: traverse from root; if both p and q are less than the current node, go left; if both are greater, go right; otherwise the current node is the LCA. O(h) time.
 
 **Q6: What is a segment tree and when do you need it?**
+**Short:** A segment tree stores range aggregates in a complete binary tree, giving O(log n) point updates and O(log n) range queries, unlike a sorted array's O(n) update.
 A complete binary tree where each node stores an aggregate (sum, min, max) of a range of array elements. Build: O(n). Point update: O(log n). Range query: O(log n). Use when you need both range queries and point updates on an array — a sorted array gives O(log n) query but O(n) update. A segment tree is the right tool for: range sum, range minimum/maximum, and problems combining queries and updates. Space: O(4n) for the tree array.
 
 **Q7: How does Java's `TreeMap.floorKey(k)` work?**
+**Short:** It walks the red-black tree keeping a running candidate for the largest key <= k, going right when a node qualifies and left otherwise, in O(log n).
 It traverses the red-black tree from the root, maintaining a running candidate for the largest key ≤ k. At each node: if the node's key ≤ k, update the candidate and go right (there may be a larger valid key). If the node's key > k, go left. Return the last valid candidate. O(log n). The same pattern applies to `ceilingKey` (smallest key ≥ k), `lowerKey` (<), and `higherKey` (>).
 
 **Q8: What is the time complexity of building a BST from a sorted array?**
+**Short:** Recursively inserting the middle element as root builds a balanced BST in O(n), while inserting elements one by one in sorted order costs O(n^2).
 O(n) if done correctly (insert the middle element as root, recurse on left and right halves — same as the "convert sorted array to BST" problem). If you insert elements one by one in sorted order: O(n²) because each insert appends to the end of a degenerate tree. The recursive balanced-build approach produces a balanced BST of height log n.
 
 **Q9: How do you serialise and deserialise a binary tree?**
+**Short:** Pre-order traversal with explicit null markers lets you serialize and deserialize a binary tree in O(n) time and space by recursively consuming the token sequence.
 Pre-order traversal with explicit null markers. Serialise: append node.val for non-null nodes, append "#" for null. Deserialise: consume the sequence recursively — if the first token is "#", return null; otherwise create a node with that value and recurse for left and right. O(n) time and space. BFS-based serialisation (level order) is also valid and is the format used by LeetCode.
 
 **Q10: What is the height and number of nodes in a complete binary tree?**
+**Short:** A perfect binary tree of height h has 2^(h+1)-1 nodes, and completeness can be checked in O(n) with a level-order BFS.
 Height = floor(log₂ n). Number of nodes in a perfect binary tree of height h = 2^(h+1) - 1. A complete binary tree has all levels full except possibly the last, which is filled left to right. Checking if a binary tree is complete can be done in O(n) with BFS: level-order traversal; once a null node is encountered, all subsequent nodes must also be null.
 
 **Q11: How do you find the k-th smallest element in a BST efficiently?**
+**Short:** In-order traversal counting to k costs O(h+k), but augmenting each node with its subtree size finds the k-th smallest in O(h) instead.
 In-order traversal counting up to k. O(h + k) time — traverse down to the leftmost node, then visit k nodes in order. With an augmented BST (each node stores the size of its subtree), you can do it in O(h) = O(log n): if k ≤ left-subtree-size, recurse left; if k == left-subtree-size + 1, the root is the k-th element; otherwise recurse right with k - left-subtree-size - 1.
 
 **Q12: What is a self-balancing BST used for in the Linux kernel?**
+**Short:** Linux's EEVDF scheduler keys a per-CPU red-black tree by virtual runtime, giving O(log n) insertion, removal, and arbitrary-position deletion that a heap can't match.
 The fair scheduling class uses a red-black tree (`rb_tree`) as the per-CPU run queue, with each runnable task a node keyed by virtual runtime (vruntime). Under EEVDF the pick is not simply the leftmost node: the scheduler selects the task with the earliest virtual *deadline* among those that are eligible (lag ≥ 0), which the tree supports in O(log n) by augmenting each node with its subtree's minimum vruntime. Insertion when a task wakes and removal when it blocks are both O(log n). The red-black tree is preferred over a binary heap because a task can be deleted from an arbitrary position in O(log n) without maintaining a side index of node positions, and because the tree keeps tasks in a total order the scheduler can walk — a heap only ever exposes its root.
 
 **Q13: What is the difference between a tree's depth and its height?**
+**Short:** Depth counts edges from the root down to a node, while height counts edges from a node down to its deepest leaf; a tree's height is its root's height.
 The **depth** of a node is the number of edges from the root to that node (root has depth 0). The **height** of a node is the number of edges on the longest downward path from that node to a leaf (leaves have height 0). The **height of the tree** is the height of the root. Some textbooks define these as the number of nodes rather than edges — always clarify in interviews. Both are equivalent for complexity analysis.
 
 **Q14: How would you implement an order-statistic tree?**
+**Short:** An order-statistic tree augments a BST with subtree sizes, giving O(log n) select (k-th smallest) and rank by accumulating left-subtree sizes along the path.
 An order-statistic tree is a BST where each node also stores the size of its subtree. Operations: select (find k-th smallest), rank (find the rank of a key). Select: O(log n) by comparing k to the left-subtree size. Rank: O(log n) by accumulating left-subtree sizes along the path. Implemented by augmenting a red-black tree (Java has no built-in; Python's `sortedcontainers.SortedList` provides similar functionality).
 
 **Q15: When would you choose a skip list over a balanced BST?**
+**Short:** A skip list gives expected O(log n) operations without rotations, simpler and lock-free, which is why Redis sorted sets use one instead of a BST.
 A skip list is a probabilistic data structure with O(log n) expected operations and O(n) space. Advantages over BST: simpler to implement correctly (no rotations), easy to make lock-free for concurrent access, supports efficient range scans. Redis sorted sets use a skip list for exactly this: simpler concurrent implementation with O(log n) ZADD/ZRANK/ZRANGE. Disadvantages: probabilistic worst case; more memory per element (multiple forward pointers).
 
 **Q16: What is the complexity of finding all nodes in a BST within a range [lo, hi]?**
+**Short:** It costs O(log n + k): navigate to the leftmost node >= lo in O(log n), then in-order traverse collecting the k matching nodes.
 O(log n + k) where k is the number of nodes in the range. Navigate to the leftmost node ≥ lo in O(log n), then in-order traverse until the value exceeds hi, collecting k nodes in O(k). The B+tree's linked leaf list gives the same O(log n + k) complexity for database range scans.
 
 **Q17: How do you construct a binary tree from its pre-order and in-order traversals?**
+**Short:** The first pre-order element is the root, and its position in the in-order sequence splits the rest into left and right subtrees, giving O(n) with a hash-map index lookup.
 Pre-order: first element is the root. In-order: the root divides it into left and right subtrees. Algorithm: pop the first element of pre-order (it's the root); find its position in in-order; elements to the left form the left subtree, right side forms the right subtree; recurse. O(n²) with linear search or O(n) with a hash map for O(1) index lookups. The hash map from value to in-order index reduces the construction to O(n).
 
 **Q18: Explain the four cases of AVL tree insertion imbalance and how to fix them.**
+**Short:** Left-Left and Right-Right imbalances need a single rotation, while Left-Right and Right-Left need a rotation on the child first, then one on the unbalanced node.
 After an insertion, an ancestor node may become unbalanced (|left_height - right_height| > 1). Four cases: (1) **Left-Left**: new node in left child's left subtree — single right rotation at the unbalanced node. (2) **Right-Right**: new node in right child's right subtree — single left rotation. (3) **Left-Right**: new node in left child's right subtree — left rotate the left child, then right rotate the unbalanced node. (4) **Right-Left**: new node in right child's left subtree — right rotate the right child, then left rotate the unbalanced node. After insertion, only O(1) rotations needed (AVL: at most 2).
 
 ---

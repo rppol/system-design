@@ -356,34 +356,45 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
 ## 11. Interview Q&A
 
 **Q: Why is `prefix[0] = 0` ("the empty prefix") so important, and what does it represent?**
+**Short:** `prefix[0] = 0` is the additive identity, letting `sum(nums[0..j]) = prefix[j+1]` work uniformly with no special case for ranges starting at index 0.
 `prefix[0] = 0` represents the sum of zero elements — it's the identity element for addition. It allows the formula `sum(nums[i..j]) = prefix[j+1] - prefix[i]` to work uniformly even when `i = 0` (a subarray starting at the very first element): `sum(nums[0..j]) = prefix[j+1] - prefix[0] = prefix[j+1] - 0 = prefix[j+1]`. In the hashmap variant, seeding `seen = {0: 1}` before the loop is the same idea — it lets subarrays starting at index 0 be "found" as a match against this sentinel.
 
 **Q: Why doesn't sliding window work for "subarray sum equals k" when the array has negative numbers?**
+**Short:** Negative numbers break the monotonic relationship between window size and sum, so expanding or shrinking the window can move the sum either direction.
 Sliding window's correctness relies on the window sum changing *monotonically* as you expand/shrink — specifically, "if the sum is too big, shrinking from the left makes it smaller (or equal), never bigger." With negative numbers, adding an element to the window (`right += 1`) could *decrease* the sum, and removing an element from the left (`left += 1`) could *increase* it (if `nums[left]` was negative). This breaks the "shrink while too big" logic — you could shrink past a valid window or fail to find one that exists. Prefix sum + hashmap has no such monotonicity requirement.
 
 **Q: How do you adapt the template for "subarray sum divisible by k"?**
+**Short:** Track `prefix % k` instead of raw prefix — two prefixes sharing a remainder mark a subarray divisible by `k`, normalizing negative remainders.
 Track `prefix % k` instead of raw `prefix`. Two prefixes with the same remainder mod `k` mean the subarray between them has a sum divisible by `k` (since `(a - b) % k == 0` iff `a % k == b % k`). Watch out for negative remainders in languages where `%` can return negative values for negative operands (Python's `%` always returns non-negative for positive `k`, but other languages like Java/C++ may not — normalize with `((x % k) + k) % k`).
 
 **Q: What's the difference between "count subarrays" and "find the maximum length subarray" in terms of what you store in the hashmap?**
+**Short:** Counting stores prefix-value occurrence counts, while max-length stores only the earliest index per prefix value to maximize the span.
 For *counting*, the hashmap stores `prefix_value -> count of occurrences` (a `defaultdict(int)`), because multiple earlier indices can have the same prefix value, each contributing one valid subarray. For *maximum length*, the hashmap stores `prefix_value -> earliest index where it occurred` (a regular dict, only the first occurrence matters, since you want the longest — i.e., earliest-starting — subarray for a given prefix match).
 
 **Q: How would you extend prefix sums to 2D (range sum of a submatrix)?**
+**Short:** Build `prefix[i][j]` via inclusion-exclusion, then answer any submatrix query in O(1) with four corner lookups.
 Build a 2D prefix array where `prefix[i][j] = sum of all cells (r, c)` with `r < i` and `c < j` — i.e., the sum of the submatrix from `(0,0)` to `(i-1, j-1)`. Compute it via `prefix[i][j] = matrix[i-1][j-1] + prefix[i-1][j] + prefix[i][j-1] - prefix[i-1][j-1]` (inclusion-exclusion to avoid double-counting the overlap). A range query for rows `[r1,r2]` and cols `[c1,c2]` is `prefix[r2+1][c2+1] - prefix[r1][c2+1] - prefix[r2+1][c1] + prefix[r1][c1]`.
 
 **Q: When would you choose a Fenwick tree over a prefix sum array?**
+**Short:** Choose a Fenwick tree when the array is mutated between queries — it does point updates and range-sum queries in O(log n), unlike a static prefix array's O(n) rebuild.
 When the array is **mutated** between queries (point updates: `nums[i] = new_value`). A plain prefix sum array requires O(n) to recompute everything after a single update (everything from index `i` onward shifts). A Fenwick tree (Binary Indexed Tree) supports both point updates and prefix-sum queries in O(log n) each, at the cost of slightly more complex implementation and O(n) extra space (similar to the prefix array's space, but structured as an implicit tree).
 
 **Q: Can prefix sum be combined with binary search?**
+**Short:** Yes — for non-negative arrays the prefix sum is monotonically non-decreasing, so binary search can find the first prefix meeting a threshold.
 Yes — if the array is non-negative, the prefix sum array is *monotonically non-decreasing*, which means you can binary search over it. For example, "find the smallest subarray length with sum >= target" can binary search for the first `prefix[j]` that is `>= prefix[i] + target`, for each `i`. (Though for non-negative arrays, sliding window is usually simpler and equally efficient.)
 
 **Q: What's the "prefix XOR" variant, and when is it used?**
+**Short:** Prefix XOR replaces sum with XOR, exploiting `a XOR a = 0` so `prefix[j] XOR prefix[i]` gives the XOR of the subarray between them.
 Same structure as prefix sum, but using XOR (`prefix[i] = nums[0] XOR nums[1] XOR ... XOR nums[i-1]`). The key property is `a XOR a = 0`, so `prefix[j] XOR prefix[i] = nums[i] XOR ... XOR nums[j-1]` (the XOR of the subarray). Used for problems like "find the XOR of a range" or "count subarrays with a given XOR value" — same hashmap structure as sum-based problems, but with XOR as the combining operator.
 
 **Q: How do you compute "Product of Array Except Self" without division, using a prefix-style approach?**
+**Short:** Multiply each index's prefix product (everything to its left) by its suffix product (everything to its right), avoiding division entirely.
 Compute `prefix_product[i] = product(nums[0..i-1])` (product of everything to the left of `i`) and `suffix_product[i] = product(nums[i+1..n-1])` (product of everything to the right). The answer for index `i` is `prefix_product[i] * suffix_product[i]`. This avoids division (which would fail if any element is 0) and can be done in O(1) extra space by computing the suffix product in a second pass that overwrites the output array (which initially holds the prefix products).
 
 **Q: What's the time complexity of building a prefix sum array, and is it ever worth it for a single query?**
+**Short:** Building costs O(n), which pays off only across multiple queries — a single range-sum query is no cheaper than direct summation.
 Building is O(n). For a *single* range-sum query, this is no better than just summing the range directly (also O(n) in the worst case for a large range). Prefix sums pay off when there are **multiple queries** on a **static** array — O(n) to build once, then O(1) per query, versus O(n) per query without precomputation. If asked "what if there's only one query," say so explicitly — it signals you understand the amortization argument.
 
 **Q: How does the prefix-sum-with-hashmap technique generalize beyond "sum"? What's the underlying principle?**
+**Short:** It generalizes to any combinable, invertible operation on cumulative values — sum with subtraction, XOR with XOR, product with division when zero-free.
 The general principle: if a property `P` of a range `[i, j]` can be expressed as `f(cumulative(j)) op f(cumulative(i))` for some combinable/invertible operation (sum with subtraction, XOR with XOR, product with division when no zeros), then you can precompute `cumulative` values and use a hashmap to find pairs `(i, j)` satisfying the target relationship in O(n). This generalizes to sums, XORs, parity counts (treat as sums mod 2), and products (with care for zeros/negatives).

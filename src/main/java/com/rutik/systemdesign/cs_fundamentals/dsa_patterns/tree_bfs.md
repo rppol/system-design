@@ -598,6 +598,7 @@ rather than crashing — easy to miss if the test only checks total node count.
 ## 11. Interview Q&A
 
 **Q: Why a queue (FIFO) and not a stack (LIFO) for level-order traversal?**
+**Short:** A queue keeps every node of level d ahead of level d+1 in discovery order, while a stack would dive depth-first into one branch instead.
 A queue processes nodes in the **order they were discovered**, which is
 exactly "all of level `d` before any of level `d+1`" — a node's children are
 enqueued *after* all of its same-level siblings, so they naturally wait their
@@ -606,6 +607,7 @@ which produces a depth-first order — diving into one branch before finishing
 a level.
 
 **Q: Why must `level_size = len(queue)` be captured *before* the inner loop, and what happens if you don't?**
+**Short:** Snapshotting `level_size` before the loop fixes the pop count for the current level, deferring newly pushed children to the next outer iteration.
 Because the inner loop both **pops** nodes from the current level and
 **pushes** their children (next level) onto the same queue. If the loop
 condition re-evaluates `len(queue)` on each iteration (or uses `while
@@ -615,6 +617,7 @@ once gives the inner loop a fixed iteration count, decoupling "how many to
 pop this round" from "how many got pushed."
 
 **Q: Zigzag level order — why use a `deque` for the per-level result instead of a list with `reverse()`?**
+**Short:** A deque's `appendleft` is O(1), avoiding the O(level_size) cost of building a list and reversing it on alternating levels.
 Both work, but `deque.appendleft()` is O(1), while building a list normally
 and then calling `.reverse()` on alternate levels is O(level_size) extra work
 per reversed level. Using a `deque` and choosing `append` vs `appendleft`
@@ -623,6 +626,7 @@ marginal for small trees, but it's the "why settle for O(n) extra work when
 O(1) per element suffices" instinct interviewers like to see.
 
 **Q: Right side view — why does "last node processed in the level" give the rightmost visible node?**
+**Short:** Because BFS pushes left children before right, the last node popped in a level's iteration is that depth's rightmost, visible node.
 Because BFS processes each level **left to right** (left children pushed
 before right children, assuming you push `left` then `right`), the last node
 popped in a level's iteration is the rightmost node at that depth — which is
@@ -630,6 +634,7 @@ exactly the node visible if you stood to the right of the tree and looked
 through it horizontally.
 
 **Q: Why does BFS find `min_depth` correctly while a naive DFS might not, without extra logic?**
+**Short:** BFS visits nodes in non-decreasing depth order, so the first leaf found is guaranteed minimum-depth, unlike a naive DFS that can misread a missing child.
 BFS visits nodes in **non-decreasing depth order** — the very first leaf it
 encounters is *guaranteed* to be at the minimum depth across the whole tree,
 so you can return immediately. A naive DFS that returns
@@ -640,6 +645,7 @@ for "this node has only one child" to avoid that trap, which BFS sidesteps
 entirely by construction.
 
 **Q: How do you link "next" pointers between siblings using only the level-size loop?**
+**Short:** Track a `prev` pointer reset each level and set `prev.next = node` as each node pops, so the BFS queue alone builds the sibling chain.
 Within the per-level loop, maintain a `prev` pointer (reset to `None` at the
 start of each level). For each node popped, if `prev is not None:
 prev.next = node`, then set `prev = node`. After the level's loop, the last
@@ -647,6 +653,7 @@ node's `next` remains `None` (its default), correctly marking the end of that
 level's chain. No extra queue or array is needed beyond the BFS queue itself.
 
 **Q: What's the worst-case space complexity, and which tree shape triggers it?**
+**Short:** A complete binary tree's ~n/2 last-level leaves make the queue hold O(n) nodes at once, while a skewed tree only ever holds O(1).
 O(n) in the worst case. A **complete binary tree** has roughly `n/2` leaves,
 all at the last level — when the queue is processing the second-to-last
 level, it simultaneously holds (about to push) all `n/2` last-level nodes,
@@ -654,6 +661,7 @@ giving `O(n)` queue size at that instant. A skewed (linked-list-shaped) tree,
 by contrast, has `w = 1` at every level — `O(1)` queue space.
 
 **Q: How does the template generalize to N-ary trees (LC 429)?**
+**Short:** Replace the left/right child pushes with a single loop over `node.children`, leaving the level-size snapshot and grouping logic unchanged.
 Replace `if node.left: queue.append(node.left)` / `if node.right: ...` with a
 single loop: `for child in node.children: queue.append(child)`. Everything
 else — the `level_size` snapshot, the per-level result list — is unchanged.
@@ -661,6 +669,7 @@ This is a good example of how the *shape* of the pattern (queue +
 level-size snapshot) is independent of the tree's branching factor.
 
 **Q: Cousins in Binary Tree — why track both `parent` and `depth` in the queue, and isn't depth alone enough?**
+**Short:** Depth alone can't rule out siblings, so tracking both parent and depth per node distinguishes cousins (different parents) from siblings.
 "Cousins" requires same depth **and different parents** (siblings have the
 same parent and are excluded). Depth alone can't distinguish siblings from
 cousins — two nodes at the same depth could be siblings (same parent,
@@ -669,6 +678,7 @@ disqualified) or cousins (different parents, qualified). Carrying
 in O(1) once you've located the two target nodes during the single BFS pass.
 
 **Q: Maximum Width of Binary Tree — why use positional indices, and how do you prevent them from overflowing for deep trees?**
+**Short:** Complete-tree positional indices can grow exponentially with depth, so re-basing each level's indices against its first index keeps them small.
 The "width" of a level is defined by the *positions* of the leftmost and
 rightmost nodes **as if the tree were complete** — including gaps from
 missing nodes. Assigning `root = 1`, `left child = 2*i`, `right child = 2*i +
@@ -680,6 +690,7 @@ start near 0 each level, keeping them small while preserving relative
 differences (which is all `last - first + 1` needs).
 
 **Q: When would you prefer the recursive (DFS-based) "level order" formulation over an explicit queue?**
+**Short:** Prefer it when you're already traversing for another reason and only need per-level grouping, since a preorder DFS into `result[depth]` gives the same lists.
 When you're already writing a DFS for another reason (e.g., computing depth
 for a different purpose) and only need to *group* values by level — not
 preserve strict left-to-right discovery order *across* levels relative to

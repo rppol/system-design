@@ -368,51 +368,67 @@ runs-on: arc-runner-set              # the ARC scale set's installation name, no
 ## 12. Interview Questions with Answers
 
 **Q1: How do you choose a CI/CD platform?**
+**Short:** Choose primarily by where code lives and ops appetite: GitHub Actions or GitLab CI for low-ops SaaS, Jenkins for maximum extensibility, and Tekton/Argo when already on Kubernetes.
 Primarily by where your code lives and your ops appetite: GitHub → GitHub Actions, GitLab → GitLab CI (low-ops, tight integration); need maximum extensibility / on-prem / many languages → Jenkins (you operate it); platform is Kubernetes and you want pipelines as cluster workloads → Tekton/Argo. Secondary factors: ecosystem, secret handling, runner scaling, cost, and lock-in tolerance.
 
 **Q2: SaaS (GitHub Actions/GitLab CI) vs Jenkins — core tradeoff?**
+**Short:** SaaS platforms are low-ops and tightly integrated but less flexible, while Jenkins is self-hosted and infinitely extensible via plugins at the cost of operating it yourself.
 SaaS platforms are low-ops (no control plane to run/patch), tightly integrated with the SCM, and YAML-configured, at the cost of flexibility and some lock-in. Jenkins is self-hosted and infinitely extensible via plugins and Groovy pipelines (any language, on-prem, custom workflows), at the cost of operating, securing, and patching the server and its plugin sprawl. Choose SaaS for convenience, Jenkins for control.
 
 **Q3: What's distinctive about Kubernetes-native CI (Tekton/Argo)?**
+**Short:** Pipelines are Kubernetes CRDs with each step running as a Pod, sharing the cluster's RBAC, secrets, and autoscaling with applications instead of a separate runner fleet.
 Pipelines are Kubernetes CRDs and each step runs as a Pod, so CI/CD shares the cluster's RBAC, secrets, autoscaling, networking, and observability with your applications — no separate runner fleet to manage. It's ideal when your platform is already Kubernetes. The tradeoff is added conceptual complexity and that you need a cluster to run pipelines at all.
 
 **Q4: Why insist on ephemeral runners regardless of platform?**
+**Short:** A fresh container or VM per job leaves no state or credentials behind, guaranteeing reproducibility and preventing one job's leftovers from leaking into another's.
 Ephemeral runners (fresh container/VM per job, destroyed after) guarantee reproducibility and isolation: no leftover state causes "passes only because of a previous build," and no cross-job leakage of files, caches, or credentials. Persistent self-hosted runners shared across repos are a security and flakiness liability. Autoscaling ephemeral runners (e.g., ARC on Kubernetes) also avoids paying for idle capacity.
 
 **Q5: How do you avoid copy-pasted pipelines across many repos?**
+**Short:** Use each platform's reuse mechanism — reusable workflows, GitLab includes/templates, or Jenkins shared libraries — to define pipeline logic once and reference it everywhere.
 Use the platform's reuse mechanism: reusable workflows and composite actions (GitHub Actions), `include`/`extends`/templates (GitLab), or shared libraries (Jenkins), and reusable Tasks (Tekton). Define the build/test/deploy logic once in a central, versioned location and reference it from each repo, so a single change updates everyone and pipelines can't drift.
 
 **Q6: Why is the CI/CD platform a high-value security target?**
+**Short:** It holds production deploy credentials and executes arbitrary build code, so a compromised pipeline or malicious dependency is a direct route to prod.
 It holds the credentials to deploy to production and executes arbitrary code (your build scripts, third-party actions/plugins). A compromised pipeline, a malicious dependency in a build, or a vulnerable Jenkins plugin is a direct route to prod. Defenses: OIDC + least-privilege deploy roles (no static admin keys), pinned/reviewed third-party actions, patched control plane, isolated ephemeral runners, and secret masking.
 
 **Q7: How does OIDC improve CI security over stored cloud keys?**
+**Short:** OIDC lets the runner exchange a short-lived signed identity token for temporary scoped cloud credentials, eliminating stored long-lived access keys and limiting blast radius.
 With OIDC federation, the runner presents a short-lived, signed identity token to the cloud, which exchanges it for temporary scoped credentials for a specific IAM role — so no long-lived cloud access keys are stored in the CI platform at all. This eliminates the most commonly leaked secret class and limits blast radius (the role is scoped and the credentials expire).
 
 **Q8: What does "pipeline as code" buy you, and do all platforms support it?**
+**Short:** Pipeline as code keeps the pipeline definition versioned and code-reviewed in the repo, giving auditability and reproducibility that UI-clicked freestyle jobs lack.
 It means the pipeline definition lives in the repo (YAML/Groovy/CRD), versioned and code-reviewed alongside the application. Benefits: history/auditability, review of pipeline changes, reproducibility, and the ability to branch pipeline changes. All modern platforms support it — GitHub `.github/workflows`, GitLab `.gitlab-ci.yml`, Jenkins `Jenkinsfile`, Tekton CRDs — though older Jenkins setups with UI-clicked freestyle jobs are an anti-pattern to migrate away from.
 
 **Q9: How do you scale self-hosted runners with demand?**
+**Short:** Autoscaling ephemeral runners on Kubernetes, such as GitHub's Actions Runner Controller, provisions runner Pods by queue depth and tears them down after each job.
 Autoscale ephemeral runners on a Kubernetes cluster: GitHub's Actions Runner Controller (ARC) provisions runner Pods based on queue depth and tears them down after each job; GitLab's Kubernetes executor and Jenkins' Kubernetes plugin do the equivalent. This gives clean isolation, elastic capacity for spikes, and no payment for idle runners — versus a fixed pool that's either over- or under-provisioned.
 
 **Q10: GitLab CI `needs:` vs stages — what's the difference?**
+**Short:** Stages enforce sequential ordering across a whole phase, while `needs:` builds a DAG so a job starts as soon as its specific dependencies finish, enabling more parallelism.
 Stages enforce sequential ordering (all `test` jobs finish before any `build` job starts). `needs:` creates a directed acyclic graph: a job starts as soon as its specific dependencies complete, regardless of stage, enabling more parallelism and faster pipelines. For example, a `deploy-docs` job needing only `build-docs` can run while unrelated test jobs are still going, rather than waiting for the whole `test` stage.
 
 **Q11: In GitHub Actions, what's the actual difference between a reusable workflow and a composite action?**
+**Short:** A reusable workflow runs as its own separate job on its own runner, while a composite action runs as a single step inside an existing job, sharing its filesystem.
 A reusable workflow is called with `uses:` at the job level and runs as its own separate job on its own runner. A composite action is called with `uses:` as a single step inside an existing job, so it runs in that job's runner and shares its filesystem and environment with the surrounding steps. Reusable workflows can contain multiple jobs of their own and support `secrets: inherit` to pass the caller's secrets through, which makes them the right tool for packaging an entire job like "build, scan, and push"; composite actions are the right tool for bundling a handful of steps into an existing job without spinning up a separate runner. The two nest — a reusable workflow's job can call composite actions as steps within it.
 
 **Q12: Beyond scheduling order, what else does GitLab CI's `needs:` control?**
+**Short:** `needs:` also restricts artifact downloads to only the listed upstream jobs instead of every job in earlier stages, keeping the deploy filesystem free of unrelated artifacts.
 It also controls artifact propagation, not just execution order. By default a GitLab job downloads artifacts from every job in all earlier stages; once a job defines `needs:`, it downloads artifacts only from the specific jobs listed in that array, ignoring everything else from earlier stages. This matters at scale — a `deploy` job that only needs `build` won't accidentally pull artifacts from unrelated `lint` or `docs` jobs it never depended on, which keeps the deploy environment's filesystem smaller and avoids stale or irrelevant files leaking into it. You can also fine-tune this further by pairing a `needs:` entry with `artifacts: true/false` to control exactly which upstream outputs are actually pulled.
 
 **Q13: How do you keep a Jenkins shared library from silently breaking every pipeline that uses it?**
+**Short:** Pin every consumer to an explicit library version like `@Library('org-shared@v2.3')` instead of tracking the default branch, since a floating reference lets one bad merge break every pipeline at once.
 Pin every consumer to an explicit library version instead of tracking the default branch. `@Library('org-shared') _` floats — it resolves to whatever is currently on the library repo's default branch, so a change merged there changes behavior for every Jenkinsfile using it at once, with no review step in the consuming repos; `@Library('org-shared@v2.3') _` pins to a tag or commit, so upgrades are deliberate and per-repo. Treat the shared library itself like a released dependency: code review its changes, tag releases, and test it with its own pipeline before consumers adopt a new version. Without pinning, one bad merge to the library's main branch can break dozens of pipelines simultaneously with no single obvious cause.
 
 **Q14: Why is `pull_request_target` risky for fork-PR workflows, and how does plain `pull_request` avoid the risk?**
+**Short:** `pull_request_target` runs with the base repo's secrets even for untrusted fork PRs, while plain `pull_request` runs with a read-only token and no secret access.
 `pull_request_target` runs in the context of the base repository with full access to its secrets and a write-scoped token, even though it's triggered by an untrusted fork. If that workflow checks out and executes the fork's code (a common pattern for "build the PR"), the fork's author can smuggle in a script that reads and exfiltrates those secrets — a well-known supply-chain hole. Plain `pull_request` from a fork instead runs with a read-only `GITHUB_TOKEN` and no access to repository secrets at all, so even a malicious fork's build script has nothing sensitive to steal. If a workflow genuinely needs secrets on fork PRs, keep the checkout of untrusted code and the secret-bearing steps in separate jobs, gated by required approval.
 
 **Q15: What do ephemeral runners give up in exchange for their isolation guarantees?**
+**Short:** They pay a cold-start cost on every job since a fresh Pod must pull the toolchain and re-fetch dependencies from scratch, which a remote cache can offset without giving up isolation.
 Ephemeral runners pay a cold-start cost on every single job that a persistent, warm runner doesn't. A fresh Pod or VM has to pull the toolchain image and re-fetch dependencies from scratch each time — no warm `node_modules`, no locally cached layers — which can add anywhere from several seconds to a minute or more before the job even starts, versus a persistent runner that's already primed. The fix isn't to give up ephemerality; it's to pair it with a remote cache (registry layer cache, GitHub Actions cache, S3-backed dependency cache) so a fresh runner rehydrates quickly instead of rebuilding from nothing. That combination — ephemeral isolation plus remote caching — gets you both the security property and most of the speed.
 
 **Q16: What are the four core Tekton CRDs and how do they relate to each other?**
+**Short:** `Task` and `Pipeline` are reusable CRD definitions checked into Git, while `TaskRun` and `PipelineRun` are the ephemeral execution objects the controller creates for each run.
 `Task` defines a reusable unit of work (like a function), and a `TaskRun` is one execution of a Task with concrete inputs. `Pipeline` defines a DAG that references Tasks by name (with `runAfter` for ordering), and a `PipelineRun` is one execution of that Pipeline, which the controller expands into a `TaskRun` — and ultimately a Pod — for every Task in the graph. This mirrors a class/instance split: `Task`/`Pipeline` are the reusable definitions checked into Git, while `TaskRun`/`PipelineRun` are the ephemeral objects the cluster creates and garbage-collects for each execution. Because it's all CRDs, `kubectl get pipelinerun` shows pipeline execution state exactly the way `kubectl get deployment` shows an app's.
 
 ---

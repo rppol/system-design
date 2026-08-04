@@ -290,51 +290,67 @@ image: registry.example.com/prod/app@sha256:abc123...   # exact, traceable, sign
 ## 12. Interview Questions with Answers
 
 **Q1: Why promote by digest instead of tag?**
+**Short:** A digest is immutable and content-addressed, while a tag can be repointed at different bytes at any time, so only digest-based promotion guarantees reproducibility.
 Tags are mutable — `app:1.4` or `app:latest` can be re-pushed to point at different bytes, so you can't guarantee what's running or reproduce a build. A digest (`sha256:...`) is content-addressed and immutable: it always refers to exactly the same bytes. Promoting and deploying by digest gives traceability ("this exact digest is in prod"), reproducibility, and a stable target to sign and verify.
 
 **Q2: What does "build once, promote the artifact" require from the registry?**
+**Short:** The registry must store the artifact immutably by digest and let it move across environments without rebuilding, so every stage runs the exact same tested bytes.
 The registry must store the immutable artifact (by digest) and allow you to move/copy or label it across environments without rebuilding — via repo-per-stage copies, property/label promotion (Artifactory), or replication. The deploy for each environment references the same digest. This ensures prod runs exactly what was tested and scanned, eliminating "rebuilt a different binary for prod" bugs.
 
 **Q3: Why use a pull-through cache / proxy repository?**
+**Short:** It caches public-registry artifacts locally, giving resilience to outages and rate limits, faster pulls, and a control point to scan what enters the environment.
 It caches artifacts from public registries (Docker Hub, npm, Maven Central) locally, so builds don't depend on the public internet for every pull. Benefits: resilience to public-registry outages and removals (yanked packages), immunity to anonymous rate limits (Docker Hub throttles unauthenticated pulls, breaking busy CI), faster pulls, and a control point for scanning/allow-listing what enters your environment.
 
 **Q4: How do you stop a registry's storage from growing forever?**
+**Short:** Retention and lifecycle policies expire untagged images and keep only the last N tagged releases per repo, exempting signed prod artifacts needed for rollback.
 Apply retention/lifecycle policies: expire untagged images after N days (CI churn), keep only the last N tagged releases per repo, and exempt signed/prod artifacts needed for rollback and audit. Without this, every CI push accumulates, ballooning storage cost. Cloud registries (ECR lifecycle policies) and Artifactory/Nexus all support rule-based cleanup.
 
 **Q5: Why is the registry a supply-chain security concern?**
+**Short:** It decides what can run in production, so unverified images, mutable tags, weak access control, and missing provenance all become paths for an attacker.
 It decides "what can run in production." Risks: pulling unverified public images (malware/typosquats), mutable tags swapped to malicious content, weak access control letting attackers push images, and missing provenance. Defenses: scan on push (Trivy), sign images and attach SBOMs (cosign/syft), enforce tag immutability, RBAC on push/pull, and cluster admission that only runs signed, scan-clean digests from your registry.
 
 **Q6: Artifactory/Nexus vs a cloud container registry — when each?**
+**Short:** Artifactory/Nexus handle many package types with promotion and replication for polyglot orgs, while cloud registries like ECR are simpler and IAM-integrated for single-cloud image use.
 Universal managers (Artifactory/Nexus) handle many package types (Docker, npm, Maven, PyPI, Helm, generic) with promotion, replication, and proxying — ideal for polyglot orgs wanting one system of record. Cloud container registries (ECR/GAR/ACR) are simpler, IAM-integrated, and managed, ideal when you mostly need OCI images in one cloud. Many orgs use cloud registries for images plus an artifact manager for language packages.
 
 **Q7: How does artifact management enable reliable rollback?**
+**Short:** Every release is an immutable, retained, digest-identified artifact, so rollback is just deploying the previous digest, guaranteed to be the exact bytes that worked.
 Because every release is an immutable, retained, digest-identified artifact, rolling back is "deploy the previous digest" — which is guaranteed to be the exact bytes that previously worked. This requires retention policies that keep enough prior releases and not deleting prod artifacts. Mutable tags or aggressive cleanup that removes old releases break rollback.
 
 **Q8: What is tag immutability and why enable it?**
+**Short:** Tag immutability rejects re-pushing an existing tag, preventing silent changes to what a running tag points at and making signing and reproducibility trustworthy.
 Tag immutability rejects re-pushing an existing tag, so once `app:1.4.0` exists it can never be changed to point at different content. This prevents silent prod changes (a re-pushed `latest` altering what runs on the next pull), supports reproducibility, and is a prerequisite for trustworthy signing. Cloud registries (ECR `IMMUTABLE`) and Harbor support it.
 
 **Q9: How do SBOMs and signing fit into the registry workflow?**
+**Short:** CI generates an SBOM and signs the image as an attestation on push, so cluster admission can verify both signature and SBOM contents before letting it run.
 On push (or promotion), CI scans the image, generates an SBOM (syft), signs the image and attaches the SBOM as a signed attestation (cosign attest). The registry stores these alongside the image. Later, cluster admission (Kyverno/Connaisseur) verifies the signature and attestation before allowing the image to run — so only artifacts with known provenance and a clean bill of materials reach production (see [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)).
 
 **Q10: What are hosted, proxy, and virtual repositories?**
+**Short:** Hosted repos store artifacts you publish, proxy repos cache external registries, and virtual repos aggregate both behind one URL for consumers.
 Hosted (local) repos store artifacts your org publishes. Proxy (remote) repos are pull-through caches of external public registries. Virtual (aggregated) repos present a single URL that resolves across multiple hosted and proxied repos, so consumers configure one endpoint and the manager decides where each artifact comes from. This structure gives one clean interface while controlling both internal and external sources.
 
 **Q11: Are digest pinning and tag immutability redundant, or do they defend different layers?**
+**Short:** Digest pinning secures the deploy reference itself, while tag immutability secures the registry's write path for anyone still pulling by tag, so both are worth running.
 They defend different layers, so both are worth running rather than picking one. Digest pinning secures the deploy reference itself — a manifest pointing at `app@sha256:abc123` runs those exact bytes no matter what happens to any tag afterward. Tag immutability (like ECR's `IMMUTABLE` setting) secures the registry's write path instead, blocking anyone from ever re-pushing an existing tag, which protects consumers who still pull by tag — a human running a manual `docker pull`, an older script, or a manifest nobody has migrated yet. Use digest pinning for automated deploys and tag immutability as the backstop for everything still tag-based.
 
 **Q12: What Docker Hub rate-limit tiers does a pull-through cache protect a CI fleet from?**
+**Short:** Docker Hub caps anonymous pulls at 100 per 6 hours per IP and free authenticated pulls at 200 per 6 hours, but a cache serves nearly all fleet pulls without touching that quota.
 Docker Hub throttles pulls by identity tier, and a pull-through cache removes your fleet from that quota entirely. Unauthenticated pulls are capped at 100 pulls per 6 hours per IPv4 address (or per IPv6 /64 subnet); an authenticated free Personal account gets 200 per 6 hours; Pro, Team and Business plans are unlimited under a fair-use policy. A pull-through cache (Artifactory, Nexus, or an ECR pull-through cache rule) sits in front of all of it — after the first fetch, every later pull across hundreds of CI runners is served from the cache instead of hitting Docker Hub again, so the fleet's actual upstream request count stays tiny regardless of how many builds run. Skip the cache and a shared office or CI IP burns through the anonymous ceiling within a few busy hours, failing builds at random with `toomanyrequests`.
 
 **Q13: How can an overly aggressive lifecycle policy delete an image that's still deployed?**
+**Short:** A retention rule keyed only on tag pattern or a flat keep-last-N count can expire a digest that a live deployment or pending rollback still depends on.
 A retention rule keyed only on tag pattern or a flat keep-last-N count can expire a digest that a live deployment or a pending rollback still depends on. For example, a rule that keeps only the last 30 `prod`-prefixed images expires the 31st-oldest the moment a new one is pushed, even if a slow-rolling region or an incident runbook still expects to roll back to it. The fix is to make retention aware of what's actually running — check live deployment references before pruning, widen the keep-count with margin for your slowest rollout, and never key expiry purely on push recency. Treat "currently deployed" as a hard exemption from any age- or count-based rule, not an afterthought.
 
 **Q14: How does cluster admission actually verify an SBOM or provenance attestation before allowing an image to run?**
+**Short:** Admission first verifies the cosign signature for tamper-proofing, then separately evaluates the attestation's SBOM or provenance content against policy.
 Admission checks two separate things, not just a signature. First it verifies the cosign signature against a trusted public key or keyless OIDC identity, confirming the artifact wasn't tampered with; then it evaluates the attached attestation's predicate — the SBOM contents or SLSA provenance metadata (builder identity, source repo, build parameters) — against policy, for example rejecting any image whose SBOM lists a package with a known-critical CVE. Tools like Kyverno's `verifyImages` or Connaisseur do both steps inline at deploy time, so an image can be validly signed yet still blocked if its attestation fails the content check. This two-layer check is what turns "signed" into "signed and trustworthy to run."
 
 **Q15: Why and how would you replicate a container registry across multiple regions?**
+**Short:** Replication copies the same digest byte-for-byte into a second region's registry, cutting pull latency and surviving a primary-region outage.
 Multi-region replication copies pushed images into a registry in a second region so distributed clusters pull from a nearby copy instead of crossing regions on every deploy. It cuts pull latency and cross-region data-transfer cost, and it keeps deploys working if one region's registry has an outage. Tools like Artifactory, Harbor, and ECR support asynchronous replication that copies the same digest byte-for-byte, so the copy is still the exact artifact that was scanned and signed — replication is copying, not rebuilding. The gotcha is replication lag: a deploy in the secondary region can reference a digest that hasn't finished replicating yet, so pipelines should gate on replication completion or fall back to pulling from the primary region.
 
 **Q16: Why doesn't deleting a tag immediately free up registry storage?**
+**Short:** Deleting a tag only removes the manifest pointer, not the shared, content-addressed layer blobs, which are freed only by a separate mark-and-sweep garbage-collection pass.
 Deleting a tag only removes the pointer to a manifest, not the underlying image layer blobs, which stay until a separate garbage-collection pass runs. Because layers are content-addressed and shared across many images (a base-image layer might back hundreds of tags), the registry can't safely delete a blob just because one manifest pointing to it was untagged — another tagged image elsewhere might still reference that same blob. Registries like Harbor and the OSS Docker Registry solve this with mark-and-sweep GC: a first pass marks every blob still reachable from a tagged manifest, and a sweep pass deletes everything left unmarked, which is why GC typically runs as a separate scheduled job rather than inline with every delete. Skipping GC is why pruning old tags alone doesn't reclaim the storage it appears to — you have to run the collector too.
 
 ---

@@ -367,51 +367,67 @@ deploy-prod:    {needs: deploy-staging, steps: [{run: deploy prod registry/app:$
 ## 12. Interview Questions with Answers
 
 **Q1: Define CI, Continuous Delivery, and Continuous Deployment.**
+**Short:** CI builds and tests every commit; Continuous Delivery makes every passing change deployable on human demand; Continuous Deployment auto-releases with no human gate.
 CI automatically builds and tests every commit and integrates changes frequently, catching breakage early. Continuous Delivery extends this so every passing change is *deployable* to production on demand — a human presses the button. Continuous Deployment removes that human gate: every change passing the pipeline is *automatically* released to production. The progression is about how far automation extends and whether a human approves the prod release.
 
 **Q2: Why "build once, promote the same artifact"?**
+**Short:** Rebuilding per environment risks prod running different bytes than what staging tested, so the same immutable, versioned artifact should be promoted through every environment unchanged.
 Because rebuilding per environment means prod runs a different binary than the one tested in staging, reintroducing the "works in staging, breaks in prod" class of bugs. You build the artifact once, version it (by commit SHA/digest), and deploy that exact immutable artifact through environments, injecting differences as *configuration at deploy time*. What you tested is precisely what ships.
 
 **Q3: What makes a pipeline fast, and why does speed matter?**
+**Short:** Caching, parallelism, running only affected tests, and ordering cheap checks first keep pipelines fast, because slow pipelines erode trust and push developers to skip checks.
 Caching (reuse dependencies and build layers), parallelism (run independent jobs concurrently so wall-clock = slowest job, not the sum), running only affected tests, and ordering fast cheap checks first. Speed matters because slow pipelines erode trust: developers batch changes, skip checks, and lose the tight feedback loop that makes small, safe, frequent deploys possible — the behavior that correlates with high-performing teams.
 
 **Q4: What are ephemeral runners and why prefer them?**
+**Short:** Ephemeral runners are fresh, isolated environments created per job and destroyed after, guaranteeing reproducibility and preventing cross-job contamination or secret leakage.
 Ephemeral runners are fresh, isolated execution environments (container/VM) created per job and destroyed after. They guarantee reproducibility (no leftover state from a previous build), prevent cross-job contamination and secret leakage, and scale horizontally. Persistent/static runners risk "works because of leftover state" bugs and are a security/cleanliness liability — used only for special hardware needs.
 
 **Q5: How should secrets be handled in CI/CD?**
+**Short:** Secrets belong in the platform's encrypted store, masked and scoped narrowly, with OIDC federation preferred so runners exchange a short-lived token instead of holding long-lived cloud keys.
 Store them in the platform's encrypted secret store (never in the repo or logs), mask them in output, and scope them to the minimum jobs. Best practice for cloud access is OIDC federation: the runner exchanges a short-lived identity token for a cloud role, so no long-lived cloud keys live in CI at all — eliminating the most commonly leaked secret. Rotate any secret that must be static.
 
 **Q6: What is "shift left" and give examples?**
+**Short:** Shift left means running checks like linting, unit tests, SAST, and dependency scanning as early and cheaply as possible, since fixing at PR time is far cheaper than in production.
 Shift left means running checks as early (and cheaply) as possible in the lifecycle. Examples: linting and unit tests on every commit/PR, SAST and dependency scanning in CI before merge, and infrastructure policy checks before apply. Catching a bug or vulnerability at PR time is far cheaper than in production, and early fast checks give developers immediate feedback.
 
 **Q7: How do flaky tests damage a pipeline, and how do you handle them?**
+**Short:** Flaky tests train developers to reflexively re-run instead of investigating, masking real failures, so they should be quarantined out of gating and fixed at the root cause.
 Flaky tests (random pass/fail) train developers to reflexively re-run, which masks genuine failures and lets real bugs through, destroying trust in the suite. Handle them by quarantining flaky tests out of the gating path, fixing the root cause (timing, shared mutable state, real network/sleep), and tracking flakiness as a defect with metrics — not by adding retries that hide the problem.
 
 **Q8: What's the difference between Continuous Delivery and Continuous Deployment, and when choose each?**
+**Short:** Continuous Delivery keeps a human approval gate before production, while Continuous Deployment auto-ships every passing change; choose Delivery when confidence or compliance requires sign-off.
 Both fully automate up to production-readiness; the difference is the final gate. Continuous Delivery keeps a human approval before prod (appropriate when test confidence/observability isn't yet sufficient, or compliance requires sign-off). Continuous Deployment auto-ships every passing change (appropriate when you have strong automated tests, progressive delivery, and fast rollback). Many teams start with Delivery and graduate to Deployment as confidence grows.
 
 **Q9: How do you keep CI fast in a large monorepo?**
+**Short:** Affected-target detection tools like Bazel, Nx, or Turborepo build and test only what a commit touches, combined with remote build caching, so CI time tracks the change, not the repo.
 Use affected-target detection (Bazel, Nx, Turborepo) to build and test only the projects a commit actually touches, rather than the whole repo. Combine with remote build caching (reuse outputs across runs/developers) and parallelism. Without this, monorepo CI time grows with the repo, not the change — the classic monorepo scaling failure.
 
 **Q10: What artifact should move through the pipeline, and how is it identified?**
+**Short:** An immutable, versioned artifact identified by digest or commit SHA, not a mutable tag like `latest`, giving traceability, reproducibility, and a stable target to sign and scan.
 An immutable, versioned artifact — typically a container image — built once and identified by content (the image digest) or commit SHA, not a mutable tag like `latest`. This gives full traceability (which commit is in prod), reproducibility (the digest is exact bits), and supply-chain integrity (you can sign/scan that specific artifact and gate on it — see [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)).
 
 **Q11: What are the DORA metrics and how do they relate to CI/CD?**
+**Short:** DORA's five metrics are change lead time, deployment frequency, failed deployment recovery time, change fail rate, and deployment rework rate, all improved by a fast automated pipeline.
 DORA measures software delivery performance with five metrics: change lead time, deployment frequency, failed deployment recovery time, change fail rate, and deployment rework rate. High performers score well across all of them, and a fast, reliable, automated CI/CD pipeline is the primary enabler: it shortens change lead time, raises deployment frequency, and (with good tests + fast rollback) lowers change fail rate, rework, and recovery time. They're the standard way to measure delivery performance.
 
 **Q12: How does CI/CD relate to GitOps?**
+**Short:** CI builds, tests, and verifies the artifact, while CD deploys it either by the pipeline pushing directly or by an in-cluster agent reconciling from a Git-declared state.
 CI produces and verifies the artifact (build, test, scan, push image). CD can be push-based (the pipeline runs `kubectl apply`) or pull-based GitOps (CI updates a manifests repo, and an in-cluster agent like ArgoCD reconciles). GitOps separates "build/verify" (CI) from "deploy" (Git-driven reconciliation), giving auditability and drift detection (see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md)). CI/CD fundamentals underpin both models.
 
 **Q13: Should a pull request pipeline run the full end-to-end test suite before merge?**
+**Short:** Usually not — PR pipelines should run fast unit and contract tests under about 10 minutes, saving slower full end-to-end coverage for the deployed staging environment.
 Usually not — PRs should run fast unit and contract tests to keep feedback under about 10 minutes, saving full end-to-end coverage for the later staging stage. Full e2e and integration suites are slower and more expensive, so they run against the deployed staging environment rather than gating every commit. The tradeoffs table frames this exact choice as full e2e (safe, slow) versus unit+contract (fast) — you're trading feedback speed for coverage at the PR stage. Running everything on every PR is what turns a fast pipeline into the 40-minute pipeline that Pitfall 3 warns gets bypassed. Reserve full e2e for the staging/pre-prod gate and keep the PR gate limited to fast, deterministic checks.
 
 **Q14: How should build caches be keyed, and what breaks if you get it wrong?**
+**Short:** Caches should be keyed by hashing the lockfile or Dockerfile so they invalidate only on real input changes; too loose reuses a stale install, too tight loses the speedup entirely.
 Cache dependency directories and build layers by hashing the lockfile or Dockerfile, so the cache invalidates only when those inputs actually change. This is the mechanism behind the module's roughly 8x cache speedup — a 6.5-minute run collapsing to about 50 seconds — where `cache-from`/`cache-to` keyed on `type=gha` reuses layers whenever the Dockerfile and its context are unchanged. Key the cache too loosely (say, ignoring the lockfile) and a dependency bump silently reuses a stale cached install, exactly the drift "build once, promote the same artifact" is meant to prevent. Key it too tightly and you lose the speedup entirely because every run counts as a cache miss. Hash the actual inputs that determine build output so cache correctness and cache speed move together instead of trading off.
 
 **Q15: When would you choose self-hosted runners over a managed CI runner fleet?**
+**Short:** Self-hosted runners suit special hardware like GPUs or ARM or tighter cost control, while managed runners trade that control for zero infrastructure upkeep billed per minute.
 Choose self-hosted runners for special hardware (GPUs, ARM) or tighter cost/environment control; managed runners trade that control for zero infrastructure upkeep billed per minute. The runner-models table frames ephemeral container/VM-per-job as the reproducible standard regardless of who hosts it, static self-hosted runners as existing mainly for special hardware needs, and managed cloud runners (GitHub/GitLab) as removing infrastructure ownership entirely. Self-hosted runners should still be ephemeral — spin up a fresh container per job on your own hardware rather than reusing one long-lived box. At high build volume, self-hosted can undercut per-minute managed pricing, but you take on patching, scaling, and runner security yourself. Default to managed runners unless a concrete hardware or cost driver forces you to operate your own fleet.
 
 **Q16: In a multi-service repo, would you run one big pipeline or a separate pipeline per service?**
+**Short:** Tightly coupled services in a monorepo often share one pipeline, while independently deployable services are better served by per-service pipelines that isolate blast radius.
 It depends on coupling: tightly coupled services in a monorepo often share one pipeline, while independently deployable services are better served by per-service pipelines. The tradeoffs table lists this exactly as mono- versus multi-pipeline, with the deciding factor being coupling and repo layout rather than a universal rule. A single pipeline is simpler to reason about but means one team's unrelated change can block or slow another team's deploy if the whole repo builds together. Per-service pipelines isolate blast radius and let each service deploy independently, pairing naturally with the monorepo affected-target tooling (Bazel/Nx/Turborepo) that only builds what a commit actually touches. Pick per-service pipelines once services deploy independently in production, and keep one pipeline only while the codebase truly ships as a single unit.
 
 ---

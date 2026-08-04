@@ -318,51 +318,67 @@ USER 10001
 ## 12. Interview Questions with Answers
 
 **Q1: What is a container image, structurally?**
+**Short:** A container image is an ordered stack of read-only, content-addressed layers plus a JSON config, unioned at runtime with a thin writable layer added on top.
 It's an ordered stack of read-only filesystem layers (each a content-addressed tarball of changes) plus a JSON config holding the entrypoint, env, and metadata. At runtime the engine unions the layers (overlayfs) and adds a thin writable layer for the running container. Layers are shared and cached across images, so pulling a new image only downloads layers you don't already have.
 
 **Q2: How does the build cache work and how do you exploit it?**
+**Short:** Each Dockerfile instruction caches a layer keyed on itself and its inputs, so ordering from least- to most-frequently-changing lets a code edit rebuild only the cheap final layers.
 Each Dockerfile instruction produces a layer cached by the instruction plus the state of its inputs (e.g., the files a `COPY` references). If an early layer's inputs change, all subsequent layers are rebuilt. You exploit this by ordering instructions from least- to most-frequently-changing: base image and dependency installs early, source code copy and build late — so a code edit rebuilds only the cheap final layers.
 
 **Q3: What does a multi-stage build buy you?**
+**Short:** A multi-stage build compiles in a fat builder stage then copies only the final artifact into a minimal runtime image, so the toolchain and source never ship.
 It separates the build environment from the runtime environment. You compile in a fat "builder" stage with the full toolchain, then `COPY --from=builder` only the final artifact into a minimal runtime image. The toolchain, source code, and intermediate files never ship — yielding a much smaller, more secure final image (e.g., a 900 MB builder producing an 80 MB runtime).
 
 **Q4: Why is running as root in a container dangerous, and how do you avoid it?**
+**Short:** Root in the container is root in its namespaces, so combined with a kernel escape or host mount it escalates the blast radius, avoided with a non-root user.
 Root in the container is root in its namespaces; combined with a kernel container-escape vulnerability or a host mount, it escalates the blast radius of any compromise. Avoid it by creating a non-root user (`USER 10001`) in the image and enforcing `runAsNonRoot: true` plus `readOnlyRootFilesystem: true` in the Kubernetes `securityContext`.
 
 **Q5: Tag vs digest — why pin by digest?**
+**Short:** A tag is a mutable pointer that can be re-pushed to different content, while a digest is immutable and content-verified, guaranteeing exactly the bits you tested.
 A tag (`node:24`) is a mutable pointer — the same tag can be re-pushed to point at different content, so builds aren't reproducible and a supply-chain attacker could swap it. A digest (`node:24@sha256:...`) is immutable and content-verified, guaranteeing you get exactly the bits you tested. Pin by digest for reproducible builds and supply-chain integrity.
 
 **Q6: Alpine vs Debian-slim — what's the catch with Alpine?**
+**Short:** Alpine's tiny size comes from musl libc instead of glibc, causing DNS quirks and glibc-wheel recompilation, which is why many teams choose Debian-slim for reliability instead.
 Alpine is tiny (~5 MB) but uses musl libc instead of glibc. This causes real problems: different DNS resolution behavior, Python packages that ship glibc wheels needing recompilation (slower builds), and occasional subtle runtime bugs. Debian-slim is larger but glibc-compatible and avoids these surprises — many teams choose slim for reliability over Alpine's size.
 
 **Q7: How do you keep build secrets out of the final image?**
+**Short:** Never put secrets in `ARG` or `ENV` since they persist in image layers; use BuildKit's `--mount=type=secret`, which exposes the secret only during one `RUN` and never writes it to a layer.
 Never use `ARG` or `ENV` for secrets — they persist in image history/layers. Use BuildKit's `--mount=type=secret`, which exposes the secret only during a specific `RUN` and never writes it to a layer. For the image itself, inject runtime secrets via the orchestrator (env from a Secret, mounted file), not baked in.
 
 **Q8: Why is `.dockerignore` important?**
+**Short:** Without a `.dockerignore`, the build context defaults to the whole directory, so `COPY . .` ships `node_modules`, `.git`, and secrets into the image.
 The build "context" (everything sent to the daemon for `COPY`) defaults to the whole directory. Without `.dockerignore`, `COPY . .` ships `node_modules`, `.git`, `.env`, and logs into the image — bloating size, slowing builds, and leaking secrets/history. `.dockerignore` excludes them, keeping the context and image lean and safe.
 
 **Q9: What is distroless and what's the tradeoff?**
+**Short:** Distroless images contain only the app and its runtime dependencies with no shell or package manager, minimizing attack surface at the cost of `kubectl exec` shell access.
 Distroless images contain only your app and its runtime dependencies — no shell, no package manager, no busybox. This minimizes attack surface and CVE count dramatically. The tradeoff is debuggability: you can't `kubectl exec … sh` into them, so you debug via ephemeral debug containers, host-side `nsenter`, or by reproducing locally.
 
 **Q10: How do multi-arch images work and why care?**
+**Short:** A multi-arch image is a manifest list mapping each platform to a platform-specific image, so one tag serves Apple Silicon dev machines, x86 CI, and ARM Graviton prod nodes alike.
 A multi-arch image is a manifest list mapping each platform (`linux/amd64`, `linux/arm64`) to a platform-specific image; the runtime pulls the one matching its CPU. `docker buildx build --platform ...` builds them in one command. It matters because devs run Apple Silicon (arm64), CI may be x86, and prod may use ARM nodes (AWS Graviton) — one tag serves all.
 
 **Q11: What's the difference between an image and a container?**
+**Short:** An image is the immutable, layered build artifact, while a container is a running or stopped instance of that image with its own writable layer and namespaces.
 An image is the immutable, layered template (build artifact); a container is a running (or stopped) instance of an image — the read-only layers plus a writable scratch layer and a process with its own namespaces/cgroups. Many containers can run from one image; deleting a container doesn't affect the image.
 
 **Q12: How do you reduce a 1.2 GB image to under 100 MB?**
+**Short:** A multi-stage build dropping the toolchain, a minimal runtime base, cache-ordered layers, a `.dockerignore`, and combined `RUN` steps together shrink a 1.2 GB image under 100 MB.
 Use a multi-stage build (drop the toolchain and source), choose a minimal runtime base (distroless/slim/scratch), order layers for caching, add a `.dockerignore`, combine and clean `RUN` steps (remove apt caches in the same layer), and avoid installing unnecessary packages. The biggest win is usually multi-stage + a minimal base.
 
 **Q13: Why might a container ignore `docker stop` and hang until it's force-killed?**
+**Short:** Shell-form `CMD` makes `/bin/sh` PID 1 instead of the app, so it never forwards SIGTERM, while exec-form runs the process directly as PID 1 so it receives and can handle the signal.
 Shell-form `CMD`/`ENTRYPOINT` makes `/bin/sh` PID 1 instead of your app, so it never forwards the SIGTERM that `docker stop` sends. Exec-form (`CMD ["node", "server.js"]`) runs your process directly as PID 1 so it receives signals itself and can shut down cleanly. Kubernetes sends SIGTERM then waits `terminationGracePeriodSeconds` (30s by default) before SIGKILL, so a process that never sees SIGTERM always takes the hard, ungraceful path out. Always use exec-form `CMD`/`ENTRYPOINT` (per this module's Best Practices) and handle SIGTERM in your application code.
 
 **Q14: Why do CI pipelines prefer rootless, daemonless builders over Docker-in-Docker (DinD)?**
+**Short:** DinD needs a privileged container with daemon-socket access that a compromised build step can use to escape to the host, while rootless BuildKit or Buildah build images entirely in userspace.
 Docker-in-Docker needs a privileged container with access to a Docker daemon socket, which is a serious CI security risk. A compromised build step — say, a malicious `npm ci` postinstall script — can use that socket or `--privileged` access to escape to the host, since privileged mode disables most container isolation. Rootless BuildKit (`buildkitd` running as an unprivileged user, driven by `docker buildx` or `buildctl`) and Buildah build OCI images from a Dockerfile entirely in userspace without a daemon or elevated privileges, so a compromised build stays contained (Podman offers the same daemonless model outside CI). Prefer a rootless builder over DinD for any pipeline that builds untrusted or dependency-heavy code.
 
 **Q15: How does a BuildKit cache mount differ from the normal image layer cache?**
+**Short:** A cache mount persists a directory like `/root/.npm` across builds outside any image layer, so it survives layer-cache invalidation and lets package managers reuse downloaded packages.
 A cache mount persists a directory like `/root/.npm` across builds without ever becoming part of an image layer. The normal layer cache is invalidated the instant `COPY . .`'s input changes, forcing `RUN npm ci` to reinstall from scratch on every code edit; a cache mount survives that invalidation because it lives outside the layer entirely, so npm/pip/apt still reuse already-downloaded packages. This is why `RUN --mount=type=cache,target=/root/.npm npm ci` in the case study's fixed Dockerfile cut code-only rebuilds from a 6-minute cold build down to about 40 seconds. Add a cache mount for your package manager's cache directory whenever dependency installs rerun needlessly on code-only changes.
 
 **Q16: How do you find out which layer is actually bloating a large image?**
+**Short:** `docker history` lists each layer's size and creating instruction, while `dive` interactively surfaces wasted space like a file added then deleted in a later layer that still costs space.
 Run `docker history` to list each layer's size and the instruction that created it, or `dive` for an interactive explorer that also flags wasted space. `dive myimg:latest` surfaces cases the size number alone hides, like a file added in one layer and deleted in a later one — it still costs space permanently because layers are immutable and additive. This turns "why is my image 1.2 GB" from guesswork into a targeted fix: reorder an instruction, add a `.dockerignore` entry, or move a step into the discarded stage of a multi-stage build. Run `dive` before optimizing an image so you fix the layer that's actually heavy instead of guessing.
 
 ---

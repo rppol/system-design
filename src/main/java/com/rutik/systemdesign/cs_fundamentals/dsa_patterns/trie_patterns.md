@@ -681,6 +681,7 @@ a silently short one.
 
 **Q: Why is a trie faster than a hashmap for prefix queries, given that hashmap
 lookups are O(1)?**
+**Short:** A hashmap only optimizes exact-match O(1) lookups; a trie answers "does any word start with X?" in O(L) regardless of dictionary size.
 A hashmap gives O(1) for **exact-match** lookups, but "does any key start
 with 'app'?" requires either iterating all keys (O(n·L)) or maintaining a
 separate prefix index. A trie answers "does any word start with 'app'?" in
@@ -690,6 +691,7 @@ applies to the exact query it was built for; prefix queries are not what
 hashing optimizes for.
 
 **Q: When is a trie actually worse than a hashmap (memory-wise)?**
+**Short:** When words share few or no prefixes (e.g., random UUIDs), a trie's per-character node overhead loses to a hashset storing each string once.
 When words share **few or no prefixes** — e.g., a dictionary of random UUIDs.
 Each `TrieNode` carries the overhead of a `dict` (or array) of children plus
 a boolean flag, multiplied across every character of every word with no
@@ -699,6 +701,7 @@ dictionaries, URLs, IP routing tables).
 
 **Q: In Word Search II, why build ONE trie from all dictionary words instead of
 running a separate grid-search for each word?**
+**Short:** One shared trie lets a single DFS pass per starting cell prune every word that doesn't share the current prefix, instead of re-searching per word.
 Running a separate DFS per word costs `O(words · rows·cols·4^L)` — the grid
 is re-explored from scratch for every word. With a single shared trie, **one**
 DFS pass per starting cell explores all words simultaneously: at each step,
@@ -708,6 +711,7 @@ share this prefix*, all at once. Shared prefixes across words (e.g., "oa" and
 
 **Q: Walk through the BROKEN -> FIX in §8 — why does the bug cause MISSED words
 rather than just extra time/space?**
+**Short:** The `#` marker must be scoped to the current call stack; leaving it unrestored makes valid letters look like walls to every later outer-loop DFS.
 `board[r][c] = "#"` is used as the "currently on this DFS path" marker — it
 must be **scoped to the current call stack**, not permanent. If it's never
 restored, cells visited by the *first* DFS call (from the first
@@ -719,6 +723,7 @@ one.
 
 **Q: How does pruning (`nxt.is_end = False` after a match) prevent duplicate
 results, and could the same word be found twice without it?**
+**Short:** Clearing `is_end` right after the first match makes a second path reaching the same node see it as already reported, avoiding a duplicate.
 If a word like "oa" can be spelled via two different paths in the grid (e.g.,
 two different 'o' cells both adjacent to an 'a'), both DFS branches would
 reach the same trie node with `is_end=True` and append `"oa"` to the result
@@ -730,6 +735,7 @@ searches — useful when `find_words` might be called repeatedly.)
 
 **Q: How does the wildcard `.` search in Template 2 avoid being O(26^L) for
 every query?**
+**Short:** All-wildcard queries are genuinely O(26^L) worst case, but real dictionaries dead-end most branches quickly, keeping typical runtime far below that.
 Worst case (all wildcards, e.g., `"......"`), it genuinely is exponential —
 `O(26^L)` — because every position branches into all 26 children. In
 practice, most branches dead-end quickly (`ch not in node.children` for most
@@ -739,6 +745,7 @@ depth is bounded by `O(L)` regardless.
 
 **Q: For Maximum XOR of Two Numbers, what does each "level" of the binary trie
 represent, and why insert most-significant-bit first?**
+**Short:** Each trie level is one bit position, and inserting most-significant-bit first ensures a greedy high-bit choice can never be undone by lower bits.
 Each level corresponds to one **bit position**, from most significant to
 least significant. Inserting MSB-first means two numbers that differ in a
 high bit diverge near the *root* of the trie — and high bits contribute more
@@ -750,6 +757,7 @@ can never be "undone" by a better choice at a lower bit, since
 
 **Q: `children: dict[str, TrieNode]` vs. `children: list[Optional[TrieNode]]` of
 size 26 — what's the tradeoff?**
+**Short:** A dict allocates only present characters, favoring sparse alphabets, while a fixed 26-slot array gives guaranteed O(1) access at the cost of unused slots.
 A `dict` only allocates entries for characters actually present — better for
 sparse alphabets (Unicode, mixed case) or when most nodes have few children.
 A fixed-size array (`[None] * 26`) gives O(1) *guaranteed* (no hashing) access
@@ -760,6 +768,7 @@ common in interview-style Python code.
 
 **Q: Why do we need an explicit `is_end` flag — can't we just check
 `len(node.children) == 0` to mean "this is a complete word"?**
+**Short:** A word like "car" can be a prefix of "card", so a non-empty children dict doesn't mean incomplete — only an explicit `is_end` flag marks a true end.
 No — `"car"` and `"card"` are both valid words in the same trie, where `"car"`
 is a **prefix** of `"card"`. The node for `"car"`'s last `'r'` has a child
 (`'d'`, leading to `"card"`), so `len(children) != 0`, yet `"car"` is itself a
@@ -768,6 +777,7 @@ even though the trie continues beyond this point."
 
 **Q: How would Replace Words be solved WITHOUT a trie, and why is the trie
 approach better?**
+**Short:** Without a trie, checking all O(L) prefixes against a hashset costs O(L^2) per word; a trie replaces that with a single O(L) character walk.
 Without a trie: for each word in the sentence, generate all its prefixes
 (`O(L)` prefixes) and check each against a hashset of roots, taking the
 shortest match — `O(L)` hashset lookups per word, each lookup itself `O(L)`
@@ -776,6 +786,7 @@ word character-by-character once (`O(L)`), stopping at the first `is_end`
 node — a single O(L) walk replaces O(L) separate hash lookups.
 
 **Q: How would you delete a word from a trie?**
+**Short:** Clear `is_end` at the word's last node, then recursively remove childless, non-end nodes up the chain to reclaim memory from dead branches.
 Walk to the node representing the word's last character and set
 `is_end = False`. If that node now has **no children** AND `is_end == False`,
 it's "dead weight" — recursively remove it from its parent's `children` dict,

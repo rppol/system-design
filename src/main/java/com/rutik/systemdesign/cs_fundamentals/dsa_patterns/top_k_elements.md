@@ -500,6 +500,7 @@ to a heap of size k unless one of the four narrower shapes above fits better.
 ## 11. Interview Q&A
 
 **Q: Why does finding the "k largest" elements use a MIN-heap — isn't that backwards?**
+**Short:** A min-heap keeps the current top-k's weakest member at the root in O(1), so a new candidate needs one comparison to decide eviction.
 The heap doesn't represent "the answer" directly; it represents your *current
 best guess* at the top-k, and its root is the **weakest member of that
 guess** — the element most likely to be displaced by a better candidate. A
@@ -509,6 +510,7 @@ Using a max-heap would put the *strongest* member at the root, which tells
 you nothing about whether a new element should be added.
 
 **Q: How does the heap-of-size-k approach compare to sorting and to quickselect?**
+**Short:** A heap of size k is O(n log k) and streams; full sort is O(n log n) but gives total order; quickselect averages O(n) on a static array.
 Heap: `O(n log k)` time, `O(k)` space, works on streams, gives you all k
 elements (unordered). Full sort: `O(n log n)` time, `O(n)` space (or `O(1)`
 in-place), gives total order — better when `k` is close to `n` or you need
@@ -518,6 +520,7 @@ it in place — best when you need only the k-th value (or an unordered top-k
 group) from a static array.
 
 **Q: When would an interviewer expect quickselect instead of a heap?**
+**Short:** Quickselect fits a one-shot "k-th largest" query on a static array; a heap fits streams or "return all k elements" requests.
 When the problem is explicitly "find the k-th largest element" (singular,
 LC 215) on a static array with a follow-up "can you do better than `O(n log
 n)`?" — quickselect's average `O(n)` is the textbook answer. If the problem
@@ -526,6 +529,7 @@ k-th), the heap is usually the cleaner and intended answer because quickselect
 doesn't naturally support incremental updates.
 
 **Q: Top K Frequent Words requires lexicographic tie-breaking — how do you encode that in a heap comparison?**
+**Short:** Push `(-count, word)` into a min-heap of all items, or invert word ordering for a size-k evicting heap, to sort frequency descending then word ascending.
 Decide the final iteration order first: you want the result sorted by
 (frequency descending, word ascending). If using a min-heap of size k that
 *evicts* the worst candidate, "worst" means (lowest frequency, then
@@ -537,6 +541,7 @@ invert the word ordering for ties. A common trick: push
 take the first `k` (no eviction) — simpler when `k` is close to `n` anyway.
 
 **Q: Why does the streaming `KthLargest` class need to keep the heap between calls?**
+**Short:** A persistent min-heap of size k lets each `add` run in O(log k) against all values seen so far, instead of O(n log n) per call.
 Because each `add(val)` must answer "what is the k-th largest *over all
 values seen so far*," not just over the latest batch. Recomputing from
 scratch on every call would be `O(n log n)` per call. By keeping a persistent
@@ -545,6 +550,7 @@ heap now has more than k elements, pop the smallest — the root is always the
 current k-th largest.
 
 **Q: What's the bucket-sort alternative to a heap for Top K Frequent Elements, and when is it strictly better?**
+**Short:** Bucket elements by frequency into n+1 buckets and scan from the top down, giving O(n) total — strictly better than the O(n log k) heap.
 Since element frequencies are bounded by `n` (an element can appear at most
 `n` times), allocate `n + 1` buckets indexed by frequency. Place each unique
 value into `buckets[frequency]`. Then iterate `buckets` from index `n` down
@@ -553,6 +559,7 @@ better than `O(n log k)` — and is a strong "optimize further" answer once the
 heap solution is established.
 
 **Q: K Closest Points to Origin — why a max-heap of size k instead of a min-heap of all points?**
+**Short:** A max-heap of size k evicts the farthest point in O(n log k), beating a full min-heap's O(n + k log n) when k is much smaller than n.
 A min-heap of *all* `n` points sorted by distance and popping `k` times is
 `O(n + k log n)` — fine, but it processes and heapifies all `n` points
 upfront. A max-heap of size k mirrors the "k largest" pattern but inverted:
@@ -561,6 +568,7 @@ keep the k *closest* (smallest distances) by evicting the *farthest*
 better when `k << n`.
 
 **Q: What's the space complexity tradeoff — O(k) heap vs O(n) frequency map?**
+**Short:** The frequency map needs O(u) space for unique elements regardless of approach; the heap itself only adds O(k) on top of that.
 For "top-k frequent" problems, you need `O(u)` space for the frequency map
 (`u` = number of unique elements, `u <= n`) regardless of approach — that's
 unavoidable since you must count occurrences. The heap itself only adds
@@ -569,6 +577,7 @@ unavoidable since you must count occurrences. The heap itself only adds
 memory footprint.
 
 **Q: How does the K-th Smallest in a Sorted Matrix heap approach work, and how does it compare to binary search on the answer?**
+**Short:** The heap pops k times in O(k log n); binary search on the value range counts elements <= mid per row, winning when k nears n^2.
 Seed a min-heap with the first element of each row (or just row 0's first
 `min(k, n)` elements with pointers), each tagged with its row and column.
 Pop the smallest `k` times, each time pushing that element's right neighbor
@@ -580,6 +589,7 @@ binary search or staircase walk — `O(n log(max-min))` or
 answer is usually faster since its cost doesn't scale with `k`.
 
 **Q: What happens if `k == n` or `k > n`?**
+**Short:** If `k == n` the heap degenerates to sorting the whole input, so sort directly; if `k > n`, clamp k to n per the stated constraints.
 If `k == n`, the heap-of-size-k approach degenerates to holding the entire
 input — equivalent to sorting, so `O(n log n)`; prefer sorting directly in
 that case. If `k > n` (more requested than available), most problems either
@@ -588,6 +598,7 @@ n)` and return everything — always check the constraints section for this
 edge case before coding.
 
 **Q: Python's `heapq` only provides a min-heap — how do tuple comparisons behave when the second element is a non-comparable object (e.g., a list of points)?**
+**Short:** Tied first elements make Python compare the next tuple field, which raises `TypeError` for non-comparable objects — add an explicit tiebreaker.
 Python compares tuples element-by-element, falling through to the second
 element only if the first elements are equal. If two points have the *exact
 same* `(-dist_sq)` value and the second tuple element is a `list` (as in

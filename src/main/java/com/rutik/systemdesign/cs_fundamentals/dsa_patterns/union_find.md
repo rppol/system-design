@@ -611,6 +611,7 @@ the same "are X and Y connected?" query repeats many times.*
 
 **Q: Why is Union-Find described as "near O(1)" when `find` walks up a tree —
 isn't that O(log n) or worse?**
+**Short:** Path compression combined with union by rank/size bounds each operation's amortized cost to O(alpha(n)), the essentially-constant inverse Ackermann function.
 Without any optimization, yes — a degenerate union sequence can produce an
 O(n)-deep tree. But **path compression** (every `find` call rewires nodes on
 its path directly to the root) combined with **union by rank/size** (always
@@ -621,6 +622,7 @@ universe — so "near O(1)" is not an exaggeration, it's a tight, proven bound.
 
 **Q: When would you choose DFS/BFS over Union-Find for a connectivity problem,
 and vice versa?**
+**Short:** DFS/BFS suffices for a one-time static connectivity check, while Union-Find wins when edges arrive incrementally or many connectivity queries repeat.
 If you're given the *whole* graph upfront and need to answer connectivity
 questions **once** (e.g., "how many connected components does this static
 graph have?"), DFS/BFS is simpler to write and equally efficient — O(V+E).
@@ -631,6 +633,7 @@ without re-traversing the graph each time.
 
 **Q: Walk through path compression step by step — what actually changes in the
 `parent` array?**
+**Short:** `find(x)` recurses to the root, then on the way back repoints every visited node's parent directly to that root, not just the original node.
 `find(x)` recurses up to the root, then on the way back *down* the call
 stack, sets `parent[node] = root` for every node visited. So if `3 -> 2 -> 0`
 (0 is root), after `find(3)`: `parent[3] = 0` AND `parent[2] = 0` (both
@@ -638,6 +641,7 @@ nodes visited during the call get repointed directly to the root) — not just
 the node you originally called `find` on.
 
 **Q: Union by rank vs. union by size — does the choice matter?**
+**Short:** Both give the same O(alpha(n)) bound with path compression; rank tracks height while size tracks element count, handy for size queries.
 Both achieve the same asymptotic bound (O(α(n)) with path compression). Rank
 tracks an *upper bound on tree height*; size tracks the *number of elements*
 in the tree. Size is sometimes more directly useful (e.g., "what's the size
@@ -646,6 +650,7 @@ is fine — pick whichever the problem's follow-up questions make more
 convenient.
 
 **Q: Why initialize `parent[i] = i` for every `i`?**
+**Short:** Each element starts as its own singleton set's representative, and `parent[i] == i` is exactly find's base-case termination condition.
 Each element starts in its **own** singleton set, and the representative
 (root) of a singleton set `{i}` is `i` itself. `parent[i] == i` is exactly
 the base case / termination condition for `find` — "if I am my own parent, I
@@ -653,6 +658,7 @@ am the root, stop here."
 
 **Q: Walk through the off-by-one bug in §8 — why specifically does `find(3)`
 crash, and what's the general lesson?**
+**Short:** An array sized only for `n` 0-indexed slots can't hold a 1-indexed node `n`, so always size the array to the max possible node value plus one.
 `UnionFindBroken(3)` allocates `parent = [0, 1, 2]` — valid indices are `0`,
 `1`, `2`. But the problem's nodes are 1-indexed up to `n=3`, so node `3` is a
 legal input — and `parent[3]` is out of bounds. The general lesson: **before
@@ -662,6 +668,7 @@ size the array to `max_possible_node_value + 1`, regardless of what `n`
 
 **Q: How does Union-Find detect a cycle, and why does that NOT generalize to
 directed graphs?**
+**Short:** `find(u) == find(v)` before union flags a cycle only because undirected connectivity is symmetric; directed graphs need direction-aware GRAY-based DFS instead.
 For an undirected edge `(u, v)`: if `find(u) == find(v)` *before* you union
 them, then `u` and `v` were already connected via some other path — adding
 edge `(u, v)` would create a cycle. This works because undirected
@@ -676,6 +683,7 @@ harmless reconvergence from a real back edge is exactly what the GRAY-ancestor
 test does and Union-Find cannot.
 
 **Q: How does Union-Find fit into Kruskal's MST algorithm?**
+**Short:** Sort edges by weight and `union` each pair in order, accepting an edge only when its endpoints start in different components to avoid a cycle.
 Sort all edges by weight ascending. For each edge `(u, v, w)` in that order,
 call `union(u, v)`. If it returns `True` (they were in different
 components), this edge doesn't create a cycle — accept it into the MST and
@@ -686,6 +694,7 @@ the efficient mechanism for the cycle check.
 
 **Q: What extra state does weighted Union-Find (Evaluate Division) need beyond
 plain Union-Find?**
+**Short:** A `weight[x]` array tracks the ratio x/parent[x], accumulated during `find` and rewritten during path compression so future ratio lookups stay O(1).
 A `weight[x]` array, where `weight[x]` represents the ratio `x / parent[x]`.
 `find(x)` must accumulate the product of `weight` values along the path to
 the root (this is the ratio `x / root`), and during path compression, update
@@ -696,6 +705,7 @@ weight between `x`'s root and `y`'s root using the already-known ratios
 
 **Q: For Number of Islands II, why is Union-Find preferred over re-running DFS
 after every cell addition?**
+**Short:** Re-running DFS after every addition costs O(k * rows * cols), while Union-Find's O(alpha(n)) amortized unions make k additions far cheaper.
 Re-running DFS from scratch after each of `k` additions costs
 `O(k * rows * cols)` in the worst case. With Union-Find, each addition is one
 `union` call per neighboring land cell — O(α(rows*cols)) amortized — so `k`
@@ -704,6 +714,7 @@ for large grids with many incremental updates.
 
 **Q: What does `self.count` track, and what's the subtlety in maintaining it
 correctly?**
+**Short:** `count` only decrements when `union` actually merges two different sets, checked via `find(x) != find(y)` before unioning, or it undercounts.
 `self.count` is the number of disjoint sets (connected components) currently.
 It starts at `n` (everything isolated) and decrements by exactly 1 **only
 when `union` actually merges two previously-different sets** — i.e., only

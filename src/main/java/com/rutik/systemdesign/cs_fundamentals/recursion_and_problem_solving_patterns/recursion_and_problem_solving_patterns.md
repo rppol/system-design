@@ -627,48 +627,63 @@ def max_sum_subarray_k(arr: list[int], k: int) -> int:
 ## 12. Interview Questions with Answers
 
 **Q1: What is a base case and why is it mandatory?**
+**Short:** A base case stops the recursion from calling itself forever; skipping past it, like checking `n == 0` while stepping by 2, is a common bug that never terminates.
 A base case is the condition under which the recursive function returns a result directly without making another recursive call. It is mandatory because without a base case, the recursion never terminates — each call generates another call forever until the call stack exhausts memory (stack overflow / `RecursionError`). Every recursive path must reach a base case. A common interview mistake is writing a base case the recursion steps straight over — `if n == 0` in a function that recurses on `n - 2` never fires for an odd n, so the recursion runs past zero forever. Guard with `if n <= 0` whenever the step size is not 1.
 
 **Q2: What is the time and space complexity of naive recursive Fibonacci?**
+**Short:** It runs in about Θ(1.618^n) time due to its lopsided call tree, using O(n) stack space; memoization brings both down to O(n).
 Time: O(2^n) as the usual loose bound, and Θ(φ^n) ≈ Θ(1.618^n) as the tight one — the call tree is lopsided (the `n-2` branch is shorter than the `n-1` branch), so the exact node count is `2·F(n+1) - 1`, not 2^n; `fib(40)` costs 331 million calls, not the ~10^12 that 2^40 would suggest. Space: O(n) — the maximum depth of the call stack is n (the deepest path is fib(n) → fib(n-1) → ... → fib(1)). Fix with memoisation: O(n) time and O(n) space.
 
 **Q3: When is two-pointer applicable versus a brute-force nested loop?**
+**Short:** Two-pointer needs a sorted or monotonic array so moving a pointer predictably improves or worsens the condition, cutting an O(n^2) nested loop down to O(n).
 Two-pointer requires the array to be sorted (or have a monotonic property) so that moving a pointer in one direction is guaranteed to improve or worsen the condition being tested. In a sorted array, if the current pair sums to less than the target, moving the left pointer right increases the sum; moving the right pointer left decreases it. Without this monotonic property, you cannot prune and must use a nested loop (O(n²)). Two-pointer reduces to O(n).
 
 **Q4: What is the sliding window technique and when does it apply?**
+**Short:** It expands the window's right edge unconditionally and shrinks the left edge when a constraint is violated, applying whenever you need a contiguous run with a monotonic constraint.
 Maintain a window [left, right] into an array/string. Expand right unconditionally (add element to window). Shrink left when the window violates a constraint (remove element from window). Track the best valid window seen. Applies when: (a) you need a contiguous subarray/substring, and (b) the constraint is monotonic — adding elements can only make the window "worse" (exceed a budget), and removing elements can only make it "better". Problems: longest substring without repeating chars, minimum window substring, maximum sum subarray of size k.
 
 **Q5: What is the difference between backtracking and DFS?**
+**Short:** DFS traverses a fixed graph with no need to undo, while backtracking builds an implicit solution tree on the fly and must undo each choice before trying the next.
 DFS is a traversal strategy for a known graph: visit all reachable nodes. Backtracking is DFS on an *implicit* solution-space tree that you build on the fly: at each node, you try all valid extensions of the current partial solution, recurse, then undo the extension. The key difference is the "undo" step — DFS on a given graph does not need to undo (the graph edges are fixed); backtracking must undo because the choices it makes (adding an element to a path) change the state that subsequent choices see.
 
 **Q6: How does Floyd's cycle detection algorithm (tortoise and hare) work?**
+**Short:** A fast pointer moving 2 steps and a slow pointer moving 1 step must meet inside a cycle; resetting slow to head and advancing both by one then finds the cycle's start.
 Two pointers, fast (2 steps/iter) and slow (1 step/iter). If no cycle, fast exits the list. If there is a cycle, both pointers enter the cycle; fast is faster, so it "laps" slow inside the cycle. They must meet because fast gains 1 step per iteration on slow inside a cycle of length L — they meet after at most L iterations. To find the cycle start: after they meet, reset slow to head, keep fast at the meeting point, advance both one step at a time — they meet at the cycle start.
 
 **Q7: Why is it important to copy the path in backtracking before appending to the result?**
+**Short:** Appending the mutable `path` by reference makes every result entry alias the same list, so you must append `path[:]` to capture a snapshot at that moment.
 The path is a mutable list. If you append `path` (a reference) to `result`, all result entries point to the same list — when you later modify path (pop/push), all previously appended results change. Always append `path[:]` (a copy) or `list(path)` to capture the state at the time of appending.
 
 **Q8: When would you convert a recursive solution to iterative?**
+**Short:** Convert when recursion depth risks exceeding the stack limit (over roughly 1000 in Python) or when function-call overhead matters, using an explicit stack to simulate the frames.
 When the recursion depth can exceed the stack limit (> 1000 in Python, > ~10000 in Java). Deep DFS on a large graph or a long linked list can hit this limit. Convert by maintaining an explicit stack (a Python list or `collections.deque`) and simulating the call stack manually. Also convert for performance — iterative avoids function-call overhead (~100 ns per call in Python).
 
 **Q9: What is tail recursion and why doesn't Python optimise it?**
+**Short:** Python deliberately skips tail-call optimization so stack traces always show the full call chain, meaning even a tail-recursive Python function can still hit `RecursionError`.
 Tail recursion is when the recursive call is the very last operation before returning — there is no work left to do with the result. Many languages (Scheme, Scala, Swift) transform tail calls to jumps (tail-call optimisation / TCO), reusing the caller's stack frame and giving O(1) stack space. Python's CPython interpreter deliberately does NOT implement TCO — Guido van Rossum decided that stack traces should always show the full call chain for debuggability. Java's JVM also does not guarantee TCO. Convert to an iterative loop if stack space matters.
 
 **Q10: You have a sorted array. How do you find the leftmost position where a target could be inserted (lower bound)?**
+**Short:** Binary search with `lo=0, hi=len(arr)`, moving `lo=mid+1` when `arr[mid] < target` else `hi=mid`, converges to the first index where `arr[pos] >= target`.
 Binary search variant: maintain `[lo, hi]` = `[0, len(arr)]` (inclusive of one past the end). While `lo < hi`: `mid = (lo + hi) // 2`; if `arr[mid] < target`, `lo = mid + 1`; else `hi = mid`. Return `lo`. This is Python's `bisect_left`. The invariant: at termination, `lo = hi` = the first position where `arr[pos] >= target`.
 
 **Q11: What is the key pattern for divide-and-conquer?**
+**Short:** Split the problem into independent equal-sized subproblems, solve each recursively, then combine results; the combine step's cost sets the overall complexity via the Master Theorem.
 (1) Base case — problem is small enough to solve directly. (2) Divide — split the problem into two or more *independent* subproblems of roughly equal size. (3) Conquer — recursively solve each subproblem. (4) Combine — merge the subproblem solutions. The combine step determines the complexity: if combining is O(n) and we split into 2 halves → T(n) = 2T(n/2) + O(n) → O(n log n) by Master Theorem Case 2.
 
 **Q12: How do you use fast-slow pointer to find the middle of a linked list?**
+**Short:** Advancing fast by 2 steps and slow by 1 per iteration lands slow at the middle once fast reaches the end, landing on the second middle node for even-length lists.
 Start both at head. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. Starting both at `head` with the loop condition `while fast and fast.next`, an even-length list leaves slow on the *second* of the two middle nodes (length 4: slow ends on index 2); start the loop at `while fast.next and fast.next.next` if you need the first one instead — which is the variant merge sort wants, so that the left half is non-empty. This is used in merge sort for linked lists (split at the middle) and in palindrome checking (reverse the second half starting from the middle).
 
 **Q13: What is the pruning in backtracking and why is it critical for performance?**
+**Short:** Pruning stops exploring a branch once you know it can't lead to a valid solution, turning an intractable O(n!) search into one solvable in milliseconds.
 Pruning is the early termination of a recursive branch when you can determine that no valid solution exists in the subtree. Example: in N-Queens, if placing a queen in a column puts it in conflict with an already-placed queen, skip all configurations in that subtree. Without pruning, backtracking explores the entire O(n!) solution space. With aggressive pruning, practical performance can be orders of magnitude faster — N-Queens with 15 queens goes from 15! ≈ 1.3 trillion to a tractable solution in milliseconds.
 
 **Q14: Explain the time complexity of the backtracking algorithm for generating all subsets of n elements.**
+**Short:** It costs O(2^n * n), since there are 2^n subsets and each requires copying a path of length up to n into the result.
 T = O(2^n × n). There are 2^n subsets. For each subset, we copy the current path of length O(n) into the result. The number of nodes in the backtracking tree is also 2^n. So the total work is O(2^n × n) for copying and O(2^n) for the tree traversal — dominated by O(2^n × n).
 
 **Q15: When is a sliding window approach not applicable?**
+**Short:** It fails when the constraint is non-monotonic, involves non-contiguous elements, or needs global structure the array doesn't provide — a hash map fits better there.
 Sliding window requires the problem to have a "monotonic" property: once you expand or shrink the window, you can determine whether the window is valid or invalid without re-examining internal structure from scratch. It does not apply when: the constraint involves non-contiguous elements, the array is unsorted and you need global properties (use a hash map instead), or the "valid window" condition is non-monotonic (adding elements could make it valid or invalid in an unpredictable way).
 
 ---

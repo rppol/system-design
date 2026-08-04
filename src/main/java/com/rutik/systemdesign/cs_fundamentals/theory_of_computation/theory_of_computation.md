@@ -826,66 +826,87 @@ NP-completeness is a statement about the **worst case**, not about every instanc
 ## 12. Interview Questions with Answers
 
 **Q: Can a regular expression match arbitrarily nested balanced parentheses?**
+**Short:** No regular expression can match arbitrarily nested parentheses because the pumping lemma proves regular languages can't count past a fixed bound; nesting needs a CFG with a stack.
 No — no regular expression can recognize arbitrarily nested balanced parentheses. Matching requires counting unbounded nesting depth, and the pumping lemma proves regular languages cannot count past a fixed bound (§6.4). Engines that appear to do it are secretly using a stack-based extension (PCRE's `(?R)` recursion) or a hand-written parser — reach for a CFG and a stack the moment nesting is unbounded.
 
 **Q: Is an NFA more powerful than a DFA?**
+**Short:** No — NFAs and DFAs recognize exactly the same languages; subset construction converts any NFA to an equivalent DFA, though possibly with up to 2^n states.
 No — NFAs and DFAs recognize exactly the same class of languages, just with possibly different state counts. Subset construction converts any n-state NFA into an equivalent DFA, though the DFA may need up to 2ⁿ states in the worst case (§6.2). NFAs are a design convenience (easier to build from a regex via Thompson's construction), not a power boost — contrast this with PDAs, where determinism genuinely does cost expressive power.
 
 **Q: Does the fact that P vs NP is unsolved mean NP-complete problems can never be solved in practice?**
+**Short:** No — NP-completeness is only a worst-case guarantee, and real NP-complete instances are routinely solved by CDCL SAT solvers and dependency resolvers.
 No — NP-completeness is a worst-case guarantee, and real NP-complete instances are solved routinely by modern solvers. CDCL SAT solvers close industrial instances with millions of clauses, and package managers resolve NP-hard dependency graphs on every install (§7). In an interview, "NP-complete" should trigger a pivot to heuristics, approximation, or bounded exact search — not a claim that the problem is hopeless.
 
 **Q: Is the halting problem unsolved because no one has found the right algorithm yet?**
+**Short:** No — Turing's diagonalization argument proves it undecidable, meaning no algorithm can ever solve it for all inputs, not merely that none has been found yet.
 No — the halting problem is proven undecidable, meaning no algorithm can ever solve it for all inputs, regardless of future cleverness. Turing's 1936 diagonalization argument shows that any hypothetical decider `H` leads to a program `D(D)` that halts if and only if it doesn't — a direct contradiction (§6.7). Distinguish "we haven't found an algorithm" (an open engineering problem) from "provably no algorithm exists" (a closed mathematical result).
 
 **Q: Does "NP-hard" mean a problem is not in NP?**
+**Short:** Not necessarily — NP-hard only means at least as hard as every problem in NP via reduction, and an NP-hard problem like the halting problem can sit entirely outside NP.
 Not necessarily — NP-hard means at least as hard as every problem in NP, and NP-hard problems can sit inside or outside NP. NP-complete is the narrower label for NP-hard problems that are *also* inside NP, like SAT and vertex cover; the halting problem is NP-hard (any 3-SAT instance reduces to it) yet undecidable, so it is not in NP at all. "NP-hard" is purely a lower bound on difficulty via reduction — it says nothing about decidability.
 
 **Q: Are all exponential-time problems NP-complete?**
+**Short:** No — NP-complete describes verification difficulty while "exponential" describes runtime; EXPTIME-complete and undecidable problems are separate, harder axes.
 No — NP-complete describes only problems whose solutions verify in polynomial time, and some problems are far harder than that. EXPTIME-complete problems (such as generalized board games on an n×n board) provably require exponential time under any algorithm, and undecidable problems like the halting problem have no time bound at all because no algorithm ever finishes correctly. "Exponential" describes the best known runtime; "NP-complete" describes verification difficulty — the two are independent axes.
 
 **Q: Is a nondeterministic pushdown automaton (NPDA) equivalent in power to a deterministic one (DPDA)?**
+**Short:** No — deterministic PDAs are strictly weaker, since recognizing even-length palindromes needs guessing the midpoint, which a DPDA cannot do.
 No — unlike the DFA/NFA case, deterministic PDAs are strictly weaker than nondeterministic ones. Recognizing even-length palindromes requires guessing the string's midpoint before continuing, something a DPDA cannot do without knowing where the middle is in advance, so palindromes are context-free but not deterministic-context-free. This asymmetry is exactly why real-world parsers (LL/LALR) restrict themselves to a deterministic CFG subset instead of accepting arbitrary grammars.
 
 **Q: Are nondeterministic Turing machines more powerful than deterministic ones?**
+**Short:** No — a deterministic TM can simulate any nondeterministic TM by exploring its computation tree, so nondeterminism costs no computability power, only possibly exponential efficiency.
 No — a deterministic TM can simulate any nondeterministic TM by exploring its entire computation tree breadth-first, so they recognize exactly the same languages, though possibly with an exponential slowdown. This is precisely the mechanism behind the open P vs NP question: an NTM can guess-and-verify a certificate in polynomial time (that's the definition of NP), but simulating that nondeterminism deterministically is only known to take exponential time. Nondeterminism costs no computability power, but may cost efficiency.
 
 **Q: What is the formal definition of a DFA, and what makes it "deterministic"?**
+**Short:** A DFA is the 5-tuple (Q, Sigma, delta, q0, F), and "deterministic" means delta is a total function with exactly one next state for every state/symbol pair.
 A DFA is the 5-tuple (Q, Σ, δ, q0, F): states, input alphabet, a total transition function, a start state, and accept states. "Deterministic" means δ: Q×Σ→Q is a genuine function — exactly one next state defined for every state/symbol pair, with no missing transitions (a missing transition is really an implicit edge to a non-accepting trap state). When building a DFA by hand, check every state has an outgoing edge for every alphabet symbol before calling it complete.
 
 **Q: How does the subset construction algorithm convert an NFA into an equivalent DFA, and what is its worst-case cost?**
+**Short:** It builds one DFA state per reachable set of NFA states, with a worst-case blow-up of 2^n DFA states for an n-state NFA.
 Subset construction builds one DFA state per reachable *set* of NFA states, computed by simulating all of the NFA's nondeterministic branches in parallel. Starting from the NFA's start state, each DFA transition is the union of every NFA transition out of the current set on that symbol, and a set is accepting if it contains any NFA accept state (§6.2). The worst-case blow-up is 2ⁿ DFA states for an n-state NFA — the verified "3rd-from-last symbol is 1" example needs a 4-state NFA but exactly 2³ = 8 DFA states — always cite this bound when discussing regex engine memory.
 
 **Q: State the pumping lemma for regular languages precisely.**
+**Short:** Every long-enough string in a regular language splits as xyz with a pumpable middle y, because a DFA with p states must repeat a state within its first p symbols.
 For any regular language L, there is a pumping length p such that every string w ∈ L with length at least p splits as w = xyz, where |xy| ≤ p, |y| ≥ 1, and xyⁱz ∈ L for every i ≥ 0. It follows from the pigeonhole principle: a DFA with p states must repeat a state within the first p symbols of any string that long, and the loop between the repeated visits is the pumpable `y`. Use it as a proof-by-contradiction tool — pick an adversarial string and show *every* possible split fails, which concludes the language is not regular.
 
 **Q: What is Kleene's theorem, and why does it matter for regex engines?**
+**Short:** Kleene's theorem says DFAs, NFAs, and regular expressions describe exactly the same regular languages, which is why regex engines can freely choose NFA or DFA simulation.
 Kleene's theorem states that DFAs, NFAs, and regular expressions all describe exactly the same class of languages — the regular languages. Regex-to-NFA uses Thompson's construction (linear time), NFA-to-DFA uses subset construction (up to exponential blow-up), and DFA-to-regex uses state elimination; all three directions are constructive algorithms (§6.3). This equivalence is why engines can choose either a flexible backtracking-NFA simulation or a guaranteed-linear compiled-DFA simulation for the very same pattern.
 
 **Q: What is a context-free grammar, and how does it differ from a regular grammar?**
+**Short:** A CFG lets a nonterminal expand into any string of terminals and nonterminals, while a regular grammar restricts the right side to one terminal plus at most one nonterminal.
 A context-free grammar has production rules `A -> γ` where A is a single nonterminal and γ is any string of terminals and nonterminals, with no further restriction. A regular grammar restricts the right-hand side to a single terminal optionally followed by one nonterminal (`A -> aB` or `A -> a`), which is exactly expressive enough for regular languages; dropping that restriction lets a CFG describe unbounded self-referential nesting, like `S -> (S)S | ε` for balanced parentheses. Whenever a language needs to remember an unbounded count or nesting depth, you need at least a CFG.
 
 **Q: How does a pushdown automaton (PDA) use its stack to accept a context-free language?**
+**Short:** A PDA pairs a finite automaton with a stack, pushing on open symbols and popping on close symbols, accepting balanced input exactly when the stack empties as input ends.
 A PDA is a finite automaton plus a single stack, and it accepts by combining state transitions with stack pushes and pops. For balanced parentheses it pushes a marker on `(` and pops on `)`, rejecting immediately on a pop from an empty stack, and accepting if the stack is empty exactly when input ends (§6.5); PDAs may accept by final state or by empty stack, and the two definitions are provably equivalent. The stack is exactly the extra memory a DFA lacks — enough to count an unbounded, but LIFO-ordered, nesting depth.
 
 **Q: What is the Church-Turing thesis, and can it be proven?**
+**Short:** The thesis claims any intuitively computable function is Turing-computable; it can't be proven formally, but every rival formalism has matched Turing machines exactly.
 The Church-Turing thesis claims that any function computable by an intuitive, step-by-step mechanical procedure is computable by a Turing machine. It cannot be formally proven, because "intuitively computable" is not itself a formal definition, but every alternative formalism proposed — lambda calculus, general recursive functions, register machines, real programming languages — has been proven exactly equivalent in power to Turing machines (§6.6). Treat it as the working definition of "computable": if a Turing machine can't do it, no real computer can either.
 
 **Q: What is the difference between a decidable language and a Turing-recognizable one?**
+**Short:** A decidable language has a TM that always halts with yes or no; a recognizable one only guarantees halting on members, and may loop forever on non-members.
 A decidable language has a Turing machine that always halts and correctly says yes or no; a Turing-recognizable language only guarantees halting on YES instances. The halting problem itself is recognizable — a simulator can say "halts" the moment it observes a halt — but not decidable, because it may run forever on a non-halting input without ever getting to say "no" (§6.7); a language is decidable exactly when both it and its complement are recognizable. When a problem seems undecidable, check whether a bounded-time "semi-algorithm" is an acceptable practical substitute.
 
 **Q: When proving a problem is NP-hard, which direction does the reduction go?**
+**Short:** You reduce a known NP-complete problem into the new problem, never the reverse, since reducing the new problem to something easy only bounds it from above.
 You reduce a known NP-complete problem *into* the new problem, not the other way around. Showing "the new problem reduces to a known-easy problem" only proves the new problem is at most as hard as that easy one; to prove hardness, you must show a fast algorithm for the new problem would give you a fast algorithm for 3-SAT (§6.8). Before writing a reduction, ask "if I could solve X quickly, could I use that to solve 3-SAT quickly?" — if yes, the direction is correct.
 
 **Q: What is the Cook-Levin theorem, and why does it matter?**
+**Short:** Cook-Levin proves SAT is NP-complete by encoding any NP verifier's entire computation as one Boolean formula, making SAT the anchor every other NP-completeness proof reduces from.
 The Cook-Levin theorem proves that Boolean satisfiability (SAT) is NP-complete, making it the first problem ever proven NP-complete and the anchor for every other such proof. The proof encodes an arbitrary NP verifier's entire computation — tape, head position, and state at every step — as one Boolean formula that is satisfiable exactly when the verifier accepts some certificate, which is why SAT can simulate any problem in NP (§6.9). Every other NP-completeness proof (3-SAT, vertex cover, Hamiltonian path, TSP) reduces from SAT rather than starting over — Cook-Levin is the one proof that had to be done from scratch.
 
 **Q: Name four canonical NP-complete problems and the general shape of their reductions from 3-SAT.**
+**Short:** 3-SAT, vertex cover, Hamiltonian path, and TSP-decision are canonical NP-complete problems, each reachable from 3-SAT through a gadget-based reduction.
 3-SAT, vertex cover, Hamiltonian path, and TSP-decision are four canonical NP-complete problems, each reachable from 3-SAT by a gadget-based reduction. 3-SAT reduces to vertex cover with a 2-vertex gadget per variable and a 3-vertex triangle per clause, wired so a size-(n+2m) cover exists exactly when the formula is satisfiable (§6.9); Hamiltonian path and TSP-decision follow a separate gadget chain. In interviews, naming the target problem and the one-sentence gadget idea is usually enough to demonstrate you recognize the reduction technique — full gadget construction is rarely required.
 
 **Q: Is every context-free language also regular?**
+**Short:** No — context-free languages properly contain the regular ones; `{a^n b^n}` is context-free but not regular, as the pumping lemma proves.
 No — context-free languages properly contain the regular languages, with plenty of languages in between. `{aⁿbⁿ : n ≥ 0}` is context-free (a trivial one-rule CFG generates it) but not regular, proven by the pumping lemma (§6.4); every regular language is trivially context-free, since any regular-grammar rule is already in valid CFG form. The witness-language table in §4 gives one example that separates each rung of the Chomsky hierarchy from the one below it.
 
 **Q: Why should recognizing that a problem is NP-complete change your approach in a coding interview?**
+**Short:** It should shift you from hunting a polynomial exact algorithm to proposing pruned exponential search, bitmask DP for small n, or a stated approximation.
 Recognizing NP-completeness should make you stop searching for a polynomial exact algorithm and instead propose exponential-with-pruning, bitmask DP for small n, or a stated approximation. Interviewers who pose a disguised NP-complete problem (graph coloring, conflict-based scheduling, subset-sum-shaped packing) are usually testing whether you can recognize the structure and explain *why* no efficient exact algorithm is known, not whether you can invent one on the spot (§14). Name the target NP-complete problem (or sketch the reduction), then pivot immediately to a bounded-input or approximate strategy — that pivot is what reads as senior.
 
 ---

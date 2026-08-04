@@ -585,6 +585,7 @@ directions) are different quantities — track them separately.
 ## 11. Interview Q&A
 
 **Q: When do you use preorder, inorder, or postorder traversal?**
+**Short:** Use preorder to process a node before its children, inorder for sorted BST order, and postorder when a node depends on its children's results.
 **Preorder** (node, left, right) when you need to process a node *before*
 its children — serialization (the root must be written first to be read
 first), or copying/cloning a tree top-down. **Inorder** (left, node, right)
@@ -595,6 +596,7 @@ children's results — heights, sums, diameters, deletions (you must process
 children before you can safely detach/free the parent).
 
 **Q: Why does inorder traversal of a BST yield sorted order?**
+**Short:** The BST invariant places smaller values left and larger right, so visiting left-node-right recursively produces a sorted sequence by induction.
 By the BST invariant, every node's left subtree contains only smaller values
 and its right subtree only larger values. Inorder visits "everything smaller
 than this node" (left subtree, recursively sorted), "this node," then
@@ -602,6 +604,7 @@ than this node" (left subtree, recursively sorted), "this node," then
 entire sequence is sorted.
 
 **Q: Diameter of Binary Tree — why track a separate `nonlocal diameter` instead of just returning the diameter from each call?**
+**Short:** The return value must carry subtree height for the parent's own calculation, so the diameter-through-a-node needs a separate side channel.
 The function's *return value* must be something the **parent** can use to
 compute *its own* combination — here, the subtree's height (a single number
 representing "how far down does this subtree extend"). The diameter *through*
@@ -612,6 +615,7 @@ channels: the return value (height, for parents) and a side-channel
 (`nonlocal diameter`, for the final answer).
 
 **Q: How does the recursive LCA algorithm work — why does "found in both subtrees" mean the current node is the answer?**
+**Short:** A non-null result from both the left and right calls means p and q sit in different subtrees, so the current node is exactly where their paths diverge.
 `lowest_common_ancestor` returns non-`None` from a subtree iff that subtree
 contains `p`, `q`, or (already-found) their LCA. If the **left** recursive
 call returns non-`None` AND the **right** does too, that means `p` is in one
@@ -621,6 +625,7 @@ one side returns non-`None`, both `p` and `q` (or their LCA) are in that
 single subtree, so bubble that result up unchanged.
 
 **Q: Validate BST — why is checking `node.val > node.left.val and node.val < node.right.val` (immediate children only) insufficient?**
+**Short:** The BST property is global, not local, so a node deep in the left subtree can violate it even while the immediate-parent check passes.
 The BST property is **global**, not just local: every node in the *entire*
 left subtree must be less than the current node, not just the immediate left
 child. A tree like `5 -> (left: 1 -> (right: 6))` has `1 < 5` (immediate
@@ -630,6 +635,7 @@ property. The `(low, high)` bounds-passing approach correctly propagates
 parent's value.
 
 **Q: Maximum Path Sum — why must you clip negative subtree results to 0?**
+**Short:** A negative subtree contribution would make the running sum worse than skipping it, so `max(dfs(child), 0)` clamps it to zero.
 A "path" extending into a subtree adds that subtree's contribution to the
 running sum. If a subtree's best downward path sum is *negative*, including
 it would make the total *worse* than not extending into it at all — so the
@@ -639,6 +645,7 @@ why both `left` and `right` are clamped before being used in either the
 `best` update or the returned value.
 
 **Q: Path Sum III — why prefix sum + hashmap instead of checking every possible path directly?**
+**Short:** Treating the root-to-node path like a 1D array lets a hashmap of prefix sums find paths ending at each node in O(1), avoiding an O(n^2) check.
 Checking every `(start, end)` pair of nodes along root-to-X paths is
 `O(n^2)` (for each node, walk up/down to try all paths through it). The
 prefix-sum trick treats the root-to-current-node path like a 1D array:
@@ -650,6 +657,7 @@ down, decrement it on the way back up (backtracking) so sibling subtrees
 don't see each other's path sums — giving `O(n)` overall.
 
 **Q: What's the space complexity of recursive tree DFS, and how would you avoid hitting Python's recursion limit on a skewed tree?**
+**Short:** Recursive DFS uses O(h) stack space, and a skewed tree's O(n) height can exceed Python's recursion limit — an explicit-stack iterative DFS avoids that.
 `O(h)` for the call stack, where `h` is the tree's height. For a balanced
 tree, `h = O(log n)` — fine. For a **skewed** tree (effectively a linked
 list), `h = O(n)`, and Python's default recursion limit (~1000) can be
@@ -659,6 +667,7 @@ DFS with an explicit stack** (`stack = [root]`, push/pop manually) — same
 call stack, which has no comparable hard limit.
 
 **Q: Construct Binary Tree from Preorder and Inorder — why precompute a hashmap of `inorder` value-to-index, and what breaks without it?**
+**Short:** Precomputing a value-to-index hashmap makes each root lookup O(1) instead of a linear search, bringing the algorithm to O(n) from O(n^2).
 The recursive construction repeatedly needs "where does `preorder[0]`
 (the current root) appear in the current `inorder` slice?" to split it into
 left/right subtree slices. A linear search for this index on every call makes
@@ -668,6 +677,7 @@ This requires all values to be **unique** — a constraint the problem
 guarantees.
 
 **Q: Subtree of Another Tree — when is the naive O(n*m) approach acceptable, and what's the O(n+m) alternative?**
+**Short:** The naive O(n*m) check suffices at typical interview scale; serializing both trees with explicit null markers lets substring search find it in O(n+m).
 `O(n*m)` (for each of `n` nodes in the main tree, run an `O(m)` equality check
 against the target) is fine for typical interview constraints (`n, m <=
 1000`, giving `10^6` operations). The `O(n+m)` alternative serializes both
@@ -678,6 +688,7 @@ search (e.g., KMP) is `O(n+m)`. Mention both; the naive approach is usually
 sufficient unless the interviewer explicitly asks for better.
 
 **Q: Can you do an inorder traversal in true O(1) auxiliary space — no recursion stack AND no explicit stack?**
+**Short:** Morris Traversal threads each node's inorder predecessor back to itself, letting the walk return with no recursion or stack in O(n) time and O(1) space.
 Yes — **Morris Traversal**. For a node with a left child, find its **inorder
 predecessor** (the rightmost node in the left subtree) and temporarily
 "thread" the tree: set `predecessor.right = current`, then descend to
