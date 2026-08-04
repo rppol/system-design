@@ -135,7 +135,7 @@ warp-aggregation) beats a faster atomic every time.
 
 | Primitive | Scope | What it guarantees |
 |-----------|-------|---------------------|
-| `__syncwarp(mask)` | One warp (subset via mask) | Reconverges the named lanes; needed since Volta's independent thread scheduling — lanes are no longer implicitly in lockstep |
+| `__syncwarp(mask)` | One warp (subset via mask) | Every lane named in `mask` waits for the others, and their prior memory accesses become visible to each other. Needed since Volta's independent thread scheduling — lanes are no longer implicitly in lockstep. Convergence holds *at* the call; the lanes may diverge again immediately after it |
 | `__syncthreads()` | One thread block | Every thread in the block reaches this point; all prior shared/global writes from every thread are visible after it |
 | `cg::this_thread_block().sync()` | One thread block | Same guarantee as `__syncthreads()`, expressed as a composable cooperative-groups object |
 | `cg::grid_group::sync()` | Entire grid (cooperative launch) | Every block in the grid reaches this point — requires `cudaLaunchCooperativeKernel` and occupancy that fits the whole grid resident at once |
@@ -158,9 +158,11 @@ warp-aggregation) beats a faster atomic every time.
   cheap shared-memory atomics, then merge into the global structure with
   one atomic per block instead of one per thread.
 - **Warp-aggregated atomics** — before touching the global atomic, have
-  each warp locally combine (via `__reduce_add_sync` or ballot + popcount)
-  all lanes' contributions into a single value, then issue **one** atomic
-  per warp instead of up to 32. Covered in depth in
+  each warp locally combine all lanes' contributions into a single value,
+  then issue **one** atomic per warp instead of up to 32. Ballot + popcount
+  (or a shuffle reduction) works everywhere; `__reduce_add_sync` does the
+  combine in a single hardware instruction but needs compute capability 8.0
+  (Ampere) and a 32-bit integer operand. Covered in depth in
   [warp_level_primitives_and_cooperative_groups](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md).
 - **Tree reduction** — replace N atomics into one address with a
   logarithmic reduction (shared memory or warp shuffle) that produces a
@@ -560,8 +562,12 @@ __global__ void cppAtomicCounter() {
     counter.fetch_add(1, cuda::memory_order_relaxed);   // just an increment, no ordering needed
 }
 
-// acquire/release publish pattern -- the modern replacement for a manual __threadfence
-__device__ cuda::atomic<int, cuda::thread_scope_block> ready{0};
+// acquire/release publish pattern -- the modern replacement for a manual __threadfence.
+// The scope must cover everyone who can observe the flag. Both objects below are
+// __device__ globals, so threads in ANY block can load `ready`; annotating them
+// thread_scope_block would be too narrow and the payload read would race across
+// blocks. Only pick thread_scope_block when the storage is __shared__.
+__device__ cuda::atomic<int, cuda::thread_scope_device> ready{0};
 __device__ int payload;
 
 __global__ void publishSubscribe() {
@@ -654,7 +660,7 @@ deferred in full to
 
 | Mechanism | Cost | Guarantees | Scope |
 |-----------|------|------------|-------|
-| `__syncwarp()` | Very low | Reconverges named lanes | Warp (32 threads) |
+| `__syncwarp()` | Very low | Named lanes rendezvous; their prior memory accesses become mutually visible | Warp (32 threads) |
 | `__syncthreads()` | Low, but every thread pays it | Every thread arrives; prior writes visible | Block |
 | Uncontended atomic | ~1 memory op | Indivisible update, no ordering promise beyond itself | Whichever address |
 | Contended atomic (global) | 10-100x an uncontended one, scales with contender count | Indivisible update, correctness preserved | Whichever address |
@@ -1070,8 +1076,9 @@ def histogram_privatized(data, bins):
 ```
 
 ```
-Grid configuration for the privatized kernel: 128 blocks x 1024 threads,
-each thread grid-strides over ~131,072 elements.
+Grid configuration for the privatized kernel: 128 blocks x 1024 threads
+= 131,072 threads, so each BLOCK covers 131,072 elements and each THREAD
+grid-strides over 128 of them.
 
 Global-atomic traffic comparison:
   Naive:       16,777,216 global atomicAdd calls (one per element)
@@ -1159,8 +1166,8 @@ atomics as a further refinement on top of this privatized version).
 - At what input distribution (e.g. all 16M bytes equal to the same value)
   does privatization stop helping, and why?
 - How would warp-aggregated atomics change the shared-memory accumulation
-  step in 6.3 of the pattern above, and what additional contention would
-  it remove?
+  (step 2) of the privatized kernel above, and what additional contention
+  would it remove?
 - If `bins` needed to be bit-reproducible across runs, what would you have
   to change about this kernel, and what would it cost?
 

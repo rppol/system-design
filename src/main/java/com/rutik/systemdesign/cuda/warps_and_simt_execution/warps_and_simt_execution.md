@@ -46,7 +46,7 @@ This module covers: why 32 is the magic number, how the warp scheduler hides mem
 
 - **Round-robin / Loose Round-Robin (LRR)** — cycles through resident warps in order each time it needs to issue; simple, fair, but can leave a just-issued warp waiting behind many others before its dependency is ready.
 - **Greedy-Then-Oldest (GTO)** — keeps issuing from the same warp until it stalls, then falls back to the oldest ready warp; improves cache/locality behavior versus strict round-robin and is closer to what modern SM warp schedulers approximate.
-- Each SM has multiple warp schedulers (4 per SM on most recent architectures), each capable of issuing (and often dual-issuing) one instruction per cycle from a different warp — the schedulers pick among their assigned resident warps using policies like the above.
+- Each SM is partitioned into 4 processing blocks, each with its own warp scheduler and a single dispatch unit, so each scheduler issues **one** instruction per cycle from one of its assigned resident warps (Volta and later dropped Pascal's second dispatch unit and with it dual-issue; the scheduler instead issues an independent instruction on the very next cycle) — the schedulers pick among their assigned resident warps using policies like the above.
 
 ### 4.2 Divergence handling across generations
 
@@ -73,11 +73,11 @@ The canonical worst case: `if (threadIdx.x % 2 == 0)`. Every warp contains both 
 ```
 Warp divergence mask -- branch: if (threadIdx.x % 2 == 0)   (checkerboard predicate)
 
-lane index (tens):  00000000001111111111222222222233
-lane index (ones):  01234567890123456789012345678901
+lane index (tens):   00000000001111111111222222222233
+lane index (ones):   01234567890123456789012345678901
                     +--------------------------------+
-if-path A (even):   |V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V|   16 active, 16 masked
-else-path B (odd):  |.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.|   16 masked, 16 active
+if-path A (even):   |V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.|   16 active, 16 masked
+else-path B (odd):  |.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V.V|   16 masked, 16 active
                     +--------------------------------+
                      V = active (executing)   . = masked (idle, holding state)
 

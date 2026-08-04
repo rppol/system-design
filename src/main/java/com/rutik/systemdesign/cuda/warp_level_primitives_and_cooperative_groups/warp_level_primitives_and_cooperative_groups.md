@@ -42,9 +42,10 @@ lanes on the same cycle, the crossbar that feeds each lane's ALU can also be wir
 neighboring lane's register on that same cycle. `__shfl_down_sync(mask, val, offset)` is
 that crossbar exposed as an intrinsic: lane `i` receives lane `i + offset`'s value for
 `val`, for free, in one instruction — no address computed, no memory transaction issued.
-Cooperative Groups then generalizes "lockstep group that can synchronize and exchange data"
-one level at a time: warp (32) -> tile (2-32) -> thread block (up to 1024) -> grid (every
-block in the launch) -> cluster (Hopper+, groups of blocks with distributed shared memory).
+Cooperative Groups then generalizes "group that can synchronize and exchange data"
+one level at a time: warp (32) -> tile (2-32) -> thread block (up to 1024) -> cluster
+(Hopper+, a group of blocks sharing distributed shared memory) -> grid (every block in the
+launch).
 
 **Why it matters**: The reduction, scan, and histogram patterns from
 [parallel_patterns_reduction_scan_histogram](../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md)
@@ -58,9 +59,10 @@ shared memory for the last warp?"*
 
 **Key insight**: A 32-lane warp reduction needs exactly **`log2(32) = 5`** shuffle steps
 (offsets 16, 8, 4, 2, 1) to collapse 32 values into one — with **zero** shared-memory
-traffic and **zero** `__syncthreads()` calls, because the lanes never leave lockstep. The
-one thing you must never forget is the **mask**: since Volta's independent thread
-scheduling, lanes are no longer guaranteed to reconverge on their own, so every `_sync`
+traffic and **zero** `__syncthreads()` calls, because each `_sync` shuffle converges the
+lanes it names and exchanges their registers in the same instruction. The one thing you
+must never forget is the **mask**: since Volta's independent thread scheduling, lanes are
+no longer guaranteed to be converged on their own, so every `_sync`
 intrinsic takes an explicit 32-bit participation mask (`0xffffffff` for "the whole warp") —
 omitting it, or using the wrong mask after a divergent branch, is undefined behavior, not a
 performance bug.
@@ -73,17 +75,21 @@ performance bug.
   lane's register value through the SM's shuffle crossbar in the same instruction that
   issues it — no shared-memory bank is touched, no global-memory transaction is issued, and
   no address is ever computed.
-- **Lockstep is the reason no barrier is needed.** All 32 lanes of a warp execute the shuffle
-  instruction on the same cycle, so by construction every lane has produced its input before
-  any lane consumes another's output. This is why a warp-shuffle reduction needs no
-  `__syncthreads()` — the synchronization is inherent to how a warp executes, not something
-  you add.
+- **The intrinsic carries its own barrier, which is why you add none.** A `_sync` primitive
+  first converges the threads named in its mask if they are not already converged, then
+  performs the exchange — the synchronization is part of the instruction, not something you
+  bolt on around it. This is why a warp-shuffle reduction needs no `__syncthreads()` and no
+  `__syncwarp()`. What you must *not* infer from this is that the lanes are in lockstep
+  generally: convergence is guaranteed only *inside* the explicitly synchronous primitive,
+  and the moment it returns the lanes may drift apart again.
 - **The `_sync` mask is mandatory, not optional, since Volta (compute capability 7.0).**
   Volta introduced independent thread scheduling: divergent branches no longer guarantee
   automatic reconvergence at the next opportunity, so the hardware needs an explicit
   32-bit mask telling it exactly which lanes participate in the exchange. `0xffffffff` means
-  "all 32 lanes of the warp"; after a divergent branch, the correct mask is whatever
-  `__activemask()` returns for the currently active lanes, not `0xffffffff`.
+  "all 32 lanes of the warp". **Derive the mask from your program logic, not from
+  `__activemask()`** — the standard idiom is a `__ballot_sync` (or the loop's own trip
+  condition) evaluated *before* the branch, whose result you then carry into the branch and
+  pass to every `_sync` call inside it.
 - **Vote functions collapse a per-lane predicate to a warp-wide answer in one instruction.**
   `__ballot_sync` returns a 32-bit mask of which lanes satisfied a condition; `__any_sync`/
   `__all_sync` collapse that further to a single boolean — "did any lane see X" / "did every
@@ -111,7 +117,7 @@ performance bug.
 
 | Intrinsic | Behavior | Typical use |
 |-----------|----------|-------------|
-| `__shfl_down_sync(mask, val, delta)` | Lane `i` gets lane `i + delta`'s `val` (lanes past the warp edge get their own `val` back, or 0 depending on width) | Reduction — collapse toward lane 0 |
+| `__shfl_down_sync(mask, val, delta)` | Lane `i` gets lane `i + delta`'s `val`; the top `delta` lanes of each `width`-wide section have no source and are left holding their own `val` (never zero) | Reduction — collapse toward lane 0 |
 | `__shfl_up_sync(mask, val, delta)` | Lane `i` gets lane `i - delta`'s `val` | Inclusive/exclusive prefix scan |
 | `__shfl_xor_sync(mask, val, laneMask)` | Lane `i` gets lane `i XOR laneMask`'s `val` | Butterfly all-reduce — every lane ends with the same total |
 | `__shfl_sync(mask, val, srcLane)` | Every participating lane gets `srcLane`'s `val` | Broadcast (e.g. distribute lane 0's pivot to all lanes) |
@@ -123,7 +129,7 @@ performance bug.
 | `__ballot_sync(mask, predicate)` | 32-bit mask, bit `i` set if lane `i`'s predicate was true | Leader election (`__ffs` of the mask), warp-aggregated atomics, compaction |
 | `__any_sync(mask, predicate)` | `1` if any participating lane's predicate is true | Early-exit checks ("does any lane in this warp need the slow path?") |
 | `__all_sync(mask, predicate)` | `1` if every participating lane's predicate is true | Uniform-branch detection |
-| `__activemask()` | 32-bit mask of lanes active *at this instruction*, no `_sync` needed | Computing the correct mask to pass to a later `_sync` call inside divergent code |
+| `__activemask()` | 32-bit mask of lanes that *happen* to be converged at this instruction; it neither synchronizes nor fences | Opportunistic warp-level programming, where "whoever is here right now" is genuinely the group you want. Not a way to reconstruct a mask you failed to compute before the branch |
 
 **Warp-aggregated atomics** — a pattern, not a single intrinsic: ballot to find which lanes
 want to increment a counter, elect the lowest-numbered active lane as leader via
@@ -238,8 +244,9 @@ step 5  offset=1    v[0] += __shfl_down_sync(0xffffffff, v[0], 1)
 
 The mask `0xffffffff` is passed identically at every step because the warp has not
 diverged — all 32 lanes are active from entry to exit of this loop. If the reduction sits
-downstream of a divergent branch, replace `0xffffffff` with `__activemask()`, captured
-*before* the branch narrows the active set (see §10).
+downstream of a divergent branch, pass the mask you computed *before* that branch — a
+`__ballot_sync` on the branch predicate is the usual source — rather than `0xffffffff`
+(see §10).
 
 **What the formula is telling you.** "Halve the surviving population five times and you
 are down to one — so a 32-lane warp needs exactly `log2(32) = 5` exchanges, and the
@@ -266,11 +273,15 @@ that have not accumulated yet.
 ```
   start        : v[i] = i          -> v[0]=0  v[1]=1  ... v[31]=31
 
-  step 1 off=16: v[0] = 0 + 16                                =  16
-  step 2 off=8 : v[0] = 16 + v[8]  where v[8] = 8 + 24 = 32   =  48
-  step 3 off=4 : v[0] = 48 + v[4]  where v[4] = 16+4*4 = 64   = 112
-  step 4 off=2 : v[0] = 112 + v[2] where v[2] = 48+4*16 = 128 = 240
-  step 5 off=1 : v[0] = 240 + v[1] where v[1] = 240+16  = 256 = 496
+  step 1 off=16: v[0] = 0 + 16                                     =  16
+  step 2 off=8 : v[0] = 16 + v[8],  v[8] = 8+24 = 32               =  48
+  step 3 off=4 : v[0] = 48 + v[4],  v[4] = 4+12+20+28 = 64         = 112
+  step 4 off=2 : v[0] = 112 + v[2], v[2] = 2+6+10+...+30 = 128     = 240
+  step 5 off=1 : v[0] = 240 + v[1], v[1] = 1+3+5+...+31 = 256      = 496
+
+  each partner v[k] read at step s already holds the sum of the lanes congruent
+  to k modulo the step's stride -- 8 terms averaging 16 gives 128, 16 terms
+  averaging 16 gives 256, which is why the running total doubles-and-adds.
 
   check: 496 = 31 x 32 / 2 = sum(0..31)                       CORRECT
 
@@ -339,8 +350,9 @@ flowchart TD
     class GRID base
 ```
 
-Each level up the hierarchy costs more to synchronize: a tile sync is free (lockstep, no
-instruction at all for a full warp), a block sync is one `bar.sync` PTX instruction, a
+Each level up the hierarchy costs more to synchronize: a full-warp tile sync is a single
+`bar.warp.sync` (what `__syncwarp()` emits) that never leaves the SM sub-partition, a block
+sync is one `bar.sync` PTX instruction across up to 32 warps, a
 cluster sync uses the Hopper distributed-shared-memory fabric, and a grid sync requires
 every block in the launch to be resident simultaneously — the occupancy-bounded, cooperative-
 launch case covered in §6.
@@ -494,11 +506,13 @@ __global__ void voteDemo(const int* flags) {
     bool allTrue  = __all_sync(0xffffffff, pred);      // did EVERY lane see true?
 
     if (pred) {
-        // Inside a divergent branch, the active set has already narrowed —
-        // capture it BEFORE using any further _sync intrinsic in this path.
-        unsigned active = __activemask();
-        int leader = __ffs(active) - 1;                // lowest-numbered active lane
-        // ... warp-aggregated work using `active`, not 0xffffffff ...
+        // Inside the branch the active set has narrowed to exactly the lanes
+        // whose `pred` was true — which is precisely `mask`, already computed
+        // BEFORE the branch. Reuse it; do NOT re-derive it with __activemask()
+        // here, which reports whoever happens to be converged at this instant
+        // and can legitimately differ from the set your logic intended.
+        int leader = __ffs(mask) - 1;                  // lowest-numbered participating lane
+        // ... warp-aggregated work using `mask`, not 0xffffffff ...
     }
 }
 ```
@@ -771,8 +785,8 @@ why §6.6-6.7 above stay C++.
 | Approach | Memory traffic | Barrier | Instructions (32-lane reduce) | When it wins |
 |----------|-----------------|---------|-------------------------------|---------------|
 | Shared memory + `__syncthreads()` | 32 shared-mem writes + reads per step | Yes, every step | ~5 steps x (store + sync + load) | Reducing across an entire *block* (>32 threads), not just one warp |
-| Warp shuffle (`__shfl_down_sync`) | None | None (lockstep) | 5 instructions | Reducing within a single warp — always prefer this for the last 32 elements |
-| `cg::reduce` on a tile | None (compiles to shuffles) | None | Same as hand-written, chosen by the library | Same as shuffle, with readable code and portability across tile sizes |
+| Warp shuffle (`__shfl_down_sync`) | None | None separate — each shuffle converges its masked lanes itself | 5 instructions | Reducing within a single warp — always prefer this for the last 32 elements |
+| `cg::reduce` on a tile | None (compiles to shuffles) | None separate — same as above | Same as hand-written, chosen by the library | Same as shuffle, with readable code and portability across tile sizes |
 | Plain per-thread atomics | 1 atomic transaction per thread | N/A | 32 atomics, serialized at the contended address | Low-contention counters where 32-way serialization is not the bottleneck |
 | Warp-aggregated atomics | 1 atomic transaction per warp | None extra | 1 ballot + 1 popcount + 1 atomic + 1 broadcast shuffle | High-contention shared counters (histograms, compaction) |
 | Grid sync (`cg::this_grid().sync()`) | Global-memory round trip for the partials being combined | Yes, whole grid | One kernel, occupancy-bounded block count | Iterative algorithms that would otherwise re-launch a kernel every pass |
@@ -931,9 +945,17 @@ __device__ float warpReduceFixed(float val, unsigned mask = 0xffffffff) {
 **Other pitfalls:**
 
 - **Using `0xffffffff` after a divergent branch.** If only some lanes reached the shuffle
-  call (e.g. inside `if (predicate)`), the correct mask is `__activemask()` captured at that
-  point — passing `0xffffffff` asks lanes that never arrived to participate, which is
-  undefined behavior, not merely "wastes a few lanes."
+  call (e.g. inside `if (predicate)`), passing `0xffffffff` asks lanes that never arrived to
+  participate, which is undefined behavior, not merely "wastes a few lanes." The correct
+  mask is `__ballot_sync(0xffffffff, predicate)` evaluated *before* the branch and carried
+  in.
+- **Reaching for `__activemask()` to repair a mask you did not compute.** `__activemask()`
+  reports which lanes happen to be converged at that instant; it performs no synchronization
+  and imposes no memory ordering, and the compiler is free to converge or not converge lanes
+  in ways that change its answer. Using it as the mask for a following `_sync` call is the
+  canonical wrong fix — derive the mask from program logic instead. Its legitimate use is
+  *opportunistic* warp programming, where an arbitrary "whoever is here" group is genuinely
+  what the algorithm wants; `cg::coalesced_threads()` expresses that intent more safely.
 - **Forgetting that a down-shuffle reduction only produces the answer in lane 0.** Code that
   needs *every* lane to see the total (e.g. rescaling a per-lane accumulator by the row sum)
   must use the `__shfl_xor_sync` all-reduce form (§6.2) or an explicit broadcast shuffle
@@ -969,16 +991,16 @@ __device__ float warpReduceFixed(float val, unsigned mask = 0xffffffff) {
 Volta introduced independent thread scheduling, so divergent lanes are no longer guaranteed to reconverge automatically before the next instruction. The mask tells the hardware exactly which lanes are exchanging data at this instruction; omitting it (or using a pre-Volta implicit-warp-synchronous shuffle) is undefined behavior, not just a style issue.
 
 **Q: What mask should you use inside a divergent branch, and why is `0xffffffff` wrong there?**
-Use `__activemask()`, captured at that point in the code, because `0xffffffff` claims all 32 lanes are participating when only the lanes that took this branch actually are. Passing the wrong mask can hang the warp or silently corrupt the shuffled values.
+Use the mask your program logic implies, computed with `__ballot_sync(0xffffffff, predicate)` *before* the branch and passed in — `0xffffffff` claims all 32 lanes are participating when only the lanes that took this branch actually are. Passing the wrong mask can hang the warp or silently corrupt the shuffled values, and the tempting shortcut of calling `__activemask()` inside the branch is not the fix: it reports whichever lanes happen to be converged at that instant, which the compiler and scheduler may make differ from the set you intended.
 
 **Q: How many `__shfl_down_sync` steps does a full 32-lane warp reduction need, and why?**
 Exactly 5 steps, because `log2(32) = 5` and each step halves the number of lanes whose value still needs combining. The offsets used are 16, 8, 4, 2, then 1.
 
 **Q: Does a warp-shuffle reduction use any shared memory or `__syncthreads()`?**
-No — it uses zero bytes of shared memory and zero barriers, because all 32 lanes execute the shuffle instruction in lockstep by construction. This is the single biggest reason it beats a shared-memory reduction for the final warp of any block-level reduction.
+No — it uses zero bytes of shared memory and zero separate barriers, because each `_sync` shuffle converges the lanes named in its mask and exchanges their registers within the same instruction. This is the single biggest reason it beats a shared-memory reduction for the final warp of any block-level reduction; note the convergence it provides holds only inside the primitive, so it is not a licence to assume lockstep on the next line.
 
 **Q: What replaces the pre-Volta assumption that a warp is always fully synchronized?**
-`__activemask()` — it returns the actual set of lanes active at the current instruction, which must be passed to any subsequent `_sync` intrinsic in that code path instead of guessing `0xffffffff`.
+The `_sync` primitives themselves, plus `__syncwarp()` where you need convergence without a data exchange — thread convergence on Volta and later is guaranteed only inside an explicitly synchronous warp-level primitive, never between them. In practice that means deciding the participating set from your program logic (typically a `__ballot_sync` before the branch) and threading that mask through every primitive in the region.
 
 **Q: What is a warp-aggregated atomic, and why is it faster than a plain per-thread atomic?**
 It elects one leader lane per warp (via `__ballot_sync` + `__ffs`) to issue a single `atomicAdd` for the whole warp's combined contribution, cutting the number of atomic-unit operations by up to 32x versus every thread hitting the counter individually. This is the standard fix when Nsight Compute shows an atomic-heavy kernel bottlenecked on contention.
@@ -1025,8 +1047,9 @@ No — `__syncwarp()` only removes the cross-warp barrier semantics of `__syncth
   hand-write the loop only when learning the mechanics or when the library's API does not
   fit (see §6.1-6.2 for the two you should still be able to write from memory).
 - Always pass an explicit mask; default to `0xffffffff` only when you can prove the call
-  site is warp-uniform, and use `__activemask()` immediately after any branch that could
-  have diverged.
+  site is warp-uniform, and for anything downstream of a branch compute the mask with a
+  `__ballot_sync` on the branch predicate *before* the branch and carry it in. Never
+  substitute `__activemask()` for a mask you should have derived from program logic.
 - Prefer the xor-butterfly all-reduce over "down-shuffle then broadcast" whenever every lane
   needs the result — it is the same instruction count with one fewer conceptual step.
 - Profile before reaching for warp-aggregated atomics — the pattern adds a ballot, a
@@ -1090,10 +1113,15 @@ __global__ void histogramBroken(const unsigned char* data, int* hist, int n) {
 ```cpp
 __global__ void histogramFixed(const unsigned char* data, int* hist, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Derive the participation mask BEFORE the guard narrows the warp. The last
+    // partial warp of the grid is genuinely divergent here, so passing a literal
+    // 0xffffffff to __match_any_sync below would be undefined behavior.
+    unsigned active = __ballot_sync(0xffffffff, idx < n);
     if (idx >= n) return;
 
     unsigned char bucket = data[idx];
-    unsigned mask = __match_any_sync(0xffffffff, bucket);  // lanes sharing this bucket value
+    unsigned mask = __match_any_sync(active, bucket);      // lanes sharing this bucket value
     int leader = __ffs(mask) - 1;
     int count  = __popc(mask);
     int lane   = threadIdx.x & 31;
@@ -1107,14 +1135,24 @@ __global__ void histogramFixed(const unsigned char* data, int* hist, int n) {
 election primitive than `__ballot_sync` when the aggregation key (the bucket value) varies
 across lanes rather than being a simple true/false predicate.
 
-**Metrics after the fix (A100, 100M readings, 256 buckets, uniform random distribution):**
+**Metrics after the fix (A100, 100M readings, 256 buckets, strongly autocorrelated sensor
+stream — consecutive samples almost always land in the same bin):**
 
 | Metric | Broken (per-thread atomics) | Fixed (warp-aggregated) |
 |--------|------------------------------|----------------------------|
 | Kernel time | 41.2 ms | 5.1 ms |
 | Atomic-unit stall (Nsight Compute) | 91% | 12% |
 | Achieved DRAM throughput | 9% of peak | 71% of peak |
-| Atomic operations issued | ~100,000,000 | ~3,900,000 (avg 32/warp collapsed to ~1.25 per warp under 256-way spread) |
+| Atomic operations issued | ~100,000,000 | ~3,900,000 (3,125,000 warps x ~1.25 distinct bin values present per warp) |
+
+**The distribution is doing the work here, and you must check it before you claim the win.**
+Warp aggregation collapses a warp's atomics down to the number of *distinct* keys its 32
+lanes hold, so the reduction factor is `32 / E[distinct keys per warp]`. Autocorrelated
+input gives ~1.25 distinct bins per warp and therefore the ~26x collapse above. Feed the
+same kernel *uniformly random* bins instead and the expectation is
+`256 x (1 - (255/256)^32) = 30.1` distinct bins per warp — a 1.06x collapse, i.e. nothing.
+The technique is worth reaching for exactly when many lanes agree, which is why §13 says to
+profile the contention before adopting it rather than adding the ballot on faith.
 
 **Discussion Questions:**
 1. Why does `__match_any_sync` outperform a manual `__ballot_sync` + equality-check loop here?

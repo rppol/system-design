@@ -10,7 +10,7 @@ Shared memory is a small, fast, on-chip scratchpad that every thread block owns 
 duration of its lifetime. It sits physically on the Streaming Multiprocessor (SM) itself —
 not on the off-chip HBM stack that backs global memory — so a shared-memory access costs on
 the order of 20-30 cycles versus the ~400-800 cycle latency of an uncached global-memory
-load: roughly two orders of magnitude faster. The entire performance-engineering discipline
+load: roughly 20x faster. The entire performance-engineering discipline
 built on top of shared memory is **tiling**: cooperatively loading a chunk ("tile") of global
 data into shared memory once, then having every thread in the block reuse that tile many
 times before it evicts, converting a memory-bound kernel into a compute-bound one.
@@ -21,7 +21,7 @@ into **32 banks**, each 4 bytes wide, and each bank can service exactly one acce
 When the 32 threads of a warp issue a shared-memory instruction, the hardware distributes
 those 32 addresses across the 32 banks in parallel *if and only if* every thread lands on a
 different bank. The moment two or more threads in the same warp target different addresses
-in the **same** bank, the hardware serializes those accesses — the “free” 100x speedup over
+in the **same** bank, the hardware serializes those accesses — the “free” ~20x speedup over
 global memory silently degrades toward global-memory levels for exactly that instruction.
 This module is entirely about seeing that mapping, breaking it on purpose, and fixing it with
 one extra column of padding.
@@ -89,16 +89,17 @@ is the single highest-leverage shared-memory optimization in the whole CUDA tool
   bank and the warp spans M distinct colliding groups, the hardware issues one transaction per
   group — the worst case (all 32 threads on 1 bank) is a **32-way conflict**, i.e. 32x the
   cycles of the conflict-free case for that single instruction.
-- **Broadcast is the built-in exception.** If every thread in the warp reads the *exact same
-  address* (not just the same bank — the identical word), the hardware detects this and
+- **Broadcast is the built-in exception.** If every thread in the warp reads any address
+  within the *same 32-bit word* (not merely the same bank), the hardware detects this and
   services it as a single broadcast read, conflict-free, regardless of how many threads share
-  it.
+  it. Note the unit is the word, not the byte address: two threads reading different bytes of
+  one 32-bit word do not conflict either.
 - **Padding shifts the stride, not the data.** Adding one unused column to a 2D tile
   (`tile[32][33]` instead of `tile[32][32]`) changes the row stride from a multiple of 32 to
   `33 = 32+1`, which de-syncs the bank-index arithmetic across rows so a column access no
   longer lands every thread on the same bank.
 - **Shared memory capacity trades against occupancy.** The SM's total shared-memory budget
-  (48-228 KB depending on generation and configuration) is divided among all blocks resident
+  (64-228 KB depending on generation and configuration) is divided among all blocks resident
   on that SM simultaneously; a kernel that claims more shared memory per block leaves room for
   fewer concurrent blocks, which can reduce occupancy even though the kernel is "using shared
   memory correctly."
@@ -124,8 +125,8 @@ is the escape hatch when the block/tile size is a tuning parameter chosen at lau
 |---------------|-----------|------|
 | **Conflict-free** | All 32 threads in the warp address 32 distinct banks | 1 cycle (full speed) |
 | **N-way bank conflict** | The warp's addresses collapse into groups sharing banks; the largest group has N threads | N sequential transactions (up to 32-way = 32x) |
-| **Broadcast** | Every thread reads the identical address (same word, same bank) | 1 cycle — hardware-detected special case |
-| **Multicast** (Volta+) | A *subset* of the warp reads the identical address while the rest hit distinct banks | The multicast group services as 1 transaction; remaining distinct-bank threads add their own transactions |
+| **Broadcast** | Every thread reads an address inside the same 32-bit word | 1 cycle — hardware-detected special case |
+| **Multicast** | A *subset* of the warp reads the same 32-bit word while the rest hit distinct banks | The multicast group services as 1 transaction; remaining distinct-bank threads add their own transactions. Available on compute capability 2.0 and later, i.e. every architecture you will meet |
 
 ```mermaid
 flowchart LR
@@ -398,8 +399,10 @@ __global__ void tiledMatMul(const float* __restrict__ A,
                              const float* __restrict__ B,
                              float* __restrict__ C,
                              int N) {
-    // Padded to 33 columns: column-wise reads inside the inner product below
-    // would otherwise all hit the same bank (see the diagrams in Section 5).
+    // Padded to 33 columns. Bs is the one that needs it: the column-wise read
+    // inside the inner product below would otherwise put all 32 lanes on the
+    // same bank (see the diagrams in Section 5). As is padded only to keep the
+    // two declarations symmetric -- its accesses are broadcast either way.
     __shared__ float As[TILE][TILE + 1];
     __shared__ float Bs[TILE][TILE + 1];
 
@@ -418,7 +421,9 @@ __global__ void tiledMatMul(const float* __restrict__ A,
 
         #pragma unroll
         for (int k = 0; k < TILE; ++k) {
-            // As[threadIdx.y][k]: fixed row, varying k -- row-major, conflict-free.
+            // As[threadIdx.y][k]: threadIdx.y and k are both uniform across the
+            // warp, so all 32 lanes read the SAME word -- the broadcast case of
+            // Section 6.5, conflict-free with or without the padding.
             // Bs[k][threadIdx.x]: varying row k, fixed-per-thread col threadIdx.x --
             // this is the column-access pattern from Section 5; the +1 padding on
             // Bs keeps it conflict-free.
@@ -634,23 +639,29 @@ shared-memory consumption becomes the binding constraint before the register or 
 limits do -- see Occupancy & Launch Configuration for how to check which limit binds first.
 ```
 
-Per-SM shared-memory budgets are generation- and configuration-dependent: the default cap is
-48 KB/SM on most generations, but `cudaFuncSetAttribute(kernel,
-cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` can opt a kernel into a larger carveout —
-up to roughly 164 KB/SM on Ampere and roughly 228 KB/SM on Hopper — at the direct cost of the
-L1 cache space and occupancy headroom that carveout takes from the rest of the SM.
+Two different limits are in play here and conflating them is the usual mistake. The **SM's**
+total shared-memory capacity is generation-dependent (64 KB on Turing, 228 KB on Hopper) and
+is what the occupancy arithmetic above divides up. A **single thread block**, separately, may
+claim at most **48 KB** of it by default on every generation. Anything beyond 48 KB per block
+must be dynamic shared memory and requires an explicit opt-in:
+`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` raises that
+per-block ceiling to roughly 164 KB on A100-class Ampere (compute capability 8.0) and roughly
+228 KB on Hopper (compute capability 9.0) — essentially the whole SM — at the direct cost of
+the L1 cache space and the occupancy headroom that carveout takes from the rest of the SM.
 
 ```mermaid
 xychart-beta
-    title "Per-SM Shared-Memory Carveout by GPU Generation"
-    x-axis ["Default cap", "Ampere max", "Hopper max"]
-    y-axis "Shared memory per SM (KB)" 0 --> 250
+    title "Shared memory a single thread block may claim"
+    x-axis ["Default, all gens", "Ampere CC 8.0 opt-in", "Hopper CC 9.0 opt-in"]
+    y-axis "Shared memory per block (KB)" 0 --> 250
     bar [48, 164, 228]
 ```
 
-The default 48 KB cap is a conservative floor common across generations; opting into the
-Ampere or Hopper maximum via `cudaFuncSetAttribute` buys 3-5x more tile capacity at the direct
-expense of the L1-cache share of the same physical SRAM.
+The 48 KB default is a conservative per-block floor common across generations; opting into the
+Ampere or Hopper ceiling via `cudaFuncSetAttribute` buys 3-5x more tile capacity per block at
+the direct expense of the L1-cache share of the same physical SRAM — and, because one such
+block now occupies nearly the whole SM's shared memory, at the cost of running one block per
+SM.
 
 ---
 
@@ -721,9 +732,9 @@ __shared__ float tile[32][32];
 tile[threadIdx.y][threadIdx.x] = input[...];
 __syncthreads();
 
-// Every thread in the warp reads a DIFFERENT ROW of the SAME COLUMN (k fixed
-// per warp iteration, threadIdx.y varies 0..31) -- bank(row,col) = col for
-// every row, so all 32 threads collide on one bank: a 32-way conflict on
+// Every thread in the warp reads a DIFFERENT ROW of the SAME COLUMN (k is
+// uniform across the warp, threadIdx.x varies 0..31) -- bank(row,col) = col
+// for every row, so all 32 threads collide on one bank: a 32-way conflict on
 // every single iteration of this loop.
 float v = tile[threadIdx.x][k];
 ```
@@ -802,7 +813,7 @@ which is exactly the race in the BROKEN example above.
 - **Assuming shared memory is zero-initialized.** Unlike global memory allocated with
   `cudaMalloc`, `__shared__` arrays contain garbage from the block's SM slot until explicitly
   written — always write before reading, or initialize to a known sentinel.
-- **Forgetting the second `__syncthreads()`** in a multi-iteration tiling loop (Section 6.6's
+- **Forgetting the second `__syncthreads()`** in a multi-iteration tiling loop (Section 6.1's
   "barrier 2") — without it, a fast thread can start overwriting the tile with the *next*
   iteration's data while a slow thread is still reading the *current* iteration's tile.
 - **Treating "more shared memory" as strictly better.** Doubling tile size to increase reuse
@@ -833,7 +844,7 @@ same warp access different addresses that map to the same one of the 32 shared-m
 forcing those accesses to serialize instead of completing in one cycle. Shared memory is split
 into 32 banks of 4 bytes each; a conflict-free warp access (32 threads, 32 distinct banks)
 completes in 1 cycle, while an N-way conflict takes N sequential cycles for that single
-instruction — the "free" 100x-faster-than-global speedup of shared memory can silently regress
+instruction — the "free" ~20x-faster-than-global speedup of shared memory can silently regress
 toward global-memory-like latency for exactly the colliding instructions.
 
 **Q: Why does a straight column access into a `tile[32][32]` array cause a 32-way conflict?**
@@ -874,10 +885,11 @@ shared memory takes its size as a runtime launch parameter. Static declares
 `<<<grid, block, bytes>>>` launch argument, letting one compiled kernel serve different tile
 sizes chosen at runtime (e.g. by an occupancy-tuning pass).
 
-**Q: Why is shared memory roughly 100x faster than global memory?**
+**Q: Why is shared memory roughly 20x faster than global memory?**
 Shared memory is on-chip SRAM
 inside the SM at roughly 20-30 cycle latency, while global memory is an off-chip HBM round
-trip at roughly 400-800 cycles. The gap is architectural — locality, not just clock speed —
+trip at roughly 400-800 cycles, which puts the ratio between about 13x and 40x. The gap is
+architectural — locality, not just clock speed —
 because a discrete memory chip carries DRAM row-activation and queuing overhead that on-die
 SRAM does not, which is exactly why tiling data through shared memory once and reusing it many
 times is the single highest-leverage optimization for memory-bound kernels.
@@ -890,11 +902,13 @@ that only works if every thread in the block sees the same memory. A thread-priv
 is the entire point of shared memory.
 
 **Q: How much shared memory is available per SM, and is that number fixed?**
-It is configurable,
-not fixed — the default cap is around 48 KB per block on most generations. Calling
-`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` can opt a
-kernel into a larger per-SM carveout, up to roughly 164 KB/SM on Ampere and roughly 228 KB/SM
-on Hopper, at the direct expense of the L1 cache's share of that same physical SRAM.
+Separate the two limits, because interviewers probe exactly this. The SM's total shared-memory
+capacity is fixed by the architecture (64 KB on Turing, up to 228 KB on Hopper) and is what all
+resident blocks divide between them. What a single block may claim out of it is *not* fixed: the
+default ceiling is 48 KB per block on every generation, and
+`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` raises it —
+to roughly 164 KB on A100-class Ampere and roughly 228 KB on Hopper — at the direct expense of
+the L1 cache's share of that same physical SRAM, and of every other block that then cannot fit.
 
 **Q: What is the tradeoff between a kernel's shared-memory footprint and its occupancy?**
 A
@@ -998,9 +1012,9 @@ pattern requires, and measure achieved occupancy after any tile-size change.
    Compute the resulting occupancy impact (Section 6.6) before committing to a larger tile.
 6. **Prefer static `__shared__` unless the tile size is a genuine runtime/tuning parameter** —
    it is compiler-checked and easier to reason about than a dynamic, offset-shared buffer.
-7. **Never rely on broadcast for anything other than a literal identical-address read** — a
-   near-miss (threads reading adjacent addresses in the same bank) still conflicts; broadcast
-   requires the exact same word.
+7. **Never rely on broadcast for anything other than reads landing in one 32-bit word** — a
+   near-miss (threads reading adjacent words in the same bank) still conflicts; the hardware's
+   exemption covers the same word, not the same bank.
 8. **Treat shared-memory capacity as a shared, finite per-SM budget** when opting into a larger
    carveout via `cudaFuncSetAttribute` — verify the L1-cache and occupancy tradeoffs it implies
    rather than assuming "more shared memory" is a strict win.
@@ -1098,8 +1112,9 @@ occupancy tuning and register blocking.
    direction and the transposed store direction simultaneously?
 2. If the transpose kernel used `double` elements instead of `float`, would the same `+1`
    padding amount still fully resolve the conflict? Why or why not (see §12's data-type Q&A)?
-3. The fixed kernel still issues two `__syncthreads()` barriers — could either be removed
-   safely, and what would break if so?
+3. The fixed kernel issues exactly one `__syncthreads()` barrier — could it be removed
+   safely, and what would break if so? Why does the tiled GEMM in §6.1 need a second one
+   while this transpose does not?
 4. How would you confirm, using only Nsight Compute output (not source-code inspection),
    which of the load or store phase was the conflicting one in the broken kernel?
 5. Beyond padding, what other technique (hint: swizzling the write index) could achieve the

@@ -180,14 +180,23 @@ program actually use simultaneously:
 
 | Engine | Role | Typical count (data-center GPU) |
 |--------|------|-----------------------------------|
-| Compute engine(s) | Execute kernels across resident SMs | 1 (shared by all streams; SMs subdivide among concurrent kernels/blocks) |
-| H2D copy engine | Host → device DMA transfer | 1 |
-| D2H copy engine | Device → host DMA transfer | 1 (separate from H2D on Ampere/Hopper-class GPUs — enables simultaneous bidirectional transfer) |
+| Compute | Execute kernels across resident SMs | One work distributor feeding all SMs; blocks from different kernels/streams can be resident at the same time on the same or different SMs |
+| H2D copy engine | Host → device DMA transfer | At least 1 |
+| D2H copy engine | Device → host DMA transfer | At least 1, separate from H2D |
 
-Because compute is a **single shared engine**, kernels from different streams do not truly
-run "at the same time" as much as they **interleave** at the block/warp-scheduling level —
-true concurrency headroom comes primarily from overlapping the *copy* engines with the
-*compute* engine, which is exactly the §5 diagram's story.
+Do not take the copy-engine count on faith — query it. `cudaDeviceProp::asyncEngineCount`
+is `1` when the device can overlap a copy in *one* direction with kernel execution, and `2`
+or more when it can run an H2D copy, a D2H copy, and a kernel all at once. Data-center parts
+have reported 2-or-more for many generations (A100 and H100 both report `3`), so bidirectional
+overlap is not an Ampere-era novelty — but a consumer or embedded part may report `1`, and
+that single number decides whether the §5 timeline is achievable on your hardware at all.
+
+Kernels from different streams **do** genuinely execute concurrently when the SMs have the
+free registers, shared memory, and block slots to host both kernels' blocks — that is real
+parallelism across SMs, not merely time-slicing. What limits compute-vs-compute overlap in
+practice is resources, not the model: a kernel that already saturates the device leaves
+nothing for a second one, which is why most of the practical headroom still comes from
+overlapping the *copy* engines with the *compute* engine, exactly the §5 diagram's story.
 
 ---
 
@@ -627,7 +636,7 @@ progress counter, or signaling a producer/consumer handoff on the host side.
 For a workload where each of 3 chunks needs 10 ms H2D, 10 ms compute, 10 ms D2H (matching
 §5's diagram): serial = 90 ms; 3-stream pipelined = 50 ms (1.8x). Scaling to 12 chunks of
 the same per-stage cost across the same 3-4 streams: serial = 360 ms; pipelined
-approximately (12 + 3) x 10 ms = 150 ms, a **2.4x** speedup, closing in on the 3x ceiling as
+`(12 + 3 - 1) x 10 ms` = 140 ms, a **2.57x** speedup, closing in on the 3x ceiling as
 chunk count grows and the fixed pipeline fill/drain (the very first H2D and very last D2H,
 which have nothing to overlap with) becomes a smaller fraction of total time.
 
@@ -914,7 +923,7 @@ The legacy (null) default stream implicitly synchronizes with every other stream
 It blocks the calling CPU host thread until every operation queued in that one specific stream has completed, and has no effect on any other stream's progress. This makes it strictly cheaper than `cudaDeviceSynchronize`, which waits for the entire device, and is the right tool when only one stream's completion actually needs to be observed.
 
 **Q: Can two kernels from different streams truly run at the same time on one GPU?**
-They can genuinely execute concurrently if the GPU's SMs have enough free resources (registers, shared memory, blocks) to host both kernels' blocks simultaneously. But because there is only one shared compute engine, "concurrency" here means interleaved scheduling of resident blocks from both kernels, not two fully separate compute pipelines — the real overlap opportunity usually comes from copy engines running alongside compute, not compute-vs-compute.
+Yes — blocks from both kernels can be resident simultaneously across the SMs, which is genuine parallel execution, not time-slicing. The catch is resources rather than the execution model: a single kernel that already fills the device with blocks leaves nothing for a second one, so concurrent kernel execution only materializes for small or resource-light kernels. That is why the reliable overlap opportunity in practice is copy engines running alongside compute, not compute-vs-compute.
 
 **Q: Is `--default-stream per-thread` a free way to get full concurrency?**
 No — it only makes each host thread's own default stream independent of other threads' default streams; it does nothing to fix pageable-memory copies or chunk your workload for you. It solves exactly one specific serialization source (the shared legacy null stream across threads), not the whole overlap problem.
@@ -932,7 +941,7 @@ No — different streams are necessary but not sufficient for overlap. Concurren
 A stream is an in-order, asynchronous queue of GPU operations issued from the host, where operations within one stream execute in the order enqueued but carry no ordering guarantee relative to any other stream. That lack of cross-stream ordering is precisely what makes concurrency possible.
 
 **Q: How many copy engines does a typical data-center GPU like the A100 or H100 have, and why does that matter?**
-These GPUs expose two independent copy engines — one dedicated to host-to-device transfer and one to device-to-host — in addition to the shared compute engine. That separation is what allows a well-pipelined program to have H2D, compute, and D2H all running simultaneously for three different chunks, which is the mechanism behind the 3x asymptotic overlap speedup.
+Query it rather than assume: `cudaDeviceProp::asyncEngineCount` reports `1` if the device can overlap a copy in one direction with kernel execution and `2` or more if it can do H2D, D2H, and compute simultaneously — A100 and H100 both report `3`. Two or more is what allows a well-pipelined program to have H2D, compute, and D2H running at once on three different chunks, which is the mechanism behind the 3x asymptotic overlap speedup; on a part reporting `1`, the ceiling is 2x instead, because the two transfer directions must share one engine.
 
 **Q: What is the practical difference between the legacy default stream and the per-thread default stream?**
 The legacy default stream is a single, process-wide stream that implicitly synchronizes with every other stream on the device. The per-thread default stream, enabled via a compile flag, instead gives each host thread its own regular, non-synchronizing default stream — explicit non-default streams behave identically either way.
