@@ -121,8 +121,9 @@ hidden tax.
 
 | API | Lives in | Host-accessible? | Typical use |
 |-----|----------|-------------------|-------------|
-| `cudaMalloc` | Device HBM | No | Default device buffer for kernel input/output |
-| `cudaFree` | — | — | Releases a `cudaMalloc` allocation |
+| `cudaMalloc` | Device HBM | No | Default device buffer for kernel input/output; synchronizes the whole device |
+| `cudaFree` | — | — | Releases a `cudaMalloc` allocation; also device-synchronizing |
+| `cudaMallocAsync` / `cudaFreeAsync` | Device HBM (memory pool) | No | Stream-ordered allocation: the allocation is ordered on a stream instead of synchronizing the device, and freed memory returns to a pool the next allocation on that stream can reuse. The right call for allocating inside a loop or a per-request path |
 | `cudaMallocPitch` | Device HBM | No | 2D arrays with row-alignment padding for coalescing |
 | `cudaMalloc3D` | Device HBM | No | 3D volumes with pitched rows |
 
@@ -867,7 +868,9 @@ CUDA_CHECK(cudaStreamSynchronize(stream)); // catches everything queued
 
 | Tool / API | Purpose |
 |------------|---------|
-| `cudaMalloc` / `cudaFree` | Device-resident allocation |
+| `cudaMalloc` / `cudaFree` | Device-resident allocation (device-synchronizing) |
+| `cudaMallocAsync` / `cudaFreeAsync` | Stream-ordered device allocation out of a memory pool — no device-wide synchronization |
+| `cudaMemPoolSetAttribute` / `cudaDeviceSetMemPool` | Tune the stream-ordered allocator's pool (release threshold, reuse policy) |
 | `cudaHostAlloc` / `cudaMallocHost` / `cudaFreeHost` | Pinned host allocation/deallocation |
 | `cudaMemcpy` / `cudaMemcpyAsync` | Synchronous / async host↔device↔device copy |
 | `cudaMallocManaged` | Unified Memory allocation |
@@ -965,9 +968,13 @@ without staging through host memory at all.
 
 **Q: Does `cudaFree` block the calling thread?**
 Yes — like `cudaMalloc`,
-`cudaFree` is synchronous and can also implicitly synchronize the device,
-which is why repeatedly allocating and freeing inside a hot loop is
-expensive; pre-allocate buffers once and reuse them instead.
+`cudaFree` is synchronous and can also implicitly synchronize the whole
+device, which is why repeatedly allocating and freeing inside a hot loop is
+expensive: every iteration drains every stream. Pre-allocate buffers once and
+reuse them, or when the sizes genuinely vary per iteration use the
+stream-ordered allocator (`cudaMallocAsync`/`cudaFreeAsync`), whose
+allocations are ordered on a stream and served from a memory pool rather than
+forcing a device-wide sync.
 
 **Q: Why is `cudaMallocPitch` used for 2D arrays instead of a flat
 `cudaMalloc`?** `cudaMallocPitch` pads each row to an alignment boundary
@@ -1012,7 +1019,9 @@ the *next* call instead of the one that actually failed.
   latency trap.
 - **Pre-allocate and reuse device and pinned-host buffers** outside hot
   loops — `cudaMalloc`/`cudaFree`/`cudaHostAlloc` are all synchronizing,
-  non-trivial-cost calls.
+  non-trivial-cost calls. When the per-iteration size genuinely varies, reach
+  for `cudaMallocAsync`/`cudaFreeAsync` so the allocation is stream-ordered
+  out of a pool instead of synchronizing the device.
 - **Profile the transfer, not just the kernel**, with Nsight Systems' timeline
   view before concluding a pipeline is "kernel-bound" — see
   [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md).

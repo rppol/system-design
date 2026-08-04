@@ -396,7 +396,8 @@ int main() {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Profile with: ncu --set full ./coalesced_vs_strided
-    // Compare "Global Load/Store Efficiency" and "sectors per request"
+    // Compare "Sectors/Req" and the sector-efficiency metrics
+    // smsp__sass_average_data_bytes_per_sector_mem_global_op_{ld,st}.pct
     // between the two kernel launches (see §11 for the metric names).
     cudaFree(d_in);
     cudaFree(d_out);
@@ -705,7 +706,7 @@ void allocatePitched() {
 - Nsight Compute flags the kernel as memory-bound (DRAM or L2 throughput near the roofline, low arithmetic intensity).
 - The kernel touches a 2D/3D array and the thread-to-index mapping was chosen for "logical" clarity rather than measured against the array's actual memory layout.
 - You are porting a CPU AoS data structure (a `struct` per entity) directly to the GPU without re-examining the access pattern.
-- A profiler shows "sectors per request" well above the ideal (4 for a 32-bit-element warp load) or "global load/store efficiency" well below 100%.
+- A profiler shows "Sectors/Req" well above the ideal (4 for a 32-bit-element warp load) or a sector efficiency (`smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct`) well below 100%.
 - The kernel logically needs a transposed, reordered, or gathered view of data that its natural indexing does not provide contiguously.
 
 **Do not over-invest in coalescing when:**
@@ -735,9 +736,10 @@ __global__ void rowSumBroken(const float* data, float* rowSums,
     }
     rowSums[row] = sum;
 }
-// Nsight Compute: "Global Load Efficiency" 12.5% once width >= 8 floats
-// (every lane owns its own sector); "sectors per request" pinned at 32
-// instead of the ideal 4.
+// Nsight Compute: load sector efficiency
+// (smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct) 12.5% once
+// width >= 8 floats (every lane owns its own sector); "Sectors/Req" pinned at
+// 32 instead of the ideal 4.
 ```
 
 ```cuda
@@ -761,7 +763,7 @@ __global__ void rowSumFixed(const float* data, float* rowSums,
         sum += __shfl_down_sync(0xffffffff, sum, off);
     if (lane == 0) rowSums[warpId] = sum;
 }
-// Measured-style result: Global Load Efficiency rises from 12.5% to ~100%;
+// Measured-style result: load sector efficiency rises from 12.5% to ~100%;
 // end-to-end kernel time drops roughly 4-6x on a bandwidth-bound row sum
 // over a large (e.g. 8192 x 8192) matrix. Launch with blockDim.x a multiple
 // of 32 so `warpId` stays uniform across every warp.
@@ -782,11 +784,11 @@ __global__ void rowSumFixed(const float* data, float* rowSums,
 | Tool / Metric | What it shows for coalescing analysis |
 |----------------|----------------------------------------|
 | **Nsight Compute — Memory Workload Analysis** | Global Load/Store Transactions, sectors requested vs sectors needed, DRAM/L2 throughput as % of peak |
-| **`smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct`** | Modern metric name for "how much of each fetched sector was actually used" — the direct coalescing-efficiency number |
-| **"Global Load/Store Efficiency" (legacy `nvprof`/older `ncu` sets)** | Older but still-referenced metric: requested bytes / transacted bytes, as a percentage; 100% is the coalesced ideal |
-| **"Sectors per Request"** | Average number of 32-byte sectors fetched per warp instruction; ideal is 4 for a fully coalesced 32-bit-element load, higher means waste |
+| **`smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct`** | Load-side sector efficiency — "how much of each fetched sector was actually used"; 100% is the coalesced ideal |
+| **`smsp__sass_average_data_bytes_per_sector_mem_global_op_st.pct`** | The store-side counterpart; the transpose case study in §14 is diagnosed on this metric, because its strided leg is the write |
+| **"Sectors/Req" (Memory Workload Analysis, L1/TEX Cache table)** | Average number of 32-byte sectors fetched per warp instruction; ideal is 4 for a fully coalesced 32-bit-element load, higher means waste |
 | **Nsight Compute Roofline chart** | Places the kernel relative to the memory-bandwidth roof — confirms whether a coalescing fix should even be expected to move wall-clock time |
-| **`cuda-memcheck`/`compute-sanitizer`** | Does not diagnose coalescing directly, but catches the misaligned-pointer and out-of-bounds bugs that vectorized-load fixes commonly introduce |
+| **`compute-sanitizer`** | Does not diagnose coalescing directly, but catches the misaligned-pointer and out-of-bounds bugs that vectorized-load fixes commonly introduce |
 | **CUB / Thrust `zip_iterator`** | Library-level pattern for iterating several SoA arrays "as if" AoS without paying the interleaved-layout coalescing cost |
 | **`cudaMallocPitch` / `cudaMemcpy2D`** | API-level tool for keeping 2D array rows aligned so row-major access stays coalesced across row boundaries |
 
@@ -819,7 +821,7 @@ It moves 16 bytes per thread in a single instruction instead of issuing four sep
 Because a transpose fundamentally requires reading row-major and writing column-major (or vice versa) — whichever indexing you choose for the read, the write ends up striding by the matrix width, and swapping the loop order just moves the same strided cost to the other operation. The only fix is to decouple the two: stage a tile through shared memory so both the global read and the global write are coalesced, and let the strided reindexing happen on-chip instead of in global memory (see §14).
 
 **Q: How do you spot an uncoalesced access in Nsight Compute?**
-Open the Memory Workload Analysis section and check "sectors per request" against the ideal of 4 (for a 32-bit-element, fully coalesced warp load) — a much higher number, or a low "Global Load/Store Efficiency" percentage, both indicate wasted transactions. The roofline chart then tells you whether fixing it is even worth doing (only if the kernel sits below the memory-bandwidth roof).
+Open the Memory Workload Analysis section and check the L1/TEX Cache table's "Sectors/Req" against the ideal of 4 (for a 32-bit-element, fully coalesced warp load) — a much higher number, or a low sector efficiency (`smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct` / `_op_st.pct`), both indicate wasted transactions. The roofline chart then tells you whether fixing it is even worth doing (only if the kernel sits below the memory-bandwidth roof).
 
 **Q: Is coalescing the same mechanism as shared-memory bank conflicts?**
 No — coalescing governs how a warp's *global*-memory addresses map to DRAM/L2 sector transactions, while bank conflicts govern how a warp's *shared*-memory addresses map to the 32 on-chip banks; the two are analogous in spirit (warp-wide parallel access vs. hardware-imposed granularity) but are different hardware paths with different fixes — see [shared_memory_and_bank_conflicts](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md).
@@ -930,8 +932,10 @@ flowchart LR
 
 ```cuda
 // BROKEN: coalesced read, uncoalesced write (see 14.1 diagram).
-// Nsight Compute: Global Store Efficiency ~ 12-15%; DRAM throughput far
-// below peak despite the kernel "looking" like a simple index swap.
+// Nsight Compute: store sector efficiency ~ 12-15%
+// (smsp__sass_average_data_bytes_per_sector_mem_global_op_st.pct); DRAM
+// throughput far below peak despite the kernel "looking" like a simple
+// index swap.
 #define N 4096
 
 __global__ void transposeNaive(const float* in, float* out) {
