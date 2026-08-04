@@ -85,7 +85,7 @@ conflict behavior around that fixed cost changes.
 
 ```
 Block size (all rungs): 256 threads/block (occupancy-friendly default; see
-                         ../occupancy_and_launch_configuration/README.md)
+    ../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md)
 
 N = 2^10 (1,024):    4 blocks           -- single kernel launch fully reduces
 N = 2^20 (1,048,576): 4,096 blocks (first-add-during-load halves this to 2,048)
@@ -143,23 +143,27 @@ flowchart TD
 ### The Reduction Tree Itself (n=16 within one block)
 
 ```
-Sequential-addressing reduction tree, n=16 (rung 3+), sdata[] in shared memory
+Sequential-addressing reduction tree, n=16 (rung 3+), sdata[] in shared memory.
+Thread tid always does  sdata[tid] += sdata[tid + s]  -- its partner sits s
+slots AWAY, never adjacent. That is precisely what keeps the ACTIVE lanes a
+contiguous prefix while the ADDRESSES stay two contiguous ranges.
 
-level 0 (16 leaves):  a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15
-                       \ /  \ /  \ /  \ /  \ /   \ /   \  /    \  /
-level 1 (8, s=8):      b0   b1   b2   b3   b4    b5    b6     b7        <- tid<8 active
-                        \   /     \   /     \    /      \     /
-level 2 (4, s=4):        c0        c1         c2          c3           <- tid<4 active
-                          \        /            \          /
-level 3 (2, s=2):           d0                     d1                  <- tid<2 active
-                              \                     /
-level 4 (1, s=1):                    result                            <- tid<1 active
+  s=8, tid<8 :  a0 a1 a2 a3 a4 a5 a6 a7  <-+-- a8 a9 a10 a11 a12 a13 a14 a15
+                b0 b1 b2 b3 b4 b5 b6 b7      (upper half consumed, then dead)
+  s=4, tid<4 :  b0 b1 b2 b3  <-+-- b4 b5 b6 b7
+                c0 c1 c2 c3
+  s=2, tid<2 :  c0 c1  <-+-- c2 c3
+                d0 d1
+  s=1, tid<1 :  d0  <-+-- d1
+                result
 
-4 levels = log2(16); 15 additions = n-1.  Every level's active threads are
-a CONTIGUOUS prefix (tid < s), never scattered by a modulo test -- this is
-the shape rungs 3-7 all share; what changes between them is how each level
-is scheduled onto real hardware (warp alignment, idle-thread count, and
-whether shared memory or a warp register shuffle carries the value).
+4 levels = log2(16); 8 + 4 + 2 + 1 = 15 additions = n-1.  Every level's active
+threads are a CONTIGUOUS prefix (tid < s), never scattered by a modulo test,
+and the two address ranges touched (0..s-1 and s..2s-1) are each contiguous,
+so consecutive lanes land in consecutive banks -- zero conflicts at every
+level. This is the shape rungs 3-7 all share; what changes between them is how
+each level is scheduled onto real hardware (warp alignment, idle-thread count,
+and whether shared memory or a warp register shuffle carries the value).
 ```
 
 *This is the same 16-leaf tree shape used throughout [`../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md`](../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) §5 — that module stops at rung 2 (sequential addressing); this case study is the "rungs 3-7" continuation it hands off to.*
@@ -208,8 +212,8 @@ if __name__ == "__main__":
 ### 4.1 Rung 1 — Interleaved Addressing with `%` (BROKEN baseline)
 
 ```cuda
-// RUNG 1 — BROKEN: warp-divergent (modulo test scatters active threads)
-//                   AND bank-conflicted (growing stride s hits repeat banks)
+// RUNG 1 — BROKEN: warp-divergent (the modulo test masks off part of every
+//                   warp), and `%` is one of the slowest integer ops on the SM
 #include <cuda_runtime.h>
 
 __global__ void reduce1_interleaved(const float* __restrict__ g_idata,
@@ -222,8 +226,8 @@ __global__ void reduce1_interleaved(const float* __restrict__ g_idata,
     __syncthreads();
 
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
-        if (tid % (2 * s) == 0) {           // DEFECT 1: scatters active threads
-            sdata[tid] += sdata[tid + s];   // DEFECT 2: stride s -> bank conflicts
+        if (tid % (2 * s) == 0) {           // DEFECT 1: masks off part of every warp
+            sdata[tid] += sdata[tid + s];   // DEFECT 2: `%` costs many instructions
         }
         __syncthreads();
     }
@@ -233,7 +237,9 @@ __global__ void reduce1_interleaved(const float* __restrict__ g_idata,
 
 **Why it is slow, mechanically.** At `blockDim.x = 256` and `s = 1`, the condition `tid % 2 == 0` leaves threads `0, 2, 4, ..., 254` active — 128 of 256 threads survive, but within *every single 32-lane warp* exactly 16 lanes are active and 16 are masked off. SIMT hardware cannot skip masked lanes for free: the warp scheduler issues the instruction for the whole warp and the inactive lanes simply discard their result, so a warp with any active/inactive split pays the full instruction cost while doing half the useful work. This is warp divergence in its purest form — not an `if/else` with different code paths, but a single instruction executed by a partially-masked warp.
 
-The second defect compounds the first: shared memory has **32 banks of 4 bytes each**, and consecutive addresses map to consecutive banks. At `s = 16`, active threads (still spaced 32 apart by the modulo test: `tid = 0, 32, 64, ...`) access `sdata[tid]` and `sdata[tid+16]` — pairs of addresses 16 apart, meaning `tid` and `tid+16` map to banks `tid % 32` and `(tid+16) % 32`, which for the *set* of active threads collide 2-way as `s` grows toward 16, forcing the memory controller to serialize what should be one-cycle parallel bank access into multiple cycles.
+The second defect is the `%` itself: integer modulo has no single-instruction form on the SM and expands into a multi-instruction sequence, paid by every thread at every one of the `log2(blockDim.x)` levels even though most of them are masked off.
+
+**What rung 1 is NOT is bank-conflicted, and that matters for rung 2.** Shared memory has **32 banks of 4 bytes each**, with consecutive 4-byte words on consecutive banks. The modulo test leaves active lanes spaced `2s` apart *within* the warp, so at `s = 1` warp 0's active lanes are `tid = 0, 2, ..., 30` touching words `0, 2, ..., 30` — 16 distinct banks for 16 lanes. At `s = 16` only `tid = 0` is active in warp 0 at all. At every value of `s`, the surviving lanes of a warp land on distinct banks. Rung 1 is conflict-free; it is *purely* a divergence-and-modulo kernel.
 
 **Measured (A100, N = 2^24, 256 threads/block):**
 
@@ -242,12 +248,14 @@ The second defect compounds the first: shared memory has **32 banks of 4 bytes e
 | Kernel time | 2.35 ms |
 | Achieved DRAM bandwidth | 28.6 GB/s |
 | % of peak HBM2e (1.6 TB/s) | 1.8% |
-| Nsight Compute top stall reason | `not selected` / warp-execution-efficiency ~62% (divergence signature) |
+| Avg active threads/warp (`smsp__thread_inst_executed_per_inst_executed.ratio`) | ~20 of 32 — the divergence signature |
+| Shared-memory bank conflicts (`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`) | zero |
 
 ### 4.2 Rung 2 — Interleaved Addressing with Strided Index (still bank-conflicted)
 
 ```cuda
-// RUNG 2 — FIX divergence, DEFECT REMAINS: still bank-conflicted
+// RUNG 2 — FIX divergence and the modulo, but INTRODUCE bank conflicts
+//          that rung 1 did not have. A trade, not a strict improvement.
 __global__ void reduce2_stridedIndex(const float* __restrict__ g_idata,
                                       float* __restrict__ g_odata, int n) {
     extern __shared__ float sdata[];
@@ -260,7 +268,7 @@ __global__ void reduce2_stridedIndex(const float* __restrict__ g_idata,
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
         int index = 2 * s * tid;              // FIX: active threads now contiguous
         if (index < blockDim.x) {
-            sdata[index] += sdata[index + s];  // DEFECT: index stride 2s -> bank conflicts
+            sdata[index] += sdata[index + s];  // NEW DEFECT: stride 2s -> bank conflicts
         }
         __syncthreads();
     }
@@ -268,7 +276,7 @@ __global__ void reduce2_stridedIndex(const float* __restrict__ g_idata,
 }
 ```
 
-**What changed.** Replacing the modulo test with `index = 2*s*tid` and testing `index < blockDim.x` means the *set of active threads* (`tid = 0, 1, 2, ...`) is now contiguous — `tid < blockDim.x/(2*s)` — so warps fully retire (all-active or all-inactive) instead of half-masking. Divergence within a warp is gone. But the *addresses touched* — `sdata[index]` and `sdada[index+s]` where `index = 2*s*tid` — still stride by `2*s` between consecutive active threads, and at `s >= 16` that stride is a multiple of the 32-bank width, so every active thread in a warp maps to the *same* bank: an 16-to-32-way conflict, actually **worse** than rung 1's 2-way conflict in the worst case.
+**What changed, and what it cost.** Replacing the modulo test with `index = 2*s*tid` and testing `index < blockDim.x` means the *set of active threads* (`tid = 0, 1, 2, ...`) is now contiguous — `tid < blockDim.x/(2*s)` — so warps fully retire (all-active or all-inactive) instead of part-masking, and the expensive `%` is gone. But the *addresses touched* — `sdata[index]` and `sdata[index+s]` where `index = 2*s*tid` — now stride by `2*s` words between consecutive active lanes, and a stride that shares a factor with 32 folds many lanes onto one bank. Work it through for a 256-thread block: at `s=1` the 32 lanes hit words `0, 2, ..., 62`, i.e. 16 distinct banks, 2 lanes each — a 2-way conflict. At `s=4` they hit `0, 8, ..., 248`, only 4 distinct banks — an 8-way conflict, the worst case for this block size. Rung 2 therefore **trades** divergence for a defect rung 1 did not have, which is exactly why the bandwidth number barely moves.
 
 **Measured (A100, N = 2^24):**
 
@@ -277,15 +285,15 @@ __global__ void reduce2_stridedIndex(const float* __restrict__ g_idata,
 | Kernel time | 2.35 ms | 1.98 ms |
 | Achieved DRAM bandwidth | 28.6 GB/s | 33.9 GB/s |
 | % of peak HBM2e | 1.8% | 2.1% |
-| Warp execution efficiency | ~62% | ~99% (divergence fixed) |
-| Shared-memory bank conflicts (ncu) | moderate | **severe** at large `s` |
+| Avg active threads/warp | ~20 of 32 | ~32 of 32 (divergence fixed) |
+| Shared-memory bank conflicts | zero | up to 8-way |
 
-Divergence is fixed but bandwidth barely moves — the bank-conflict defect dominates just as much as divergence did. This rung is the textbook "fixed the wrong half of the bug" trap: an interviewer who accepts this as "the fix" without asking about bank conflicts is testing whether you stop at the first plausible-looking improvement.
+Divergence is fixed, the modulo is gone, and bandwidth barely moves — because the fix imported a bank-conflict defect worth about as much as the divergence it removed. This rung is the textbook "fixed the wrong half of the bug" trap, with the extra sting that the fix itself created the other half: an interviewer who accepts this as "the fix" without asking about bank conflicts is testing whether you stop at the first plausible-looking improvement.
 
 ### 4.3 Rung 3 — Sequential Addressing (no divergence, no bank conflict)
 
 ```cuda
-// RUNG 3 — FIX: BOTH divergence and bank conflicts removed
+// RUNG 3 — FIX: contiguous active lanes AND conflict-free addresses at once
 __global__ void reduce3_sequentialAddressing(const float* __restrict__ g_idata,
                                               float* __restrict__ g_odata, int n) {
     extern __shared__ float sdata[];
@@ -305,7 +313,7 @@ __global__ void reduce3_sequentialAddressing(const float* __restrict__ g_idata,
 }
 ```
 
-**This is the single line every senior-interview answer must reach.** Reversing the loop (`s` starts at `blockDim.x/2` and halves, instead of starting at 1 and doubling) and testing `tid < s` instead of a modulo/multiply produces the *same* tree shape (Section 3's diagram) but now: (1) active threads are always the contiguous prefix `0..s-1` — full warps retire cleanly as `s` drops below 32, and (2) `sdata[tid]` and `sdata[tid+s]` are accessed at **unit stride across the active range** — for any fixed `s`, the `blockDim.x` active-thread addresses `tid` and `tid+s` are each a permutation of `0..blockDim.x-1`, so consecutive active threads land in *distinct* banks with zero repeats, for every value of `s`.
+**This is the single line every senior-interview answer must reach.** Reversing the loop (`s` starts at `blockDim.x/2` and halves, instead of starting at 1 and doubling) and testing `tid < s` instead of a modulo/multiply produces the *same* tree shape (Section 3's diagram) but now: (1) active threads are always the contiguous prefix `0..s-1` — full warps retire cleanly as `s` drops below 32, and (2) `sdata[tid]` and `sdata[tid+s]` are accessed at **unit stride across the active range** — for any fixed `s` the two address sets are the contiguous ranges `0..s-1` and `s..2s-1`, so consecutive active lanes land in consecutive, *distinct* banks with zero repeats, for every value of `s`. It keeps rung 1's conflict-free banking while also getting rung 2's contiguous active prefix, which is what neither of the first two rungs managed on its own.
 
 **BROKEN -> FIX, measured side by side (A100, N = 2^24):**
 
@@ -314,7 +322,8 @@ __global__ void reduce3_sequentialAddressing(const float* __restrict__ g_idata,
 | Kernel time | 2.35 ms | 0.68 ms | **3.5x** |
 | Achieved DRAM bandwidth | 28.6 GB/s | 98.7 GB/s | 3.5x |
 | % of peak HBM2e | 1.8% | 6.2% | — |
-| Bank conflicts (ncu) | present | zero | — |
+| Avg active threads/warp | ~20 of 32 | ~32 of 32 | — |
+| Bank conflicts | zero | zero | — |
 
 ```python
 # Python verification harness -- run every rung through this to confirm
@@ -402,23 +411,31 @@ __global__ void reduce4_firstAddDuringLoad(const float* __restrict__ g_idata,
 | % of peak HBM2e | 6.2% | 10.8% | — |
 | Blocks launched | 65,536 | 32,768 | 2x fewer |
 
-### 4.5 Rung 5 — Unroll the Last Warp (warp-synchronous, drop `__syncthreads`)
+### 4.5 Rung 5 — Unroll the Last Warp (drop `__syncthreads` for `__syncwarp`)
 
 ```cuda
-// RUNG 5 — once s <= 32, all remaining active threads are in ONE warp:
-//          lockstep execution means __syncthreads() is provably unnecessary,
-//          and the loop can be fully unrolled.
-__device__ void warpReduce(volatile float* sdata, unsigned int tid) {
-    // volatile: prevents the compiler from caching sdata[tid] in a register
-    // across these lines -- correctness depends on every line re-reading
-    // shared memory, since the "sync" here is only the warp's lockstep
-    // execution, not an explicit barrier.
-    sdata[tid] += sdata[tid + 32];
-    sdata[tid] += sdata[tid + 16];
-    sdata[tid] += sdata[tid + 8];
-    sdata[tid] += sdata[tid + 4];
-    sdata[tid] += sdata[tid + 2];
-    sdata[tid] += sdata[tid + 1];
+// RUNG 5 — once s <= 32, every thread that will still touch shared memory is
+//          in ONE warp, so the BLOCK-wide barrier is overkill: a warp-scope
+//          __syncwarp() is enough, and the loop can be fully unrolled.
+//
+//          NOTE the shape of this function, because the classic textbook
+//          version is a `volatile float*` with NO barriers at all, relying on
+//          warps executing in lockstep. Independent Thread Scheduling (Volta,
+//          cc 7.0 and every architecture since) gives each thread its own
+//          program counter and ended that guarantee; the lockstep version is
+//          a race on any GPU this code will actually run on. __syncwarp() is
+//          the replacement, and `volatile` is no longer what carries
+//          correctness -- the barrier is.
+__device__ void warpReduce(float* sdata, unsigned int tid) {
+    // Read and write are separated by a barrier at every step: without the
+    // second __syncwarp() a lane could write sdata[tid] while a lower lane is
+    // still reading it for the same step.
+    float v = sdata[tid];
+    #pragma unroll
+    for (int offset = 32; offset > 0; offset >>= 1) {   // 32,16,8,4,2,1
+        v += sdata[tid + offset];  __syncwarp();
+        sdata[tid] = v;            __syncwarp();
+    }
 }
 
 __global__ void reduce5_unrollLastWarp(const float* __restrict__ g_idata,
@@ -437,14 +454,17 @@ __global__ void reduce5_unrollLastWarp(const float* __restrict__ g_idata,
         if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
-    // Last 6 levels (s=32..1): exactly one warp is active -> no barrier needed
+    // Last 6 levels (s=32..1): exactly one warp is active -> the cheap
+    // warp-scope __syncwarp() replaces the block-scope __syncthreads()
     if (tid < 32) warpReduce(sdata, tid);
 
     if (tid == 0) g_odata[blockIdx.x] = sdata[0];
 }
 ```
 
-**Why `__syncthreads()` is provably safe to drop here.** Once `s <= 32`, the set of threads that will ever again touch shared memory is `tid = 0..31` — exactly one warp. A warp executes its instructions in lockstep on pre-Volta hardware (and Volta+'s independent thread scheduling still guarantees warp-synchronous behavior for this specific unconditional straight-line sequence with no divergent branches inside it), so every thread in the warp reaches each line at the same instruction cycle — a shared-memory write by thread `tid+32` at line N is guaranteed visible to thread `tid` at line N+1 without an explicit barrier. This is "warp-synchronous programming": a hand proof that a barrier is redundant for this specific 6-line sequence, not a general license to drop `__syncthreads()` anywhere. `volatile` on the pointer is required so the compiler does not hoist `sdata[tid]` into a register across the six lines, which would silently break the very lockstep assumption the optimization depends on.
+**Why the block barrier can go, and what must replace it.** Once `s <= 32`, the set of threads that will ever again touch shared memory is `tid = 0..31` — exactly one warp. A **block**-wide `__syncthreads()` is therefore doing far more than it needs to: it makes all 256 threads rendezvous when only 32 of them have anything to coordinate. Narrowing the barrier from block scope to warp scope (`__syncwarp()`) is the actual win, and it is cheap — the warp is already resident and converged, so the barrier collapses to a reconvergence hint rather than a scheduler round-trip.
+
+**What you must not do is remove the barrier entirely.** The textbook version of this rung — a `volatile float*` and six bare `sdata[tid] += sdata[tid + k];` lines with no synchronization — was correct on pre-Volta hardware, where a warp genuinely shared one program counter. **Independent Thread Scheduling, introduced with Volta (compute capability 7.0) and present on every architecture since, gives each thread its own PC**; the compiler and the hardware are both free to let lanes drift apart between those lines, and the same code is a data race on any GPU it will actually run on today. `volatile` does not save it — `volatile` only forces the loads and stores to be issued, it says nothing about *when* other lanes issue theirs. The barrier is what carries correctness, which is why the `__syncwarp()` above appears twice per step: once after the read of `sdata[tid + offset]` and once after the write back to `sdata[tid]`, so no lane can overwrite a slot a lower lane has not yet read.
 
 **Measured (A100, N = 2^24):**
 
@@ -453,7 +473,7 @@ __global__ void reduce5_unrollLastWarp(const float* __restrict__ g_idata,
 | Kernel time | 0.39 ms | 0.31 ms | 1.26x |
 | Achieved DRAM bandwidth | 172 GB/s | 216 GB/s | 1.26x |
 | % of peak HBM2e | 10.8% | 13.5% | — |
-| `__syncthreads()` calls/block | 8 | 3 | — |
+| `__syncthreads()` calls/block | 9 | 3 | — |
 
 ### 4.6 Rung 6 — Complete Unroll with Templates on Block Size
 
@@ -462,14 +482,19 @@ __global__ void reduce5_unrollLastWarp(const float* __restrict__ g_idata,
 // deployment (fixed at launch-config-tuning time); templating on it lets
 // nvcc dead-code-eliminate every level whose "if" condition is compile-time
 // false, and fully unroll the remaining loop -- zero loop overhead at all.
+// Same __syncwarp() discipline as rung 5 -- Independent Thread Scheduling
+// means the barrier, not `volatile`, is what makes this correct.
+#define WARP_STEP(K)                                                     \
+    if (BLOCK_SIZE >= 2 * (K)) {                                         \
+        v += sdata[tid + (K)];  __syncwarp();                            \
+        sdata[tid] = v;         __syncwarp();                            \
+    }
+
 template <unsigned int BLOCK_SIZE>
-__device__ void warpReduceT(volatile float* sdata, unsigned int tid) {
-    if (BLOCK_SIZE >= 64) sdata[tid] += sdata[tid + 32];
-    if (BLOCK_SIZE >= 32) sdata[tid] += sdata[tid + 16];
-    if (BLOCK_SIZE >= 16) sdata[tid] += sdata[tid + 8];
-    if (BLOCK_SIZE >=  8) sdata[tid] += sdata[tid + 4];
-    if (BLOCK_SIZE >=  4) sdata[tid] += sdata[tid + 2];
-    if (BLOCK_SIZE >=  2) sdata[tid] += sdata[tid + 1];
+__device__ void warpReduceT(float* sdata, unsigned int tid) {
+    float v = sdata[tid];
+    WARP_STEP(32) WARP_STEP(16) WARP_STEP(8)
+    WARP_STEP(4)  WARP_STEP(2)  WARP_STEP(1)
 }
 
 template <unsigned int BLOCK_SIZE>
@@ -564,7 +589,7 @@ __global__ void reduce7_warpShuffle(const float* __restrict__ g_idata,
 }
 ```
 
-**What this removes versus rung 6.** `__shfl_down_sync` reads a register value directly from another lane in the same warp via the hardware crossbar — no shared-memory read, no shared-memory write, no bank-conflict possibility (there is no memory access at all), and the value never leaves registers for the whole 5-step warp collapse (`log2(32) = 5` steps to go from 32 lanes to 1). This is strictly less traffic through the memory subsystem than even the fully-unrolled shared-memory version in rung 6, at the same instruction count. Combined with the grid-stride load (each thread accumulates a private running sum over as many elements as `gridDim.x * blockDim.x` allows before ever touching shared memory), this rung reduces the number of blocks needed at all — a single well-sized grid (e.g. one block per SM, ~132 blocks on an A100 instead of 32,768) can saturate memory bandwidth while doing dramatically less block-launch and shared-memory bookkeeping.
+**What this removes versus rung 6.** `__shfl_down_sync` reads a register value directly from another lane in the same warp via the hardware crossbar — no shared-memory read, no shared-memory write, no bank-conflict possibility (there is no memory access at all), and the value never leaves registers for the whole 5-step warp collapse (`log2(32) = 5` steps to go from 32 lanes to 1). This is strictly less traffic through the memory subsystem than even the fully-unrolled shared-memory version in rung 6, at the same instruction count. Combined with the grid-stride load (each thread accumulates a private running sum over as many elements as `gridDim.x * blockDim.x` allows before ever touching shared memory), this rung reduces the number of blocks needed at all — a single well-sized grid (e.g. one block per SM: 108 blocks on an A100, 132 on an H100, instead of 32,768) does dramatically less block-launch and shared-memory bookkeeping. Note that "fewer blocks" is not automatically "faster"; see the 21%-of-peak discussion below.
 
 **Grid-level combine — two idiomatic options:**
 
@@ -572,12 +597,16 @@ __global__ void reduce7_warpShuffle(const float* __restrict__ g_idata,
 // OPTION A: second kernel launch (portable back to any CUDA version).
 // Simple, always correct, costs one extra kernel-launch latency (~5-10 us).
 void reduceHost_twoKernel(const float* d_in, float* d_out, float* d_partial,
-                           int n, int block_size) {
-    int grid = min(1024, (n + block_size - 1) / block_size);
-    reduce7_warpShuffle<256><<<grid, block_size>>>(d_in, d_partial, n);
+                           int n) {
+    // BLOCK_SIZE is a template parameter the kernel indexes with, so the launch
+    // MUST pass the same value as blockDim.x -- a runtime block_size argument
+    // paired with a hard-coded <256> is a silent indexing bug.
+    constexpr int BS = 256;
+    int grid = min(1024, (n + BS - 1) / BS);
+    reduce7_warpShuffle<BS><<<grid, BS>>>(d_in, d_partial, n);
     // Second pass: reduce the (small) partial-sums array with the SAME kernel,
     // one block, treating d_partial as the new input.
-    reduce7_warpShuffle<256><<<1, block_size>>>(d_partial, d_out, grid);
+    reduce7_warpShuffle<BS><<<1, BS>>>(d_partial, d_out, grid);
 }
 ```
 
@@ -590,6 +619,8 @@ void reduceHost_twoKernel(const float* d_in, float* d_out, float* d_partial,
 namespace cg = cooperative_groups;
 
 template <unsigned int BLOCK_SIZE>
+// PRECONDITION: the host must cudaMemset(g_odata, 0, sizeof(float)) before the
+// launch -- atomicAdd accumulates into whatever is already sitting there.
 __global__ void reduce7_cooperativeGrid(const float* __restrict__ g_idata,
                                          float* __restrict__ g_odata, int n) {
     cg::grid_group grid = cg::this_grid();
@@ -607,14 +638,20 @@ __global__ void reduce7_cooperativeGrid(const float* __restrict__ g_idata,
         v = warpReduceShuffle(v);
         if (tid == 0) atomicAdd(g_odata, v);   // grid-wide atomic combine
     }
-    grid.sync();  // ensures every block's atomicAdd has landed before any
-                   // thread reads *g_odata as "the final answer"
+    grid.sync();  // after this barrier every block's atomicAdd has landed
+    // Read the total honestly: as written, NOTHING follows this barrier, so
+    // kernel exit would have been barrier enough and a plain non-cooperative
+    // atomicAdd kernel is exactly equivalent -- and cheaper, since it drops the
+    // cooperative-launch requirement and its occupancy constraint. grid.sync()
+    // only earns its keep when the SAME kernel goes on to CONSUME the total,
+    // e.g. a fused "divide every element by the sum" pass right here. That
+    // second phase, not the reduction, is the reason to reach for grid.sync().
 }
 ```
 
-Option A is simpler and portable; Option B avoids the second kernel-launch latency entirely (relevant when this reduction is called millions of times per training run) but requires cooperative-launch support and one grid-wide `atomicAdd` per block (contention across only `gridDim.x` blocks — typically ~132 on an A100 sized to one block/SM — not across all `N` threads, so the atomic cost is negligible relative to the memory traffic). See [`../warp_level_primitives_and_cooperative_groups/`](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) for the full cooperative-groups API and grid-synchronization guarantees.
+Option A is simpler and portable; Option B avoids the second kernel-launch latency entirely (relevant when this reduction is called millions of times per training run) but requires cooperative-launch support and one grid-wide `atomicAdd` per block (contention across only `gridDim.x` blocks — 108 on an A100 sized to one block/SM — not across all `N` threads, so the atomic cost is negligible relative to the memory traffic). Note that for the reduction *alone* the `grid.sync()` is redundant, and so is the cooperative launch: it is the fused second phase after the barrier that makes Option B worth its constraints. See [`../warp_level_primitives_and_cooperative_groups/`](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) for the full cooperative-groups API and grid-synchronization guarantees.
 
-**Measured (A100, N = 2^24, grid sized to 132 blocks = 1/SM):**
+**Measured (A100, N = 2^24, grid sized to 108 blocks = 1/SM):**
 
 | Metric | Rung 6 | Rung 7 | Improvement |
 |---|---:|---:|---:|
@@ -622,7 +659,7 @@ Option A is simpler and portable; Option B avoids the second kernel-launch laten
 | Achieved DRAM bandwidth | 235 GB/s | 339 GB/s | 1.44x |
 | % of peak HBM2e (1.6 TB/s) | 14.7% | 21.2% | — |
 
-**Wait — 21% of peak, not 85-90%?** This is the correct, if counter-intuitive, ceiling for a *single grid-sized-to-one-block-per-SM* reduction on a mid-size array: at 132 blocks x 256 threads = 33,792 threads total, the grid does not have enough outstanding memory requests in flight to saturate HBM's queue depth the way a bandwidth-benchmark kernel (which typically launches 10-100x more threads with no combine step) does. Reaching 85%+ of peak in production requires a much larger grid (thousands of blocks, one element or a small fixed chunk per thread with grid-stride looping) rather than the "one block per SM" sizing shown above — `cub::DeviceReduce` (Section 4.0/6) tunes exactly this grid-sizing tradeoff per architecture, which is precisely why the library call matches or exceeds a hand-rolled rung-7 kernel unless you also hand-tune the launch configuration to the array size. The full ladder's real lesson is the *shape* of each fix (divergence -> bank conflicts -> idle threads -> sync overhead -> shared-memory traffic), not that rung 7 alone guarantees peak bandwidth — grid sizing is an eighth, size-dependent axis layered on top.
+**Wait — 21% of peak, not 85-90%?** This is the correct, if counter-intuitive, ceiling for a *single grid-sized-to-one-block-per-SM* reduction on a mid-size array: at 108 blocks x 256 threads = 27,648 threads total, the grid does not have enough outstanding memory requests in flight to saturate HBM's queue depth the way a bandwidth-benchmark kernel (which typically launches 10-100x more threads with no combine step) does. Reaching 85%+ of peak in production requires a much larger grid (thousands of blocks, one element or a small fixed chunk per thread with grid-stride looping) rather than the "one block per SM" sizing shown above — `cub::DeviceReduce` (Section 4.0/6) tunes exactly this grid-sizing tradeoff per architecture, which is precisely why the library call matches or exceeds a hand-rolled rung-7 kernel unless you also hand-tune the launch configuration to the array size. The full ladder's real lesson is the *shape* of each fix (divergence -> bank conflicts -> idle threads -> sync overhead -> shared-memory traffic), not that rung 7 alone guarantees peak bandwidth — grid sizing is an eighth, size-dependent axis layered on top.
 
 ### 4.8 Summary Table — All Seven Rungs
 
@@ -632,12 +669,12 @@ Option A is simpler and portable; Option B avoids the second kernel-launch laten
 | 2. Interleaved strided index | divergence fixed; bank conflicts remain | 1.98 ms | 33.9 | 2.1% |
 | 3. Sequential addressing | divergence AND bank conflicts fixed | 0.68 ms | 98.7 | 6.2% |
 | 4. First add during load | idle-thread waste (half of every block) | 0.39 ms | 172 | 10.8% |
-| 5. Unroll last warp | unneeded `__syncthreads()` in the last 6 levels | 0.31 ms | 216 | 13.5% |
+| 5. Unroll last warp | block-scope `__syncthreads()` narrowed to warp-scope `__syncwarp()` in the last 6 levels | 0.31 ms | 216 | 13.5% |
 | 6. Complete unroll (templated) | loop-counter/branch overhead | 0.285 ms | 235 | 14.7% |
 | 7. Warp-shuffle + grid combine | all shared-memory traffic in final collapse | 0.198 ms | 339 | 21.2% |
-| — `cub::DeviceReduce` / `thrust::reduce` / `cupy.sum` | architecture-tuned grid sizing on top of rung 7's technique | ~0.024 ms | ~1,400+ | ~88% |
+| — `cub::DeviceReduce` / `thrust::reduce` / `cupy.sum` | architecture-tuned grid sizing on top of rung 7's technique | ~0.048 ms | ~1,400 | ~88% |
 
-Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-kernel technique improvements; the final architecture-tuned grid-sizing step (what CUB actually ships) is worth another ~7x on top of that, which is the strongest practical argument in this entire case study for "understand the ladder, then call the library."
+Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-kernel technique improvements; the final architecture-tuned grid-sizing step (what CUB actually ships) is worth another **~4.2x** on top of that (339 -> ~1,400 GB/s), which is the strongest practical argument in this entire case study for "understand the ladder, then call the library." Note that 88% of 1.6 TB/s is ~1,408 GB/s, so a 64 MB reduction cannot go below ~48 microseconds on this part — a "24 us" figure would be 175% of peak bandwidth and is the arithmetic slip to watch for when quoting library timings across GPUs.
 
 ---
 
@@ -648,7 +685,7 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 | Which rung to ship in production | `cub::DeviceReduce` / `thrust::reduce` / `cupy.sum` | Hand-rolled rung 7 | CUB's grid-sizing autotuning reaches ~88% of peak bandwidth; a hand-rolled kernel stops at ~21% unless you also replicate CUB's per-architecture launch-config tuning tables — not worth re-deriving unless fusing |
 | When to hand-roll anyway | Only when fusing into a larger kernel (e.g. FlashAttention's row-max/row-sum) | Always hand-roll for "control" | A standalone reduction gains nothing from hand-rolling that CUB doesn't already provide; a fused reduction avoids an entire extra HBM round-trip of the intermediate result, which a library call structurally cannot do |
 | Grid combine strategy | Two-kernel launch (Option A) for portability; cooperative-groups grid sync (Option B) only when launch-count matters at scale | Single giant block covering all of N | A single block cannot exceed 1,024 threads, so it cannot cover large N at all; multi-block + combine is mandatory past `N > 2 * max_threads_per_block` |
-| Shared memory vs. warp shuffle for the intra-block tree | Warp shuffle for the last 5 levels (rung 7); shared memory for levels above one warp | Shared memory for all levels (rung 6) | Shuffle removes shared-memory read/write and any possibility of a bank conflict for those levels; multi-warp levels still need shared memory because shuffle only operates within one warp |
+| Shared memory vs. warp shuffle for the intra-block tree | Warp shuffle for the last 5 levels (rung 7); shared memory for levels above one warp | Shared memory for all levels (rung 6) | Shuffle removes the shared-memory read/write, any possibility of a bank conflict, and — the correctness argument, not just the speed one — the inter-lane memory hazard that Volta's Independent Thread Scheduling forces rung 5/6 to order with `__syncwarp()`; multi-warp levels still need shared memory because shuffle only operates within one warp |
 | Block size | 256 threads | 128 or 512 | 256 balances register pressure per SM against enough warps resident to hide the ~400-800 cycle global load latency; see [`../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the general tuning method |
 | Precision of the accumulator | FP32 accumulate in-kernel, verify against FP64 CPU reference | FP64 accumulate on-device | FP64 arithmetic throughput is a fraction of FP32 on consumer/most datacenter parts (varies by GPU: e.g. 1:2 on some, 1:32+ on others) and doubles the bytes moved for the same element count if inputs must also be FP64 — verify with a tolerance instead of forcing FP64 compute (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md)) |
 | Reduction order determinism | Not guaranteed bit-identical across block-size or grid-size changes | Force a fixed, bit-reproducible tree | Cross-run determinism at a *fixed* configuration is achievable (see Section 9); cross-configuration determinism is not attempted because it would forbid the very grid-sizing tuning that gets CUB from 21% to 88% of peak |
@@ -662,7 +699,7 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 - **CuPy's `cupy.sum`/`cupy.max`/`cupy.min`** dispatch the same CUB device-wide primitives from Python, which is why the "just call the library" baseline in Section 4.0 already reaches near-CUB performance with zero custom kernel code.
 - **PyTorch's `torch.sum`/`torch.mean`/loss reductions** use ATen's CUDA backend, which for simple standalone reductions calls into CUB-equivalent kernels, and for reductions fused with an adjacent op (softmax's row-sum, LayerNorm's mean/variance) hand-writes a fused kernel using exactly the warp-shuffle technique in rung 7 to avoid materializing an intermediate tensor to HBM.
 - **NCCL's `ncclAllReduce`** solves the *multi-GPU* generalization of this problem (partial sums must combine across GPUs over NVLink/InfiniBand, not just across blocks on one GPU) using ring or tree algorithms chosen by topology — see [`../multi_gpu_programming_and_nccl/`](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md); the single-GPU ladder in this case study is the primitive NCCL's per-GPU local reduction step still relies on before the cross-GPU combine.
-- **Mark Harris's original 2007 NVIDIA whitepaper** ("Optimizing Parallel Reduction in CUDA") is the canonical source for rungs 1-6 of this exact progression; rung 7 (warp shuffle) postdates that paper — `__shfl_down_sync` shipped with Kepler (compute capability 3.0) and cooperative groups with CUDA 9 — and is the modern continuation NVIDIA's own later sample code and CUB adopted.
+- **Mark Harris's original 2007 NVIDIA whitepaper** ("Optimizing Parallel Reduction in CUDA") is the canonical source for rungs 1-6 of this exact progression, and its rung 5/6 last-warp function is the `volatile`-and-no-barrier version that Independent Thread Scheduling invalidated a decade later (Section 4.5). Rung 7 postdates that paper entirely: the warp shuffle instruction arrived with Kepler (compute capability 3.0) as `__shfl_down`, the explicitly-masked `__shfl_down_sync` form used here arrived with CUDA 9 alongside Volta (the unmasked variants were removed for `sm_70` and later), and cooperative groups arrived in the same release. Rung 7 is the modern continuation NVIDIA's own later sample code and CUB adopted.
 
 ---
 
@@ -673,8 +710,8 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 | `cub::DeviceReduce` / `cub::BlockReduce` / `cub::WarpReduce` | The production-grade implementation this ladder converges toward | Header-only, compile-time policy-tuned; `cub::WarpReduce` wraps `__shfl_down_sync` with the same 5-step shuffle shown in rung 7 |
 | `thrust::reduce` | Simplest correct production call for a standalone C++ reduction | Thin wrapper over CUB; no manual kernel needed |
 | `cupy.sum` | Simplest correct production call from Python | CUB-backed; matches the Section 4.0 baseline |
-| Nsight Compute (`ncu`) | Measures the exact metrics cited at every rung: DRAM throughput %, warp execution efficiency, shared-memory bank-conflict count, stall reasons | See [`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md) for the full profiling loop and CLI recipes used to produce every table in Section 4 |
-| `compute-sanitizer --tool racecheck` | Validates rungs 5-7's warp-synchronous assumptions (no missing `__syncthreads()` where one is actually still required) | Run once per new rung before trusting its measured speed — a race can silently produce a *plausible-looking* wrong answer |
+| Nsight Compute (`ncu`) | Measures the exact metrics cited at every rung: DRAM throughput %, average active threads per warp (`smsp__thread_inst_executed_per_inst_executed.ratio` — ncu's replacement for nvprof's "warp execution efficiency", which no longer exists), shared-memory bank conflicts (`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`), stall reasons | See [`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md) for the full profiling loop and CLI recipes used to produce every table in Section 4 |
+| `compute-sanitizer --tool racecheck` | Validates rungs 5-7's synchronization: catches a missing `__syncthreads()`, and catches the pre-Volta `volatile`/no-barrier last-warp idiom that Independent Thread Scheduling turned into a race | Run once per new rung before trusting its measured speed — a race can silently produce a *plausible-looking* wrong answer |
 | `nvcc -Xptxas -v` | Reports register usage per kernel — used to confirm rung 6's templated unroll does not blow the register budget and hurt occupancy as a side effect of unrolling | Cross-reference against [`../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md)'s occupancy calculator |
 | Cooperative Groups (`cooperative_groups.h`) | Enables rung 7 Option B's single-launch grid-wide combine via `grid.sync()` | Requires `cudaLaunchCooperativeKernel`; device support gated on `cudaDevAttrCooperativeLaunch` |
 
@@ -754,15 +791,15 @@ Every new rung must pass `verify_rung()` (Section 4.3) against the FP64 CPU refe
 
 ## 9. Common Pitfalls & War Stories
 
-**Pitfall: shipping rung 2 and believing the divergence fix was "the fix."** A team profiling with only `nvprof`'s (deprecated but still occasionally seen) top-line "kernel time" metric fixed the modulo-test divergence (rung 1 -> rung 2), saw warp execution efficiency jump from 62% to 99%, declared victory, and shipped it. Bandwidth barely moved (28.6 -> 33.9 GB/s) because the bank-conflict defect dominates just as much as divergence did at this problem size — the team had fixed the metric they were looking at, not the bottleneck. **Fix:** always check the *bank-conflict* counter alongside warp efficiency in Nsight Compute; a "healthy" warp-efficiency number with unchanged bandwidth is the signature of exactly this trap.
+**Pitfall: shipping rung 2 and believing the divergence fix was "the fix."** A team watching only a top-line "kernel time" number fixed the modulo-test divergence (rung 1 -> rung 2), saw average active threads per warp jump from ~20 of 32 to a clean 32 of 32, declared victory, and shipped it. Bandwidth barely moved (28.6 -> 33.9 GB/s), because the `index = 2*s*tid` rewrite that removed the divergence simultaneously *introduced* up to an 8-way shared-memory bank conflict that rung 1 did not have (Section 4.2) — the team fixed the metric they were looking at and paid for it in a metric they were not. **Fix:** always read the bank-conflict counter alongside the active-threads-per-warp number in Nsight Compute; a "healthy" divergence number with unchanged bandwidth is the signature of exactly this trap.
 
-**Pitfall: forgetting `volatile` in the warp-synchronous last-warp function (rung 5/6).** Without `volatile float* sdata`, the compiler is free to keep `sdata[tid]` in a register across the six unrolled lines in `warpReduce()` — which is exactly what an aggressive optimizer will do, since it looks like a redundant reload. The kernel then reads a *stale* value on some of the six lines, silently producing a wrong sum that differs from the CPU reference by an amount that looks like ordinary floating-point rounding error rather than an obvious crash — the single most dangerous kind of bug because it passes a loose tolerance check and fails only occasionally, on specific input distributions or compiler versions. **Fix:** always mark the shared-memory pointer `volatile` in any function that relies on warp-synchronous (barrier-free) execution, and additionally run `compute-sanitizer --tool racecheck` once per new rung — it will flag this exact hazard even when the loose numerical tolerance does not catch it.
+**Pitfall: the pre-Volta `volatile` last-warp reduction, copied forward (rung 5/6).** The single most widely copy-pasted snippet in CUDA teaching material is a `__device__ void warpReduce(volatile float* sdata, unsigned tid)` with six bare `sdata[tid] += sdata[tid + k];` lines and no barrier at all. It was correct on Fermi/Kepler/Pascal, where a warp shared one program counter. **Independent Thread Scheduling, introduced with Volta (cc 7.0) and present on every architecture since, gave each thread its own PC** — lanes may now be at different instructions, so a lane's write and another lane's read of the same slot are unordered. `volatile` does not fix this: it forces the accesses to be *issued* rather than cached in a register, but says nothing about when other lanes issue theirs. The result is a genuine data race that usually still produces a plausible-looking number, differing from the CPU reference by an amount indistinguishable from ordinary FP32 rounding — so it passes a loose tolerance check and fails only occasionally, on particular input distributions, compiler versions, or occupancy. **Fix:** put an explicit `__syncwarp()` between the read and the write at every step (Section 4.5), or skip shared memory for the last warp entirely and use `__shfl_down_sync` (rung 7), which has no inter-lane memory hazard to synchronize. Run `compute-sanitizer --tool racecheck` once per new rung either way — it flags this exact hazard when the numerical tolerance does not.
 
 **Pitfall: reduction-order nondeterminism reported as a "flaky test."** A CI regression test compared a GPU-computed loss value across two different block-size configurations (256 vs 512) using `==` instead of `allclose`, and it failed intermittently depending on which build config ran — the team spent two days trying to find a data race before realizing that changing block size changes the reduction *tree shape*, which changes floating-point rounding order, which changes the last few mantissa bits of a non-associative sum. This is expected behavior, not a bug — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §5 on `atomicAdd` accumulation order and tree-shape-dependent nondeterminism. **Fix:** compare reduction results with an explicit tolerance (`rtol=1e-5` for FP32) in every test, never bitwise equality, and if bit-exact reproducibility is a hard requirement (regulatory audit), fix the block size and grid size as part of the deployed configuration, not just the kernel code.
 
 **Pitfall: assuming rung 7 alone gets you to peak bandwidth.** A team implemented the full warp-shuffle kernel (rung 7), measured 21% of peak HBM2e bandwidth, and filed a ticket believing something was still broken relative to `cupy.sum`'s ~88%. Nothing was broken — the gap is **grid sizing**, an eighth axis this ladder does not by itself solve: CUB's `AgentReduce` policy launches a much larger, size-and-architecture-tuned grid with several elements coarsened per thread via a grid-stride loop, which keeps far more memory requests in flight simultaneously than a "one block per SM" hand-rolled launch config. **Fix:** for a standalone reduction, stop optimizing hand-written kernel code once you reach rung 7 and switch to tuning grid size against measured achieved bandwidth (or just call CUB) rather than assuming more kernel-level cleverness is available.
 
-**Pitfall: TF32 silently changing FP32 reduction accuracy after a GPU generation upgrade.** Reduction itself does not involve a matmul, so it is not directly subject to TF32 — but a team using `cub::DeviceReduce` as part of a larger pipeline that *also* called `torch.matmul` upstream saw an "accuracy regression" after moving from a V100 to an A100 and initially suspected the reduction kernel. The actual cause was Ampere's default TF32 path on the *matmul* feeding the reduction, unrelated to the reduction's own arithmetic. **Fix:** when a numeric regression appears after a GPU generation change, audit every op in the pipeline for TF32/mixed-precision defaults (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §4), not just the most recently touched kernel.
+**Pitfall: TF32 silently changing FP32 reduction accuracy after a GPU generation upgrade.** Reduction itself does not involve a matmul, so it is not directly subject to TF32 — but a team using `cub::DeviceReduce` as part of a larger pipeline that *also* called `torch.matmul` upstream saw an "accuracy regression" after moving from a V100 to an A100 and initially suspected the reduction kernel. The actual cause was a TF32 path upstream — and the trap is that PyTorch's two TF32 switches have **opposite defaults**: `torch.backends.cuda.matmul.allow_tf32` is `False`, so `torch.matmul` is *not* the culprit people assume, while `torch.backends.cudnn.allow_tf32` is `True`, so the convolution layers feeding the matmul silently were. A direct cuBLAS call is a third case again, since cuBLAS's own default math mode permits TF32 on Ampere and later. **Fix:** when a numeric regression appears after a GPU generation change, audit every op in the pipeline for TF32/mixed-precision defaults — "we never turned TF32 on" is not the same statement as "TF32 is off" (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §4), not just the most recently touched kernel.
 
 ---
 
@@ -776,7 +813,7 @@ Rule of thumb block count for rung 7 (grid-stride, 1 block/SM target):
   target_blocks = num_sms * blocks_per_sm   (blocks_per_sm = 1 for max shared-mem
                                               budget per block; 2 if occupancy
                                               tuning shows headroom -- see
-                                              ../occupancy_and_launch_configuration/)
+      ../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md)
 
   For the standalone (non-fused) case, prefer the LIBRARY's grid sizing
   instead of hand-tuning this -- Section 4.7's "why 21% not 88%" explains why
@@ -789,8 +826,8 @@ Rule of thumb block count for rung 7 (grid-stride, 1 block/SM target):
 |---:|---:|---:|---:|---:|
 | 2^16 (65,536) | 256 KB | ~4 us (launch-overhead dominated) | ~4 us (same regime) | N/A -- overhead-bound |
 | 2^20 (1.05M) | 4 MB | ~14 us | ~4 us | ~65% |
-| 2^24 (16.7M) | 64 MB | 198 us | ~24 us | ~88% |
-| 2^28 (268M) | 1 GB | ~3.1 ms | ~0.42 ms | ~91% |
+| 2^24 (16.7M) | 64 MB | 198 us | ~48 us | ~88% |
+| 2^28 (268M) | 1 GB | ~3.1 ms | ~0.74 ms | ~91% |
 
 **Reading this table**: at small `N` (2^16 and below), kernel-launch overhead (~2-5 microseconds on modern CUDA) dominates over any memory-bandwidth consideration — neither the hand-rolled kernel nor CUB can do much better than the fixed launch cost, which is why batching many small reductions into one call (or fusing them into a caller kernel) matters far more than ladder-level optimization at this scale. At large `N` (2^24 and up), the gap between hand-rolled rung 7 and CUB widens in relative terms because CUB's larger, tuned grid keeps proportionally more memory requests in flight as `N` grows — this is the concrete capacity-planning argument for "call the library past a few hundred thousand elements," matching the recommendation in Section 5.
 
@@ -802,7 +839,7 @@ Rule of thumb block count for rung 7 (grid-stride, 1 block/SM target):
 
 **Q: Walk through the parallel reduction optimization ladder from divergent to peak bandwidth.**
 
-Start with interleaved addressing using a modulo test (`if (tid % (2*s) == 0)`) — warp-divergent because active threads scatter across every warp, and bank-conflicted because the growing stride maps repeat threads to the same shared-memory bank. Fix divergence alone with a strided index (`index = 2*s*tid`), which reveals that bank conflicts were an independent defect that barely moves bandwidth on its own. Fix both with sequential addressing (`if (tid < s)`, `s` halving each iteration) — contiguous active-thread prefix and unit-stride shared-memory access, typically a 3-4x speedup over the naive baseline by itself. Then remove idle threads by adding two elements per thread during the initial global load (halving the block count). Then unroll the last warp using warp-synchronous programming (`volatile` pointer, no `__syncthreads()` needed once only one warp remains active) and template on block size for a fully unrolled, branch-free tree. Finally replace shared memory entirely for the last few levels with `__shfl_down_sync`, which reduces 32 lanes to 1 in 5 steps with zero memory traffic. Each rung removes one specific, nameable inefficiency — that specificity is what an interviewer is checking for, not just "it gets faster."
+Start with interleaved addressing using a modulo test (`if (tid % (2*s) == 0)`) — warp-divergent because part of every warp is masked off at every level, and slow besides because integer `%` is a multi-instruction sequence. Its shared-memory access, though, is *conflict-free*, which is the detail that makes the next step interesting: fixing divergence alone with a strided index (`index = 2*s*tid`) introduces bank conflicts up to 8-way that were not there before, so bandwidth barely improves — a trade, not a fix. Sequential addressing (`if (tid < s)`, `s` halving each iteration) is what gets both properties at once: contiguous active-thread prefix *and* two contiguous, conflict-free address ranges, typically a 3-4x speedup over the naive baseline by itself. Then remove idle threads by adding two elements per thread during the initial global load (halving the block count). Then narrow the barrier in the last six levels from block-scope `__syncthreads()` to warp-scope `__syncwarp()` — not to *no* barrier, since Volta's Independent Thread Scheduling ended the implicit-lockstep guarantee the classic `volatile` version relied on — and template on block size for a fully unrolled, branch-free tree. Finally replace shared memory entirely for the last five levels with `__shfl_down_sync`, which reduces 32 lanes to 1 with zero memory traffic and no inter-lane hazard to synchronize at all. Each rung removes one specific, nameable inefficiency — that specificity is what an interviewer is checking for, not just "it gets faster."
 
 **Q: Why is a parallel reduction memory-bound, and does any rung of the ladder change that?**
 
@@ -810,11 +847,11 @@ Every rung reads each of the `N` input elements from HBM exactly once and does `
 
 **Q: What exactly is a shared-memory bank conflict, and how does sequential addressing avoid it?**
 
-Shared memory is divided into 32 banks of 4 bytes each, and consecutive 4-byte addresses map to consecutive banks; if two or more threads in the same warp access different addresses that happen to fall in the same bank, those accesses are serialized into multiple cycles instead of one. In interleaved addressing with a growing stride `s`, active-thread addresses spaced by a multiple of 32 collide on the same bank as `s` grows. Sequential addressing keeps the addresses touched at any tree level — `sdata[tid]` and `sdata[tid+s]` across the active range `tid < s` — as two disjoint contiguous ranges that, for any fixed `s`, cover 32 distinct banks with no repeats, so every access at every level is conflict-free.
+Shared memory is divided into 32 banks of 4 bytes each, and consecutive 4-byte addresses map to consecutive banks; if two or more threads in the same warp access *different* addresses that fall in the same bank, those accesses are serialized into multiple cycles instead of one. (Same-address accesses are not a conflict — they broadcast.) The interesting case in this ladder is rung 2, whose `index = 2*s*tid` puts consecutive active lanes `2*s` words apart: any stride sharing a factor with 32 folds lanes onto a shrinking set of banks, so a 256-thread block sees 2-way conflicts at `s=1` and 8-way at `s=4`. Sequential addressing keeps the addresses touched at any tree level — `sdata[tid]` and `sdata[tid+s]` across the active range `tid < s` — as two disjoint *contiguous* ranges, so consecutive lanes land on consecutive banks with no repeats and every access at every level is conflict-free. Worth knowing for the follow-up: rung 1's modulo test is also conflict-free (its surviving lanes are spread `2*s` apart across the warp, hitting distinct banks) — its problem is divergence, not banking.
 
 **Q: Why does dropping `__syncthreads()` in the last warp not introduce a race condition?**
 
-Once fewer than or equal to 32 threads remain active (one warp), those threads execute in lockstep — every thread reaches the same instruction at the same cycle, so a write by one lane is visible to another lane on the very next instruction without an explicit barrier, for this specific unconditional straight-line sequence with no divergent branches inside it. This is not a general license to omit barriers; it is a hand-provable special case that only holds for exactly one warp with no intervening conditional branches, and it requires marking the pointer `volatile` so the compiler cannot cache a stale value in a register across the six lines.
+It does — and this is the trap in the question. The classic answer ("one warp executes in lockstep, so a write by one lane is visible to the next lane on the following instruction, provided the pointer is `volatile`") was true through Pascal and stopped being true with **Volta (cc 7.0)**, whose Independent Thread Scheduling gives every thread its own program counter. Lanes may sit at different instructions, so the write and the read are unordered and `volatile` — which only forces the accesses to be issued rather than register-cached — does not order them. What *is* safe to drop is the **block** scope: once only one warp still touches shared memory, `__syncthreads()` is doing more than needed, and the correct replacement is `__syncwarp()` between the read and the write at each step. Better still, use `__shfl_down_sync` for the last five levels: the value never enters shared memory, so there is no inter-lane hazard to order in the first place, which is exactly why rung 7 supersedes this rung rather than merely being faster than it.
 
 **Q: What does `__shfl_down_sync` do, and why is 5 the magic number of steps for a 32-lane warp?**
 
@@ -842,7 +879,7 @@ Fix the reduction's *topology* — block size, grid size, and elements-per-threa
 
 **Q: Your reduction kernel passes a loose numerical tolerance check but occasionally returns a visibly wrong answer on certain inputs — what's your debugging approach?**
 
-Run `compute-sanitizer --tool racecheck` before assuming it is a precision issue — a missing or incorrectly-scoped `__syncthreads()` (or a missing `volatile` on a warp-synchronous shared-memory pointer) produces genuinely wrong, run-to-run-varying values that are easy to misdiagnose as "just floating-point rounding" because the symptom (small-looking numeric discrepancy, intermittent) looks identical from the outside. Only after ruling out an actual data race should reduction-order nondeterminism or precision be treated as the explanation — see the war story in Section 9 on exactly this failure mode.
+Run `compute-sanitizer --tool racecheck` before assuming it is a precision issue — a missing or incorrectly-scoped barrier — a dropped `__syncthreads()`, or a last-warp sequence with no `__syncwarp()` between the read and the write — produces genuinely wrong, run-to-run-varying values that are easy to misdiagnose as "just floating-point rounding" because the symptom (small-looking numeric discrepancy, intermittent) looks identical from the outside. The highest-prior-probability version of this on any Volta-or-later GPU is a copied-forward `volatile`, barrier-free last-warp reduction (Section 9), which was correct code before 2017 and is a race now. Only after ruling out an actual data race should reduction-order nondeterminism or precision be treated as the explanation — see the war story in Section 9 on exactly this failure mode.
 
 **Q: How does this single-GPU reduction ladder relate to a multi-GPU all-reduce (NCCL)?**
 

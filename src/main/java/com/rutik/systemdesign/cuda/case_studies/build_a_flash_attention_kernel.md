@@ -28,7 +28,7 @@
 
 - **Correctness first**: bitwise-exact-in-spirit (tolerance-bounded) agreement with the mathematical definition of attention — this is a fused *exact* kernel, not an approximation like linear attention or sparse attention.
 - **Memory**: peak activation memory for the forward pass must be `O(N)` per sequence, not `O(N^2)` — this is the entire point of the exercise. The `N x N` score matrix must never be materialized in HBM.
-- **Throughput target**: on an A100 (312 TFLOP/s FP16 Tensor Core peak), a production-grade kernel should sustain 50-73% of peak FLOP/s for realistic shapes (`N=4096`, `d=128`) — this is the actual measured range for FlashAttention-2 on A100. On H100, FlashAttention-3 sustains 63-75% of the 989 TFLOP/s FP16 peak (1.5 PFLOP/s with FP8 sparsity variants excluded).
+- **Throughput target**: on an A100 (312 TFLOP/s FP16 Tensor Core peak), a production-grade kernel should sustain 50-73% of peak FLOP/s for realistic shapes (`N=4096`, `d=128`) — this is the actual measured range for FlashAttention-2 on A100. On H100, FlashAttention-3 sustains up to 75% of the 989 TFLOP/s FP16 peak (740 TFLOP/s), and close to 1.2 PFLOP/s in its FP8 mode.
 - **Latency**: for inference decode (`N_query=1` against a growing KV cache), the kernel must remain HBM-bandwidth-bound on the KV-cache read (this is the fundamentally different regime from training-time attention — see [Design a Multi-Tenant GPU Inference Platform §2](../../llm/case_studies/design_gpu_inference_platform.md) for how that shapes fleet sizing).
 - **Portability**: must compile and run correctly on Ampere (A100, compute capability 8.0) and Hopper (H100, compute capability 9.0), with Hopper able to additionally exploit warp-specialization, the Tensor Memory Accelerator (TMA), and FP8.
 - **Determinism boundary**: forward-pass results must be reproducible run-to-run on the *same* GPU architecture and kernel build; bit-identical reproduction across different GPU architectures, tile sizes, or kernel versions is explicitly not required (floating-point accumulation order legitimately differs) — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) for what determinism guarantee is actually achievable and how to test for it.
@@ -46,7 +46,7 @@
 
 ### The Core Argument: Naive Attention Is Memory-Bound
 
-Naive (two-pass) attention writes and reads the full `N x N` intermediate matrices to and from HBM three times: once to write `S = QK^T`, once to read `S` back for the softmax, once to write `P = softmax(S)`, and once to read `P` back for the `PV` matmul.
+Naive (two-pass) attention moves the full `N x N` intermediate matrices across the HBM bus four times: once to write `S = QK^T`, once to read `S` back for the softmax, once to write `P = softmax(S)`, and once to read `P` back for the `PV` matmul.
 
 ```
 Naive attention HBM traffic for the S/P intermediates, per (batch, head):
@@ -64,19 +64,19 @@ Worked example: N = 8192, fp16
                                                   only O(N x d), much smaller)
 
 Scale to a GPT-3-class model: H = 32 heads/layer, L = 80 layers
-  512 MiB x 32 heads x 80 layers = 1.28 TiB of HBM traffic
+  512 MiB x 32 heads x 80 layers = 1,280 GiB = 1.25 TiB of HBM traffic
   for the S/P intermediates alone, for ONE forward pass over ONE sequence
 
 At H100 HBM3 bandwidth (~3 TB/s):
-  1.28 TiB / 3 TB/s = 1,441 GB / 3,000 GB/s ~= 480 ms
+  1,280 GiB = 1,374 GB;  1,374 GB / 3,000 GB/s ~= 458 ms
 
 Compare to the actual matmul FLOPs for the same shapes:
   QK^T + PV FLOPs = 4 x N^2 x d = 4 x 8192^2 x 128 ~= 34.4 GFLOP per head
   x 32 heads x 80 layers = 88.1 TFLOP total compute
   At H100 FP16 Tensor Core peak (~989 TFLOP/s): 88.1 / 989 ~= 89 ms of PURE compute
 
-  480 ms of S/P HBM traffic vs. 89 ms of matmul compute: the naive kernel is
-  ~5.4x MORE TIME-DOMINATED by moving the intermediate matrix than by doing
+  458 ms of S/P HBM traffic vs. 89 ms of matmul compute: the naive kernel is
+  ~5.1x MORE TIME-DOMINATED by moving the intermediate matrix than by doing
   the actual arithmetic. This is the textbook definition of memory-bound.
 ```
 
@@ -109,7 +109,7 @@ Worked example: N = 8192, d = 128, M = Br = 128, fp16
   for SRAM and must live in HBM).
 
   At H100 HBM3 (~3 TB/s): 256 MiB x 32 heads x 80 layers = 640 GiB total
-  640 GiB / 3 TB/s ~= 229 ms  <- vs. naive's 480 ms for S/P alone
+  640 GiB / 3 TB/s ~= 229 ms  <- exactly half of naive's 458 ms for S/P alone
   Total wall time is now dominated by the ~89 ms of Tensor Core matmul work
   plus this reduced HBM traffic, overlapped via double-buffered tile loads —
   pushing the kernel toward the COMPUTE roof instead of the memory roof.
@@ -130,15 +130,20 @@ Per-CTA (thread block) shared memory budget for Br = Bc = 128, d = 128, fp16:
   O accumulator (fp32, resident in registers or shared): 128 x 128 x 4 bytes = 65,536 bytes = 64 KiB
   running m_i, l_i (fp32, one per query row): 128 x 4 bytes x 2 = 1,024 bytes (negligible)
   --------------------------------------------------------------------------
-  Total per CTA                                          ~= 160 KiB (161,792 bytes)
+  Total per CTA                                          = 164,864 bytes ~= 161 KiB
 
-Budget check against hardware limits:
-  A100:  164 KB usable shared memory/SM (192 KB physical, minus L1 carve-out)
-         160 KiB fits with ~4 KB headroom -> exactly ONE resident CTA per SM
-         at this tile size; occupancy is capped by shared memory, not registers.
-  H100:  227 KB usable shared memory/SM
-         160 KiB leaves ~67 KB headroom -> room for double-buffering K/V tiles
-         (prefetch tile j+1 while computing on tile j) without exceeding budget.
+Budget check against hardware limits (note these are PER-THREAD-BLOCK caps; the
+per-SM figure is 1 KB higher in each case, and the 48 KB default applies until
+the kernel opts in via cudaFuncSetAttribute -- see Section 4d):
+  A100 (cc 8.0):  163 KB max per block = 166,912 bytes (164 KB per SM; 192 KB
+         physical L1+shared, minus the L1 carve-out)
+         164,864 bytes fits with just 2 KB headroom -> exactly ONE resident CTA
+         per SM at this tile size; occupancy is capped by shared memory, not
+         registers.
+  H100 (cc 9.0):  227 KB max per block = 232,448 bytes (228 KB per SM)
+         164,864 bytes leaves 67,584 bytes (~66 KB) headroom -> room for
+         double-buffering the K/V tiles (65,536 bytes for a second sK+sV pair,
+         prefetching tile j+1 while computing on tile j) with ~2 KB to spare.
 
 This is why tile size is a first-order design decision (see Section 5): a
 tile size chosen purely to maximize arithmetic intensity can blow the shared
@@ -165,9 +170,9 @@ Decode-step KV-cache read, per layer, GQA with H_kv key/value heads:
   is -- there is no intermediate matrix to eliminate in decode; Br=1 means the
   "fusion" win from Sections 4a-4d essentially does not apply, because naive
   decode attention never materializes an N x N matrix in the first place
-  (only an N x 1 x N score vector, already tiny).
+  (only a 1 x N score vector per head, already tiny).
 
-  At H100 HBM3 (~3 TB/s): 10 GiB / 3 TB/s ~= 3.3 ms per decode step, PURELY
+  At H100 HBM3 (~3 TB/s): 10 GiB = 10.74 GB, / 3 TB/s ~= 3.6 ms per step, PURELY
   from reading the KV cache -- this is why decode is bandwidth-bound on KV-
   cache size, not on attention kernel fusion, and why GQA (fewer K/V heads)
   is the dominant lever for decode throughput, not tiling strategy.
@@ -269,8 +274,10 @@ def naive_attention(q, k, v, scale):
     return p @ v                              # reads all of p, plus v
 
 # At N = 32,768, d = 128, fp16, B = 1, H = 32:
-#   s and p are each 32768^2 x 2 bytes = 2.1 GiB PER HEAD
-#   -> 68 GiB total for 32 heads just for the intermediate score matrix.
+#   s and p are each 32768^2 x 2 bytes = 2 GiB PER HEAD
+#   -> 64 GiB for `s` across 32 heads, and `p` is live at the same time
+#      (softmax reads s while writing p), so 128 GiB peak for the two
+#      intermediates alone.
 #   A single H100 (80 GB HBM) cannot hold this alongside model weights and
 #   the KV cache -> torch.cuda.OutOfMemoryError at long context, well before
 #   the model itself would be memory-constrained.
@@ -344,6 +351,15 @@ At 6 tiles per row, 15 of 36 blocks are `F`, 6 are `D`, and 15 are skipped (`.`)
 // production kernels (FlashAttention-2/3, CUTLASS FMHA) look more like a
 // templated GEMM than this sketch. The MATH -- the online-softmax recurrence
 // -- is identical in both.
+//
+// Two consequences of the simplification, so nobody tries to benchmark it:
+//   1. acc[D] + s_row[BC] + p_row[BC] = 384 floats per thread, far past the
+//      255-register budget, so this version spills heavily to local memory.
+//   2. The three tiles need 3 x 128 x 128 x 2 = 98,304 bytes of DYNAMIC shared
+//      memory, well past the 48 KB per-block default. The launch must first do
+//        cudaFuncSetAttribute(flash_attention_fwd,
+//            cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+//      or every launch fails with cudaErrorInvalidValue.
 
 #define BR 128          // query tile rows
 #define BC 128          // key/value tile cols
@@ -476,6 +492,9 @@ def _flash_attn_fwd_kernel(
         v = tl.load(v_ptrs, mask=n_range[:, None] < N, other=0.0)
 
         s = tl.dot(q, tl.trans(k)) * scale               # [BLOCK_M, BLOCK_N] -- Tensor Core GEMM
+        # Out-of-range keys were loaded as 0.0, which would otherwise contribute
+        # exp(0 - m) to the denominator. They must be -inf in S, not 0.
+        s = tl.where(n_range[None, :] < N, s, float("-inf"))
         if CAUSAL:
             causal_mask = m_range[:, None] >= n_range[None, :]
             s = tl.where(causal_mask, s, float("-inf"))
@@ -564,7 +583,7 @@ MQA (a single shared K/V head for all query heads) and GQA (K/V heads shared acr
 
 ### 4e. Tensor Cores for the QK^T and PV Matmuls
 
-Both matmuls inside the tile loop — `S_ij = Q_i K_j^T` and `O_i += P_ij V_j` — are ordinary small GEMMs (`Br x d` by `d x Bc`, and `Br x Bc` by `Bc x d`), and both are dispatched to Tensor Cores rather than scalar CUDA cores whenever the shapes and dtypes qualify (FP16/BF16 inputs, dimensions that are multiples of 8 or 16). In hand-written CUDA C++ this means loading `sQ`/`sK`/`sV` fragments with `wmma::load_matrix_sync` and issuing `wmma::mma_sync` (Ampere, `mma.sync.aligned.m16n8k16` at the PTX level) or, on Hopper, `wgmma.mma_async` warpgroup-wide asynchronous MMA instructions that additionally pull operands directly from shared memory without a register round-trip. In Triton, this mapping is implicit: `tl.dot(q, tl.trans(k))` and `tl.dot(p, v)` in the kernel above compile straight to the same `mma`/`wgmma` instruction selection the compiler would choose for a hand-tuned GEMM.
+Both matmuls inside the tile loop — `S_ij = Q_i K_j^T` and `O_i += P_ij V_j` — are ordinary small GEMMs (`Br x d` by `d x Bc`, and `Br x Bc` by `Bc x d`), and both run on Tensor Cores rather than scalar CUDA cores. There is no runtime "qualification test" that silently drops a GEMM back to CUDA cores — in a hand-written kernel the MMA *instruction* fixes the fragment shape (`m16n8k16` on Ampere), so the tile loop is written in whole multiples of that shape and edge tiles are zero-padded up to it; what a badly shaped tile actually costs is the 16-byte-alignment fast path for `ldmatrix`/`cp.async`, a performance cliff rather than a fallback. In hand-written CUDA C++ this means loading `sQ`/`sK`/`sV` fragments with `wmma::load_matrix_sync` and issuing `wmma::mma_sync` (Ampere, `mma.sync.aligned.m16n8k16` at the PTX level) or, on Hopper, `wgmma.mma_async` warpgroup-wide asynchronous MMA instructions that additionally pull operands directly from shared memory without a register round-trip. In Triton, this mapping is implicit: `tl.dot(q, tl.trans(k))` and `tl.dot(p, v)` in the kernel above compile straight to the same `mma`/`wgmma` instruction selection the compiler would choose for a hand-tuned GEMM.
 
 The reason this matters for FlashAttention specifically (beyond "matmuls are faster on Tensor Cores") is that FlashAttention-2 explicitly restructured the *non-matmul* work — the softmax rescale, the max/sum reductions — to be as cheap as possible relative to the matmul portion, because Tensor Core throughput on Ampere/Hopper is roughly an order of magnitude higher than the scalar/SFU throughput used for `exp` and reductions. A kernel that spends too much relative time on `RM`/`RESC` (Section 3's diagram) squanders the raw GEMM speed Tensor Cores provide — this is why FlashAttention-2 reduced non-matmul FLOPs and why FlashAttention-3 goes further and overlaps softmax computation on one warpgroup with Tensor Core GEMM work on another (Section 6). See [`../tensor_cores_and_mixed_precision/`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) for the WMMA/`mma` programming model and precision-format details this section assumes.
 
@@ -574,7 +593,7 @@ The reason this matters for FlashAttention specifically (beyond "matmuls are fas
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|-----------------|-------------------------|-----------|
-| Tile size (`Br`, `Bc`) | 128 x 128 (FlashAttention-2 default for `d=128`) | Larger (256x256) for higher arithmetic intensity | 128x128 fits the ~160 KiB shared-memory footprint (Section 2) within one A100 SM's 164 KB budget; 256x256 would roughly quadruple shared memory and collapse occupancy well before the intensity gain paid off |
+| Tile size (`Br`, `Bc`) | 128 x 128 (FlashAttention-2 default for `d=128`) | Larger (256x256) for higher arithmetic intensity | 128x128's ~161 KiB shared-memory footprint (Section 2) fits inside A100's 163 KB per-block cap with 2 KB to spare; every term of that footprint is linear in `Br`/`Bc` at fixed `d`, so 256x256 doubles it to ~320 KiB — past even H100's 227 KB per-block cap, so the kernel does not launch at all rather than merely losing occupancy |
 | Backward-pass activation storage | Store only the `O(N)` per-row logsumexp `L_i = m_i + ln(l_i)`; recompute `S_ij`/`P_ij` on the fly during backward | Store the full `O(N^2)` `P` matrix from the forward pass | Storing `P` defeats the entire memory point of FlashAttention — it OOMs at the same `N` naive attention would; recomputing costs extra FLOPs but those FLOPs are cheap relative to the HBM traffic saved (the same memory-bound argument from Section 2, applied to backward) |
 | Precision | FP16/BF16 storage, FP32 internal accumulation for `S`, `P`, `m_i`, `l_i`, `O_i` | Full FP16 accumulation throughout | FP16 accumulation of a sum over `N` terms loses precision catastrophically at long context (the running sum `l_i` can silently underflow/round); FP32 accumulators cost negligible extra register pressure and eliminate this class of bug — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) |
 | Causal masking | Skip entire `K`/`V` tiles that lie fully above the diagonal (early loop exit, as in the CUDA/Triton sketches above) | Compute the full `Br x Bc` block for every tile, then mask invalid entries to `-inf` | Skipping tiles cuts total FLOPs roughly in half for causal (decoder) attention, since on average half of all `(query, key)` pairs are masked out; masking-after-compute wastes that half of the matmul work entirely |
@@ -591,7 +610,7 @@ The reason this matters for FlashAttention specifically (beyond "matmuls are fas
 
 **FlashAttention-2 (Dao, 2023)** restructured the parallelization to also split work across the sequence-length dimension (not just batch x heads), which matters enormously for long-context, small-batch inference where batch x heads alone leaves most SMs idle. It also reduced non-matmul FLOPs (Section 4e) and improved the inner-loop work partitioning between warps. Measured result: ~2x over FlashAttention-1, reaching 50-73% of A100's theoretical FP16 peak FLOP/s versus FlashAttention-1's 25-40%.
 
-**FlashAttention-3 (Shah, Bikshandi, Karrenbauer, Li, Dao et al., 2024)** is Hopper-specific: it exploits warp-specialization (Section 5), asynchronous data movement via the **Tensor Memory Accelerator (TMA)**, and FP8 low-precision execution with an incoherent-processing technique to control quantization error. It reaches 63-75% of H100's 989 TFLOP/s FP16 peak (1.2-1.5x over FlashAttention-2 on the same hardware) and up to ~1.3 PFLOP/s in FP8 mode.
+**FlashAttention-3 (Shah, Bikshandi, Zhang, Thakkar, Ramani, Dao — 2024)** is Hopper-specific: it exploits warp-specialization (Section 5), asynchronous data movement via the **Tensor Memory Accelerator (TMA)**, and FP8 low-precision execution with an incoherent-processing technique to control quantization error. It is 1.5-2.0x faster than FlashAttention-2 on the same hardware, reaching up to 740 TFLOP/s in FP16 (75% of H100's 989 TFLOP/s peak) and close to 1.2 PFLOP/s in FP8 mode, at 2.6x lower numerical error than a baseline FP8 attention.
 
 ```mermaid
 sequenceDiagram
@@ -615,7 +634,7 @@ sequenceDiagram
     CW->>CW: tile j+1 ready immediately -- no stall
 ```
 
-The diagram makes the FlashAttention-3 win concrete: on Ampere, the warp that computes tile `j` is the same warp that must then block waiting to load tile `j+1` — load and compute are serialized. On Hopper, a dedicated producer warpgroup issues the tile `j+1` load asynchronously via TMA *while* a separate consumer warpgroup is still computing on tile `j`, so the load latency is hidden behind compute rather than adding to the critical path — the mechanism behind FlashAttention-3's 1.2-1.5x improvement over FlashAttention-2 on identical Hopper hardware running the identical online-softmax algorithm.
+The diagram makes the FlashAttention-3 win concrete: on Ampere, the warp that computes tile `j` is the same warp that must then block waiting to load tile `j+1` — load and compute are serialized. On Hopper, a dedicated producer warpgroup issues the tile `j+1` load asynchronously via TMA *while* a separate consumer warpgroup is still computing on tile `j`, so the load latency is hidden behind compute rather than adding to the critical path — the mechanism behind FlashAttention-3's 1.5-2.0x improvement over FlashAttention-2 on identical Hopper hardware running the identical online-softmax algorithm.
 
 **The Triton implementation** shown in Section 4d is close to the official Triton tutorial's `06-fused-attention.py`, which OpenAI maintains as a reference kernel and which several inference engines use directly (particularly on hardware where a hand-tuned CUDA extension is unavailable or unmaintained, e.g. some AMD ROCm deployments via Triton's HIP backend).
 
@@ -629,7 +648,7 @@ The diagram makes the FlashAttention-3 win concrete: on Ampere, the warp that co
 
 **AMD's Composable Kernel (CK) FlashAttention port** and Triton's ROCm/HIP backend bring the same tiling and online-softmax design to AMD MI-series GPUs, following the non-overlap boundary noted in [`README.md` §2](../README.md) — the CUDA-native focus of this section means the ROCm-specific programming details live in [`../gpu_portability_hip_sycl_and_beyond/`](../gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md), while the algorithm this file describes is identical across vendors: fuse, tile, and never materialize the `N x N` matrix.
 
-**Flash-Decoding (Dao, Häggström, Rush et al., 2023)** extends this file's fusion technique specifically to the decode-regime bottleneck identified in Section 2: at `Br=1` (single query token) the standard FlashAttention parallelization — one CTA per Q-tile — launches far too few CTAs to occupy a full GPU, since there is only one Q-tile total per (batch, head). Flash-Decoding instead splits the *KV-cache dimension* across multiple CTAs (each handling a slice of the cached `K`/`V`), computes partial online-softmax results per slice, and does a final lightweight reduction across slices to combine them — turning an under-parallelized decode step into one with enough concurrent CTAs to saturate the GPU's SMs, directly addressing the low-occupancy failure mode that plain FlashAttention hits at `Br=1`.
+**Flash-Decoding (Dao, Haziza, Massa, Sizov — 2023)** extends this file's fusion technique specifically to the decode-regime bottleneck identified in Section 2: at `Br=1` (single query token) the standard FlashAttention parallelization — one CTA per Q-tile — launches far too few CTAs to occupy a full GPU, since there is only one Q-tile total per (batch, head). Flash-Decoding instead splits the *KV-cache dimension* across multiple CTAs (each handling a slice of the cached `K`/`V`), computes partial online-softmax results per slice, and does a final lightweight reduction across slices to combine them — turning an under-parallelized decode step into one with enough concurrent CTAs to saturate the GPU's SMs, directly addressing the low-occupancy failure mode that plain FlashAttention hits at `Br=1`.
 
 ---
 
@@ -640,7 +659,7 @@ The diagram makes the FlashAttention-3 win concrete: on Ampere, the warp that co
 | `flash-attn` (Dao-AILab/flash-attention) | Reference CUDA implementation, PyPI package with CUDA extension | The canonical hand-tuned CUDA kernel most inference engines and training frameworks import directly |
 | Triton (OpenAI) | Python-embedded kernel DSL | `tl.dot` auto-maps to Tensor Core `mma`/`wgmma`; official tutorial kernel is the reference Triton FlashAttention |
 | CUTLASS (NVIDIA) | Templated C++ GEMM/attention library | `examples/41_fused_multi_head_attention`; the substrate several production CUDA attention kernels are built on |
-| cuDNN | NVIDIA's fused-attention operator (`cudnnFlashAttentionForward`) | Vendor-maintained fused MHA, used when a framework prefers a closed-source, hardware-optimized path over an open kernel |
+| cuDNN | Fused scaled-dot-product-attention node in the cuDNN graph API (`cudnn_frontend`'s `sdpa_forward`/`sdpa_backward`, not a standalone C entry point) | Vendor-maintained fused MHA, used when a framework prefers a closed-source, hardware-optimized path over an open kernel |
 | xFormers (Meta) | `memory_efficient_attention` | Independent IO-aware attention implementation; still used where its specific bias/mask shapes are supported and FlashAttention's are not |
 | PyTorch SDPA | `torch.nn.functional.scaled_dot_product_attention` | Auto-dispatches to FlashAttention / xFormers / math backend; the practical entry point for most model code |
 | Nsight Compute | Kernel-level profiler | Verifies achieved occupancy, DRAM throughput, and Tensor Core utilization match the design's predictions (Section 8) |
@@ -659,15 +678,19 @@ Every new kernel version (a precision change, a tile-size change, a port to a ne
 
 ```python
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 def validate_flash_attention(flash_fn, N=4096, d=128, B=2, H=8, causal=True):
     q = torch.randn(B, H, N, d, device="cuda", dtype=torch.float16)
     k = torch.randn(B, H, N, d, device="cuda", dtype=torch.float16)
     v = torch.randn(B, H, N, d, device="cuda", dtype=torch.float16)
 
-    ref = torch.nn.functional.scaled_dot_product_attention(
-        q.float(), k.float(), v.float(), is_causal=causal
-    )  # fp32 reference via the math backend
+    # Pin the backend: without sdpa_kernel(), SDPA is free to dispatch to a
+    # fused kernel, and the "reference" would then be the thing under test.
+    with sdpa_kernel(SDPBackend.MATH):
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.float(), k.float(), v.float(), is_causal=causal
+        )  # unfused fp32 reference
     out = flash_fn(q, k, v, causal=causal)
 
     torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=2e-2)
@@ -679,7 +702,7 @@ def validate_flash_attention(flash_fn, N=4096, d=128, B=2, H=8, causal=True):
 
 ### Profile -> Fix -> Re-Measure Loop
 
-Every tile-size or warp-organization change is validated with Nsight Compute before and after, checking three metrics against the design's predictions from Section 2: `sm__throughput.avg` (compute utilization, should approach the Tensor Core roof for large `N`), `dram__bytes.sum` (should scale as `O(N^2/M)`, not `O(N^2)` — a regression here means `S`/`P` leaked back to HBM somewhere), and `l1tex__data_bank_conflicts` (a nonzero count on the shared-memory tile loads flags padding bugs, Section 9). See [`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md) for the full guided-analysis walkthrough this loop follows.
+Every tile-size or warp-organization change is validated with Nsight Compute before and after, checking three metrics against the design's predictions from Section 2: `sm__throughput.avg.pct_of_peak_sustained_elapsed` (compute utilization, should approach the Tensor Core roof for large `N`), `dram__bytes.sum` (should scale as `O(N^2/M)`, not `O(N^2)` — a regression here means `S`/`P` leaked back to HBM somewhere), and `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` (a nonzero count on the shared-memory tile loads flags layout bugs, Section 9). Nsight Compute requires the full metric name including the suffix; the bare `sm__throughput` / `l1tex__data_bank_conflicts` stems are metric *families*, not queryable metrics. See [`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md) for the full guided-analysis walkthrough this loop follows.
 
 ### Benchmark Harness
 
@@ -690,6 +713,8 @@ def benchmark(flash_fn, naive_fn, seq_lens=(512, 1024, 2048, 4096, 8192, 16384, 
     for N in seq_lens:
         q = torch.randn(1, 32, N, 128, device="cuda", dtype=torch.float16)
         k, v = torch.randn_like(q), torch.randn_like(q)
+
+        flash_fn(q, k, v, causal=True)   # warm-up: the first Triton call JIT-compiles
 
         torch.cuda.synchronize(); t0 = time.perf_counter()
         for _ in range(20): flash_fn(q, k, v, causal=True)
@@ -717,10 +742,10 @@ Because the correctness harness (Section 8) and the kernel's own tile-size/warp-
 
 | CUDA Toolkit | GPU Architecture | Warp Organization | FP8 Support | CI Status Gate |
 |--------------|-------------------|--------------------|-------------|-----------------|
-| 11.8 | Ampere (A100, cc 8.0) | Uniform warps (FlashAttention-1/2 style) | No | Correctness (Section 8) + benchmark regression < 3% |
-| 12.x | Ampere (A100, cc 8.0) | Uniform warps | No | Same as above |
-| 12.x | Hopper (H100, cc 9.0) | Warp-specialized (FlashAttention-3, TMA) | Yes | Correctness (both FP16 and FP8 tolerance bands) + benchmark regression < 3% |
-| 12.x | Ada Lovelace (L40S, cc 8.9) | Uniform warps (no TMA) | Yes (4th-gen Tensor Core) | Correctness + benchmark regression < 5% (secondary-tier architecture, wider tolerance) |
+| 12.x (oldest supported) | Ampere (A100, cc 8.0) | Uniform warps (FlashAttention-1/2 style) | No | Correctness (Section 8) + benchmark regression < 3% |
+| 13.x (current) | Ampere (A100, cc 8.0) | Uniform warps | No | Same as above |
+| 13.x (current) | Hopper (H100, cc 9.0) | Warp-specialized (FlashAttention-3, TMA) | Yes | Correctness (both FP16 and FP8 tolerance bands) + benchmark regression < 3% |
+| 13.x (current) | Ada Lovelace (L40S, cc 8.9) | Uniform warps (no TMA) | Yes (4th-gen Tensor Core) | Correctness + benchmark regression < 5% (secondary-tier architecture, wider tolerance) |
 
 A release blocks fleet-wide rollout (Rollout Playbook, above) if any cell in this matrix fails, not just the architecture the change was originally written for — the Hopper warp-specialization path and the Ampere uniform-warp path are different code paths sharing the same online-softmax math, and a bug fix validated only on Ampere has shipped broken to Hopper more than once in kernel-development history across the ecosystem this file describes.
 
@@ -728,13 +753,13 @@ A release blocks fleet-wide rollout (Rollout Playbook, above) if any cell in thi
 
 ## 9. Common Pitfalls & War Stories
 
-**Missing max-subtraction before `exp` — silent overflow to `inf`/`NaN`.** If the online-softmax update omits subtracting the running max before exponentiating (or a first-tile edge case leaves `m_i` uninitialized as `0` instead of `-inf`), scores of even moderate magnitude (`S_ij` around 40-60, common with unscaled or poorly-initialized `Q`/`K` projections) overflow FP16's `exp` range and produce `inf`, which then poisons every subsequent tile's rescale factor with `NaN`. One team's training run consumed roughly 380 A100-GPU-hours (~$2,800 at typical cloud spot pricing) before a downstream loss-spike alert caught the corrupted gradients — the kernel had produced plausible-looking (non-`NaN`) outputs for the first several thousand steps because early training scores stayed small, and only diverged once weights grew large enough to push scores past the FP16 `exp` ceiling.
+**Missing max-subtraction before `exp` — silent overflow to `inf`/`NaN`.** If the online-softmax update omits subtracting the running max before exponentiating (or a first-tile edge case leaves `m_i` uninitialized as `0` instead of `-inf`), scores of even moderate magnitude (`S_ij` around 40-60, common with unscaled or poorly-initialized `Q`/`K` projections) overflow FP16's `exp` range and produce `inf`, which then poisons every subsequent tile's rescale factor with `NaN`. One team's training run consumed roughly 380 A100-GPU-hours (~$700 at ~$1.80/GPU-hour A100 cloud spot pricing) before a downstream loss-spike alert caught the corrupted gradients — the kernel had produced plausible-looking (non-`NaN`) outputs for the first several thousand steps because early training scores stayed small, and only diverged once weights grew large enough to push scores past the FP16 `exp` ceiling.
 
 **Incorrect rescale of the running accumulator — the single most dangerous bug class in this kernel.** Forgetting to multiply the *previous* accumulator `acc`/`l_i` by the correction factor `alpha = exp(m_i - m_new)` before adding the new tile's contribution produces output that is subtly, silently wrong rather than `NaN` — and the bug is invisible whenever the sequence fits in a single `K`/`V` tile (`N <= Bc`), because there is no "previous" accumulator to rescale in that case. It only surfaces once `N > Bc` triggers a second loop iteration, which is exactly why the correctness harness in Section 8 must test multiple sequence lengths straddling the tile boundary (`N = Bc - 1`, `N = Bc`, `N = Bc + 1`, `N = 3*Bc`), not just one large `N`.
 
-**Missing shared-memory padding on the transposed load — a 4x slowdown, not a correctness bug.** When `sK` is staged into shared memory in a layout that a later transpose-style access reads column-wise (needed to feed `K^T` into the `QK^T` GEMM), failing to pad the tile's leading dimension by one element causes a 32-way bank conflict on that access pattern — every one of the 32 threads in a warp lands on the same shared-memory bank. This does not change the numerical result, only the wall-clock time, which is why it is easy to miss without profiling: a kernel that "works" but silently runs 4x slower than it should. See [`../shared_memory_and_bank_conflicts/`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for the padding fix (pad the tile's stride to `D+1` elements) and [`./cross_cutting/cuda_memory_hierarchy_reference.md`](./cross_cutting/cuda_memory_hierarchy_reference.md) for why the 32-bank structure causes this specific failure mode.
+**Wrong shared-memory layout on the transposed load — a 4x slowdown, not a correctness bug.** When `sK` is staged into shared memory in a layout that a later transpose-style access reads column-wise (needed to feed `K^T` into the `QK^T` GEMM), an unpadded `[128][128]` half tile gives every row a 256-byte stride; since a bank is 4 bytes wide and there are 32 banks, `(row * 256 / 4) % 32 == 0` for every row, so all 32 lanes of the warp land on bank 0 — a 32-way conflict. This does not change the numerical result, only the wall-clock time, which is why it is easy to miss without profiling: a kernel that "works" but silently runs 4x slower than it should. The classic `+1` element pad is the FP32 fix and is the *wrong* fix here: one extra `half` shifts the row stride to 258 bytes, breaking the 16-byte alignment that `ldmatrix` and vectorized `cp.async` loads require. Pad by 8 halves (16 bytes) instead, or do what CUTLASS and the production FlashAttention kernels do and XOR-swizzle the shared-memory layout, which removes the conflict with no padding at all. See [`../shared_memory_and_bank_conflicts/`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) and [`./cross_cutting/cuda_memory_hierarchy_reference.md`](./cross_cutting/cuda_memory_hierarchy_reference.md) for why the 32-bank structure causes this specific failure mode.
 
-**Oversized tile causing occupancy collapse.** A team increased `Br`/`Bc` from 128 to 256 expecting the higher arithmetic intensity (Section 2) to translate directly into higher throughput, and measured a 40% *slowdown* instead. Nsight Compute traced it to register usage per thread jumping from roughly 64 to 130 (the wider tile requires proportionally more registers for the `S_ij`/`P_ij` row buffers), forcing register spilling to local memory (itself routed through the L1/L2 hierarchy, not free) and collapsing resident CTAs per SM from 2 to effectively fractional occupancy. The lesson generalizes beyond this kernel: a design change that improves one term of the roofline argument (arithmetic intensity) can still lose on wall-clock time if it degrades a different resource (occupancy/latency hiding) more than it gains — see [`../occupancy_and_launch_configuration/`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the occupancy-vs-register-pressure tradeoff in general.
+**Oversized tile causing occupancy collapse.** A team increased `Br`/`Bc` from 128 to 256 expecting the higher arithmetic intensity (Section 2) to translate directly into higher throughput, and measured a 40% *slowdown* instead. Nsight Compute traced it to two resources moving together: the shared-memory tile footprint is linear in `Br`/`Bc` at fixed `d`, so it doubled, and register usage per thread rose from roughly 64 to 130 because the `S_ij`/`P_ij` row buffers each thread holds got wider. Between them the SM went from 2 resident CTAs to 1, removing the warp-level latency hiding the kernel had been relying on — and at that point the extra arithmetic intensity had nothing to hide the remaining HBM latency behind. The lesson generalizes beyond this kernel: a design change that improves one term of the roofline argument (arithmetic intensity) can still lose on wall-clock time if it degrades a different resource (occupancy/latency hiding) more than it gains — see [`../occupancy_and_launch_configuration/`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the occupancy-vs-register-pressure tradeoff in general.
 
 **Computing the full block then masking for causal attention, instead of early-exiting.** A first implementation computed every `Br x Bc` block for every `(query-tile, key-tile)` pair and applied the causal mask afterward (`s = where(mask, s, -inf)`), which is numerically correct but wastes roughly half of all matmul FLOPs — every block entirely above the diagonal is computed in full only to be discarded. The fix (Section 4d/4e's `hi_tile`/`hi` early-exit) skips those blocks' `K`/`V` loads and matmuls entirely, which is a pure performance fix with zero numerical difference — a good example of a correctness-preserving optimization that is easy to miss because the "mask afterward" version looks simpler and is not wrong, merely slow.
 
@@ -742,7 +767,7 @@ A release blocks fleet-wide rollout (Rollout Playbook, above) if any cell in thi
 
 **Wrong KV-head index under GQA — silent cross-head contamination.** A GQA-aware kernel that computes `kv_head` from `q_head` incorrectly (an off-by-one in the grouping arithmetic, or forgetting to change the index computation when porting a plain-MHA kernel to a GQA model) causes some query heads to attend against a *different* group's K/V weights than intended. The output is not `NaN` and not obviously wrong — the model still produces fluent-looking text, because every head still computes a mathematically valid attention operation, just against the wrong key/value head — making this bug detectable only by comparing per-head outputs against a reference implementation, not by any output-plausibility check. This is why the correctness harness (Section 8) must be run per-model-architecture (checking the actual `H_kv`/`H_q` ratio in use), not just once against a generic MHA shape.
 
-**Non-vectorized Q/K/V loads leaving coalescing bandwidth on the table.** A first-draft tile-loading loop that reads one `half` (2 bytes) per thread per iteration, rather than a vectorized `float4`/`uint4` load pulling 8 contiguous FP16 elements (16 bytes) per instruction, under-utilizes the 128-byte coalesced-transaction width the hardware provides for aligned, contiguous accesses. This does not affect correctness — it is purely a bandwidth-utilization pitfall — but on a kernel already carefully re-engineered to minimize HBM traffic (Section 2), leaving 4-8x of available load bandwidth unused by skipping vectorized loads undoes a meaningful fraction of the fusion's benefit; see the coalescing/vectorized-load treatment in `memory_coalescing_and_access_patterns/README.md` for the general pattern this kernel's `Q`/`K`/`V` tile loads should follow.
+**Non-vectorized Q/K/V loads leaving coalescing bandwidth on the table.** A first-draft tile-loading loop that reads one `half` (2 bytes) per thread per iteration, rather than a vectorized `float4`/`uint4` load pulling 8 contiguous FP16 elements (16 bytes) per instruction, under-utilizes the hardware. A warp of 32 lanes each grabbing one `half` covers only 64 bytes — half of a 128-byte line — and it takes **8x as many load instructions** to move the same tile, so the loss is mostly issue slots and secondarily transaction width. This does not affect correctness — it is purely a bandwidth/issue-rate pitfall — but on a kernel already carefully re-engineered to minimize HBM traffic (Section 2), leaving the vectorized load path unused undoes a meaningful fraction of the fusion's benefit; see [`../memory_coalescing_and_access_patterns/`](../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) for the general pattern this kernel's `Q`/`K`/`V` tile loads should follow.
 
 **Nondeterministic outputs across runs at fixed seed.** Floating-point addition is not associative, and different tile sizes, warp counts, or GPU architectures accumulate the running sum `l_i` and output `O_i` in a different order — producing bit-different (though tolerance-close) results run-to-run on different hardware, and sometimes run-to-run on the *same* hardware if the kernel uses any atomic-add reduction path. Tests must compare with a tolerance (`atol`/`rtol`, Section 8), never bitwise equality, and any claim of "determinism" must specify which axis is held fixed (same GPU architecture, same tile size, same kernel binary) — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) for the full reproducibility-knobs reference.
 
@@ -760,15 +785,15 @@ resident, and for how many CTAs can be resident simultaneously:
 
   bytes_per_CTA(Br) ~= Br x d x (3 x 2 + 4) = Br x d x 10 bytes   (Br = Bc assumed)
 
-  A100 (S_sm = 164 KB = 167,936 bytes), d = 128:
-    Br_max = 167,936 / (128 x 10) = 131 -> Br = 128 fits (161,792 bytes used,
-    Section 2), Br = 256 does NOT fit in a single CTA's realistic budget once
-    other per-thread state (registers spilled to shared, etc.) is accounted for
+  A100 (per-block cap 163 KB = 166,912 bytes), d = 128:
+    Br_max = 166,912 / (128 x 10) = 130 -> Br = 128 fits (164,864 bytes used
+    including the m_i/l_i scalars, Section 2); Br = 256 needs 327,680 bytes,
+    roughly double, and does not fit at all
     -> occupancy = 1 resident CTA/SM at Br=128 on A100
 
-  H100 (S_sm = 227 KB = 232,448 bytes), d = 128:
-    Same Br=128 tile (161,792 bytes) leaves 70,656 bytes headroom
-    -> enough for a SECOND buffered K/V tile (double-buffering, ~65,536 bytes
+  H100 (per-block cap 227 KB = 232,448 bytes), d = 128:
+    Same Br=128 tile (164,864 bytes) leaves 67,584 bytes headroom
+    -> enough for a SECOND buffered K/V tile (double-buffering, 65,536 bytes
     for sK+sV alone) -> prefetch tile j+1 while computing on tile j, hiding
     HBM latency behind compute -> this is a large part of why FlashAttention-2/3
     kernels are tuned per-architecture rather than using one universal tile size
@@ -785,21 +810,30 @@ Attention FLOPs per token (forward + backward ~= 3x forward, standard rule of th
   train_flops_per_seq    = 3 x forward_flops_per_seq (fwd + bwd, backward ~2x fwd)
 
 Worked example: L=80, H=32, d=128, N=8192 (GPT-3-scale training context):
-  forward_flops_per_seq = 4 x 80 x 32 x 8192^2 x 128 ~= 8.8e15 FLOP per sequence
-  train_flops_per_seq   = 3 x 8.8e15 ~= 2.64e16 FLOP per sequence
+  forward_flops_per_seq = 4 x 80 x 32 x 8192^2 x 128 ~= 8.8e13 FLOP per sequence
+    (identical to Section 2's 88.1 TFLOP figure for the same shape -- same
+     4 x L x H x N^2 x d expression, so the two sections must agree)
+  train_flops_per_seq   = 3 x 8.8e13 ~= 2.64e14 FLOP per sequence
 
 At a target of P = 300B training tokens, N = 8192 tokens/sequence:
   num_sequences = 300e9 / 8192 ~= 36.6M sequences
-  total_attention_flops = 36.6e6 x 2.64e16 ~= 9.67e23 FLOP
+  total_attention_flops = 36.6e6 x 2.64e14 ~= 9.66e21 FLOP
 
 At H100 sustained (FlashAttention-3, ~70% of 989 TFLOP/s FP16 peak = 692 TFLOP/s
 per GPU, attention layers only -- the rest of the model's FLOPs are additional):
-  GPU-seconds for attention alone = 9.67e23 / 692e12 ~= 1.40e9 GPU-seconds
-  GPU-days = 1.40e9 / 86,400 ~= 16,150 GPU-days
-  On a 1,024-H100 cluster: 16,150 / 1,024 ~= 15.8 days JUST for attention FLOPs
-  (total training wall-time is longer once FFN/embedding FLOPs and communication
-  overhead are added -- this isolates the fraction attributable to attention,
-  which is why a 1.5x kernel speedup (FA2 -> FA3) is worth ~5 cluster-days here)
+  GPU-seconds for attention alone = 9.66e21 / 692e12 ~= 1.40e7 GPU-seconds
+  GPU-days = 1.40e7 / 86,400 ~= 162 GPU-days
+  On a 1,024-H100 cluster: 162 / 1,024 ~= 0.16 days ~= 3.8 hours of the run's
+  wall-clock attributable to attention FLOPs alone. Running the same job on
+  FlashAttention-2 instead (1.5x slower) costs ~5.7 hours -- a ~2-hour saving.
+
+  The point this makes is worth reading the other way round: at N=8192 attention
+  is a MODEST slice of a training run's FLOPs (the FFN and embedding layers
+  dominate), so the kernel's headline value is NOT cluster-days of compute --
+  it is the activation memory it removes, which is what makes the context length
+  reachable at all (see "Memory Savings" below). The FLOP argument only becomes
+  the dominant one as N grows, since attention scales as N^2 while the rest of
+  the model scales as N.
 ```
 
 ### Memory Savings Translated to Maximum Context Length
@@ -835,14 +869,14 @@ per-token KV-cache read cost from Section 2's decode-regime analysis:
   time_per_decode_step = kv_cache_bytes_at_context_N / hbm_bandwidth
 
   LLaMA-3 70B, N = 32,768, H100 (~3 TB/s):
-    kv_cache_bytes = 10 GiB (Section 2)  ->  time_per_step ~= 3.3 ms/step
-    max decode steps/sec (single sequence, KV-bandwidth-bound) ~= 303 steps/sec
+    kv_cache_bytes = 10 GiB (Section 2)  ->  time_per_step ~= 3.6 ms/step
+    max decode steps/sec (single sequence, KV-bandwidth-bound) ~= 279 steps/sec
 
   Batching B concurrent sequences shares the KV-cache read cost across the
   batch IF the kernel/scheduler batches the HBM read (continuous batching,
   as in vLLM) rather than serializing per-sequence reads:
     effective tokens/sec at B=32 concurrent sequences, same context length
-    ~= 303 x 32 = 9,696 tokens/sec/GPU (upper bound; real systems achieve
+    ~= 279 x 32 = 8,928 tokens/sec/GPU (upper bound; real systems achieve
     60-70% of this due to scheduling and other-layer overhead -- consistent
     with the 65% target MBU used for fleet sizing in
     design_gpu_inference_platform.md)
@@ -858,7 +892,7 @@ At production LLM scale, the gap between a memory-bound naive attention kernel a
 
 **Q: Why is naive (unfused) attention memory-bound rather than compute-bound?**
 
-Because materializing the `N x N` score matrix `S` and probability matrix `P` in HBM forces roughly `8 x N^2` bytes of memory traffic (write `S`, read `S`, write `P`, read `P`) that carries almost no arithmetic per byte — the softmax's `exp` and normalization are cheap relative to a full HBM round trip. At `N=8192`, `d=128` on an H100, that S/P traffic alone takes about 480 ms while the actual `QK^T`/`PV` matmul FLOPs take about 89 ms — the memory movement dominates wall-clock time by more than 5x, the textbook signature of a memory-bound kernel.
+Because materializing the `N x N` score matrix `S` and probability matrix `P` in HBM forces roughly `8 x N^2` bytes of memory traffic (write `S`, read `S`, write `P`, read `P`) that carries almost no arithmetic per byte — the softmax's `exp` and normalization are cheap relative to a full HBM round trip. At `N=8192`, `d=128` on an H100, that S/P traffic alone takes about 458 ms while the actual `QK^T`/`PV` matmul FLOPs take about 89 ms — the memory movement dominates wall-clock time by more than 5x, the textbook signature of a memory-bound kernel.
 
 **Q: What is FlashAttention's core algorithmic idea, in one sentence?**
 
@@ -910,7 +944,7 @@ Run the tolerance-bounded comparison against a naive FP32 reference (Section 8) 
 
 **Q: Does FlashAttention help inference decode as much as it helps training/prefill?**
 
-Not nearly as much, because decode's dominant cost is fundamentally different: with a single query token (`Br=1`) attending to a large KV cache, there is no `O(N^2)` intermediate matrix to eliminate in the first place — the bottleneck is simply reading the accumulated KV cache from HBM once per step, which costs about 3.3 ms for a 10 GiB KV cache on H100 regardless of how the attention math is fused. The levers that actually move decode throughput are GQA/MQA (fewer KV-cache bytes per token), quantized KV-cache storage, and batching (PagedAttention) — FlashAttention's fusion technique matters most where the `N^2` term is large, which is prefill and training, not single-token decode.
+Not nearly as much, because decode's dominant cost is fundamentally different: with a single query token (`Br=1`) attending to a large KV cache, there is no `O(N^2)` intermediate matrix to eliminate in the first place — the bottleneck is simply reading the accumulated KV cache from HBM once per step, which costs about 3.6 ms for a 10 GiB KV cache on H100 regardless of how the attention math is fused. The levers that actually move decode throughput are GQA/MQA (fewer KV-cache bytes per token), quantized KV-cache storage, and batching (PagedAttention) — FlashAttention's fusion technique matters most where the `N^2` term is large, which is prefill and training, not single-token decode.
 
 **Q: How does grouped-query attention (GQA) change the kernel, and why doesn't it change the online-softmax math?**
 

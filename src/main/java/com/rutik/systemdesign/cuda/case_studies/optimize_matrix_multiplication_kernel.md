@@ -3,7 +3,7 @@
 ## Intuition
 
 > **Design intuition**: A naive CUDA matmul kernel and a tuned one run on the *same silicon* —
-> same FLOP/s, same HBM bandwidth — yet one delivers 20 GFLOP/s and the other delivers
+> same FLOP/s, same HBM bandwidth — yet one delivers 24 GFLOP/s and the other delivers
 > 850,000 GFLOP/s. Nothing about the hardware changed; what changed is how many bytes had to
 > travel from HBM to a compute unit for each FLOP performed. GEMM optimization is the single
 > best teaching example in all of GPU programming because every major performance lever —
@@ -76,9 +76,11 @@ FLOPs(M, N, K) = 2 * M * N * K
 Reference problem for every measurement in this file: M = N = K = 4096
   FLOPs = 2 * 4096 * 4096 * 4096 = 137,438,953,472 FLOPs  ~= 137.4 GFLOP
 
-This shape is representative, not arbitrary — it is close to the FFN-projection GEMM
-in a 7B-parameter transformer at batch*seq = 4096 tokens (hidden 4096 -> 4096), the single
-most common GEMM shape appearing in an LLM training or inference profile.
+This shape is representative, not arbitrary — it is exactly the attention Q/K/V and
+output-projection GEMM in a 7B-parameter transformer at batch*seq = 4096 tokens
+(hidden 4096 -> 4096), one of the most common GEMM shapes appearing in an LLM training
+or inference profile. (The FFN projections in the same model are 4096 -> 11008 and
+11008 -> 4096, so they are ~2.7x larger in K or N but structurally identical.)
 ```
 
 ### Bytes Moved: Naive vs. Tiled
@@ -108,12 +110,13 @@ TILED (shared-memory block tile BM x BN, one thread per output element):
 
   BM = BN = 32 (the classic 32x32 shared-memory tile, matched to warp size and to the
   32-bank shared-memory layout):
-    AI_tiled = (32 * 32) / (2 * 64) = 1024 / 64 = 16 FLOP/byte
-    (this file's actual rung-3 kernel below reuses a 32x32 tile per k-slab, see §4.3;
-     with BK folded into the loop the realized figure is 8 FLOP/byte because each
-     shared-memory tile is read out BK=32 times but the *shared*-memory traffic, not
-     HBM traffic, scales with BK — HBM bytes per block are still governed by BM, BN alone)
-    bytes_tiled ~= bytes_naive / 32 ~= 17.2 GB  (32x less HBM traffic than naive)
+    AI_tiled = (32 * 32) / (2 * (32 + 32)) = 1024 / 128 = 8 FLOP/byte
+    (this file's actual rung-3 kernel below uses exactly this 32x32 tile, see §4.3.
+     BK cancels out of the ratio: a deeper reduction slab raises the bytes loaded and
+     the FLOPs performed by the same factor, so HBM bytes per FLOP are governed by
+     BM and BN alone. Only *shared*-memory traffic scales with BK.)
+    bytes_tiled ~= bytes_naive / 32 ~= 17.2 GB  (32x less HBM traffic than naive,
+     matching the 0.25 -> 8 FLOP/byte jump in arithmetic intensity)
 ```
 
 ### Arithmetic Intensity vs. the GPU Roofline (Ridge Point)
@@ -140,7 +143,9 @@ achieved GFLOP/s in §4; see also
                                                      not toward the ridge (see note below)
   3. Shared-mem tiled          8         22.3      memory-bound, much closer to ridge
   4. Register-blocked         16         22.3      memory-bound but nearly at the ridge
-  5. Tensor Core (WMMA)     100s        330        comfortably right of the (much higher) ridge
+  5. Tensor Core (WMMA)    ~1000        330       right of the (much higher) ridge -- but
+                                                     only because both operands fit in L2
+                                                     at this shape (see §4.5)
 ```
 
 **The rung-1-to-2 subtlety, worth internalizing**: fixing coalescing does *not* move a kernel
@@ -156,9 +161,9 @@ A 7B-parameter transformer forward pass at batch=32, seq=2048 issues roughly 4 l
 per transformer layer (Q/K/V projection fused, output projection, two FFN projections) x 32
 layers = ~128 GEMM calls per forward pass.
 
-At 500 requests/sec average (a mid-size inference fleet) with an average of 600 forward
-passes worth of decode + prefill GEMMs per request:
-  GEMM calls/sec ~= 500 * 128 ~= 64,000 GEMM launches/sec across the fleet
+At 500 forward passes/sec across a mid-size inference fleet -- prefill plus every decode
+step, since one decode step IS one forward pass, so decode dominates the count:
+  GEMM calls/sec = 500 * 128 = 64,000 GEMM launches/sec across the fleet
 
 This is why kernel *launch overhead* (a few microseconds each) and *library dispatch*
 (cuBLAS heuristic selection) matter as much as peak arithmetic throughput at fleet scale --
@@ -237,7 +242,7 @@ BK = 8 reduction depth per shared-memory slab.
            BN = 64 columns of the B tile   (shared memory: Bs, 8 rows x 64 cols)
            col:  0    8   16   24   32   40   48   56
          +-----+----+----+----+----+----+----+----+
-   BK=8  | T00 |T01 |T02 |T03 |T04 |T05 |T06 |T07 |   Tij = one thread's 8x8
+  8 thd  | T00 |T01 |T02 |T03 |T04 |T05 |T06 |T07 |   Tij = one thread's 8x8
    rows  +-----+----+----+----+----+----+----+----+   micro-tile of C, held
          | T10 |T11 |T12 |T13 |T14 |T15 |T16 |T17 |   entirely in registers
          +-----+----+----+----+----+----+----+----+
@@ -245,12 +250,14 @@ BK = 8 reduction depth per shared-memory slab.
          +-----+----+----+----+----+----+----+----+
          | T70 |T71 |T72 |T73 |T74 |T75 |T76 |T77 |
          +-----+----+----+----+----+----+----+----+
-   BM = 64 rows of the A tile (shared memory: As, 64 rows x 8 cols) indexes down this side
+   BM = 64 rows of the A tile (stored transposed in shared memory as As[8][64]) runs down
+   this side; the 8 grid rows above are the 8 THREAD rows, each owning 8 rows of C.
 
    Thread Tij reads TM=8 values from As (reused across all TN=8 of its output columns) and
    TN=8 values from Bs (reused across all TM=8 of its output rows), then performs TM*TN = 64
-   FMAs.  Shared-memory reads per 64 FLOPs = TM + TN = 16, i.e. 4 FLOPs per shared-memory
-   read -- versus 1 FLOP per shared-memory read with no register blocking (TM=TN=1, rung 3).
+   FMAs = 128 FLOPs.  Shared-memory reads per 128 FLOPs = TM + TN = 16, i.e. 8 FLOPs per
+   shared-memory read -- versus 1 FLOP per shared-memory read with no register blocking
+   (TM=TN=1, rung 3: two shared-memory reads feed a single FMA).
 ```
 
 See also: [`memory_coalescing_and_access_patterns`](../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md)
@@ -387,7 +394,8 @@ __global__ void sgemm_tiled(int M, int N, int K, float alpha,
     for (int t = 0; t < numTiles; ++t) {
         const int aCol = t * TILE + threadIdx.x;
         const int bRow = t * TILE + threadIdx.y;
-        // Cooperative load: 1024 threads load 1024 elements each of As/Bs, coalesced
+        // Cooperative load: the block's 1024 threads load one element each into As and
+        // one into Bs, filling both 32x32 tiles in a single coalesced pass
         // (threadIdx.x is the fast axis for both -- both loads are stride-1 across the warp)
         As[threadIdx.y][threadIdx.x] = (row < M && aCol < K) ? A[row * K + aCol] : 0.0f;
         Bs[threadIdx.y][threadIdx.x] = (bRow < K && col < N) ? B[bRow * N + col] : 0.0f;
@@ -438,6 +446,12 @@ exactly the register-file-level analogue of what shared memory did to HBM traffi
 #define TM 8
 #define TN 8
 // threads per block = (BM/TM) * (BN/TN) = 8 * 8 = 64
+//
+// Shown for tile-aligned M, N, K (the 4096^3 reference shape divides evenly by BM=BN=64
+// and BK=8). The zero-padded-tile + guarded-write boundary handling of rung 3 (§4.3) is
+// omitted here so the register-blocking mechanics stay readable; §5 records it as a
+// requirement, and running this kernel on a non-aligned shape reads and writes out of
+// bounds rather than merely producing wrong edges.
 
 __global__ void sgemm_regblock(int M, int N, int K, float alpha,
                                 const float* A, const float* B,
@@ -502,7 +516,8 @@ memory traffic and instruction issue rate rather than by either roofline segment
 Measured (M=N=K=4096, H100 SXM5): ~48 TFLOP/s -> 72% of the 67 TFLOP/s FP32 peak
 
 Speedup over rung 3: 48,000 / 21,600 ~= 2.2x -- from register reuse cutting shared-memory
-traffic roughly (TM*TN)/(TM+TN) = 64/16 = 4x, plus fewer total blocks/threads needed
+reads per FMA from 2 (rung 3) to (TM+TN)/(TM*TN) = 16/64 = 0.25, an 8x reduction
+(2*TM*TN/(TM+TN) = 128/16 = 8), plus fewer total blocks/threads needed
 (less scheduling and __syncthreads() overhead per useful FLOP).
 ```
 
@@ -568,17 +583,27 @@ cublasCreate(&handle);
 const float alpha = 1.0f, beta = 0.0f;
 // Note the swapped operand order: cuBLAS is column-major; computing C^T = B^T @ A^T
 // in column-major storage is bit-identical to C = A @ B in row-major storage (see §9).
+// computeType is a cublasComputeType_t (CUBLAS_COMPUTE_32F), not a cudaDataType_t --
+// and CUBLAS_GEMM_DEFAULT already selects Tensor Core kernels, so the algo argument is
+// plain CUBLAS_GEMM_DEFAULT.
 cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
              &alpha, B, CUDA_R_16F, N, A, CUDA_R_16F, K,
-             &beta,  C, CUDA_R_32F, N, CUDA_R_32F,
-             CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+             &beta,  C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F,
+             CUBLAS_GEMM_DEFAULT);
 ```
 
 **Roofline reading**: FP16 Tensor Core peak is ~990 TFLOP/s, giving a ridge point of
 990e12/3e12 = 330 FLOP/byte (§2). CUTLASS/cuBLAS's multi-level tiling (a large block tile,
-e.g. 128x128, further split into warp tiles and MMA-fragment tiles) pushes effective arithmetic
-intensity into the hundreds of FLOP/byte — safely to the right of the 330 FLOP/byte ridge, so the
-kernel is unambiguously compute-bound, limited by Tensor Core math throughput, not HBM bandwidth:
+e.g. 128x128, further split into warp tiles and MMA-fragment tiles) is not by itself enough to
+clear that ridge: a 128x128 FP16 block tile is `(BM*BN)/(BM+BN)` = 16384/256 = 64 FLOP/byte
+(twice the FP32 figure for the same tile, because a `half` is 2 bytes rather than 4). What
+clears the ridge at this shape is **L2 residency**: `A` and `B` are 4096*4096*2 = 33.5 MB each,
+so both operands live inside the H100's 50 MB L2 and the block tiles' re-reads are served from
+L2, not HBM. DRAM traffic then collapses toward the compulsory minimum — read `A` and `B` once,
+write FP32 `C` once: 33.5 + 33.5 + 67.1 = 134 MB — putting the kernel at
+137.4e9 / 134e6 ~= 1,000 FLOP/byte, far to the right of the 330 ridge and unambiguously
+compute-bound on Tensor Core math throughput. At a shape whose operands do *not* fit in L2, the
+64 FLOP/byte block-tile figure is the one that binds and the same kernel is memory-bound again:
 
 ```
 Measured (M=N=K=4096, FP16 in / FP32 accumulate, H100 SXM5): ~850 TFLOP/s
@@ -697,9 +722,9 @@ if __name__ == "__main__":
 | Tile size (rung 3) | 32x32 (matches warp size, 32 shared-memory banks) | 16x16 or 64x64 | 32x32 gives conflict-free banking for free and keeps shared-memory usage per block at 2 x 32x32x4B = 8 KB, well under the ~228 KB/SM budget, allowing high occupancy alongside the tiling win |
 | Register-blocking micro-tile (rung 4) | TM=TN=8 (each thread owns 64 output elements) | TM=TN=4 (32 elements) or TM=TN=16 (256 elements) | 8x8 balances register pressure (64 accumulator floats + 16 operand floats = 80 registers/thread, within the ~255 max) against reuse; 16x16 spills registers to local memory and is *slower* despite higher theoretical AI — see §9 |
 | Transposed `As[BK][BM]` shared layout (rung 4) | Store `A`'s tile transposed in shared memory | Store it in natural `[BM][BK]` orientation | Natural orientation makes the register-fill read `As[threadRow*TM+i][k]` bank-conflicted (fixed `k`, varying row means all 32 lanes in some cases hit the same bank); transposing during the cooperative load fixes this at zero extra HBM cost |
-| Tensor Core precision (rung 5) | FP16 input / FP32 accumulate | BF16 input, or full FP32 (TF32 Tensor Core path) | FP16/FP32-accumulate is the best-supported, highest-throughput path on Volta-through-Hopper; BF16 trades FP16's 1e-1-scale rounding error for wider dynamic range at the same throughput — the right choice when values may overflow FP16's ~65504 max (see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)) |
+| Tensor Core precision (rung 5) | FP16 input / FP32 accumulate | BF16 input, or full FP32 (TF32 Tensor Core path) | FP16/FP32-accumulate is the best-supported 16-bit path on every Tensor Core generation from Volta onward (FP8 and below go higher still on Hopper and Blackwell, but only through `mma`/CUTLASS or a library, not `nvcuda::wmma`); BF16 trades FP16's 1e-1-scale rounding error for wider dynamic range at the same throughput — the right choice when values may overflow FP16's ~65504 max (see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)) |
 | Boundary handling | Zero-pad shared-memory tiles for out-of-bounds `M`/`N`/`K`, guard writes with bounds checks | Require `M`/`N`/`K` to be exact multiples of tile size | Real workloads (odd batch sizes, non-power-of-2 hidden dims) are rarely tile-aligned; the small per-iteration branch cost is negligible next to the throughput gained from tiling itself |
-| Custom kernel vs. cuBLAS in production | Use cuBLAS/CUTLASS for standalone GEMM; hand-write only when *fusing* it with adjacent ops | Always hand-write for full control | cuBLAS is within a few percent of hardware peak for standalone GEMM (§4.5); hand-written kernels win only when fusion (e.g. FlashAttention folding softmax into the matmul) avoids an HBM round-trip cuBLAS cannot skip |
+| Custom kernel vs. cuBLAS in production | Use cuBLAS/CUTLASS for standalone GEMM; hand-write only when *fusing* it with adjacent ops | Always hand-write for full control | cuBLAS lands around 86% of hardware peak for standalone GEMM (§4.5); hand-written kernels win only when fusion (e.g. FlashAttention folding softmax into the matmul) avoids an HBM round-trip cuBLAS cannot skip |
 
 ---
 
@@ -710,8 +735,8 @@ measured against. It ships hundreds of pre-compiled kernel variants per GPU arch
 selects among them at runtime via an internal heuristic (shape, transpose flags, precision,
 and — since CUDA 11 — an explicit "heuristic" API `cublasLtMatmulAlgoGetHeuristic` that returns
 a ranked list of candidate algorithms an application can benchmark itself). For the 4096^3 FP16
-case in §4.5, `cublasGemmEx` typically lands at 90-95% of the 990 TFLOP/s H100 peak — a few
-points ahead of the hand-tiled WMMA kernel above, the gap being cuBLAS's use of larger,
+case in §4.5, `cublasGemmEx` lands in the high-80s percent of the 990 TFLOP/s H100 peak — well
+ahead of the hand-tiled WMMA kernel above, the gap being cuBLAS's use of larger,
 architecture-specific tile and pipelining configurations (double-buffered shared memory, deeper
 software pipelines overlapping load and compute) that are impractical to hand-derive in an
 interview setting.
@@ -725,11 +750,11 @@ custom-precision matmul support.
 
 **The "how close can you get to cuBLAS" blog lineage**: Simon Boehm's widely-cited 2023 worklog
 ("How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog") walks exactly this
-ladder — naive, coalesced, tiled, 1D thread-coarsened, 2D thread-coarsened (the register-blocked
-rung here), vectorized `float4` loads, and warp-tiling — reaching roughly 93% of cuBLAS's FP32
-throughput on an A100 with fewer than 300 lines of CUDA C++ per kernel. It remains the canonical
-reference implementation for this exact interview question, and this case study's rung 4 is a
-simplified version of that post's kernel 6.
+ladder — naive, coalesced, tiled, 1D blocktiling, 2D blocktiling (the register-blocked
+rung here), vectorized `float4` loads, autotuning, and warptiling — reaching 93.7% of cuBLAS's
+FP32 throughput (21.7 vs 23.2 TFLOP/s) on an **RTX A6000** with fewer than 300 lines of CUDA C++
+per kernel. It remains the canonical reference implementation for this exact interview question,
+and this case study's rung 4 is a simplified version of that post's kernel 5 (2D blocktiling).
 
 **DeepSeek-V3** (DeepSeek, 2024 technical report) is a production example of going *past* library
 GEMM: its training used custom PTX-level GEMM kernels with warp specialization (dedicating
@@ -738,10 +763,14 @@ to sustain high FP8 throughput at the specific GEMM shapes their MoE architectur
 justified because their shapes and precision (FP8 with custom scaling) fell outside what
 off-the-shelf cuBLAS at the time tuned well for.
 
-**Meta's FBGEMM** (used in production recommendation-model inference) is another example of the
-"beat the library by fusing, not by out-tiling" principle from §5: it wins not by re-deriving a
-faster generic GEMM than cuBLAS, but by fusing quantization/dequantization and embedding-table
-lookups directly into the matmul kernel to avoid extra HBM round-trips.
+**Meta's FBGEMM** (the low-precision GEMM library behind PyTorch's quantized x86 CPU operators,
+used in production recommendation-model inference) is another example of the "beat the library by
+fusing, not by out-tiling" principle from §5: it wins not by re-deriving a faster generic GEMM
+than the vendor BLAS, but by fusing quantization/requantization and the bias/activation epilogue
+directly into the matmul so the low-precision result never round-trips through memory as a
+separate pass. Its GPU sibling **FBGEMM_GPU** applies the same idea on-device for the
+recommendation stack's other bottleneck — batched embedding-table lookups — which is a
+gather-heavy kernel rather than a GEMM.
 
 ---
 
@@ -750,7 +779,7 @@ lookups directly into the matmul kernel to avoid extra HBM round-trips.
 | Tool / Layer | Role | When to Reach for It |
 |---------------|------|----------------------|
 | Hand-written CUDA C++ (this file) | Full control over tiling, register blocking, precision | Learning/interview prep; production only when fusing with adjacent ops |
-| cuBLAS / `cublasGemmEx` | NVIDIA's tuned dense-GEMM library | Any standalone GEMM in production — default choice, 90%+ of peak |
+| cuBLAS / `cublasGemmEx` | NVIDIA's tuned dense-GEMM library | Any standalone GEMM in production — default choice, ~85-90% of peak at large shapes |
 | CUTLASS | Template-based GEMM building blocks (block/warp/MMA tiles as C++ templates) | Custom precision (INT8, FP8), custom epilogues (fused bias/activation), or a shape cuBLAS's heuristic tunes poorly for |
 | Triton | Python-embedded kernel DSL with block-level abstraction and autotuning | Fast iteration on a fused kernel without hand-writing tiling/indexing (see [`../triton_and_kernel_dsls/`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md)) |
 | Nsight Compute | Per-kernel roofline, SOL (speed-of-light) bars, achieved-occupancy metrics | Confirming which rung of this ladder a given kernel actually behaves like, on real hardware (see §8) |
@@ -774,13 +803,15 @@ $ ncu --set full -o naive_profile ./gemm_bench --rung=1
 
 Key metrics to read off the report:
   sm__throughput.avg.pct_of_peak_sustained_elapsed   (compute SOL)   -> near 0%  for rung 1
-  gpu__compute_memory_throughput.avg.pct_of_peak      (memory SOL)   -> ~3%      for rung 1
-  l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld
-      -> ~32 sectors/request for rung 1 (should be ~1 for a fully coalesced 128B load)
+  gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed
+                                                     (memory SOL)    -> ~3%      for rung 1
+  l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio
+      -> ~32 sectors/request for rung 1. The floor is 4, not 1: a fully coalesced
+         32-lane 4-byte load covers 128 bytes, which is four 32-byte sectors.
       -> the single number that proves the "32-way scatter" diagnosis in §4.1 before
          writing a single line of the fix
 
-After rung 2 (coalesced): sectors/request drops to ~1; memory SOL climbs to ~85-90%;
+After rung 2 (coalesced): sectors/request drops to ~4; memory SOL climbs to ~85-90%;
 compute SOL stays low -- confirms the kernel is now memory-bound *at its true bandwidth
 ceiling*, telling you the next lever is arithmetic intensity (tiling), not further
 coalescing work.
@@ -975,8 +1006,9 @@ shared across all resident blocks) and the occupancy tradeoff of using more of i
 
 Register blocking has each thread compute a small `TM x TN` sub-tile of the output entirely in
 registers, reading each of its `TM` shared-memory `A` values and `TN` shared-memory `B` values
-once and reusing them across all `TM*TN` FMAs — cutting shared-memory reads per FLOP by a factor
-of roughly `(TM*TN)/(TM+TN)`. Larger micro-tiles (e.g. 16x16, 256 registers just for the
+once and reusing them across all `TM*TN` FMAs. Without register blocking every FMA costs two
+shared-memory reads; with it the cost is `(TM+TN)/(TM*TN)` = 16/64 = 0.25 reads per FMA, so the
+reduction factor is `2*TM*TN/(TM+TN)` = 128/16 = 8x at TM=TN=8. Larger micro-tiles (e.g. 16x16, 256 registers just for the
 accumulator) push a thread's register footprint past the hardware's per-thread register budget
 (255 on recent architectures), forcing the compiler to spill excess registers to local memory —
 which is global-memory-latency traffic, exactly what register blocking was trying to eliminate.
@@ -988,7 +1020,7 @@ comfortably under the spill threshold while still delivering most of the achieva
 cuBLAS and CUTLASS encode years of architecture-specific tuning — precise tile shapes, double-
 buffered shared memory, software-pipelined loads that overlap with compute, and a runtime
 heuristic that picks among hundreds of pre-compiled variants per shape — routinely landing within
-5-10% of theoretical peak for standalone GEMM. A hand-written kernel wins only when it can do
+10-15% of theoretical peak for standalone GEMM at large shapes. A hand-written kernel wins only when it can do
 something the library's API boundary prevents: typically *fusing* an adjacent operation (like
 softmax, in FlashAttention) directly into the matmul to avoid a full round-trip to HBM between
 kernels. If the workload is a standalone GEMM with no fusion opportunity, reaching for cuBLAS
@@ -1041,7 +1073,7 @@ coalescing, more tiling, or Tensor Cores?**
 Start with Nsight Compute's memory and compute SOL (speed-of-light) percentages
 ([`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md)).
 If memory SOL is low (well under peak) and the sectors-per-request metric for global loads is
-far above 1, the fix is coalescing — bytes are being requested but wasted on scatter. If memory
+far above its coalesced floor of 4, the fix is coalescing — bytes are being requested but wasted on scatter. If memory
 SOL is near 90%+ and compute SOL is low, the kernel has genuinely maxed out its current
 arithmetic intensity and the fix is more reuse — shared-memory tiling or register blocking. If
 both memory and compute SOL are high relative to the CUDA-core roofline but the workload's
@@ -1053,11 +1085,14 @@ update the grid dimensions to match?**
 
 The grid dimensions must be computed as `ceil(M/BM) x ceil(N/BN)` — if the launch code still uses
 the rung-3 tile size (32) to compute grid dimensions while the kernel body assumes `BM=BN=64`,
-each block will believe it owns a 64x64 output region that is actually only ever assigned
-(via `blockIdx`) a 32x32-sized slice of the grid, causing either duplicate work (if grid is too
-large) or, more dangerously, silently uncomputed regions of `C` (if grid is too small) — output
-that looks plausible (it is not garbage memory, just stale or zero-initialized) but is
-mathematically wrong for a subset of the matrix. This is why the correctness gate in §4.6's
+each block will believe it owns a 64x64 output region while `blockIdx` was laid out for 32x32
+slices. Too large a grid (the rung-3 `ceil(M/32) x ceil(N/32)` with a `BM=BN=64` kernel is 4x too
+many blocks) has the highest-numbered blocks index `C` past its end — the register-blocked kernel
+carries no bounds guard, so this is an out-of-bounds read and write, an illegal memory access that
+`compute-sanitizer` catches immediately but a plain run may only show as intermittent corruption
+elsewhere on the device. Too small a grid is the more insidious direction: whole regions of `C` are
+silently never written, leaving output that looks plausible (not garbage memory, just stale or
+zero-initialized) but is mathematically wrong for a subset of the matrix. This is why the correctness gate in §4.6's
 Python harness always runs a full-tensor comparison against `torch.matmul`, not a spot-check on a
 handful of elements — a launch-configuration mismatch like this one is exactly the kind of bug
 that only shows up in the corners of the matrix.
