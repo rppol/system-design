@@ -83,7 +83,7 @@ def climb_stairs_brute(n: int) -> int:
 
 Recurrence: `T(n) = T(n-1) + T(n-2)`. This is a Fibonacci-type recurrence. Solving it gives `T(n) = O(phi^n)` where `phi ≈ 1.618`, so **exponential** time. Space: O(n) call stack.
 
-For `n = 50`, this computes approximately 2^50 ≈ 10^15 function calls. Completely infeasible.
+The call count is exactly `2 * fib(n+1) - 1`, so `n = 50` costs 40,730,022,147 calls — about 4 x 10^10, matching `phi^50 ≈ 2.8 x 10^10` and NOT `2^50`. The base of the exponential is 1.618, not 2, and at n = 50 that is the difference between 4 x 10^10 and 10^15. Still infeasible: at the ~3 x 10^7 calls/second CPython manages, `n = 50` runs for roughly 20 minutes.
 
 Coin Change brute force: try all coin selections with recursion.
 
@@ -121,7 +121,7 @@ def lcs_brute(text1: str, text2: str, i: int, j: int) -> int:
     return max(lcs_brute(text1, text2, i - 1, j), lcs_brute(text1, text2, i, j - 1))
 ```
 
-The same sub-problem `lcs_brute(text1, text2, i, j)` is recomputed exponentially many times. For `m = n = 40`, this requires roughly 2^40 ≈ 10^12 calls.
+The same sub-problem `lcs_brute(text1, text2, i, j)` is recomputed exponentially many times. When the two strings share no characters the call count is exactly `2 * C(m+n, m) - 1` — one node per monotone lattice path through the (i, j) grid. For `m = n = 40` that is `2 * C(80, 40) ≈ 2 x 10^23` calls, not `2^40`: the bound is a central binomial coefficient, which grows as `4^n / sqrt(pi*n)`, far faster than `2^n`.
 
 ### Pattern 3 — Knapsack
 
@@ -142,7 +142,7 @@ def knapsack_brute(weights: List[int], values: List[int], capacity: int, i: int)
 
 ### Pattern 4 — Unique Paths
 
-Brute force: DFS/BFS on the grid, counting all root-to-leaf paths. Time: O(2^(m+n)) in the worst case (exponential branching). The grid can be 100x100, giving 2^200 paths — impossible.
+Brute force: DFS/BFS on the grid, counting all root-to-leaf paths. Time: O(2^(m+n)) in the worst case (exponential branching), with the exact path count being `C(m+n-2, m-1)`. A 100x100 grid has `C(198, 99) ≈ 2.3 x 10^58` paths — impossible.
 
 ```python
 def unique_paths_brute(m: int, n: int, r: int, c: int) -> int:
@@ -157,7 +157,7 @@ def unique_paths_brute(m: int, n: int, r: int, c: int) -> int:
     return paths
 ```
 
-For a 20x20 grid, this makes C(38, 18) ≈ 10^10 calls.
+For a 20x20 grid (19 rights and 19 downs), the path count is C(38, 19) = 35,345,263,800 ≈ 3.5 x 10^10 calls.
 
 ---
 
@@ -276,10 +276,13 @@ At capacity 5: dp[5] = max(dp[5], dp[5-3]+4) = max(3, dp[2]+4) = max(3, 3+4) = 7
 
 Processing item (w=4, v=5), inner loop right to left:
 ```
-Before: dp = [0, 0, 3, 4, 5, 7]
+Before: dp = [0, 0, 3, 4, 4, 7]
 After:  dp = [0, 0, 3, 4, 5, 7]
 ```
-No improvement because capacity 5 already achieves 7.
+`dp[5]` does not move — `max(7, dp[1]+5) = max(7, 5) = 7`, so the answer stays 7 (items 1 and 2).
+But `dp[4]` does: `max(4, dp[0]+5) = 5`, the third item alone beating the second item alone.
+The answer being final does not mean the row is: a later item can still improve a smaller
+capacity, which is exactly what a rolling array has to keep correct for the items after it.
 
 ---
 
@@ -307,8 +310,9 @@ def fib_broken(n: int) -> int:
         return n
     return fib_broken(n - 1) + fib_broken(n - 2)
 
-# fib_broken(50) makes approximately 2^50 ≈ 10^15 recursive calls.
-# On a modern machine doing 10^8 ops/second, this takes ~10^7 seconds ≈ 115 days.
+# fib_broken(50) makes exactly 2*fib(51)-1 = 40,730,022,147 calls (~4 x 10^10).
+# The base is phi = 1.618, not 2 — 2^50 would be 10^15, four orders too high.
+# At the ~3 x 10^7 calls/second CPython sustains, that is ~20 minutes.
 ```
 
 ### 4.2 FIX Step 1: Add Memoisation (Top-Down)
@@ -327,7 +331,8 @@ def fib_memo(n: int) -> int:
 
     return helper(n)
 
-# fib_memo(50) makes exactly 50 unique recursive calls.
+# fib_memo(50) computes 51 unique subproblems (k = 0..50) in 99 helper
+# invocations — every k above 1 is entered twice, once computed, once a cache hit.
 # Time: O(n), Space: O(n) for the call stack + cache.
 ```
 
@@ -363,15 +368,24 @@ def knapsack_01_broken(weights: List[int], values: List[int], capacity: int) -> 
             dp[w] = max(dp[w], dp[w - weights[i]] + values[i])
     return dp[capacity]
 
-# Example: weights=[2,3], values=[3,4], capacity=5
-# Expected 0/1 answer: 7 (use both items once: 2+3=5 weight, 3+4=7 value)
-# knapsack_01_broken([2,3],[3,4],5) returns 9 — WRONG.
-# It uses item 0 twice (2+2+... doesn't fit in 5, but item 0 at w=2 gets
-# dp[2]=3, then at w=4 picks dp[4-2]+3=dp[2]+3=6, then at w=5 picks
-# dp[5-3]+4=dp[2]+4=7... actually the exact output depends on loop order,
-# but the semantic error is that left-to-right allows item reuse.
-# For weights=[1], values=[5], capacity=3: broken returns 15 (item used 3x),
-# correct 0/1 answer is 5.
+# Pick the counterexample carefully — a reused item has to actually FIT.
+#
+# NOT a counterexample: weights=[2,3], values=[3,4], capacity=5.
+#   Both versions return 7. Reuse needs 2+2+3=7 or 3+3=6 of capacity, and
+#   neither fits in 5, so the bug has no room to show. A "broken" example
+#   that prints the right answer teaches the reader nothing.
+#
+# A real counterexample: same items, capacity 6.
+#   knapsack_01_broken([2,3],[3,4],6) = 9  — item 1 (w=3,v=4) used twice.
+#   knapsack_01([2,3],[3,4],6)        = 7  — correct: each item at most once.
+#
+# The starkest one: weights=[1], values=[5], capacity=3.
+#   broken = 15 (the single item counted three times), correct = 5.
+#
+# The bug is only VISIBLE when the capacity leaves room for a second copy of
+# some item to beat the best single-use packing. Verify your counterexample by
+# running both versions — do not assume a wrong loop direction gives a wrong
+# number on the first input you try.
 ```
 
 ### 4.5 FIX: 0/1 Knapsack Inner Loop Right-to-Left
@@ -660,7 +674,7 @@ Google's search autocorrect, Apple's iOS keyboard, and Microsoft Word's spell ch
 
 ### BLAST — Bioinformatics Sequence Alignment
 
-The Basic Local Alignment Search Tool (BLAST), used by the National Center for Biotechnology Information (NCBI) to search the GenBank database of DNA sequences, is built on the Smith-Waterman algorithm — a local sequence alignment variant of edit distance. Researchers use BLAST to find which known genes a new DNA fragment resembles. The DP table is the same 2-D structure as LCS/edit-distance; Smith-Waterman adds a floor of 0 so local rather than global alignment is found. BLAST processes petabytes of sequence data annually; its heuristic acceleration (seeding with k-mer matches before running full DP) is what makes it tractable.
+The Basic Local Alignment Search Tool (BLAST), used by the National Center for Biotechnology Information (NCBI) to search the GenBank database of DNA sequences, is the heuristic stand-in for the Smith-Waterman algorithm — the exact local-alignment DP, a variant of edit distance. Researchers use BLAST to find which known genes a new DNA fragment resembles. The DP table is the same 2-D structure as LCS/edit-distance; Smith-Waterman adds a floor of 0 so local rather than global alignment is found. Exact Smith-Waterman over a whole database is O(query x database) and far too slow, so BLAST never runs it: it seeds on exact k-mer (word) matches, then extends each seed with a banded Smith-Waterman-style DP over a narrow strip around the seed. That is the tradeoff — BLAST can miss an alignment Smith-Waterman would find, and it is the only reason database-scale search is tractable.
 
 ### RNA Secondary Structure Folding — Interval DP
 
@@ -730,8 +744,8 @@ assert knapsack_01([2,3,4,5],[3,4,5,6], 8) == 10  # classic case
 
 ```python
 assert unique_paths(1, 1) == 1     # single cell
-assert unique_paths(1, n) == 1     # single row: only one path
-assert unique_paths(m, 1) == 1     # single column: only one path
+assert unique_paths(1, 9) == 1     # single row: only one path
+assert unique_paths(9, 1) == 1     # single column: only one path
 assert unique_paths(3, 7) == 28    # LeetCode example
 assert unique_paths(3, 2) == 3     # small grid
 assert unique_paths(100, 100) > 0  # large grid: should not overflow in Python
@@ -753,7 +767,7 @@ assert unique_paths(100, 100) > 0  # large grid: should not overflow in Python
 
 **Frequency**: Most common DP bug. Observed in roughly 40% of first attempts by engineers new to DP.
 
-**Quantification**: `fib(50)` with naive recursion requires approximately 2^50 ≈ 10^15 recursive calls. A modern Python interpreter executing 10^7 function calls per second would need 10^8 seconds — over three years. With memoisation, `fib(50)` requires exactly 50 unique calls and completes in microseconds.
+**Quantification**: `fib(50)` with naive recursion requires exactly `2 * fib(51) - 1` = 40,730,022,147 calls, about 4 x 10^10. (Note the base: the recursion grows as `phi^n` with `phi = 1.618`, so `2^50 ≈ 10^15` overstates it by more than four orders of magnitude — a mistake worth avoiding in the interview itself.) At the ~3 x 10^7 calls/second CPython sustains, that is about 20 minutes of CPU. With memoisation, `fib(50)` computes 51 unique subproblems and completes in microseconds.
 
 **Production war story**: A European price-comparison engine used an O(2^n) brute-force subset enumeration for discount combination selection. With n = 20 items, this produced 2^20 ≈ 10^6 combinations. At 10 ms per combination evaluation, each pricing request took 10^7 ms — nearly 3 hours. The fix was tabulation: coin-change-style DP with states `dp[amount]` over all possible discount amounts. The table had 20 * 10,000 = 200,000 cells and completed in under 1 ms per request — a 10^7 improvement.
 
@@ -795,7 +809,7 @@ assert unique_paths(100, 100) > 0  # large grid: should not overflow in Python
 
 ### Mistake 5 — Integer Overflow in Large Grid DP
 
-**Example**: `unique_paths(100, 100)` has a value of approximately 10^56. In Python, arbitrary-precision integers handle this natively. In Java or C++, using `int` overflows silently; use `long` or modular arithmetic if the problem asks for the answer modulo 10^9 + 7.
+**Example**: `unique_paths(100, 100)` = `C(198, 99)` ≈ 2.3 x 10^58. In Python, arbitrary-precision integers handle this natively. In Java or C++, using `int` overflows silently; use `long` or modular arithmetic if the problem asks for the answer modulo 10^9 + 7.
 
 **Production context**: combinatorics over large grids in route-planning services have caused silent arithmetic overflow bugs in Java microservices. Always check the problem's output size against the data type.
 

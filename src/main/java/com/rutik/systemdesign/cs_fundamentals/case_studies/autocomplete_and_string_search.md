@@ -16,7 +16,7 @@ Together, trie-based prefix lookup and KMP-style substring matching appear in ev
 
 Given a list of words and a stream of prefix queries, return the top-3 most frequent completions for each prefix.
 
-**Constraints (LeetCode 1268 / Amazon / Google phone screen variant):**
+**Constraints (LeetCode 642 variant / Amazon / Google phone screen)** — LeetCode 642 "Design Search Autocomplete System" is the frequency-ranked, lexicographically-tie-broken top-3 problem stated here; LeetCode 1268 "Search Suggestions System" is the sibling that ranks purely lexicographically:
 - Words list length: 1 <= len(words) <= 10^5
 - Word length: 1 <= len(word) <= 50
 - Prefix length: 1 <= len(prefix) <= 50
@@ -164,7 +164,7 @@ Index:    0  1  2  3
 lps:      0  0  1  2
 
 When mismatch at j=3 (after matching "ABA"), lps[2]=1 means
-we already know text has "AB" matched at the current tail —
+we already know text has "A" matched at the current tail —
 resume from j=1, not j=0.
 ```
 
@@ -239,7 +239,10 @@ class Trie:
         """
         Return up to k suggestions for prefix, ranked by frequency descending,
         ties broken by lexicographic order ascending.
-        O(P + S) where S = total characters in all words in the prefix subtree.
+        O(P + S + R log R) where P = prefix length, S = total characters in the
+        prefix subtree, and R = number of words in it. The R log R term is the
+        ranking sort below — it is NOT free, which is exactly why production
+        systems cache top-k at each node instead (see section 11).
         """
         node = self._walk(prefix)
         if node is None:
@@ -437,7 +440,8 @@ class TrieAutocomplete:
         # Independent of W — does not touch words outside the prefix subtree.
         return self._trie.suggestions(prefix, k)
 
-# 500,000-word trie build: ~50ms one-time cost.
+# 500,000-word trie build: ~400ms one-time cost in CPython
+# (measured: the 234,000-word macOS system dictionary builds in ~180ms).
 # Per-query: O(10 + 30) = 40 operations for a 10-char prefix, top-3 at ~10 chars each.
 # ~0.01ms per query vs ~50ms — 5000x improvement.
 ```
@@ -519,7 +523,7 @@ Where alpha is the branching factor (up to 26 for lowercase ASCII). The space ov
 
 **Space optimization: compressed trie (radix trie / Patricia trie)**
 
-Nodes with a single child are merged into their parent, storing multi-character edge labels. The number of nodes is O(W) rather than O(W * L). This is what production systems use (the Linux kernel's IP routing table, NGINX's URL router, and Rust's `radix` crate all use radix tries).
+Nodes with a single child are merged into their parent, storing multi-character edge labels. The number of nodes is O(W) rather than O(W * L). This is what production systems use (the Linux kernel's IPv4 routing table, NGINX's URL router, and Rust's `radix_trie` crate all use radix tries).
 
 Trie for `["slow", "slower", "slowly"]`: the naive form allocates one node per character, while the compressed radix form merges every single-child chain into one multi-character edge label.
 
@@ -559,7 +563,7 @@ flowchart LR
     class nw,nr,ny,rslow,rer,rly train
 ```
 
-3 nodes instead of 7. Space: O(W) nodes regardless of word length.
+3 nodes instead of 8. Space: O(W) nodes regardless of word length.
 
 ### KMP vs Boyer-Moore vs Rabin-Karp
 
@@ -613,7 +617,7 @@ Both use trie-like prefix indexes sharded by the first 2–3 characters (prefix 
 GitHub's code search (introduced 2023) uses a combination of trigram indexing (for regex) and exact substring matching using SIMD-accelerated variants of Boyer-Moore-Horspool on the blob content. Pattern length > 16 bytes benefits from SSE2/AVX2 memcmp optimizations. KMP is the baseline; SIMD allows 16–32 bytes compared per CPU cycle, achieving throughput of ~20 GB/s on modern hardware.
 
 **Elasticsearch Term Suggest API**
-The `term` suggester uses an in-memory FST (Finite State Transducer — a compressed trie that maps byte sequences to weights). The `completion` suggester uses a radix trie (Lucene's AnalyzingSuggester) stored in a special Lucene segment. Completion suggestions are served entirely from heap-resident data, avoiding disk I/O.
+The `term` suggester runs edit-distance candidate generation over Lucene's terms dictionary, whose term index is itself an FST (Finite State Transducer — a compressed automaton over byte sequences). The `completion` suggester is FST-based too (Lucene's `AnalyzingSuggester` / `NRTSuggester`), storing the suggestions as a weighted FST in a dedicated Lucene segment — the FST maps each byte sequence to a weight, so top-k comes straight off the automaton. Completion suggestions are served entirely from heap-resident data, avoiding disk I/O.
 
 **Spell Checkers (Hunspell, aspell)**
 Both use trie-based dictionary lookup combined with edit-distance DFS pruning. Hunspell's affix compression (shared prefix/suffix rules) is effectively a radix trie over stems. aspell uses a weighted DFS with a branch-and-bound cutoff when the edit distance budget is exhausted.
@@ -625,7 +629,7 @@ HTTP routers like Gin (Go), httprouter, and Radix (Rust) store route patterns in
 DNS resolvers match domain names in reverse label order (com → example → www) using a trie of label nodes. Each zone is a subtree. BIND9's internal data structure for zone loading is a red-black tree of dns_name_t; the resolver's label matching is a trie walk. Negative caching (NXDOMAIN) also uses trie-based non-existence proofs (NSEC records in DNSSEC map to a sorted order over the trie's sorted node set).
 
 **Network Intrusion Detection Systems (Snort, Suricata)**
-Both use Aho-Corasick (multi-pattern trie with failure links) to match thousands of known attack signatures simultaneously against packet payloads. Suricata compiles signatures into a DFA (deterministic finite automaton — equivalent to an Aho-Corasick trie with resolved failure links) and processes packets at 40 Gbps on commodity hardware using hyperscan (Intel's SIMD pattern matching library), which is itself a highly optimized Aho-Corasick engine.
+Snort's multi-pattern engine is Aho-Corasick (a multi-pattern trie with failure links), matching thousands of known attack signatures simultaneously against packet payloads; Suricata ships an Aho-Corasick MPM too and falls back to it when Hyperscan is unavailable. Suricata's default is Hyperscan (Intel's SIMD pattern matcher, now maintained as the Vectorscan fork), which is NOT an Aho-Corasick engine — it decomposes each regex into literal and finite-automaton components and matches the literals with bucketed SIMD shuffle matchers (FDR and Teddy). That is a different design from Aho-Corasick's single shared goto/failure automaton, and it is why Hyperscan wins on modern wide-SIMD cores.
 
 ---
 
@@ -758,7 +762,7 @@ A production search API serving 50,000 requests/second with 500,000 words per re
   At 50,000 req/s: 2,000,000 operations/second. A single Python process handles this in under 1% CPU.
 - The ratio: 250 billion vs 2 million = **125,000x difference in CPU budget**.
 
-This gap is the root cause of the "our search box is slow" postmortem in at least three production incidents reported on the HackerNews "Ask: what's the worst bug you shipped" thread. In all cases the fix was switching from a `[w for w in words if w.startswith(prefix)]` list comprehension to a trie or sorted-array binary search.
+This gap is the standard shape of the "our search box got slow as the catalogue grew" postmortem: the linear scan is invisible at 1,000 words and fatal at 500,000, and nothing about the code changes in between. The fix is always the same — replace the `[w for w in words if w.startswith(prefix)]` list comprehension with a trie or a sorted-array binary search.
 
 ```mermaid
 xychart-beta
@@ -794,11 +798,13 @@ for (char c : pattern) hash = (hash * BASE + c) % MOD;
 
 ### Mistake 4 — Trie memory blowup with per-node arrays
 
-Using `children = [None] * 26` (fixed-size array) instead of a dict:
-- Memory per node: 26 pointers × 8 bytes = 208 bytes, allocated whether or not the children exist.
-- For a 500,000-word trie with average length 10: up to 5,000,000 nodes × 208 bytes = ~1 GB.
-- With a dict, sparse nodes (most nodes have 1–3 children) cost 50–80 bytes.
-- Difference: ~1 GB vs ~250 MB for the same dictionary. Use dict unless lookup speed is the only concern and the alphabet is fixed and small.
+Using `children = [None] * 26` (fixed-size array) instead of a dict. Measured on CPython 3.13 with `sys.getsizeof` over a real 50,000-word English trie:
+
+- Array node: 64 B for the `__slots__` object + 264 B for the list (56 B header + 26 pointers × 8 B) = **328 bytes per node**, allocated whether or not the children exist.
+- Dict node: 64 B for the object + 184 B for the dict (CPython allocates that size for any dict of 1–5 entries, and most trie nodes have 1–3 children) = **219 bytes per node** measured across the whole trie.
+- For a 500,000-word trie with average length 10: up to 5,000,000 nodes, so ~1.6 GB array-based vs ~1.1 GB dict-based.
+
+Note the honest size of the win: **about 1.5x, not 4x.** A CPython dict is not a cheap object — the saving is real but small, and it is the wrong lever if you actually need to fit the dictionary in memory. Prefer dict over a 26-slot array, but reach for a radix trie or an FST when the memory number has to move by an order of magnitude.
 
 ### Mistake 5 — Miscomputing the failure function (off-by-one in lps)
 
@@ -849,7 +855,7 @@ Rabin-Karp is preferred when searching for multiple patterns simultaneously: com
 A trie storing W words of average length L uses O(W * L) nodes in the worst case (when all words share no common prefix). Each node in a Python dict-based implementation costs ~200 bytes, so 500,000 words × 10 chars × 200 bytes = ~1 GB. This becomes a problem on memory-constrained systems. Solutions: compressed trie (O(W) nodes), DAWG/FST (merges common suffixes too, O(W) nodes and O(W * L) bits total), or a hash map with prefix keys.
 
 **Q: What is a radix trie (compressed trie / Patricia trie) and why do production systems use it instead of a standard trie?**
-A radix trie merges nodes that have only one child into multi-character edge labels. The number of internal nodes equals the number of branching points, which is O(W) rather than O(W * L). NGINX's URL router, Go's httprouter, and Rust's `radix` crate all use radix tries. The tradeoff: slightly more complex split/merge logic during insertion, but dramatically less memory and better cache locality (fewer pointer hops for long shared prefixes).
+A radix trie merges nodes that have only one child into multi-character edge labels. The number of internal nodes equals the number of branching points, which is O(W) rather than O(W * L). NGINX's URL router, Go's httprouter, and Rust's `radix_trie` crate all use radix tries. The tradeoff: slightly more complex split/merge logic during insertion, but dramatically less memory and better cache locality (fewer pointer hops for long shared prefixes).
 
 **Q: How does Aho-Corasick extend KMP to handle multiple patterns?**
 Aho-Corasick builds a trie from all patterns, then adds failure links analogous to KMP's failure function. The failure link at each trie node points to the longest proper suffix of the current node's string that is also a prefix of some pattern. One left-to-right scan of the text follows trie edges on matches and failure links on mismatches, exactly like KMP but over the combined trie. Total preprocessing: O(sum of pattern lengths). Scan: O(n + total output). Used in anti-virus, IDS, and multi-keyword text filtering.
@@ -876,7 +882,7 @@ Three techniques: (1) Cache top-k at every trie node, not just terminal nodes �
 A suffix array is a sorted array of all suffixes of a text T. Building it takes O(n log n) or O(n) with SA-IS. Binary search finds all occurrences of a pattern P in O(m log n) per query. Compared to a trie over all suffixes (which uses O(n^2) memory in the worst case), a suffix array uses O(n) space. It is preferred when: the text is fixed and large, many short queries are expected, and memory is constrained. Production full-text search engines (Sphinx, some Elasticsearch analyzers) use suffix arrays or their compressed variants (FM-index, Compressed Suffix Array) for space-efficient substring indexing.
 
 **Q: What is a DAWG (Directed Acyclic Word Graph) and how does it differ from a trie?**
-A DAWG (also called a minimal automaton or CDAWG) merges not only common prefixes (like a trie) but also common suffixes. Two nodes that have identical subtrees are collapsed into one. For a dictionary of English words, the DAWG can be 10–20x smaller than the equivalent trie because many word endings ("-ing", "-ed", "-tion") are shared. The tradeoff: construction is more complex (requires a canonicalization step after each insert); lookup is the same O(L). Hunspell uses a DAWG representation for its dictionary files to minimize memory footprint on embedded and mobile platforms.
+A DAWG (also called a minimal automaton or CDAWG) merges not only common prefixes (like a trie) but also common suffixes. Two nodes that have identical subtrees are collapsed into one. For a dictionary of English words, the DAWG can be 10–20x smaller than the equivalent trie because many word endings ("-ing", "-ed", "-tion") are shared. The tradeoff: construction is more complex (requires a canonicalization step after each insert); lookup is the same O(L). The DAWG was introduced for exactly this purpose by Appel and Jacobson's 1988 Scrabble program, and word-game solvers and mobile keyboard dictionaries still use DAWG-family encodings to fit a full lexicon in a small memory footprint.
 
 **Q: How does an autocomplete system handle prefix queries on a trie when the subtree is huge (millions of completions)?**
 For nodes near the root (short prefixes like "a", "the"), the completion subtree may contain millions of words. DFS over the entire subtree is O(millions) — unacceptable. The standard solution is to cache the top-k completions at every trie node, computed at build time or incrementally updated on insert. With k = 10, the cache at each node is a fixed-size list of (frequency, word) pairs. A query takes O(prefix_length) to reach the node, then O(1) to return the cached list. The cache update on insert is O(k * depth) — bounded by the word length. This is the approach used by Elasticsearch's completion suggester and Solr's SuggestComponent.
@@ -914,7 +920,7 @@ flowchart TD
     class tt,tr,td,te,tp2,te2 train
 ```
 
-Node count: 10 (root + 9 character nodes). Each node stores a dict of children.
+Node count: 12 (root + 11 character nodes). Each node stores a dict of children.
 Prefix "car" walks: root -> 'c' -> 'a' -> 'r' (3 hops). The subtree at 'r' contains
 ["car", "card", "care"] — DFS yields all three.
 
@@ -947,8 +953,10 @@ Search in text "ABCABABCABD" for pattern "ABCABD":
   text[7]='C', pattern[2]='C' => j=3
   text[8]='A', pattern[3]='A' => j=4
   text[9]='B', pattern[4]='B' => j=5
-  text[10]='D', pattern[5]='D' => j=6 == m => MATCH at index 10-6=4 ... wait
-  Actually match at i - j = 11 - 6 = 5. Pattern starts at text[5].
+  text[10]='D', pattern[5]='D' => i=11, j=6 == m => MATCH
+
+  The reported index is i - j, not i - m using the pre-increment i:
+  i has already advanced past the matched character, so i - j = 11 - 6 = 5.
 
   Result: match at index 5. ("ABCABD" starts at position 5 in "ABCABABCABD")
 ```
@@ -976,7 +984,7 @@ Character comparison only when hash matches a pattern hash.
 
 | Problem | Structure | Build | Query | Space |
 |---------|-----------|-------|-------|-------|
-| Autocomplete (prefix suggestions) | Trie | O(W*L) | O(P + S) | O(W*L*26) dict-based |
+| Autocomplete (prefix suggestions) | Trie | O(W*L) | O(P + S + R log R) | O(W*L) nodes, dict-based |
 | Autocomplete (with cached top-k) | Trie + per-node cache | O(W*L*k) | O(P) | O(W*L*k) |
 | Compressed prefix lookup | Radix Trie | O(W*L) | O(P) | O(W) nodes |
 | Single pattern substring search | KMP | O(m) | O(n) | O(m) |

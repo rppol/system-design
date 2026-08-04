@@ -28,7 +28,7 @@ put(key: int, value: int) — insert or update the key-value pair
 
 **Complexity target**: `get` and `put` must both run in O(1) average time.
 
-This is LeetCode 146 (Hard) and is a near-universal senior-engineer interview question.
+This is LeetCode 146 (Medium) and is a near-universal senior-engineer interview question.
 
 ---
 
@@ -88,8 +88,13 @@ class LRUCacheBrute:
         if key in self.data:
             self.order = [(ts, k) for ts, k in self.order if k != key]
         elif len(self.data) >= self.capacity:
-            # O(n): find minimum timestamp → LRU entry
-            self.order.sort()
+            # O(n log n): find minimum timestamp → LRU entry.
+            # Sort on the timestamp ALONE. A bare self.order.sort() compares the
+            # whole (ts, key) tuple, and time.time() repeats its value on most
+            # consecutive calls, so equal timestamps would be broken by key —
+            # evicting the smallest key instead of the least recently used one.
+            # Sorting by ts only is stable, so ties keep FIFO order.
+            self.order.sort(key=lambda pair: pair[0])
             _, lru_key = self.order.pop(0)
             del self.data[lru_key]
         self.data[key] = value
@@ -598,7 +603,7 @@ All O(1) operations are amortized average-case for the hash map (hash collisions
 | List + HashMap     | O(n) | O(n) | Low             | Unsafe        |
 | DLL + HashMap      | O(1) | O(1) | Medium          | Needs lock    |
 | OrderedDict        | O(1) | O(1) | Very Low        | Needs lock    |
-| Sharded LRU        | O(1) | O(1) | High            | Built-in      |
+| Sharded LRU        | O(1) | O(1) | High            | Per-shard lock |
 | Skip-list LRU      | O(log n) | O(log n) | Very High | Varies      |
 
 ### Why Not Other Structures?
@@ -631,7 +636,7 @@ A single-node LRU cache does not scale to millions of keys or multiple applicati
 - **Each shard**: independent LRU cache with its own capacity
 - **Cross-shard eviction**: not needed — each shard manages its own capacity
 
-Redis implements this model with the `maxmemory-policy lru` setting.
+Redis implements this model with the `maxmemory-policy allkeys-lru` setting.
 
 ```mermaid
 flowchart LR
@@ -653,7 +658,7 @@ flowchart LR
     class S0,S1,SN base
 ```
 
-Consistent hashing routes each key to exactly one shard; every shard is a self-contained LRU with its own capacity, so eviction never crosses shard boundaries — this is the model behind Redis Cluster's `maxmemory-policy lru`.
+Consistent hashing routes each key to exactly one shard; every shard is a self-contained LRU with its own capacity, so eviction never crosses shard boundaries — this is the model behind Redis Cluster's `maxmemory-policy allkeys-lru`.
 
 ### Variation 4: Thread-Safe LRU with Read/Write Lock
 
@@ -663,7 +668,8 @@ For read-heavy workloads:
 import threading
 
 class LRUCacheRWLock(LRUCache):
-    """Optimistic: allow concurrent reads, serialize writes."""
+    """Named for the pattern you might reach for — and cannot use here.
+    Because get() reorders the list, BOTH methods take the write lock."""
 
     def __init__(self, capacity: int) -> None:
         super().__init__(capacity)
@@ -887,7 +893,7 @@ print("Stress test passed.")
 
 ### Mistake 2: Forgetting That `get` Mutates Order
 
-A team implementing a cache-aside pattern wrote read replicas that called `get()` on a shared cache without acquiring the write lock, reasoning that `get` is a "read." Because `get` moves the accessed node to the MRU position, it mutates three pointers (`prev.next`, `next.prev`, `head.next`). Concurrent pointer writes from two threads produced a list cycle. The first `put` that tried to traverse the list to find `tail.prev` entered an infinite loop, hanging the thread until the OS killed the process after the JVM's thread-dump timeout.
+A team implementing a cache-aside pattern wrote read replicas that called `get()` on a shared cache without acquiring the write lock, reasoning that `get` is a "read." Because `get` moves the accessed node to the MRU position, it performs six pointer writes — `node.prev.next` and `node.next.prev` to unlink, then `node.prev`, `node.next`, `head.next.prev` and `head.next` to relink at the front. Concurrent pointer writes from two threads produced a list cycle. The first traversal that walked the list — the `__repr__`-based debug dump used by the health endpoint — entered an infinite loop, pinning a worker at 100% CPU until the process was restarted.
 
 **Lesson**: LRU `get` is not read-only. Treat it as a write operation for locking purposes.
 
@@ -959,7 +965,7 @@ O(1) average for both operations. The hash map provides O(1) lookup, insert, and
 To eliminate boundary conditions. Without sentinels, inserting the first node and removing the last node require special-casing (`if head is None`, `if tail is None`). With sentinels, the real data is always between `head` and `tail`, and `_add_to_front` / `_remove` never need to handle null neighbors. This makes the code shorter and less error-prone.
 
 **Q: Is `get` a read operation or a write operation for locking purposes?**
-Write operation. `get` moves the accessed node to the MRU position, modifying three pointers (`node.prev.next`, `node.next.prev`, `head.next`). In a multi-threaded context, `get` must acquire a write lock. Treating it as a pure read and using a reader lock leads to data structure corruption under concurrent access.
+Write operation. `get` moves the accessed node to the MRU position, performing six pointer writes: `node.prev.next` and `node.next.prev` to unlink it, then `node.prev`, `node.next`, `head.next.prev` and `head.next` to relink it at the front. In a multi-threaded context, `get` must acquire a write lock. Treating it as a pure read and using a reader lock leads to data structure corruption under concurrent access.
 
 **Q: How does Redis implement LRU and why is it approximate?**
 Redis uses sampled LRU: on each eviction, Redis picks `maxmemory-samples` (default 5) random keys and evicts the least recently used among them. Exact LRU would require maintaining a global LRU list, which means every read command must acquire a lock to update the list — too expensive at Redis's throughput. The sampled approximation is O(1), empirically close to exact LRU, and avoids serializing all reads.
@@ -980,7 +986,7 @@ Yes. Python's `collections.OrderedDict` maintains insertion order internally usi
 In the standard doubly-linked-list implementation, ties are impossible because every operation moves a node to the strict front of the list. There is always a total order. Timestamp-based implementations (the brute-force approach) can have ties if the system clock resolution is coarser than the operation rate; in that case, arbitrary tiebreaking (e.g., FIFO among ties) is acceptable.
 
 **Q: How would you design a distributed LRU cache for 1 million keys across 10 machines?**
-Use consistent hashing to map each key to one of 10 shards. Each shard runs an independent LRU cache with capacity = 100,000 keys. `get(key)` and `put(key, value)` are routed to `hash(key) % 10`. For fault tolerance, replicate each shard to one secondary (primary-replica). For eviction consistency, only the primary evicts; replicas track the same order via replication log. This is essentially how Redis Cluster works with `maxmemory-policy lru`.
+Use consistent hashing to map each key to one of 10 shards. Each shard runs an independent LRU cache with capacity = 100,000 keys. `get(key)` and `put(key, value)` are routed to `hash(key) % 10`. For fault tolerance, replicate each shard to one secondary (primary-replica). For eviction consistency, only the primary evicts; replicas track the same order via replication log. This is essentially how Redis Cluster works with `maxmemory-policy allkeys-lru`.
 
 **Q: What is a cache stampede (thundering herd), and how does it relate to LRU?**
 A cache stampede occurs when a popular cached item expires (or is evicted by LRU) and many concurrent requests simultaneously find a cache miss, all racing to recompute and repopulate the entry. This floods the backing store. Mitigations: (1) mutex/lock: first caller computes and populates, others wait; (2) probabilistic early expiration: refresh the entry slightly before it would be evicted; (3) read-through cache: the cache layer is responsible for fetching from the store, serializing the fetch. LRU amplifies stampede risk because popular items can be evicted if a burst of other items displaces them.
@@ -1111,4 +1117,4 @@ public class LRUCacheLinkedHashMap extends LinkedHashMap<Integer, Integer> {
 }
 ```
 
-`LinkedHashMap` with `accessOrder=true` maintains a doubly-linked list in access order internally (same structure as our manual implementation). `removeEldestEntry` is called after every `put` to decide whether to evict.
+`LinkedHashMap` with `accessOrder=true` maintains a doubly-linked list in access order internally (same structure as our manual implementation). `removeEldestEntry` is called after every `put` that INSERTS a new entry, to decide whether to evict; a `put` that merely updates an existing key never calls it (it cannot grow the map, so there is nothing to evict).
