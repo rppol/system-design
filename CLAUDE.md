@@ -423,6 +423,14 @@ auto-widen of under-measured boxes.
 (4) **Rounded corners** — the reader rounds every box; for GitHub parity prefer rounded node
 shapes `(label)`/`([label])`, and never hand-set a light fill or a square-corner override.
 
+**`\n` in a node label is NOT a bug — do not sweep it (tested 2026-08-04).** `<br/>` is the
+house style under rule 3, but **3,381 existing labels use a literal `\n`** instead (ml 1305,
+llm 1068, spring 417, java 327, cuda 264). An audit agent flagged these as possibly
+rendering the literal escape. They do not: rendered through the pinned `mermaid@11.16.0`
+with the repo's exact config (`htmlLabels: false`), `\n` and `<br/>` produce the same label
+text and **neither leaves a `\n` anywhere in the SVG**. Use `<br/>` in new diagrams for
+consistency; never open a mass rewrite of the existing ones, and do not re-flag this.
+
 **Product logos (icon nodes) — owner-set 2026-07-24.** A node standing for a **concrete
 product or service** (S3, Lambda, Kafka, Redis, PostgreSQL, Kubernetes, PyTorch, …)
 should render its **real logo** via a Mermaid icon node:
