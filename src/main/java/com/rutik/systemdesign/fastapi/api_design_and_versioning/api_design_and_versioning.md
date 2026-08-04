@@ -25,9 +25,9 @@ middleware hooks — but the design decisions are yours. This module covers:
 - OpenAPI customisation: `operation_id`, `deprecated=True`, `include_in_schema=False`, SDK generation
 
 Cross-references:
-- Router mechanics: `../routing_and_request_handling/README.md`
-- Middleware and exception handler ordering: `../middleware_and_lifecycle/README.md`
-- Caching and Redis patterns: `../caching_and_performance/README.md`
+- Router mechanics: `../routing_and_request_handling/routing_and_request_handling.md`
+- Middleware and exception handler ordering: `../middleware_and_lifecycle/middleware_and_lifecycle.md`
+- Caching and Redis patterns: `../caching_and_performance/caching_and_performance.md`
 
 ---
 

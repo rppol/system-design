@@ -1354,9 +1354,9 @@ MONITORING SCHEDULE
 
 ## Cross-References
 
-- `../guardrails_and_content_safety/README.md` — content safety mechanisms complement AI Act safety requirements
-- `../safety_and_alignment/README.md` — alignment engineering and red teaming inform EU AI Act robustness requirements
-- `../llm_security/README.md` — security requirements for GPAI models under systemic risk provisions
-- `../evaluation_and_benchmarks/README.md` — benchmark selection and evaluation methodology for conformity assessment performance documentation
-- `../../database/database_security_and_compliance/README.md` — GDPR erasure, audit logging, and data governance at the database level
-- `../../ml/model_evaluation_and_selection/README.md` — bias metrics, fairness evaluation, and calibration methodology
+- `../guardrails_and_content_safety/guardrails_and_content_safety.md` — content safety mechanisms complement AI Act safety requirements
+- `../safety_and_alignment/safety_and_alignment.md` — alignment engineering and red teaming inform EU AI Act robustness requirements
+- `../llm_security/llm_security.md` — security requirements for GPAI models under systemic risk provisions
+- `../evaluation_and_benchmarks/evaluation_and_benchmarks.md` — benchmark selection and evaluation methodology for conformity assessment performance documentation
+- `../../database/database_security_and_compliance/database_security_and_compliance.md` — GDPR erasure, audit logging, and data governance at the database level
+- `../../ml/model_evaluation_and_selection/model_evaluation_and_selection.md` — bias metrics, fairness evaluation, and calibration methodology

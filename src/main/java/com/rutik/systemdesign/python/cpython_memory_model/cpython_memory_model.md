@@ -23,9 +23,9 @@ across thousands of requests, for tuning GC parameters on latency-sensitive endp
 for profiling allocations with `tracemalloc`.
 
 Cross-references:
-- See `../the_gil_and_free_threading/README.md` for how the GIL interacts with reference
+- See `../the_gil_and_free_threading/the_gil_and_free_threading.md` for how the GIL interacts with reference
   counting (refcount operations are not atomic without the GIL).
-- See `../data_model_and_objects/README.md` for `__slots__`, which reduces per-instance
+- See `../data_model_and_objects/data_model_and_objects.md` for `__slots__`, which reduces per-instance
   memory overhead by eliminating the per-object `__dict__`.
 
 ---
@@ -1268,7 +1268,7 @@ module globals and type objects use deferred reference counting on top, and runt
 objects are immortal, so their counts are never touched at all. Practical guidance: do not
 rely on refcount atomicity in C extensions that release the GIL; use
 `Py_INCREF`/`Py_DECREF` only while holding the GIL, and see
-`../the_gil_and_free_threading/README.md` for the free-threaded rules.
+`../the_gil_and_free_threading/the_gil_and_free_threading.md` for the free-threaded rules.
 
 **Q13: Why is Python's `int` not a C `int`, and what are the memory implications?**
 **Short:** Python's `int` is an arbitrary-precision `PyLongObject`, at least 28 bytes versus a 4-byte C int.
@@ -1340,7 +1340,7 @@ variable that needs to be checked afterward).
    inline "managed" value array rather than an eagerly created `__dict__`, so the win is
    smaller than it used to be — measure roughly 40–50 bytes per instance, not hundreds. It
    is still worth it at millions of instances, and it also prevents attribute typos. See
-   `../data_model_and_objects/README.md` for details.
+   `../data_model_and_objects/data_model_and_objects.md` for details.
 
 10. **Measure before tuning.** Run `gc.get_stats()` in production to see actual Gen0/1/2
     collection frequencies and object counts before changing thresholds. Premature GC

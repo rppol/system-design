@@ -16,8 +16,8 @@ Python offers three distinct models for concurrent and parallel execution:
 
 Python 3.8 added `multiprocessing.shared_memory` for zero-copy shared buffers across processes. Python 3.12 introduced experimental free-threaded mode (no GIL) via `--disable-gil` build flag.
 
-See `../the_gil_and_free_threading/README.md` for why multiprocessing outperforms threading for CPU-bound work.
-See `../asyncio_and_event_loop/README.md` for the asyncio alternative to threading for I/O-bound concurrency.
+See `../the_gil_and_free_threading/the_gil_and_free_threading.md` for why multiprocessing outperforms threading for CPU-bound work.
+See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio alternative to threading for I/O-bound concurrency.
 
 ---
 
@@ -1195,6 +1195,6 @@ async def resize_uploaded(file: UploadFile) -> dict[str, str]:
 
 ---
 
-*See `../the_gil_and_free_threading/README.md` for why multiprocessing outperforms threading for CPU-bound work, including free-threaded Python 3.13 benchmarks.*
+*See `../the_gil_and_free_threading/the_gil_and_free_threading.md` for why multiprocessing outperforms threading for CPU-bound work, including free-threaded Python 3.13 benchmarks.*
 
-*See `../asyncio_and_event_loop/README.md` for the asyncio alternative to threading for I/O-bound concurrency, including `asyncio.TaskGroup` and structured concurrency patterns.*
+*See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio alternative to threading for I/O-bound concurrency, including `asyncio.TaskGroup` and structured concurrency patterns.*

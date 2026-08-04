@@ -959,7 +959,7 @@ Install the Prometheus adapter (`k8s-prometheus-adapter`), which queries Prometh
 **Q13: How do ConfigMaps and Secrets differ in Kubernetes, and how do you inject them into FastAPI?**
 **Short:** ConfigMaps hold non-sensitive config while Secrets hold sensitive data, both injected as environment variables.
 
-`ConfigMap` stores non-sensitive key-value pairs (feature flags, log levels, service URLs). `Secret` stores sensitive data (DB passwords, API keys) encoded as base64 and optionally encrypted at rest with KMS. Both are injected into pods via `envFrom` (all keys as env vars) or `env[].valueFrom` (individual keys). In FastAPI, `pydantic-settings` reads env vars with `BaseSettings`, providing type validation and `.env` file fallback for local development. The app code never references ConfigMap or Secret names — it reads from environment variables, keeping it portable. See `../configuration_and_settings_management/README.md` for the full `BaseSettings` pattern.
+`ConfigMap` stores non-sensitive key-value pairs (feature flags, log levels, service URLs). `Secret` stores sensitive data (DB passwords, API keys) encoded as base64 and optionally encrypted at rest with KMS. Both are injected into pods via `envFrom` (all keys as env vars) or `env[].valueFrom` (individual keys). In FastAPI, `pydantic-settings` reads env vars with `BaseSettings`, providing type validation and `.env` file fallback for local development. The app code never references ConfigMap or Secret names — it reads from environment variables, keeping it portable. See `../configuration_and_settings_management/configuration_and_settings_management.md` for the full `BaseSettings` pattern.
 
 **Q14: Why does a `livenessProbe` with `timeoutSeconds: 1` and `failureThreshold: 1` risk killing healthy pods under load?**
 **Short:** A 1-second liveness timeout with failureThreshold 1 kills healthy pods during ordinary transient load spikes.
@@ -1006,10 +1006,10 @@ Size it as `preStop` sleep + graceful HTTP drain timeout + a small safety margin
 **Performance**
 - Use `uvicorn[standard]` in production to get uvloop and httptools automatically
 - Never use `--reload` in production; use K8s rolling updates for code changes
-- Profile with `py-spy` or `austin` before over-provisioning workers; one blocking sync call in an async route negates all concurrency gains — see `../../async_patterns_and_pitfalls/README.md`
+- Profile with `py-spy` or `austin` before over-provisioning workers; one blocking sync call in an async route negates all concurrency gains — see `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
 
 **Observability cross-cutting**
-- Emit structured JSON logs with correlation IDs (`request_id`, `trace_id`) from every request; configure `accesslog` in Gunicorn to emit JSON — see `../observability_and_monitoring/README.md`
+- Emit structured JSON logs with correlation IDs (`request_id`, `trace_id`) from every request; configure `accesslog` in Gunicorn to emit JSON — see `../observability_and_monitoring/observability_and_monitoring.md`
 - Expose `/metrics` (Prometheus format) on a separate internal port to prevent metrics scraping from consuming request worker capacity
 
 ---
@@ -1224,7 +1224,7 @@ spec:
 ---
 
 *Cross-references:*
-- `../configuration_and_settings_management/README.md` — `BaseSettings`, ConfigMap/Secret injection
-- `../observability_and_monitoring/README.md` — structured logging, Prometheus metrics, OpenTelemetry
-- `../../async_patterns_and_pitfalls/README.md` — blocking-in-async detection, `asyncio.to_thread()`
-- `../middleware_and_lifecycle/README.md` — `lifespan`, middleware ordering, BackgroundTasks
+- `../configuration_and_settings_management/configuration_and_settings_management.md` — `BaseSettings`, ConfigMap/Secret injection
+- `../observability_and_monitoring/observability_and_monitoring.md` — structured logging, Prometheus metrics, OpenTelemetry
+- `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md` — blocking-in-async detection, `asyncio.to_thread()`
+- `../middleware_and_lifecycle/middleware_and_lifecycle.md` — `lifespan`, middleware ordering, BackgroundTasks

@@ -888,8 +888,8 @@ add_item(1)  # [1]
 add_item(2)  # [2]  -- fresh list each call -- correct
 ```
 
-See `../iterators_and_generators/README.md` for the iterator protocol that makes `map`/`filter` lazy.
-See `../decorators_and_closures/README.md` for `functools.wraps` and `lru_cache`.
+See `../iterators_and_generators/iterators_and_generators.md` for the iterator protocol that makes `map`/`filter` lazy.
+See `../decorators_and_closures/decorators_and_closures.md` for `functools.wraps` and `lru_cache`.
 
 ---
 

@@ -599,7 +599,7 @@ async def readiness(request: Request) -> dict[str, str]:
 | `request.is_disconnected()` | Detect client disconnect mid-stream and stop the async generator early |
 
 Cross-references:
-- Model serving patterns: `../../../ml/model_serving_and_inference/README.md`
+- Model serving patterns: `../../../ml/model_serving_and_inference/model_serving_and_inference.md`
 - SSE and streaming at scale: `../../../llm/case_studies/cross_cutting/streaming_at_scale.md`
 
 ---

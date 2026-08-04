@@ -11,7 +11,7 @@ files this module contributes to each curated path; omit a tier to leave it out
 > defenses (federated learning, secure aggregation, PATE, split learning). The
 > LLM-scale treatment of DP-SGD, PII pipelines, and machine unlearning lives in
 > `../../llm/llm_security/privacy_and_data_governance.md`; membership inference as an
-> *attack* is owned by `../adversarial_ml_and_robustness/README.md`. This module is the
+> *attack* is owned by `../adversarial_ml_and_robustness/adversarial_ml_and_robustness.md`. This module is the
 > ML-native, cross-cutting home for the privacy *defenses* and their math.
 
 ---

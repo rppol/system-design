@@ -25,7 +25,7 @@ Patterns covered:
 Cross-references:
 - For GoF pattern reference implementations in Java, see `../../lld/creational/`, `../../lld/structural/`, `../../lld/behavioral/`
 - For the Observer pattern at scale in a distributed system, see `../../hld/`
-- For the Repository pattern with FastAPI DI, see `../fastapi/dependency_injection_in_fastapi/README.md`
+- For the Repository pattern with FastAPI DI, see `../fastapi/dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`
 
 ---
 

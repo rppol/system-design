@@ -151,7 +151,7 @@ When two principles conflict, the tiebreaker is usually: **reversibility**. Choo
 | Principle | See Also |
 |-----------|---------|
 | DRY | `../anti_patterns/Copy_Paste_Programming.md` — DRY violation is the canonical copy-paste anti-pattern |
-| Program to Interface | `../solid_principles/README.md` — DIP is the SOLID formalization of PtI |
+| Program to Interface | `../solid_principles/solid_principles.md` — DIP is the SOLID formalization of PtI |
 | Composition over Inheritance | `../structural/decorator/` — Decorator is the canonical pattern built on CoI |
 | Law of Demeter | `../behavioral/mediator/` — Mediator addresses systemic LoD violations by centralizing cross-object communication |
 | YAGNI / KISS | `../../java/design_patterns_in_java/` — patterns applied only where they solve a real problem |

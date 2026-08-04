@@ -111,7 +111,7 @@ flowchart TD
     p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization")
     p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>character_encoding_deep_dive")
     cs("Case Studies, all phases<br/>design_lru_cache, top_k_and_streaming_problems<br/>dynamic_programming_patterns, graph_traversal_and_shortest_path<br/>autocomplete_and_string_search, interval_and_scheduling_problems")
-    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/README.md - recognition engine:<br/>decision tree + cue-pattern table<br/>22 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - Blind 75 + NeetCode 150")
+    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>22 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - Blind 75 + NeetCode 150")
 
     p1 --> p2 --> p3
     p3 --> p4
@@ -333,19 +333,19 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 
 | Chunk | Contents | Status |
 |-------|----------|--------|
-| **0 — Scaffold** | `cs_fundamentals/README.md`, `CLAUDE.md`, `case_studies/README.md`, root `README.md` + `CLAUDE.md` registrations, memory files | done |
+| **0 — Scaffold** | `cs_fundamentals/README.md`, `CLAUDE.md`, `case_studies/case_studies.md`, root `README.md` + `CLAUDE.md` registrations, memory files | done |
 | **1** | Phase 1 modules 1–3 (complexity, number systems, recursion) | done |
 | **2** | Phase 2 modules 4–8 (data structures) | done |
 | **3** | Phase 3 modules 9–12 (algorithms) | done |
 | **4** | Phase 4 modules 13–16 (operating systems) | done |
 | **5** | Phase 5 modules 17–20 (systems & security) | done |
-| **6** | 6 case studies + finalize `case_studies/README.md` | done |
+| **6** | 6 case studies + finalize `case_studies/case_studies.md` | done |
 
 ### Chunk Plan — DSA Pattern Playbooks (`dsa_patterns/`)
 
 | Chunk | Contents | Status |
 |-------|----------|--------|
-| **P0 — Spine** | `dsa_patterns/README.md` (recognition engine), `CLAUDE.md` template registration, `README.md` §6a + §7 manifest, root `README.md` + `CLAUDE.md` updates, memory file | done |
+| **P0 — Spine** | `dsa_patterns/dsa_patterns.md` (recognition engine), `CLAUDE.md` template registration, `README.md` §6a + §7 manifest, root `README.md` + `CLAUDE.md` updates, memory file | done |
 | **P1 — Array/String/LL patterns** | `two_pointers.md`, `sliding_window.md`, `fast_and_slow_pointers.md`, `prefix_sum.md`, `cyclic_sort.md`, `monotonic_stack.md`, `in_place_linked_list_reversal.md`, `merge_intervals.md`, `hashing_patterns.md` | done |
 | **P2 — Search/Heap patterns** | `modified_binary_search.md`, `top_k_elements.md`, `k_way_merge.md`, `two_heaps.md` | done |
 | **P3 — Tree/Graph patterns** | `tree_bfs.md`, `tree_dfs.md`, `graph_traversal.md`, `topological_sort.md`, `union_find.md`, `trie_patterns.md`, `shortest_path.md` | done |
@@ -357,26 +357,26 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 
 | # | Module | Phase | Chunk | Status | Q&A Target |
 |---|--------|-------|-------|--------|-----------|
-| 1 | `complexity_analysis_and_big_o/README.md` | 1 | 1 | done | 18 |
-| 2 | `number_systems_and_bit_manipulation/README.md` | 1 | 1 | done | 15 |
-| 3 | `recursion_and_problem_solving_patterns/README.md` | 1 | 1 | done | 15 |
-| 4 | `arrays_strings_and_hashing/README.md` | 2 | 2 | done | 18 |
-| 5 | `linked_lists_stacks_and_queues/README.md` | 2 | 2 | done | 15 |
-| 6 | `trees_and_binary_search_trees/README.md` | 2 | 2 | done | 18 |
-| 7 | `heaps_and_priority_queues/README.md` | 2 | 2 | done | 18 |
-| 8 | `graphs_tries_and_advanced_structures/README.md` | 2 | 2 | done | 18 |
-| 9 | `sorting_and_searching/README.md` | 3 | 3 | done | 18 |
-| 10 | `dynamic_programming/README.md` | 3 | 3 | done | 18 |
-| 11 | `greedy_and_divide_and_conquer/README.md` | 3 | 3 | done | 15 |
-| 12 | `graph_and_string_algorithms/README.md` | 3 | 3 | done | 18 |
-| 13 | `processes_threads_and_context_switching/README.md` | 4 | 4 | done | 15 |
-| 14 | `cpu_scheduling_algorithms/README.md` | 4 | 4 | done | 15 |
-| 15 | `memory_management_and_virtual_memory/README.md` | 4 | 4 | done | 15 |
-| 16 | `deadlocks_and_synchronization/README.md` | 4 | 4 | done | 15 |
-| 17 | `computer_architecture_and_memory_hierarchy/README.md` | 5 | 5 | done | 15 |
-| 18 | `networking_fundamentals/README.md` | 5 | 5 | done | 15 |
-| 19 | `database_and_storage_fundamentals/README.md` | 5 | 5 | done | 15 |
-| 20 | `cryptography_fundamentals/README.md` | 5 | 5 | done | 15 |
+| 1 | `complexity_analysis_and_big_o/complexity_analysis_and_big_o.md` | 1 | 1 | done | 18 |
+| 2 | `number_systems_and_bit_manipulation/number_systems_and_bit_manipulation.md` | 1 | 1 | done | 15 |
+| 3 | `recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md` | 1 | 1 | done | 15 |
+| 4 | `arrays_strings_and_hashing/arrays_strings_and_hashing.md` | 2 | 2 | done | 18 |
+| 5 | `linked_lists_stacks_and_queues/linked_lists_stacks_and_queues.md` | 2 | 2 | done | 15 |
+| 6 | `trees_and_binary_search_trees/trees_and_binary_search_trees.md` | 2 | 2 | done | 18 |
+| 7 | `heaps_and_priority_queues/heaps_and_priority_queues.md` | 2 | 2 | done | 18 |
+| 8 | `graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md` | 2 | 2 | done | 18 |
+| 9 | `sorting_and_searching/sorting_and_searching.md` | 3 | 3 | done | 18 |
+| 10 | `dynamic_programming/dynamic_programming.md` | 3 | 3 | done | 18 |
+| 11 | `greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md` | 3 | 3 | done | 15 |
+| 12 | `graph_and_string_algorithms/graph_and_string_algorithms.md` | 3 | 3 | done | 18 |
+| 13 | `processes_threads_and_context_switching/processes_threads_and_context_switching.md` | 4 | 4 | done | 15 |
+| 14 | `cpu_scheduling_algorithms/cpu_scheduling_algorithms.md` | 4 | 4 | done | 15 |
+| 15 | `memory_management_and_virtual_memory/memory_management_and_virtual_memory.md` | 4 | 4 | done | 15 |
+| 16 | `deadlocks_and_synchronization/deadlocks_and_synchronization.md` | 4 | 4 | done | 15 |
+| 17 | `computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md` | 5 | 5 | done | 15 |
+| 18 | `networking_fundamentals/networking_fundamentals.md` | 5 | 5 | done | 15 |
+| 19 | `database_and_storage_fundamentals/database_and_storage_fundamentals.md` | 5 | 5 | done | 15 |
+| 20 | `cryptography_fundamentals/cryptography_fundamentals.md` | 5 | 5 | done | 15 |
 
 ### Case Study File Status
 
@@ -393,7 +393,7 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 
 | File | Chunk | Status |
 |------|-------|--------|
-| `dsa_patterns/README.md` | P0 | done |
+| `dsa_patterns/dsa_patterns.md` | P0 | done |
 | `dsa_patterns/two_pointers.md` | P1 | done |
 | `dsa_patterns/sliding_window.md` | P1 | done |
 | `dsa_patterns/fast_and_slow_pointers.md` | P1 | done |
@@ -488,7 +488,7 @@ PATTERN-FILE TEMPLATE — 11-section playbook (dsa_patterns/ sub-section only):
 MAINTENANCE RULE when completing a chunk:
   1. Flip Status "pending" -> "done" for each completed file in the tables above
   2. Advance the NEXT UP pointer at the top of §7
-  3. Update case_studies/README.md if new case studies were added
+  3. Update case_studies/case_studies.md if new case studies were added
   4. Update root README.md and CLAUDE.md counts if the total changed
   5. Update the cs-fundamentals-section.md memory file if structure changed
   6. For pattern files: add bidirectional See Also entry in the relevant concept module(s)

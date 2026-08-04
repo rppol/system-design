@@ -128,11 +128,11 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| I | `01_communication/README.md` | done |
-| II | `02_coordination/README.md` | done |
-| III | `03_scalability/README.md` | done |
-| IV | `04_resiliency/README.md` | done |
-| V | `05_maintainability/README.md` | done |
+| I | `01_communication/01_communication.md` | done |
+| II | `02_coordination/02_coordination.md` | done |
+| III | `03_scalability/03_scalability.md` | done |
+| IV | `04_resiliency/04_resiliency.md` | done |
+| V | `05_maintainability/05_maintainability.md` | done |
 
 ---
 

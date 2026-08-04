@@ -56,15 +56,15 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
-| `Depends`-injected service layer | all six (established by Rate-Limited API) | `../dependency_injection_in_fastapi/README.md` | 1 — Core Framework |
-| Redis Lua atomicity (TOCTOU-free counters) | Rate-Limited API | `../caching_and_performance/README.md` | 3 — Production |
-| `lifespan` startup loading | ML Inference, Rate-Limited API | `../fastapi_fundamentals_asgi/README.md` | 1 |
-| Async SQLAlchemy session-per-request | Multi-Tenant SaaS | `../async_database_sqlalchemy/README.md` | 2 — Data & Integration |
-| JWT + scope RBAC | Multi-Tenant SaaS | `../authentication_and_security/README.md` | 2 |
-| WebSocket lifecycle + Redis pub/sub fan-out | Real-Time Chat, ML Inference (SSE) | `../websockets_sse_and_streaming/README.md` | 2 |
-| Idempotency keys, retries, DLQ | Async Task Queue | `../background_jobs_and_task_queues/README.md` | 2 |
-| `asyncio.Semaphore` / `asyncio.Queue` producer-consumer | Async Web Scraper | `../../python/asyncio_and_event_loop/README.md` (cross-section) | 2 |
-| Rate limiting + `Retry-After` shaping | Rate-Limited API | `../api_design_and_versioning/README.md` | 3 |
+| `Depends`-injected service layer | all six (established by Rate-Limited API) | `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` | 1 — Core Framework |
+| Redis Lua atomicity (TOCTOU-free counters) | Rate-Limited API | `../caching_and_performance/caching_and_performance.md` | 3 — Production |
+| `lifespan` startup loading | ML Inference, Rate-Limited API | `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md` | 1 |
+| Async SQLAlchemy session-per-request | Multi-Tenant SaaS | `../async_database_sqlalchemy/async_database_sqlalchemy.md` | 2 — Data & Integration |
+| JWT + scope RBAC | Multi-Tenant SaaS | `../authentication_and_security/authentication_and_security.md` | 2 |
+| WebSocket lifecycle + Redis pub/sub fan-out | Real-Time Chat, ML Inference (SSE) | `../websockets_sse_and_streaming/websockets_sse_and_streaming.md` | 2 |
+| Idempotency keys, retries, DLQ | Async Task Queue | `../background_jobs_and_task_queues/background_jobs_and_task_queues.md` | 2 |
+| `asyncio.Semaphore` / `asyncio.Queue` producer-consumer | Async Web Scraper | `../../python/asyncio_and_event_loop/asyncio_and_event_loop.md` (cross-section) | 2 |
+| Rate limiting + `Retry-After` shaping | Rate-Limited API | `../api_design_and_versioning/api_design_and_versioning.md` | 3 |
 
 ---
 

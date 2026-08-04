@@ -1400,7 +1400,7 @@ Head-of-line blocking is when one stalled item blocks everything queued behind i
 - [cs_fundamentals/networking_fundamentals/ — the layered network stack and IP fundamentals](../../../cs_fundamentals/networking_fundamentals/networking_fundamentals.md)
 - [cs_fundamentals/cryptography_fundamentals/ — symmetric/asymmetric crypto, certificates, HMAC](../../../cs_fundamentals/cryptography_fundamentals/cryptography_fundamentals.md)
 - [book/DDIA Ch 4 — Encoding and Evolution (backward/forward-compatible schema changes)](../../designing_data_intensive_applications/04_encoding_and_evolution/04_encoding_and_evolution.md)
-- Next in this book: Part II — Coordination (`../02_coordination/README.md`) — consensus, replication, and time, all of which assume the reliable, secure links built here.
+- Next in this book: Part II — Coordination (`../02_coordination/02_coordination.md`) — consensus, replication, and time, all of which assume the reliable, secure links built here.
 
 ## Further Reading
 

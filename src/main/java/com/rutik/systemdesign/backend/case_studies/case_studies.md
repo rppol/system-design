@@ -64,15 +64,15 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
-| Idempotency keys | Booking, Payment, Event-Driven Order | `../distributed_transactions_and_consistency/README.md` | 4 — Database Engineering |
-| Transactional outbox | Payment, Event-Driven Order | `../messaging_patterns/README.md` | 8 — Event-Driven |
-| Saga + compensation | Payment (orchestrated), Event-Driven Order | `../distributed_transactions_and_consistency/README.md` | 4 |
-| Optimistic vs pessimistic locking, distributed locks | Booking | `../database_internals_and_indexing/README.md`, `../../database/concurrency_control_and_locking/README.md` | 4 |
-| Kafka EOS / DLQ / consumer idempotency | Event-Driven Order | `../kafka_deep_dive/README.md`, `../messaging_patterns/README.md` | 8 |
-| CQRS read-model projection | Event-Driven Order | `../event_sourcing_and_cqrs/README.md` | 8 |
-| Redis sorted sets + fan-out strategy | Feed Service | `../caching_strategies_deep_dive/README.md` | 3 — Performance |
-| Cursor pagination | Feed Service | `../rest_api_design/README.md`, `../query_optimization/README.md` | 2 / 4 |
-| Strangler fig, branch-by-abstraction, feature flags | Microservices Migration | `../microservices_fundamentals/README.md`, `../distributed_system_operational_patterns/README.md` | 9 — Microservices |
+| Idempotency keys | Booking, Payment, Event-Driven Order | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 — Database Engineering |
+| Transactional outbox | Payment, Event-Driven Order | `../messaging_patterns/messaging_patterns.md` | 8 — Event-Driven |
+| Saga + compensation | Payment (orchestrated), Event-Driven Order | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 |
+| Optimistic vs pessimistic locking, distributed locks | Booking | `../database_internals_and_indexing/database_internals_and_indexing.md`, `../../database/concurrency_control_and_locking/concurrency_control_and_locking.md` | 4 |
+| Kafka EOS / DLQ / consumer idempotency | Event-Driven Order | `../kafka_deep_dive/kafka_deep_dive.md`, `../messaging_patterns/messaging_patterns.md` | 8 |
+| CQRS read-model projection | Event-Driven Order | `../event_sourcing_and_cqrs/event_sourcing_and_cqrs.md` | 8 |
+| Redis sorted sets + fan-out strategy | Feed Service | `../caching_strategies_deep_dive/caching_strategies_deep_dive.md` | 3 — Performance |
+| Cursor pagination | Feed Service | `../rest_api_design/rest_api_design.md`, `../query_optimization/query_optimization.md` | 2 / 4 |
+| Strangler fig, branch-by-abstraction, feature flags | Microservices Migration | `../microservices_fundamentals/microservices_fundamentals.md`, `../distributed_system_operational_patterns/distributed_system_operational_patterns.md` | 9 — Microservices |
 
 ---
 

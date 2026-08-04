@@ -946,7 +946,7 @@ A metaclass conflict occurs when a class tries to inherit from two bases whose m
 **Q12: How does the descriptor protocol interact with `__slots__`?**
 **Short:** Because __slots__ creates a data descriptor per slot, it takes priority over the instance dict while eliminating __dict__ itself.
 
-When a class defines `__slots__ = ("x",)`, Python creates a `member_descriptor` (a data descriptor) for each slot name on the class. This data descriptor stores the value in a C-level slot in the instance struct rather than in `__dict__`. Because it is a data descriptor, it takes priority over any instance dict entry — but `__slots__` eliminates `__dict__` entirely for slotted attributes, saving roughly 40-50 bytes per instance for classes with many instances. See `../data_model_and_objects/README.md` for `__slots__` coverage.
+When a class defines `__slots__ = ("x",)`, Python creates a `member_descriptor` (a data descriptor) for each slot name on the class. This data descriptor stores the value in a C-level slot in the instance struct rather than in `__dict__`. Because it is a data descriptor, it takes priority over any instance dict entry — but `__slots__` eliminates `__dict__` entirely for slotted attributes, saving roughly 40-50 bytes per instance for classes with many instances. See `../data_model_and_objects/data_model_and_objects.md` for `__slots__` coverage.
 
 **Q13: Can a metaclass change what bases a class inherits from?**
 **Short:** A metaclass can replace the bases tuple inside __new__ before calling super().__new__, changing what the class inherits from.
@@ -956,7 +956,7 @@ Yes. In `__new__`, the `bases` tuple can be replaced before calling `super().__n
 **Q14: What is `typing.Protocol` and how does it differ from `abc.ABC`?**
 **Short:** typing.Protocol enables structural subtyping based on matching methods, while abc.ABC requires explicit nominal inheritance.
 
-`Protocol` (PEP 544, Python 3.8+) enables structural subtyping: a class satisfies a `Protocol` if it has the required methods and attributes, regardless of inheritance. No `register()` call or explicit inheritance is needed — static type checkers (mypy, pyright) verify compatibility. `abc.ABC` uses nominal subtyping: a class must explicitly inherit from the ABC or be registered. See `../the_type_system_and_typing/README.md` for full `Protocol` coverage.
+`Protocol` (PEP 544, Python 3.8+) enables structural subtyping: a class satisfies a `Protocol` if it has the required methods and attributes, regardless of inheritance. No `register()` call or explicit inheritance is needed — static type checkers (mypy, pyright) verify compatibility. `abc.ABC` uses nominal subtyping: a class must explicitly inherit from the ABC or be registered. See `../the_type_system_and_typing/the_type_system_and_typing.md` for full `Protocol` coverage.
 
 **Q15: Walk through what Python does when it executes `class Foo(Bar, metaclass=Meta): x = 1`.**
 **Short:** Creating a class with a custom metaclass runs __prepare__, executes the body in that namespace, then calls __new__ and __init__.
@@ -1300,5 +1300,5 @@ The 300,000 `validate()` calls are irreducible — that is the feature. The 300,
 
 ### Cross-references
 
-- See `../data_model_and_objects/README.md` for `__slots__` and the basic descriptor protocol — including how `member_descriptor` interacts with the slot storage layout.
-- See `../the_type_system_and_typing/README.md` for `Protocol` as a typing-level alternative to `ABCMeta` — structural subtyping without inheritance or registration.
+- See `../data_model_and_objects/data_model_and_objects.md` for `__slots__` and the basic descriptor protocol — including how `member_descriptor` interacts with the slot storage layout.
+- See `../the_type_system_and_typing/the_type_system_and_typing.md` for `Protocol` as a typing-level alternative to `ABCMeta` — structural subtyping without inheritance or registration.

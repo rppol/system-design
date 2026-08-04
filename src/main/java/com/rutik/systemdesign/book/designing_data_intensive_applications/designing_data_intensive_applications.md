@@ -145,19 +145,19 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| — | `00_preface_and_book_map/README.md` | done |
-| 1 | `01_reliable_scalable_maintainable/README.md` | done |
-| 2 | `02_data_models_and_query_languages/README.md` | done |
-| 3 | `03_storage_and_retrieval/README.md` | done |
-| 4 | `04_encoding_and_evolution/README.md` | done |
-| 5 | `05_replication/README.md` | done |
-| 6 | `06_partitioning/README.md` | done |
-| 7 | `07_transactions/README.md` | done |
-| 8 | `08_trouble_with_distributed_systems/README.md` | done |
-| 9 | `09_consistency_and_consensus/README.md` | done |
-| 10 | `10_batch_processing/README.md` | done |
-| 11 | `11_stream_processing/README.md` | done |
-| 12 | `12_future_of_data_systems/README.md` | done |
+| — | `00_preface_and_book_map/00_preface_and_book_map.md` | done |
+| 1 | `01_reliable_scalable_maintainable/01_reliable_scalable_maintainable.md` | done |
+| 2 | `02_data_models_and_query_languages/02_data_models_and_query_languages.md` | done |
+| 3 | `03_storage_and_retrieval/03_storage_and_retrieval.md` | done |
+| 4 | `04_encoding_and_evolution/04_encoding_and_evolution.md` | done |
+| 5 | `05_replication/05_replication.md` | done |
+| 6 | `06_partitioning/06_partitioning.md` | done |
+| 7 | `07_transactions/07_transactions.md` | done |
+| 8 | `08_trouble_with_distributed_systems/08_trouble_with_distributed_systems.md` | done |
+| 9 | `09_consistency_and_consensus/09_consistency_and_consensus.md` | done |
+| 10 | `10_batch_processing/10_batch_processing.md` | done |
+| 11 | `11_stream_processing/11_stream_processing.md` | done |
+| 12 | `12_future_of_data_systems/12_future_of_data_systems.md` | done |
 
 ---
 

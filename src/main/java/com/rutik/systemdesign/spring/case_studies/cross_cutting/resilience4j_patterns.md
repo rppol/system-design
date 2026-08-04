@@ -396,7 +396,7 @@ similar to the `AtomicLong` contention curve from [../../../java/case_studies/cr
 
 `SemaphoreBulkhead` with virtual threads (Java 21+) is preferred: virtual threads are cheap,
 so the overhead of a dedicated `ThreadPoolBulkhead` is rarely justified. See
-[../../../java/structured_concurrency_and_loom/README.md] for virtual thread integration.
+[../../../java/structured_concurrency_and_loom/structured_concurrency_and_loom.md] for virtual thread integration.
 
 ---
 

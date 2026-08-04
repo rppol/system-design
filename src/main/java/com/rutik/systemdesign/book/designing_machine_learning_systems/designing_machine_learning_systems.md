@@ -147,17 +147,17 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| 1 | `01_overview_of_machine_learning_systems/README.md` | done |
-| 2 | `02_introduction_to_machine_learning_systems_design/README.md` | done |
-| 3 | `03_data_engineering_fundamentals/README.md` | done |
-| 4 | `04_training_data/README.md` | done |
-| 5 | `05_feature_engineering/README.md` | done |
-| 6 | `06_model_development_and_offline_evaluation/README.md` | done |
-| 7 | `07_model_deployment_and_prediction_service/README.md` | done |
-| 8 | `08_data_distribution_shifts_and_monitoring/README.md` | done |
-| 9 | `09_continual_learning_and_test_in_production/README.md` | done |
-| 10 | `10_infrastructure_and_tooling_for_mlops/README.md` | done |
-| 11 | `11_the_human_side_of_machine_learning/README.md` | done |
+| 1 | `01_overview_of_machine_learning_systems/01_overview_of_machine_learning_systems.md` | done |
+| 2 | `02_introduction_to_machine_learning_systems_design/02_introduction_to_machine_learning_systems_design.md` | done |
+| 3 | `03_data_engineering_fundamentals/03_data_engineering_fundamentals.md` | done |
+| 4 | `04_training_data/04_training_data.md` | done |
+| 5 | `05_feature_engineering/05_feature_engineering.md` | done |
+| 6 | `06_model_development_and_offline_evaluation/06_model_development_and_offline_evaluation.md` | done |
+| 7 | `07_model_deployment_and_prediction_service/07_model_deployment_and_prediction_service.md` | done |
+| 8 | `08_data_distribution_shifts_and_monitoring/08_data_distribution_shifts_and_monitoring.md` | done |
+| 9 | `09_continual_learning_and_test_in_production/09_continual_learning_and_test_in_production.md` | done |
+| 10 | `10_infrastructure_and_tooling_for_mlops/10_infrastructure_and_tooling_for_mlops.md` | done |
+| 11 | `11_the_human_side_of_machine_learning/11_the_human_side_of_machine_learning.md` | done |
 
 ---
 

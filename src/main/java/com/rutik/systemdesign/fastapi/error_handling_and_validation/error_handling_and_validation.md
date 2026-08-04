@@ -33,9 +33,9 @@ Key capabilities this module covers:
 Python version: 3.13/3.14. FastAPI 0.140+. Pydantic v2.
 
 Cross-references:
-- Pydantic v2 validators and model internals: `../pydantic_v2_deep_dive/README.md`
-- Route parameter extraction and response models: `../routing_and_request_handling/README.md`
-- Middleware ordering and ASGI lifecycle: `../middleware_and_lifecycle/README.md`
+- Pydantic v2 validators and model internals: `../pydantic_v2_deep_dive/pydantic_v2_deep_dive.md`
+- Route parameter extraction and response models: `../routing_and_request_handling/routing_and_request_handling.md`
+- Middleware ordering and ASGI lifecycle: `../middleware_and_lifecycle/middleware_and_lifecycle.md`
 
 ---
 

@@ -345,44 +345,44 @@ Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced
 
 | Chunk | Contents | Status |
 |-------|----------|--------|
-| **0 — Scaffold** | `cuda/README.md`, `cuda/CLAUDE.md`, `case_studies/README.md` skeleton, `game/app.js` wiring, root `README.md` + `CLAUDE.md` references | done |
+| **0 — Scaffold** | `cuda/README.md`, `cuda/CLAUDE.md`, `case_studies/case_studies.md` skeleton, `game/app.js` wiring, root `README.md` + `CLAUDE.md` references | done |
 | **1** | Phase 1 modules 1–3 + cross-cutting roofline + memory-hierarchy reference | done |
 | **2** | Phase 2 modules 4–7 + cross-cutting error-handling/launch-config | done |
 | **3** | Phase 3 modules 8–13 (the core) + cross-cutting nsight-workflow + numerics | done |
 | **4** | Phase 4 modules 14–17 (streams, graphs, multi-GPU, dynamic parallelism) | done |
 | **5** | Phase 5 modules 18–21 (Tensor Cores, libraries, Python, Triton) | done |
 | **6** | Phase 6 modules 22–24 (profiling, debugging, portability) | done |
-| **7** | Case studies 1–6 + finalize `case_studies/README.md` | done |
+| **7** | Case studies 1–6 + finalize `case_studies/case_studies.md` | done |
 | **8** | Finalize Learning Paths / Knowledge-Question Map / Study Plan; root counts; memory; verification | done |
 
 ### Module File Status
 
 | # | Module | Phase | Chunk | Status | Q&A Target |
 |---|--------|-------|-------|--------|-----------|
-| 1 | `gpu_computing_foundations/README.md` | 1 | 1 | done | 15 |
-| 2 | `gpu_hardware_architecture/README.md` | 1 | 1 | done | 15 |
-| 3 | `cuda_toolkit_and_compilation/README.md` | 1 | 1 | done | 15 |
-| 4 | `cuda_programming_model_and_kernels/README.md` | 2 | 2 | done | 15 |
-| 5 | `warps_and_simt_execution/README.md` | 2 | 2 | done | 15 |
-| 6 | `cuda_memory_model_and_hierarchy/README.md` | 2 | 2 | done | 15 |
-| 7 | `memory_management_and_data_transfer/README.md` | 2 | 2 | done | 15 |
-| 8 | `memory_coalescing_and_access_patterns/README.md` | 3 | 3 | done | 18 |
-| 9 | `shared_memory_and_bank_conflicts/README.md` | 3 | 3 | done | 18 |
-| 10 | `occupancy_and_launch_configuration/README.md` | 3 | 3 | done | 18 |
-| 11 | `synchronization_and_atomics/README.md` | 3 | 3 | done | 15 |
-| 12 | `parallel_patterns_reduction_scan_histogram/README.md` | 3 | 3 | done | 15 |
-| 13 | `warp_level_primitives_and_cooperative_groups/README.md` | 3 | 3 | done | 15 |
-| 14 | `streams_events_and_concurrency/README.md` | 4 | 4 | done | 15 |
-| 15 | `cuda_graphs/README.md` | 4 | 4 | done | 15 |
-| 16 | `multi_gpu_programming_and_nccl/README.md` | 4 | 4 | done | 15 |
-| 17 | `dynamic_parallelism_and_advanced_kernels/README.md` | 4 | 4 | done | 15 |
-| 18 | `tensor_cores_and_mixed_precision/README.md` | 5 | 5 | done | 18 |
-| 19 | `cuda_math_and_dnn_libraries/README.md` | 5 | 5 | done | 15 |
-| 20 | `python_gpu_ecosystem/README.md` | 5 | 5 | done | 15 |
-| 21 | `triton_and_kernel_dsls/README.md` | 5 | 5 | done | 15 |
-| 22 | `profiling_and_performance_analysis/README.md` | 6 | 6 | done | 18 |
-| 23 | `debugging_correctness_and_numerics/README.md` | 6 | 6 | done | 15 |
-| 24 | `gpu_portability_hip_sycl_and_beyond/README.md` | 6 | 6 | done | 15 |
+| 1 | `gpu_computing_foundations/gpu_computing_foundations.md` | 1 | 1 | done | 15 |
+| 2 | `gpu_hardware_architecture/gpu_hardware_architecture.md` | 1 | 1 | done | 15 |
+| 3 | `cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md` | 1 | 1 | done | 15 |
+| 4 | `cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md` | 2 | 2 | done | 15 |
+| 5 | `warps_and_simt_execution/warps_and_simt_execution.md` | 2 | 2 | done | 15 |
+| 6 | `cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md` | 2 | 2 | done | 15 |
+| 7 | `memory_management_and_data_transfer/memory_management_and_data_transfer.md` | 2 | 2 | done | 15 |
+| 8 | `memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md` | 3 | 3 | done | 18 |
+| 9 | `shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md` | 3 | 3 | done | 18 |
+| 10 | `occupancy_and_launch_configuration/occupancy_and_launch_configuration.md` | 3 | 3 | done | 18 |
+| 11 | `synchronization_and_atomics/synchronization_and_atomics.md` | 3 | 3 | done | 15 |
+| 12 | `parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md` | 3 | 3 | done | 15 |
+| 13 | `warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md` | 3 | 3 | done | 15 |
+| 14 | `streams_events_and_concurrency/streams_events_and_concurrency.md` | 4 | 4 | done | 15 |
+| 15 | `cuda_graphs/cuda_graphs.md` | 4 | 4 | done | 15 |
+| 16 | `multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md` | 4 | 4 | done | 15 |
+| 17 | `dynamic_parallelism_and_advanced_kernels/dynamic_parallelism_and_advanced_kernels.md` | 4 | 4 | done | 15 |
+| 18 | `tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md` | 5 | 5 | done | 18 |
+| 19 | `cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md` | 5 | 5 | done | 15 |
+| 20 | `python_gpu_ecosystem/python_gpu_ecosystem.md` | 5 | 5 | done | 15 |
+| 21 | `triton_and_kernel_dsls/triton_and_kernel_dsls.md` | 5 | 5 | done | 15 |
+| 22 | `profiling_and_performance_analysis/profiling_and_performance_analysis.md` | 6 | 6 | done | 18 |
+| 23 | `debugging_correctness_and_numerics/debugging_correctness_and_numerics.md` | 6 | 6 | done | 15 |
+| 24 | `gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md` | 6 | 6 | done | 15 |
 
 ### Case Study & Cross-Cutting File Status
 
@@ -449,7 +449,7 @@ CASE STUDY TEMPLATE — 11-section principal template (matches llm/ml):
 MAINTENANCE RULE when completing a chunk:
   1. Flip Status "pending" -> "done" for each completed file in the tables above
   2. Advance the NEXT UP pointer at the top of §8
-  3. Update case_studies/README.md if new case studies were added
+  3. Update case_studies/case_studies.md if new case studies were added
   4. Re-run `python3 game/extract.py` and confirm questions/cuda.json grows
   5. Update root README.md and CLAUDE.md counts if the total changed
   6. Update the cuda-section.md memory file if structure changed

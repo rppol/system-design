@@ -31,8 +31,8 @@ Key concepts covered in this module:
 - JWT authentication in WebSocket connections
 
 Cross-references:
-- Async generators and backpressure fundamentals: `../../async_patterns_and_pitfalls/README.md`
-- ASGI protocol and Starlette internals: `../fastapi_fundamentals_asgi/README.md`
+- Async generators and backpressure fundamentals: `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
+- ASGI protocol and Starlette internals: `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
 - Production multi-pod streaming architecture: `../../../llm/case_studies/cross_cutting/streaming_at_scale.md`
 
 ---

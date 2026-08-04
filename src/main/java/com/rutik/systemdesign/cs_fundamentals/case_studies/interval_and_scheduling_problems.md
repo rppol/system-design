@@ -126,14 +126,16 @@ This is impractical for n > 10,000.
 
 ### Meeting Rooms II — O(n^2) brute force
 
-For each meeting, count how many other meetings are running at the same time (i.e., overlap with it). The answer is `max(concurrent_count_at_any_point)`.
+The tempting version — for each meeting, count how many other meetings overlap *it* — is **wrong**, not merely slow, and it is the BROKEN block in §4. Overlapping the same meeting does not make two meetings simultaneous with each other: on `[[0,30],[5,10],[15,20]]` it reports 3 rooms when 2 suffice. Differential-tested against a correct sweep on 4,000 random inputs it disagreed on 1,389 of them, always over-counting.
+
+The correct O(n^2) baseline counts concurrency at a *point*, and it is enough to test the start of each meeting — peak concurrency always begins at some meeting's start:
 
 ```
 max_rooms = 0
 for each interval A:
-    concurrent = 1
-    for each interval B != A:
-        if overlaps(A, B):
+    concurrent = 0
+    for each interval B:
+        if B.start <= A.start < B.end:
             concurrent += 1
     max_rooms = max(max_rooms, concurrent)
 ```
@@ -313,17 +315,17 @@ def merge_intervals_broken(intervals: List[List[int]]) -> List[List[int]]:
 # Demonstration of the failure:
 intervals = [[3, 5], [1, 2], [2, 4]]
 print(merge_intervals_broken(intervals))
-# Outputs: [[3, 5], [1, 4]]  -- WRONG: [1,2] and [2,4] were not merged with [3,5]
+# Outputs: [[3, 5]]  -- WRONG: the span really covers 1..5
 # Correct: [[1, 5]]
 ```
 
-The problem: when input is `[[3,5],[1,2],[2,4]]`, the algorithm starts with `[3,5]` as the running interval. Then it sees `[1,2]` — start 1 is not `<= 5`... wait, it is. Actually the check `curr[0] <= last[1]` passes (1 <= 5), so it merges into `[3,5]` → extends last[1] to max(5,2) = 5, producing `[3,5]`. Then `[2,4]` comes — 2 <= 5, extends to max(5,4) = 5. Output: `[[3,5]]`. But the correct merged range should start at 1, not 3. The broken version misses that the merged interval's start should be the minimum start seen.
+The problem: when input is `[[3,5],[1,2],[2,4]]`, the algorithm starts with `[3,5]` as the running interval. It then sees `[1,2]`, and the check `curr[0] <= last[1]` passes (1 <= 5), so it "merges" by extending `last[1]` to `max(5, 2) = 5` — the running interval is still `[3,5]`. Then `[2,4]`: 2 <= 5, extend to `max(5, 4) = 5`. Output `[[3,5]]`, which has lost the range 1..3 entirely. The scan only ever pushes the *end* rightwards; it has no way to pull the start leftwards, and sorting is what guarantees it never has to.
 
-A subtler broken case: `[[1,2],[5,7],[3,4]]`. Without sorting:
+A second failure mode, where the output has the wrong *number* of intervals rather than the wrong bounds: `[[1,2],[5,7],[3,4]]`. Without sorting:
 - Start with `[1,2]`.
-- `[5,7]`: 5 > 2, append. Result so far: `[[1,2],[5,7]]`.
-- `[3,4]`: 3 > 2 (last.end=7, actually 3 <= 7), merges into [5,7] → [5, max(7,4)] = [5,7]. Output: `[[1,2],[5,7]]`.
-- But [3,4] should have merged with [1,2] to give [1,4], then [1,4] does NOT overlap [5,7]. Correct output: `[[1,4],[5,7]]`.
+- `[5,7]`: 5 > 2, no overlap, append. Result so far: `[[1,2],[5,7]]`.
+- `[3,4]`: compared against `last = [5,7]`, and 3 <= 7, so it is absorbed: `[5, max(7,4)] = [5,7]`. Output: `[[1,2],[5,7]]`.
+- `[3,4]` overlaps nothing here — 3 > 2 and 4 < 5 — so it should have survived as its own interval. Correct output: `[[1,2],[3,4],[5,7]]`. The broken run silently deleted an interval by comparing it against the wrong neighbour.
 
 **FIX — always sort by start time first:**
 
@@ -496,7 +498,13 @@ def task_scheduler_formula(tasks: List[str], n: int) -> int:
 
 def task_scheduler_simulation(tasks: List[str], n: int) -> int:
     """
-    Max-heap + cooldown queue simulation: O(m log m) where m = number of distinct task types.
+    Max-heap + cooldown queue simulation.
+
+    Cost is O(R log k) where R is the ANSWER (total intervals, idles included) and
+    k <= 26 is the number of distinct task types — the loop ticks once per interval,
+    so it is proportional to the output, not to the input. That is worse than the
+    formula whenever the cooldown dominates: two tasks with n = 10,000 run the loop
+    10,002 times to return 10,002. The formula answers the same question in O(T).
 
     More generalizable — can be extended to weighted tasks or variable execution times.
 
@@ -539,7 +547,7 @@ def task_scheduler_simulation(tasks: List[str], n: int) -> int:
 # --- Verification ---
 if __name__ == "__main__":
     tests = [
-        (["A","A","A","B","B","B"], 2, 8),   # classic: ABABAB + 2 idles? No: ABCABC or ABABXAB
+        (["A","A","A","B","B","B"], 2, 8),   # classic: A B idle | A B idle | A B  = 8
         (["A","A","A","B","B","B"], 0, 6),   # no cooldown: 6 tasks = 6 intervals
         (["A","A","A","A","A","A","B","C","D","E","F","G"], 2, 16),
         (["A","A","B","B"], 2, 5),
@@ -561,11 +569,16 @@ if __name__ == "__main__":
 
 ```
 Operation           Time            Space
-Sort                O(n log n)      O(log n) — timsort in Python
+Sort                O(n log n)      O(n) — timsort's merge buffer is up to n/2
 Linear scan         O(n)            O(n) — output list
 -------------------------------------------------
 Total               O(n log n)      O(n)
 ```
+
+Note the sort's space: CPython's `list.sort()` is timsort, which allocates a temporary
+array of up to n/2 elements for merging, so it is O(n) auxiliary, not the O(log n) that
+an in-place quicksort or heapsort would give. It does not change the total here, because
+the output list is already O(n), but it does if you were counting on sorting in place.
 
 The sort dominates. If input arrives pre-sorted (e.g., Google Calendar stores events ordered by start), the linear scan alone is O(n). For online (streaming) insertion, maintain a sorted structure (balanced BST / SortedList) for O(log n) per insert + O(k) to merge k overlapping intervals.
 
@@ -573,7 +586,7 @@ The sort dominates. If input arrives pre-sorted (e.g., Google Calendar stores ev
 
 ```
 Operation           Time            Space
-Sort                O(n log n)      O(log n) timsort
+Sort                O(n log n)      O(n) timsort merge buffer
 n heap ops          O(n log n)      O(n) heap
 -------------------------------------------------
 Total               O(n log n)      O(n)
@@ -586,11 +599,11 @@ Alternative: coordinate compression (line sweep). Create events `(time, type)` w
 ```
 Approach            Time            Space       Notes
 Formula             O(T)            O(26)=O(1)  T = len(tasks); only for uniform task times
-Heap simulation     O(T log 26)     O(26)=O(1)  26 distinct task types max for A-Z
-                  = O(T)            O(1)        since log 26 is constant
+Heap simulation     O(R log 26)     O(26)=O(1)  R = the ANSWER, not the input size
+                  = O(R)            O(1)        since log 26 is constant
 ```
 
-The formula is O(T) and the simplest to code correctly under pressure. The simulation is more general — it handles variable execution times and non-uniform cooldowns if extended.
+The formula is O(T) and the simplest to code correctly under pressure. The simulation is more general — it handles variable execution times and non-uniform cooldowns if extended — but it is proportional to the *output*: the loop ticks once per interval, idles included, so `R = max(T, (max_count-1)*(n+1)+max_count_tasks)`. With a large cooldown that is unbounded in T; `["A","A"]` with `n = 10,000` runs 10,002 iterations to produce the answer 10,002. Say "O(R), where R is the schedule length" rather than "O(T)" if an interviewer pushes on it.
 
 ### Comparison Table
 
@@ -612,15 +625,15 @@ Input: `[[1,3],[2,6],[8,10],[15,18]]` (already sorted here for clarity)
 ```
 Time axis:
  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18
- |-----|                                               [1,3]
-    |-----------|                                      [2,6]
-                         |------|                      [8,10]
-                                            |--------|  [15,18]
+ |-----|                                                [1,3]
+    |-----------|                                       [2,6]
+                      |-----|                           [8,10]
+                                           |--------|   [15,18]
 
 After merge:
- |-----------|                                         [1,6]
-                         |------|                      [8,10]
-                                            |--------|  [15,18]
+ |--------------|                                       [1,6]
+                      |-----|                           [8,10]
+                                           |--------|   [15,18]
 
 Merge step trace:
   result = [[1,3]]
@@ -634,11 +647,15 @@ Merge step trace:
 Input: `[[0,30],[5,10],[15,20]]` sorted by start = same order.
 
 ```
-Meetings on timeline:
- 0          10    15    20              30
- |-----------------------------Room A----|   [0,30]
-       |----Room B----|                      [5,10]
-                  |----Room C----|           [15,20]
+Meetings on timeline (1 column = 1 minute, so gaps are to scale):
+          0    5    10   15   20   25   30
+          |    |    |    |    |    |    |
+Room A    [=============================]       [0,30]
+Room B         [====]                           [5,10]
+Room C                   [====]                 [15,20]
+
+Room B frees at 10 and Room C only needs a room at 15 — a real 5-minute
+gap, which is why C reuses B's room instead of taking a third one.
 
 Heap trace (min-heap of end times, showing heap after each meeting):
   Process [0,30]:  heap empty           -> push 30   -> heap=[30]          rooms=1
@@ -665,7 +682,7 @@ Frame 2:  [ A | B | _ ]    (A and B placed; 1 idle slot)
 Last bit: [ A | B ]        (max_count_tasks = 2 tasks remaining)
 
 Timeline: A B _ A B _ A B
-           1 2 3 4 5 6 7 8
+Interval: 1 2 3 4 5 6 7 8
 
 Total = (max_count - 1) * (n + 1) + max_count_tasks
       = (3 - 1) * (2 + 1) + 2
@@ -696,7 +713,7 @@ Total = (max_count - 1) * (n + 1) + max_count_tasks
 
 ### Task Scheduler Variations
 
-**Task Scheduler II (LeetCode 2365)**: Tasks with individual cooldowns (not global). Sort by deadline-like approach using a priority queue.
+**Task Scheduler II (LeetCode 2365)**: Same single global cooldown (`space`), but the tasks must be completed **in the given order** — no reordering. That one change deletes the frequency formula: with the order fixed there is nothing to interleave, so you scan once keeping a `dict` of `type -> earliest day it may run again`, jumping the clock forward when the next task is still cooling. O(T) time, O(k) space.
 
 **Reorganize String (LeetCode 767)**: Rearrange characters so no two adjacent chars are the same. Special case of n=1 cooldown. Answer exists iff max_count <= ceil(len/2). Greedy: always place the most frequent remaining character.
 
@@ -716,11 +733,11 @@ For the backend, Calendar's conflict-detection API (the "check availability" cal
 
 ### Airbnb / Booking.com — Availability Windows
 
-A property has a list of booked intervals (check-in, check-out dates). The system must compute contiguous available windows and answer queries like "find all properties available for [June 10, June 15]". The approach: merge all booked intervals for a property, then the gaps between merged intervals are available windows. This is pure merge-intervals. At Airbnb's scale (~6M active listings), availability checks run with pre-merged interval sets cached per listing and invalidated on new bookings. The difference between O(n^2) and O(n log n) per booking insertion determined their cache invalidation budget.
+A property has a list of booked intervals (check-in, check-out dates). The system must compute contiguous available windows and answer queries like "find all properties available for [June 10, June 15]". The approach: merge all booked intervals for a property, then the gaps between merged intervals are available windows. This is pure merge-intervals. At Airbnb's scale (over 8M active listings), availability checks run with pre-merged interval sets cached per listing and invalidated on new bookings. The difference between O(n^2) and O(n log n) per booking insertion determined their cache invalidation budget.
 
-### Kubernetes Pod Scheduling — Resource Intervals
+### GKE Maintenance Windows and Exclusions
 
-Kubernetes resource requests and limits model compute slots as intervals in time. The scheduler must place pods on nodes without exceeding resource bounds. A simplified sub-problem: given a node's scheduled maintenance windows (intervals during which pods should not be running), determine the merged maintenance blackout windows and schedule pods only in the gaps. The cluster autoscaler uses interval-merge to consolidate PodDisruptionBudget windows across replicas before deciding safe scale-down times.
+A managed Kubernetes control plane has to reconcile two sets of time intervals before it may upgrade anything. GKE lets you declare a recurring **maintenance window** (an RFC-5545 `RRULE` plus a start/end, e.g. every Saturday 02:00–06:00) and, on top of that, up to 20 **maintenance exclusions** — spans during which no automatic upgrade may run at all, such as a retail freeze over Black Friday. Deciding when an upgrade may start is exactly merge-intervals: expand the recurrence into concrete windows, merge the overlapping exclusions into a minimal blackout set, subtract, and take the gaps. Note what Kubernetes itself does *not* give you here: a PodDisruptionBudget is a `minAvailable`/`maxUnavailable` count with no time component, so it constrains how many pods may go down at once, never when.
 
 ### Database Maintenance Windows — Vacuum / ANALYZE Scheduling
 
@@ -730,9 +747,9 @@ PostgreSQL autovacuum and Oracle's automatic maintenance tasks are scheduled wit
 
 GitHub Actions and Jenkins pipelines define jobs with `needs` dependencies. The scheduler tracks which jobs are running (intervals of execution time on agents). To maximize parallelism, it finds the maximum concurrent job count (meeting rooms II) to determine minimum agent pool size. Cooldown-aware retries (task scheduler concept) appear in GitHub Actions' `wait-timer` on environments, where deployments must cool down between re-runs to prevent cascading failures.
 
-### CPU Task Scheduling — Linux CFS Concept
+### CPU Task Scheduling — Linux `SCHED_NORMAL`
 
-The Linux Completely Fair Scheduler (CFS) uses a red-black tree of tasks keyed by `vruntime` (virtual runtime). The scheduling decision is: pick the task with lowest vruntime (most deserving of CPU time). This is conceptually the task-scheduler greedy: always run the task with the most remaining "debt." Rate-limited I/O tasks (e.g., NVMe queue depth limits) introduce per-task cooldown windows analogous to the cooldown parameter `n`. The formula `(max_count-1)*(n+1)+max_count_tasks` has a direct analogue in CFS's calculation of minimum scheduling latency.
+Linux's fair scheduling class keeps runnable tasks in a red-black tree and pops the front of it on every reschedule — a continuous greedy selection, exactly the shape of the task-scheduler greedy: always run whoever is owed the most. The sort key changed in kernel 6.6, when EEVDF (Earliest Eligible Virtual Deadline First) replaced CFS: CFS picked the smallest `vruntime`, EEVDF picks the earliest virtual *deadline* among the tasks whose lag is non-negative. "Linux uses CFS" has been the wrong answer since 2023. Rate-limited I/O tasks (NVMe queue-depth limits, for instance) introduce per-task cooldown windows analogous to the cooldown parameter `n`. The analogy stops at the greedy structure, though — the scheduler has no counterpart to `(max_count-1)*(n+1)+max_count_tasks`, because it never sees the whole task set in advance and so can never compute a schedule length. Its latency knob is a *slice*, `base_slice_ns` (700 µs in current mainline), scaled per thread by weight.
 
 ### Video Editing — Timeline Track Allocation
 

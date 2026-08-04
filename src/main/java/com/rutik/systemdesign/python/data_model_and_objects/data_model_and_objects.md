@@ -100,7 +100,7 @@ A descriptor is any object whose class defines `__get__`, `__set__`, or `__delet
 - **Non-data descriptor:** defines only `__get__`. Instance `__dict__` takes precedence over it. Functions are non-data descriptors — this is why instance methods work.
 - **Data descriptor:** defines `__get__` and (`__set__` or `__delete__`). Takes precedence over the instance `__dict__`. `property` is a data descriptor.
 
-See `../metaclasses_and_metaprogramming/README.md` for how descriptors interact with metaclasses during class creation.
+See `../metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md` for how descriptors interact with metaclasses during class creation.
 
 ### 4.5 `__slots__`
 
@@ -110,7 +110,7 @@ See `../metaclasses_and_metaprogramming/README.md` for how descriptors interact 
 
 Python resolves method lookup in multiple inheritance using the C3 linearization algorithm (introduced in Python 2.3). `ClassName.__mro__` exposes the full resolution order as a tuple. `super()` always refers to the next class in the MRO, not the direct parent — enabling cooperative multiple inheritance.
 
-Compare with Java's single-inheritance model in `../../java/core_language/README.md`.
+Compare with Java's single-inheritance model in `../../java/core_language/core_language.md`.
 
 ### 4.7 `__init_subclass__` [3.6]
 

@@ -609,7 +609,7 @@ stateDiagram-v2
 # Redis-based rate limiter: INCR + EXPIRE is a FIXED-window counter -- not a
 # token bucket and not a sliding window. It admits up to 2x the limit across a
 # window boundary; use a sorted-set sliding log or a Lua token bucket when that
-# burst matters (see ../rate_limiting/README.md).
+# burst matters (see ../rate_limiting/rate_limiting.md).
 function is_rate_limited(user_id, limit=100, window=3600):
     key = "ratelimit:" + user_id
     count = redis.INCR(key)

@@ -133,17 +133,17 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| 1 | `01_introduction_and_overview/README.md` | done |
-| 2 | `02_visual_search_system/README.md` | done |
-| 3 | `03_google_street_view_blurring_system/README.md` | done |
-| 4 | `04_youtube_video_search/README.md` | done |
-| 5 | `05_harmful_content_detection/README.md` | done |
-| 6 | `06_video_recommendation_system/README.md` | done |
-| 7 | `07_event_recommendation_system/README.md` | done |
-| 8 | `08_ad_click_prediction_on_social_platforms/README.md` | done |
-| 9 | `09_similar_listings_on_vacation_rental_platforms/README.md` | done |
-| 10 | `10_personalized_news_feed/README.md` | done |
-| 11 | `11_people_you_may_know/README.md` | done |
+| 1 | `01_introduction_and_overview/01_introduction_and_overview.md` | done |
+| 2 | `02_visual_search_system/02_visual_search_system.md` | done |
+| 3 | `03_google_street_view_blurring_system/03_google_street_view_blurring_system.md` | done |
+| 4 | `04_youtube_video_search/04_youtube_video_search.md` | done |
+| 5 | `05_harmful_content_detection/05_harmful_content_detection.md` | done |
+| 6 | `06_video_recommendation_system/06_video_recommendation_system.md` | done |
+| 7 | `07_event_recommendation_system/07_event_recommendation_system.md` | done |
+| 8 | `08_ad_click_prediction_on_social_platforms/08_ad_click_prediction_on_social_platforms.md` | done |
+| 9 | `09_similar_listings_on_vacation_rental_platforms/09_similar_listings_on_vacation_rental_platforms.md` | done |
+| 10 | `10_personalized_news_feed/10_personalized_news_feed.md` | done |
+| 11 | `11_people_you_may_know/11_people_you_may_know.md` | done |
 
 ---
 

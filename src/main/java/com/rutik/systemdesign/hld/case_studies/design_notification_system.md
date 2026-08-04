@@ -496,7 +496,7 @@ public class SmsChannelWorker {
     // granted to that number (1 for an unregistered long code, up to 180
     // for a high-Trust-Score 10DLC campaign, 100 for a short code -- §2).
     private final Map<String, TokenBucketRateLimiter> perNumberLimiters;
-    private final CircuitBreaker twilioBreaker; // see resilience_patterns/README.md
+    private final CircuitBreaker twilioBreaker; // see resilience_patterns/resilience_patterns.md
 
     public void processMessage(NotificationMessage msg) {
         String fromNumber = numberPool.assign(msg);

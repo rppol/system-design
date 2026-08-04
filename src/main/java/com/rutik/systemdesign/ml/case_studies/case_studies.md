@@ -215,12 +215,12 @@ Track completion status across sessions.
 | `cross_cutting/responsible_ai_fairness_and_explainability.md` | done | 14-section, 15 Q&As |
 | `cross_cutting/experimentation_and_online_evaluation.md` | done | 14-section, 13 Q&As |
 | `cross_cutting/drift_monitoring_and_retraining.md` | done | 14-section, 12 Q&As |
-| `cross_cutting/README.md` | done | Index table |
+| `cross_cutting/cross_cutting.md` | done | Index table |
 | `design_churn_prediction.md` | done | 11-section principal template, 11 Q&As |
 | `design_credit_risk_scoring.md` | done | 11-section principal template, 11 Q&As |
 | `design_eta_prediction.md` | done | 11-section principal template, 10 Q&As |
 | `design_marketplace_matching.md` | done | 11-section principal template, 10 Q&As |
-| `ml/model_selection_and_algorithm_choice/README.md` | done | 14-section module, 19 Q&As |
+| `ml/model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md` | done | 14-section module, 19 Q&As |
 | `design_customer_ltv_prediction.md` | done | 11-section principal template, 10 Q&As |
 | `design_multi_touch_attribution.md` | done | 11-section principal template, 10 Q&As |
 | `design_dynamic_pricing.md` | done | 11-section principal template, 8 Q&As |

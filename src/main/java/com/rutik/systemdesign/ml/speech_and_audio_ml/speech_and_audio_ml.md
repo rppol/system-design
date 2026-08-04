@@ -514,7 +514,7 @@ loss = AF.rnnt_loss(
 
 ```python
 # Reuses the same Bahdanau-style cross-attention mechanics as
-# ../recurrent_neural_networks/README.md - the query is the decoder state, the
+# ../recurrent_neural_networks/recurrent_neural_networks.md - the query is the decoder state, the
 # keys/values are the pyramidal encoder's outputs.
 class LASDecoder(nn.Module):
     def __init__(self, vocab_size: int, hidden_size: int, enc_dim: int) -> None:
@@ -547,7 +547,7 @@ def wav2vec2_contrastive_loss(
 ) -> Tensor:
     """InfoNCE-style loss: identify the true quantized latent among K distractors
     for each masked timestep, using cosine similarity. This is the same InfoNCE
-    family as ../self_supervised_and_contrastive_learning/README.md's NT-Xent
+    family as ../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md's NT-Xent
     loss, applied to masked spans of audio instead of augmented image views.
     """
     pos_sim = F.cosine_similarity(context_vectors, quantized_targets, dim=-1) / temperature
@@ -561,7 +561,7 @@ def wav2vec2_contrastive_loss(
 
 # The feature encoder that produces context_vectors is a stack of seven 1-D
 # convolutional layers over the raw waveform (see
-# ../convolutional_neural_networks/README.md for the receptive-field/stride
+# ../convolutional_neural_networks/convolutional_neural_networks.md for the receptive-field/stride
 # math), downsampling 16 kHz audio to roughly 49 latent frames per second
 # before the Transformer context network and the loss above ever run.
 

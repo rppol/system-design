@@ -1545,6 +1545,6 @@ user-facing SLA, and individual task errors are isolated via `FetchResult` — n
 uncaught exceptions that would cancel sibling fetches unnecessarily.
 
 **Cross-references:**
-- For blocking-in-async anti-patterns see `../async_patterns_and_pitfalls/README.md`
-- For FastAPI's use of anyio internally, see `../fastapi/fastapi_fundamentals_asgi/README.md`
+- For blocking-in-async anti-patterns see `../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
+- For FastAPI's use of anyio internally, see `../fastapi/fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
 - For LLM streaming with asyncio SSE, see `../../llm/case_studies/cross_cutting/streaming_at_scale.md`

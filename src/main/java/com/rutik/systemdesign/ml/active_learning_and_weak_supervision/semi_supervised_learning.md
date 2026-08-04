@@ -5,9 +5,9 @@
 > FixMatch but does not develop them. This file is the mechanics: the three assumptions
 > that decide whether unlabeled data helps, self-training and its confirmation-bias trap,
 > consistency regularization (Pi-model, Mean Teacher), FixMatch/MixMatch, and graph-based
-> label propagation. Cross-links: `../graph_neural_networks/README.md`,
+> label propagation. Cross-links: `../graph_neural_networks/graph_neural_networks.md`,
 > `../computer_vision/self_supervised_vision.md`,
-> `../self_supervised_and_contrastive_learning/README.md`.
+> `../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md`.
 
 ## 1. Concept Overview
 
@@ -98,7 +98,7 @@ Precursors it subsumes:
 
 ### 4.6 Graph-based / transductive (label propagation & spreading)
 
-Build a similarity graph over *all* points (labeled + unlabeled) — usually kNN or an RBF kernel — then let labels diffuse from labeled nodes to unlabeled neighbors, so the manifold assumption does the work. **Label Propagation** clamps the seed labels; **Label Spreading** uses a normalized graph Laplacian and allows soft relabeling (parameter `alpha`), which is more robust to label noise. These are **transductive**: they output labels only for the specific points in the graph, not a function you can apply to new data — to generalize you train an inductive model on the propagated labels afterward. This is the SSL cousin of the message-passing idea in `../graph_neural_networks/README.md` (a GCN is essentially learnable, feature-aware label propagation).
+Build a similarity graph over *all* points (labeled + unlabeled) — usually kNN or an RBF kernel — then let labels diffuse from labeled nodes to unlabeled neighbors, so the manifold assumption does the work. **Label Propagation** clamps the seed labels; **Label Spreading** uses a normalized graph Laplacian and allows soft relabeling (parameter `alpha`), which is more robust to label noise. These are **transductive**: they output labels only for the specific points in the graph, not a function you can apply to new data — to generalize you train an inductive model on the propagated labels afterward. This is the SSL cousin of the message-passing idea in `../graph_neural_networks/graph_neural_networks.md` (a GCN is essentially learnable, feature-aware label propagation).
 
 ### 4.7 Co-training, entropy minimization
 
@@ -487,7 +487,7 @@ The first quarter of the ramp delivers only 6% of the weight — the model train
 
 **Speech (Noisy Student for ASR).** Google applied Noisy Student to speech recognition: a teacher labels a huge unlabeled audio corpus, a noised student trains on those pseudo-transcripts, cutting word error rate — the same self-training loop as vision.
 
-**Graph / relational data (label propagation).** Fraud rings, citation networks, and product-category tagging use label spreading over a similarity or interaction graph to extend a few known labels across the network — the transductive precursor to graph neural networks (`../graph_neural_networks/README.md`).
+**Graph / relational data (label propagation).** Fraud rings, citation networks, and product-category tagging use label spreading over a similarity or interaction graph to extend a few known labels across the network — the transductive precursor to graph neural networks (`../graph_neural_networks/graph_neural_networks.md`).
 
 ---
 
@@ -531,7 +531,7 @@ The first quarter of the ramp delivers only 6% of the weight — the model train
 - Labeled and unlabeled sets come from **different distributions** (`U` contains classes or domains absent from `L`) — SSL can then drive accuracy *below* the supervised baseline.
 - The assumptions are violated: fine-grained interleaved classes (smoothness fails), or no meaningful clusters/manifold. On some tabular problems SSL gives nothing.
 - Labels are cheap/automatic (logged clicks, outcomes) — just label more; SSL's complexity is not worth it.
-- You need a *reusable representation* across many tasks — prefer self-supervised pretraining (`../self_supervised_and_contrastive_learning/README.md`), then fine-tune.
+- You need a *reusable representation* across many tasks — prefer self-supervised pretraining (`../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md`), then fine-tune.
 
 ### Watch out for
 
@@ -580,7 +580,7 @@ If `U` contains classes or domains not present in `L` (a common real-world accid
 
 ### Pitfall 3 — Trusting raw softmax as calibration
 
-Deep nets are systematically over-confident, so `max softmax = 0.97` does not mean 97% correct. Thresholding on uncalibrated probabilities admits wrong pseudo-labels. Apply temperature scaling on a held-out set first (see `../uncertainty_quantification_and_conformal_prediction/README.md`), or use ensemble/MC-dropout confidence.
+Deep nets are systematically over-confident, so `max softmax = 0.97` does not mean 97% correct. Thresholding on uncalibrated probabilities admits wrong pseudo-labels. Apply temperature scaling on a held-out set first (see `../uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md`), or use ensemble/MC-dropout confidence.
 
 ### Pitfall 4 — No consistency ramp-up (or ramping FixMatch unnecessarily)
 
@@ -610,7 +610,7 @@ Because SSL sometimes *hurts*, a good-looking absolute number is meaningless wit
 | sklearn `LabelPropagation` / `LabelSpreading` | Graph-based transductive SSL | kNN or RBF kernel; small-to-mid `N` |
 | sklearn `SelfTrainingClassifier` | Wraps any probabilistic estimator for self-training | Confidence threshold + `k_best` per round |
 | Hugging Face + back-translation | UDA-style text augmentation | Consistency SSL for NLP |
-| PyTorch Geometric | Graph SSL / GNNs (learnable label propagation) | See `../graph_neural_networks/README.md` |
+| PyTorch Geometric | Graph SSL / GNNs (learnable label propagation) | See `../graph_neural_networks/graph_neural_networks.md` |
 | cleanlab | Detect wrong pseudo-labels / label errors | Guards against confirmation bias |
 
 ---
@@ -736,7 +736,7 @@ Start the consistency weight near zero and ramp it up over the first epochs, bec
 
 **Step 1 — Baselines and data hygiene.** Train supervised-only on the 5,000 labels (test accuracy ~78%) as the mandatory comparison. Carve out a *randomly-sampled* 5,000-image gold test set held fixed throughout. Run a quick OOD check on `U` (embed with a pretrained backbone, flag images far from every labeled cluster); ~3% are off-catalog junk and are dropped, leaving ~480,000 clean unlabeled images.
 
-**Step 2 — Self-supervised warm start (optional but strong).** Pretrain the backbone with SimCLR on the 480,000 unlabeled images so the representation is not starting from scratch (`../self_supervised_and_contrastive_learning/README.md`). This alone lifts the linear-probe baseline and gives FixMatch a better initialization.
+**Step 2 — Self-supervised warm start (optional but strong).** Pretrain the backbone with SimCLR on the 480,000 unlabeled images so the representation is not starting from scratch (`../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md`). This alone lifts the linear-probe baseline and gives FixMatch a better initialization.
 
 **Step 3 — FixMatch training.**
 

@@ -163,7 +163,7 @@ Interpretation of `LOF(p)`:
 
 The `reach-dist` smoothing (taking the max with the neighbor's own k-distance) stabilizes the density estimate against statistical fluctuation for close points. LOF's weakness is the same as its strength: it is O(n²) in the naive form (O(n log n) with a k-d/ball tree in low dimensions), sensitive to `k`, and its score is *not* comparable across datasets. In sklearn, LOF defaults to `novelty=False` (outlier detection: `fit_predict` on one dataset); set `novelty=True` to train on normal-only and then `predict` new points.
 
-### 4.7 Reconstruction methods (autoencoder / VAE — see unsupervised_learning/README.md)
+### 4.7 Reconstruction methods (autoencoder / VAE — see unsupervised_learning/unsupervised_learning.md)
 
 Train an autoencoder to reconstruct only-normal data through a bottleneck. At inference, **reconstruction error (MSE) is the anomaly score** — the network has no capacity for patterns it never saw, so anomalies reconstruct poorly. A VAE additionally gives a probabilistic score (ELBO / reconstruction probability). Failure modes (memorization, error dilution across high dimensions) are covered in [`../unsupervised_learning/unsupervised_learning.md`](../unsupervised_learning/unsupervised_learning.md); §6 below adds the threshold mechanics.
 

@@ -1228,10 +1228,10 @@ The guidance in Best Practice 11 — "use `beartype` for runtime enforcement in 
 
 **Why the O(1) strategy matters here.** Checking `list[str]` exhaustively would cost `O(len(list))`, so a 100,000-element list would make a *single* call expensive and `c` would stop being a constant at all. beartype instead samples one element per call, keeping `c` flat regardless of container size. The trade is that a list whose 40,000th element is an `int` may pass — runtime enforcement is a probabilistic net across many calls, not a proof. That is exactly why it complements `mypy --strict` rather than replacing it: the static checker gives you the proof, beartype catches what crosses the boundary from code the checker never saw.
 
-See `../fastapi/pydantic_v2_deep_dive/README.md` for how Pydantic v2 uses `Annotated` and `TypeVar` for
+See `../fastapi/pydantic_v2_deep_dive/pydantic_v2_deep_dive.md` for how Pydantic v2 uses `Annotated` and `TypeVar` for
 validation at a framework level.
 
-Compare with Java erasure in `../../java/generics_and_type_system/README.md` — both Python and
+Compare with Java erasure in `../../java/generics_and_type_system/generics_and_type_system.md` — both Python and
 Java erase generic parameters at runtime, but Python retains the annotation strings in
 `__annotations__` while Java loses them entirely at the bytecode level.
 
@@ -1645,5 +1645,5 @@ Key outcomes from this case study:
   trivial to swap backends in tests.
 - `Annotated[int, Field(gt=0)]` on `EntityId` is validated by FastAPI at the route boundary
   with zero extra code — the `Field` metadata flows through `get_type_hints(include_extras=True)`.
-- See `../fastapi/pydantic_v2_deep_dive/README.md` for deeper coverage of `Annotated` field composition
+- See `../fastapi/pydantic_v2_deep_dive/pydantic_v2_deep_dive.md` for deeper coverage of `Annotated` field composition
   and `model_rebuild()` for forward-reference resolution.

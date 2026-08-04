@@ -60,7 +60,7 @@ A naive approach: for each cell that is `'1'`, launch a fresh DFS/BFS that marks
 
 This is actually already O(m * n) time and O(m * n) space (recursion stack), so "brute force" here means the naive implementation without careful visited tracking. The real trap is visiting the same cell multiple times by not marking cells early enough — covered in the BROKEN→FIX block in §4.
 
-There is no fundamentally worse brute force for this problem other than the aforementioned infinite-loop bug.
+There is no fundamentally worse brute force for this problem other than the aforementioned duplicate-enqueue bug.
 
 ### Problem 2 — Course Schedule: Brute Force
 
@@ -75,7 +75,7 @@ A slightly better but still suboptimal approach: DFS-based cycle detection with 
 
 Bellman-Ford is the "brute force" shortest-path algorithm: relax every edge V-1 times.
 
-Time: O(V * E) — with V=100 nodes and E=6000 edges (complete directed graph), that is 600,000 relaxations per test, acceptable but worse than Dijkstra's O((V+E) log V).
+Time: O(V * E) — with V=100 nodes and E=6000 edges (LeetCode's edge ceiling for this problem; a complete directed graph on 100 nodes has 9,900 edges), that is roughly 600,000 relaxations per test, acceptable but worse than Dijkstra's O((V+E) log V).
 
 Space: O(V) for the distance array.
 
@@ -90,7 +90,7 @@ The key insight: Bellman-Ford handles negative weights; Dijkstra does not. When 
 **Key insight:** treat each `'1'` cell as a graph node with up to 4 neighbors. The number of islands equals the number of connected components.
 
 - **DFS approach:** recursive flood-fill. When we find an unvisited `'1'`, increment the count and DFS in all 4 directions, marking cells as visited. Time O(m*n), space O(m*n) for the recursion stack in worst case (entire grid is land, DFS goes m*n deep).
-- **BFS approach:** seed a queue with the source cell, mark it visited at enqueue time (not dequeue time — this is the critical correctness distinction), then expand layer by layer. Time O(m*n), space O(min(m,n)) for the BFS frontier in the best case but O(m*n) worst case.
+- **BFS approach:** seed a queue with the source cell, mark it visited at enqueue time (not dequeue time — dequeue-time marking still visits every cell exactly once and returns the same answer, but the queue swells to one entry per edge instead of one per cell; see §4), then expand layer by layer. Time O(m*n), space O(min(m,n)) for the BFS frontier in the best case but O(m*n) worst case.
 - **Union-Find approach:** iterate once, union adjacent land cells. Count remaining distinct roots. Time O(m*n * alpha(m*n)) ≈ O(m*n), space O(m*n). Best choice when the grid is dynamic (cells added/removed over time).
 
 For a static grid, DFS (iterative to avoid stack overflow for large grids) or BFS are standard.
@@ -147,7 +147,7 @@ Kahn's is preferred in interviews because the cycle-detection logic is a natural
 4. For each neighbor `v` of `u` with edge weight `w`: if `dist[u] + w < dist[v]`, update `dist[v]` and push `(dist[v], v)` onto the heap.
 5. After the heap is exhausted, `max(dist.values())` is the answer (or -1 if any node remains at infinity).
 
-Time O((V + E) log V) with the stale-entry guard. Without the guard: correct results but O(E log E) because stale entries pile up and each is processed.
+Time O((V + E) log V). The lazy variant pushes one heap entry per successful relaxation, so the tighter statement is O(E log E) — the same class, since log E < 2 log V. The stale-entry guard does not shrink the heap (it removes no pushes) and so does not change the complexity class; what it buys is not re-scanning a node's adjacency list once per stale pop, measured at 4x fewer edge scans in §4.
 
 ---
 
@@ -219,15 +219,20 @@ if __name__ == "__main__":
 
 ---
 
-### BROKEN→FIX Block 1: BFS without visited set causes infinite loop on cyclic graphs
+### BROKEN→FIX Block 1: BFS that marks visited at dequeue time blows the queue up to O(E)
 
-The following example uses a general graph (not a grid) to show the bug in its most destructive form — cycling between two directly connected nodes.
+The following example uses a general graph (not a grid) to show the bug in the form that
+hides longest: the output is right, so tests pass and only memory tells you.
 
 ```python
 # BROKEN: BFS marks visited at DEQUEUE time, not enqueue time.
-# On a graph with cycles, the same node is enqueued multiple times
-# before it is ever dequeued and marked. With a dense graph this
-# causes the queue to grow without bound.
+# The same node is enqueued once per in-edge from an already-expanded
+# node, so the queue holds up to E entries instead of V. This is a
+# MEMORY bug, not a correctness bug and not an infinite loop: the
+# `if node in visited: continue` check drains the duplicates, every
+# node is still expanded exactly once, and the traversal order is
+# byte-for-byte identical to the fixed version below (verified on
+# 2,000 random directed graphs: zero differences).
 
 from collections import deque
 
@@ -249,14 +254,14 @@ def bfs_broken(graph: dict[int, list[int]], start: int) -> list[int]:
     return order
 
 
-# On this tiny cyclic graph:
-#   0 <-> 1  (bidirectional edge)
-# The queue alternates: [0] -> [1] -> [0] -> [1] -> ...
-# before 0 is dequeued and marked visited, 1 is already enqueued twice.
-# For a dense graph (E = V^2), memory grows as O(E) before the dequeue
-# loop can mark and drain the duplicates. Observed in production:
-# a 512-node dense graph grew the queue to 262,144 entries (512^2)
-# consuming 8 GB before OOM kill after 5 minutes of runtime.
+# A 2-node cycle 0 <-> 1 does NOT expose this: the run is
+#   [0] -> [1] -> [0], pop 0, already visited, done — 3 enqueues, max
+# queue depth 1. Density is what hurts, not cycles. On a 512-node
+# dense digraph (E = 261,632) the queue peaks at 261,121 entries
+# against 511 for the fixed version — a 511x blowup, and the deque
+# alone grows from a few KB to ~2 MB (6 MB under tracemalloc, which
+# counts the boxed ints). Nothing crashes; the process just carries
+# O(E) of garbage and pops it one entry at a time.
 ```
 
 ```python
@@ -284,9 +289,9 @@ def bfs_fixed(graph: dict[int, list[int]], start: int) -> list[int]:
     return order
 
 
-# Same dense cyclic graph now terminates in O(V + E) time.
-# Queue size never exceeds the number of nodes: max(queue) = V.
-# Memory stable at O(V) = ~20 MB for the 512-node graph above.
+# Same dense graph, same traversal order, same O(V + E) time —
+# but the queue size never exceeds the number of nodes: max 511
+# entries for the 512-node graph above, a few KB instead of ~2 MB.
 
 if __name__ == "__main__":
     # Undirected cycle: 0-1-2-3-0
@@ -430,14 +435,18 @@ if __name__ == "__main__":
 
 ```python
 # BROKEN: Dijkstra without stale-entry guard (d > dist[u] check).
-# Produces CORRECT shortest-path results but processes every stale
-# heap entry, causing O(E log E) runtime instead of O((V+E) log V).
-# On a dense graph with E = V^2 = 10,000 edges and V = 100 nodes,
-# the heap can grow to ~10,000 entries; each is popped and its
-# neighbors relaxed even though a shorter path was already committed.
-# Benchmark: 100-node complete directed graph, 9,900 edges.
-# Without guard: ~52,000 heap operations (pops + pushes).
-# With guard:    ~1,200 heap operations — a 43x reduction.
+# Produces CORRECT shortest-path results but re-scans the adjacency
+# list of every stale heap entry, even though relaxing from the
+# already-improved dist[u] cannot help anyone.
+# Note what the guard does NOT do: it removes no pushes, so the heap
+# is exactly the same size and the heap-operation count is unchanged.
+# Benchmark, 100-node complete directed graph, 9,900 edges, weights
+# 1..1000, mean of 10 seeds:
+#   heap ops:    817 without the guard, 817 with it (identical)
+#   max heap:    343 entries either way (not O(E) in practice)
+#   stale pops:  309 of 409 pops
+#   edge scans:  40,481 without the guard vs 9,900 with — 4.1x
+# So the guard is an inner-loop constant, not a complexity class.
 
 import heapq
 import math
@@ -520,7 +529,7 @@ Problem 3 — Network Delay Time
 | Approach            | Time               | Space          |
 +---------------------+--------------------+----------------+
 | Dijkstra (heap)     | O((V+E) log V)     | O(V + E)       |
-| Dijkstra (no guard) | O(E log E)         | O(E)           |
+| Dijkstra (no guard) | O(E log E) *       | O(E)           |
 | Bellman-Ford        | O(V * E)           | O(V)           |
 | Floyd-Warshall      | O(V^3)             | O(V^2)         |
 +---------------------+--------------------+----------------+
@@ -528,6 +537,11 @@ Problem 3 — Network Delay Time
 Dijkstra wins when: non-negative weights, single source.
 Bellman-Ford wins when: negative weights present (but no negative cycles).
 Floyd-Warshall wins when: all-pairs shortest path needed and V is small.
+
+* Heap operations only, and the same class as the row above it. Dropping the
+  stale-entry guard removes no pushes, so the heap is exactly as large; what
+  it costs is re-scanning a node's adjacency list once per stale pop -- 4.1x
+  more edge scans on the 100-node complete graph benchmarked in section 4.
 ```
 
 The three competing shortest-path algorithms above collapse into a single routing decision:
@@ -584,13 +598,13 @@ Non-negative single-source weights route straight to Dijkstra; a negative cycle 
 
 **Alien dictionary (LeetCode 269):** Given a sorted list of alien words, derive the alphabet ordering. Build a directed graph from character comparisons between adjacent words; topological sort gives the ordering. Cycle means contradictory ordering — return "".
 
-**Minimum height trees (LeetCode 310):** Find roots that minimize the tree height. Iteratively remove leaf nodes (in-degree 1) until 1 or 2 nodes remain — a topological-sort-like peeling process.
+**Minimum height trees (LeetCode 310):** Find roots that minimize the tree height. Iteratively remove leaf nodes (degree 1 — the tree is undirected here, so it is degree, not in-degree) until 1 or 2 nodes remain — a topological-sort-like peeling process.
 
 **Task scheduler with cooldowns:** Not topological sort, but a greedy/heap problem. Common interviewer follow-up after Course Schedule.
 
 ### Network Delay Time Variations
 
-**Cheapest flights within K stops (LeetCode 787):** Dijkstra with a modified state: `(cost, node, stops_remaining)`. Alternatively, Bellman-Ford with exactly K relaxations. The K-stop constraint invalidates the standard Dijkstra "skip stale entries" optimization — you may need to process a node multiple times with different stop counts.
+**Cheapest flights within K stops (LeetCode 787):** Dijkstra with a modified state: `(cost, node, stops_remaining)`. Alternatively, Bellman-Ford with exactly K+1 relaxation rounds — K *stops* means at most K+1 *flights*, and running only K rounds is the classic off-by-one, which quotes a fare that is too high or misses the route entirely (it disagreed with a brute-force path enumeration on 351 of 3,000 random instances, while K+1 rounds matched on all of them). The K-stop constraint invalidates the standard Dijkstra "skip stale entries" optimization — you may need to process a node multiple times with different stop counts.
 
 **Path with minimum effort (LeetCode 1631):** Instead of summing edge weights, minimize the maximum edge weight along the path. Use Dijkstra where `dist[v] = min(dist[v], max(dist[u], effort(u,v)))`.
 
@@ -604,7 +618,7 @@ Non-negative single-source weights route straight to Dijkstra; a negative cycle 
 
 ### BFS for shortest path (unweighted)
 
-**LinkedIn "degrees of connection":** When LinkedIn displays "2nd degree connection," it runs a bidirectional BFS from the viewer's node and the target's node in a social graph with ~900 million nodes. BFS guarantees the shortest-path hop count. The implementation uses a bloom filter to approximate visited-node membership, trading a small false-positive rate for memory savings. Without the visited-at-enqueue optimization, the BFS frontier for a highly-connected node (10,000 connections) would re-enqueue each neighbor 10,000 times.
+**LinkedIn "degrees of connection":** When LinkedIn displays "2nd degree connection," it runs a bidirectional BFS from the viewer's node and the target's node in a social graph with over 1 billion members. BFS guarantees the shortest-path hop count. The implementation uses a bloom filter to approximate visited-node membership, trading a small false-positive rate for memory savings. Without the visited-at-enqueue optimization, a node is re-enqueued once for every already-expanded neighbor pointing at it, so a hub with 10,000 connections contributes 10,000 duplicate queue entries at the layer boundary rather than one.
 
 **Social network influencer detection (Facebook/Instagram):** BFS from a seed node level by level identifies 1st-degree, 2nd-degree, and 3rd-degree followers. The "layers" naturally emerge from BFS levels without additional bookkeeping.
 
@@ -612,7 +626,7 @@ Non-negative single-source weights route straight to Dijkstra; a negative cycle 
 
 ### Topological sort
 
-**Kubernetes dependency resolution:** When a Helm chart declares that ServiceB depends on ServiceA (which must be Running before ServiceB starts), the controller builds a DAG of Kubernetes resources and runs topological sort to determine the startup order. A cycle in the chart (ServiceA depends on ServiceB which depends on ServiceA) is detected as a Kahn's count mismatch and returns an error before any deployment starts.
+**Terraform's resource graph:** `terraform apply` builds a DAG from the references between resources (`aws_instance.web` reading `aws_security_group.sg.id` is an edge) and walks it in topological order, running independent branches in parallel. A dependency loop is caught before anything is provisioned and reported as `Error: Cycle: aws_security_group.a, aws_security_group.b` — the same count-mismatch signal Kahn's algorithm produces. Kubernetes itself is the counterexample worth knowing: it has no dependency ordering at all, and Helm applies resources in a fixed order by kind rather than sorting a graph, which is why "wait for ServiceA to be Running" has to be expressed with init containers or readiness probes instead.
 
 **Git commit graph:** Every Git commit points to its parent commit(s). The commit history forms a DAG. `git log --topo-order` outputs commits in topological order. `git rebase` traverses the commit DAG to find the common ancestor and replay commits.
 
@@ -731,17 +745,17 @@ assert network_delay_time([[1, 2, 10**9]], 2, 1) == 10**9
 
 ## 9. Common Mistakes
 
-### Mistake 1: BFS marks visited at dequeue time — infinite loop in production
+### Mistake 1: BFS marks visited at dequeue time — a silent O(E) memory bug
 
-**What happened:** An internal microservice at a mid-size fintech company ran a BFS over a service dependency graph to compute transitive closure (which services are reachable from a given root). The developer wrote the visited check inside the dequeue loop rather than at enqueue time. In the test environment, the graph was a DAG (no cycles), so no duplicate enqueue was possible and the bug was invisible.
+**What happened:** An internal microservice ran a BFS over a service dependency graph to compute transitive closure (which services are reachable from a given root). The developer wrote the visited check inside the dequeue loop rather than at enqueue time.
 
-In production, one team added a monitoring-only circular dependency (Service A depended on Service B for metrics, and Service B depended on Service A for health checks). This introduced a 2-node cycle.
+The reason this survives review and every unit test is that **the answer stays correct**. The `if node in visited: continue` check at the top of the loop drains the duplicates, every node is still expanded exactly once, and the traversal order is identical — differential-tested here on 2,000 random directed graphs with zero differences. Nothing loops forever either; the run terminates in O(V + E) as always.
 
-The BFS ran the following pattern: dequeue A, enqueue B; dequeue B, enqueue A; dequeue A, enqueue B; ...
+What changes is the queue. A node is enqueued once for every in-edge from an already-expanded node, so the queue holds up to E entries instead of V. On a small or sparse graph that is invisible. It became visible only when the graph got dense: a fan-out layer where nearly every service called nearly every other one.
 
-Memory grew from 512 MB baseline to 8 GB in under 5 minutes as the queue accumulated millions of duplicate entries before the OOM killer terminated the process. The deployment was rolled back and the bug was diagnosed from a heap dump showing a `deque` object containing 4.2 million identical entries.
+Note the two intuitions that both mislead here. It is **not** cycles: the 2-node cycle everyone reaches for (A imports B, B imports A) produces three enqueues and a maximum queue depth of one. And a cycle-free graph is **not** safe: a DAG full of diamonds duplicates just as badly, because duplication is driven by in-degree, not by back edges.
 
-Fix applied: visited set populated at enqueue time. Post-fix memory: stable at 20 MB. Queue max size: 2 entries (the two-node graph).
+Fix applied: visited set populated at enqueue time. Measured on a 512-node dense digraph (261,632 edges), the queue peak went from 261,121 entries to 511 — a 511x reduction, and the deque itself from ~2 MB to a few KB.
 
 **Lesson quantified:** On a dense graph with E = V^2, not marking visited at enqueue causes O(V^2) queue entries instead of O(V). At V = 512, that is 262,144 entries versus 512 — a 512x blowup in queue memory.
 
@@ -792,7 +806,7 @@ Topological sort is defined only for directed graphs. On an undirected graph, an
 
 ### Mistake 5: Python recursion limit for grid DFS
 
-Python's default recursion limit is `sys.getrecursionlimit()` = 1,000. A 350 x 350 grid with a single large island can trigger a recursion depth of 122,500 during DFS, raising `RecursionError` in Python. Calling `sys.setrecursionlimit(200000)` is a workaround but increases stack memory linearly and can cause a segmentation fault in CPython. The correct solution is iterative DFS or BFS. Frequency in production: every Python competitive-programming solution that uses recursive DFS on large grids hits this in a judge environment or on large test cases.
+Python's default recursion limit is `sys.getrecursionlimit()` = 1,000. A 350 x 350 grid with a single large island can trigger a recursion depth of 122,500 during DFS, raising `RecursionError` in Python. Calling `sys.setrecursionlimit(200000)` is a workaround — since CPython 3.12 a pure-Python call no longer consumes a C stack frame, and the interpreter checks the real C stack and raises `RecursionError` rather than segfaulting, so a 122,500-deep pure-Python recursion completes cleanly on 3.13 — but it still costs one frame object per level, and any recursion routed through C (a `__repr__`, a comparison, a C-implemented decorator) is still bounded by the C stack. The correct solution is iterative DFS or BFS. Frequency in production: every Python competitive-programming solution that uses recursive DFS on large grids hits this in a judge environment or on large test cases.
 
 ---
 
@@ -845,7 +859,7 @@ Advanced Graph
 BFS explores nodes in order of their hop distance from the source: all 1-hop neighbors first, then 2-hop, then 3-hop. The first time BFS reaches a node, it has taken the fewest possible hops to get there. DFS follows one branch as deep as possible before backtracking, so the first time it reaches a target it may have taken a long winding path. To find the BFS-shortest path with DFS you would need to explore all paths and track the minimum — which is exponential in the worst case.
 
 **Q: Can Dijkstra handle negative edge weights? What is the consequence if you use it on a graph with negative edges?**
-No. Dijkstra's correctness relies on the greedy property: once a node is popped from the heap, its distance is finalized. This holds only when adding an edge cannot decrease an already-finalized distance. A negative edge from an unprocessed node to an already-finalized node could produce a shorter path that Dijkstra has already committed to not updating. The result is not a crash but a silently incorrect shortest-path answer for some nodes — the type of bug that is hard to detect without a known-correct reference. Use Bellman-Ford for graphs with negative edges (but no negative cycles), or run a negative-cycle check first.
+No. Dijkstra's correctness relies on the greedy property: once a node is popped from the heap, its distance is finalized. This holds only when adding an edge cannot decrease an already-finalized distance. A negative edge from an unprocessed node to an already-finalized node could produce a shorter path that Dijkstra has already committed to not updating. The result is not a crash but a silently incorrect shortest-path answer for some nodes — the type of bug that is hard to detect without a known-correct reference. Be precise about *which* implementation gives the wrong answer, because it is a favourite follow-up: the finalize-on-pop variant that keeps a `visited` set and skips popped nodes does return wrong distances (differential-tested against Bellman-Ford on 4,683 negative-edge graphs with no negative cycle: 91 wrong). The lazy variant in §4 keeps no `visited` set, so an improved node is simply pushed again and re-expanded, and it returned the correct distances on all 4,683 — but that is not a licence to use it, because re-expansion destroys the O((V+E) log V) bound and turns it into an unbounded relaxation loop that is Bellman-Ford wearing a heap. A minimal counterexample worth memorising for the visited-set variant: edges `0->1 (1)`, `0->2 (2)`, `2->1 (-2)`, `1->3 (1)`; the true distances are `[0, 0, 2, 1]` and it answers `[0, 1, 2, 2]`. Use Bellman-Ford for graphs with negative edges (but no negative cycles), or run a negative-cycle check first.
 
 **Q: How do you detect a cycle in a directed graph versus an undirected graph?**
 In a directed graph: use DFS with three colors — white (unvisited), gray (in the current DFS call stack), black (fully processed). A back edge (edge from a gray node to another gray ancestor) indicates a cycle. Alternatively, Kahn's algorithm: a cycle exists if and only if the number of nodes processed by Kahn's is less than the total number of nodes. In an undirected graph: use DFS and track the parent. If DFS encounters an already-visited neighbor that is NOT the immediate parent, a cycle exists. Union-Find is also clean for undirected cycle detection: if two endpoints of an edge are already in the same component, adding that edge creates a cycle.
@@ -872,7 +886,7 @@ Add four diagonal direction pairs: (1,1), (1,-1), (-1,1), (-1,-1). The algorithm
 Each time a node's distance is improved, a new `(new_dist, node)` entry is pushed onto the heap without removing the old one. When the heap pops a `(d, u)` pair where `d > dist[u]`, it means a shorter path to `u` has already been processed — this entry is stale and is skipped. The first time a node is popped with `d == dist[u]`, that is its shortest distance (all earlier entries for the same node were stale and skipped). Correctness holds because the heap invariant ensures we always pop the globally minimum distance first. The lazy approach avoids the O(log V) decrease-key operation that a Fibonacci heap provides, trading a modest constant increase in heap size for implementation simplicity.
 
 **Q: What is the difference between Dijkstra's "eager" variant (with decrease-key) and the "lazy" variant (without decrease-key), and when does it matter?**
-Eager Dijkstra uses a heap that supports O(log V) decrease-key (e.g., a Fibonacci heap in theory). When a shorter path to node v is found, the existing heap entry is updated in place. This keeps the heap size bounded at V, giving O((V + E) log V) time. Lazy Dijkstra pushes a new entry on every relaxation without removing the stale one; the heap can grow to O(E) entries. Both variants are O((V+E) log V) with a binary heap when E = O(V log V) (sparse graphs). For dense graphs (E = O(V^2)), the lazy variant processes O(V^2) entries and runs in O(V^2 log V), while the eager variant with a Fibonacci heap achieves the theoretically optimal O(V^2 + E) = O(V^2). In practice, Fibonacci heaps have large constants and are almost never used in competitive programming or production code — the lazy binary heap is universally preferred for its implementation simplicity.
+Eager Dijkstra uses a heap that supports O(log V) decrease-key (e.g., a Fibonacci heap in theory). When a shorter path to node v is found, the existing heap entry is updated in place. This keeps the heap size bounded at V, giving O((V + E) log V) time. Lazy Dijkstra pushes a new entry on every relaxation without removing the stale one; the heap can grow to O(E) entries. With a binary heap both variants land in the same class, O(E log V), because log E < 2 log V. The separation only appears with a better heap: Fibonacci-heap Dijkstra is O(E + V log V), which on a dense graph (E = O(V^2)) is O(V^2) against the binary heap's O(V^2 log V) — and O(V^2) is exactly what the plain array-scan implementation of Dijkstra gives on a dense graph without any heap at all. In practice, Fibonacci heaps have large constants and are almost never used in competitive programming or production code — the lazy binary heap is universally preferred for its implementation simplicity.
 
 **Q: A student says: "For topological sort I can just run DFS and output nodes in reverse post-order." Is this correct? How does it compare to Kahn's?**
 Yes, this is correct. DFS post-order processes a node after all nodes reachable from it have been processed. Reversing that order gives a valid topological ordering. Cycle detection requires the three-color (white/gray/black) tracking: a gray-to-gray back edge indicates a cycle. Kahn's BFS-based approach produces the same valid topological order (one of potentially many valid orderings) and detects cycles via the count check. The two are equivalent in correctness and complexity O(V+E). Kahn's is often preferred in interviews because it avoids the need to explain the three-color state machine; the DFS reverse-post-order approach is preferred when you need to integrate with existing DFS code or process nodes in a recursive manner.
@@ -890,7 +904,7 @@ Yes. An undirected edge (u, v, w) is simply represented as two directed edges: a
 ### Grid for Number of Islands
 
 ```
-Grid (5x5):
+Grid (4 rows x 5 cols):
 +---+---+---+---+---+
 | 1 | 1 | 1 | 1 | 0 |   Row 0
 +---+---+---+---+---+
@@ -907,8 +921,9 @@ BFS from (0,0):
   Layer 0: {(0,0)}
   Layer 1: {(0,1),(1,0)}
   Layer 2: {(0,2),(1,1),(2,0)}
-  Layer 3: {(0,3),(1,3),(2,1)}
-  All cells visited. Count = 1.
+  Layer 3: {(0,3),(2,1)}
+  Layer 4: {(1,3)}          <- reached via (0,3), not via (1,2), which is water
+  All 9 land cells visited. Count = 1.
 ```
 
 ### DAG for Course Schedule

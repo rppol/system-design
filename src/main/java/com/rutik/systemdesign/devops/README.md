@@ -356,7 +356,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/README.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** No NEXT UP pointer remains.
+> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/case_studies.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** No NEXT UP pointer remains.
 >
 > Chunk 11 added Phase 8 — Specialized Platforms & Performance: 3 modules (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`), 1 case study (`design_ml_platform_infrastructure`), 1 cross-cutting primitive (`gpu_node_lifecycle`). Future additions should append modules/case studies following the "Adding a DevOps module" instructions in CLAUDE.md and flip new rows below.
 
@@ -364,7 +364,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 | Chunk | Contents | Status |
 |-------|----------|--------|
-| **0 — Scaffold** | `devops/README.md`, `case_studies/README.md` skeleton, root `README.md` + `CLAUDE.md` + `MEMORY.md` references | done |
+| **0 — Scaffold** | `devops/README.md`, `case_studies/case_studies.md` skeleton, root `README.md` + `CLAUDE.md` + `MEMORY.md` references | done |
 | **1** | Phase 1 modules 1–4 | done |
 | **2** | Phase 2 modules 5–9 (containers + K8s arch/workloads/networking) | done |
 | **3** | Phase 2 modules 10–14 (K8s storage/scheduling/security/helm/operators) | done |
@@ -374,54 +374,54 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | **7** | Phase 6 modules 29–34 (Observability & SRE) | done |
 | **8** | Phase 7 modules 35–38 (DevSecOps & reliability) | done |
 | **9** | 6 cross-cutting primitives + case studies 1–6 | done |
-| **10** | Case studies 7–12 + finalize `case_studies/README.md` | done |
+| **10** | Case studies 7–12 + finalize `case_studies/case_studies.md` | done |
 | **11 — Phase 8 expansion** | Modules 39–41 (GPU/MLOps, streaming ops, perf/load testing) + case study `design_ml_platform_infrastructure` + cross-cutting `gpu_node_lifecycle` | done |
 
 ### Module File Status
 
 | # | Module | Phase | Chunk | Status | Q&A Target |
 |---|--------|-------|-------|--------|-----------|
-| 1 | `linux_and_os_fundamentals/README.md` | 1 | 1 | done | 12 |
-| 2 | `shell_scripting_and_automation/README.md` | 1 | 1 | done | 10 |
-| 3 | `networking_for_devops/README.md` | 1 | 1 | done | 12 |
-| 4 | `version_control_and_git_workflows/README.md` | 1 | 1 | done | 10 |
-| 5 | `containers_and_docker/README.md` | 2 | 2 | done | 12 |
-| 6 | `container_runtimes_and_oci/README.md` | 2 | 2 | done | 12 |
-| 7 | `kubernetes_architecture/README.md` | 2 | 2 | done | 15 |
-| 8 | `kubernetes_workloads_and_objects/README.md` | 2 | 2 | done | 12 |
-| 9 | `kubernetes_networking/README.md` | 2 | 2 | done | 15 |
-| 10 | `kubernetes_storage_and_state/README.md` | 2 | 3 | done | 12 |
-| 11 | `kubernetes_scheduling_and_autoscaling/README.md` | 2 | 3 | done | 12 |
-| 12 | `kubernetes_security/README.md` | 2 | 3 | done | 15 |
-| 13 | `helm_and_package_management/README.md` | 2 | 3 | done | 10 |
-| 14 | `kubernetes_operators_and_crds/README.md` | 2 | 3 | done | 12 |
-| 15 | `ci_cd_fundamentals/README.md` | 3 | 4 | done | 12 |
-| 16 | `ci_cd_platforms/README.md` | 3 | 4 | done | 10 |
-| 17 | `deployment_strategies/README.md` | 3 | 4 | done | 12 |
-| 18 | `gitops_argocd_flux/README.md` | 3 | 4 | done | 12 |
-| 19 | `artifact_and_registry_management/README.md` | 3 | 4 | done | 10 |
-| 20 | `infrastructure_as_code_terraform/README.md` | 4 | 5 | done | 15 |
-| 21 | `terraform_advanced_and_alternatives/README.md` | 4 | 5 | done | 12 |
-| 22 | `configuration_management/README.md` | 4 | 5 | done | 10 |
-| 23 | `secrets_management/README.md` | 4 | 5 | done | 12 |
-| 24 | `cloud_fundamentals_and_aws/README.md` | 5 | 6 | done | 12 |
-| 25 | `gcp_and_azure_essentials/README.md` | 5 | 6 | done | 10 |
-| 26 | `serverless_and_faas/README.md` | 5 | 6 | done | 12 |
-| 27 | `cloud_networking_and_cdn/README.md` | 5 | 6 | done | 12 |
-| 28 | `cloud_cost_optimization_finops/README.md` | 5 | 6 | done | 10 |
-| 29 | `observability_metrics_prometheus/README.md` | 6 | 7 | done | 15 |
-| 30 | `observability_logging/README.md` | 6 | 7 | done | 12 |
-| 31 | `observability_tracing_and_otel/README.md` | 6 | 7 | done | 12 |
-| 32 | `visualization_and_alerting/README.md` | 6 | 7 | done | 10 |
-| 33 | `sre_principles_and_slos/README.md` | 6 | 7 | done | 15 |
-| 34 | `incident_management_and_oncall/README.md` | 6 | 7 | done | 12 |
-| 35 | `devsecops_and_supply_chain_security/README.md` | 7 | 8 | done | 12 |
-| 36 | `policy_as_code_and_compliance/README.md` | 7 | 8 | done | 12 |
-| 37 | `disaster_recovery_and_resilience/README.md` | 7 | 8 | done | 12 |
-| 38 | `platform_engineering_and_idp/README.md` | 7 | 8 | done | 10 |
-| 39 | `ml_platform_and_gpu_infrastructure/README.md` | 8 | 11 | done | 15 |
-| 40 | `event_streaming_operations/README.md` | 8 | 11 | done | 12 |
-| 41 | `performance_and_load_testing/README.md` | 8 | 11 | done | 12 |
+| 1 | `linux_and_os_fundamentals/linux_and_os_fundamentals.md` | 1 | 1 | done | 12 |
+| 2 | `shell_scripting_and_automation/shell_scripting_and_automation.md` | 1 | 1 | done | 10 |
+| 3 | `networking_for_devops/networking_for_devops.md` | 1 | 1 | done | 12 |
+| 4 | `version_control_and_git_workflows/version_control_and_git_workflows.md` | 1 | 1 | done | 10 |
+| 5 | `containers_and_docker/containers_and_docker.md` | 2 | 2 | done | 12 |
+| 6 | `container_runtimes_and_oci/container_runtimes_and_oci.md` | 2 | 2 | done | 12 |
+| 7 | `kubernetes_architecture/kubernetes_architecture.md` | 2 | 2 | done | 15 |
+| 8 | `kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md` | 2 | 2 | done | 12 |
+| 9 | `kubernetes_networking/kubernetes_networking.md` | 2 | 2 | done | 15 |
+| 10 | `kubernetes_storage_and_state/kubernetes_storage_and_state.md` | 2 | 3 | done | 12 |
+| 11 | `kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md` | 2 | 3 | done | 12 |
+| 12 | `kubernetes_security/kubernetes_security.md` | 2 | 3 | done | 15 |
+| 13 | `helm_and_package_management/helm_and_package_management.md` | 2 | 3 | done | 10 |
+| 14 | `kubernetes_operators_and_crds/kubernetes_operators_and_crds.md` | 2 | 3 | done | 12 |
+| 15 | `ci_cd_fundamentals/ci_cd_fundamentals.md` | 3 | 4 | done | 12 |
+| 16 | `ci_cd_platforms/ci_cd_platforms.md` | 3 | 4 | done | 10 |
+| 17 | `deployment_strategies/deployment_strategies.md` | 3 | 4 | done | 12 |
+| 18 | `gitops_argocd_flux/gitops_argocd_flux.md` | 3 | 4 | done | 12 |
+| 19 | `artifact_and_registry_management/artifact_and_registry_management.md` | 3 | 4 | done | 10 |
+| 20 | `infrastructure_as_code_terraform/infrastructure_as_code_terraform.md` | 4 | 5 | done | 15 |
+| 21 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md` | 4 | 5 | done | 12 |
+| 22 | `configuration_management/configuration_management.md` | 4 | 5 | done | 10 |
+| 23 | `secrets_management/secrets_management.md` | 4 | 5 | done | 12 |
+| 24 | `cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md` | 5 | 6 | done | 12 |
+| 25 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | 5 | 6 | done | 10 |
+| 26 | `serverless_and_faas/serverless_and_faas.md` | 5 | 6 | done | 12 |
+| 27 | `cloud_networking_and_cdn/cloud_networking_and_cdn.md` | 5 | 6 | done | 12 |
+| 28 | `cloud_cost_optimization_finops/cloud_cost_optimization_finops.md` | 5 | 6 | done | 10 |
+| 29 | `observability_metrics_prometheus/observability_metrics_prometheus.md` | 6 | 7 | done | 15 |
+| 30 | `observability_logging/observability_logging.md` | 6 | 7 | done | 12 |
+| 31 | `observability_tracing_and_otel/observability_tracing_and_otel.md` | 6 | 7 | done | 12 |
+| 32 | `visualization_and_alerting/visualization_and_alerting.md` | 6 | 7 | done | 10 |
+| 33 | `sre_principles_and_slos/sre_principles_and_slos.md` | 6 | 7 | done | 15 |
+| 34 | `incident_management_and_oncall/incident_management_and_oncall.md` | 6 | 7 | done | 12 |
+| 35 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | 7 | 8 | done | 12 |
+| 36 | `policy_as_code_and_compliance/policy_as_code_and_compliance.md` | 7 | 8 | done | 12 |
+| 37 | `disaster_recovery_and_resilience/disaster_recovery_and_resilience.md` | 7 | 8 | done | 12 |
+| 38 | `platform_engineering_and_idp/platform_engineering_and_idp.md` | 7 | 8 | done | 10 |
+| 39 | `ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` | 8 | 11 | done | 15 |
+| 40 | `event_streaming_operations/event_streaming_operations.md` | 8 | 11 | done | 12 |
+| 41 | `performance_and_load_testing/performance_and_load_testing.md` | 8 | 11 | done | 12 |
 
 ### Case Study & Cross-Cutting File Status
 
@@ -492,7 +492,7 @@ CASE STUDY TEMPLATE — 11-section principal template (matches llm/ml):
 MAINTENANCE RULE when completing a chunk:
   1. Flip Status "pending" -> "done" for each completed file in the tables above
   2. Advance the NEXT UP pointer at the top of §8
-  3. Update case_studies/README.md if new case studies were added
+  3. Update case_studies/case_studies.md if new case studies were added
   4. Update root README.md and CLAUDE.md counts if the total changed
   5. Update the devops-section.md memory file if structure changed
 ```

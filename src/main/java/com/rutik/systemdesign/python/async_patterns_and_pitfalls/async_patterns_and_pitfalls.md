@@ -5,7 +5,7 @@ senior: async_patterns_and_pitfalls.md
 principal: async_patterns_and_pitfalls.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
-> Advanced companion to `../asyncio_and_event_loop/README.md`. Covers production patterns
+> Advanced companion to `../asyncio_and_event_loop/asyncio_and_event_loop.md`. Covers production patterns
 > that go beyond the event loop fundamentals: detecting and fixing blocking-in-async (the #1
 > FastAPI production bug), executor integration, async generators, rate limiting with
 > `asyncio.Semaphore`, backpressure, retry with jitter, circuit breakers, timeout composition,
@@ -883,7 +883,7 @@ Cross-reference: cancellation semantics themselves — `CancelledError` propagat
 `asyncio.shield()`, cancellation scopes, and `Task.uncancel()` — are developed in
 [`../asyncio_and_event_loop/structured_concurrency.md`](../asyncio_and_event_loop/structured_concurrency.md)
 §6.2. See `../../backend/api_gateway_patterns/` for circuit breaker concepts at the API
-gateway layer, and `../asyncio_and_event_loop/README.md` for `TaskGroup` and structured
+gateway layer, and `../asyncio_and_event_loop/asyncio_and_event_loop.md` for `TaskGroup` and structured
 concurrency fundamentals.
 
 ---
@@ -1253,7 +1253,7 @@ async def safe_consumer(url: str) -> dict | None:
 - `asyncio.timeout()` — Python 3.11+
 - `asyncio.to_thread()` — Python 3.9+
 - `aiter()` / `anext()` built-ins — Python 3.10+
-- `asyncio.TaskGroup` — Python 3.11+ (see `../asyncio_and_event_loop/README.md`)
+- `asyncio.TaskGroup` — Python 3.11+ (see `../asyncio_and_event_loop/asyncio_and_event_loop.md`)
 - `asyncio.Barrier` — Python 3.11+
 
 ---
@@ -1712,6 +1712,6 @@ async def ingest_batch_resilient(record_ids: list[str]) -> dict[str, Any]:
 - All tasks are tracked in `_tasks` to prevent silent GC cancellation.
 
 Cross-references:
-- See `../asyncio_and_event_loop/README.md` for event loop fundamentals and `TaskGroup`
+- See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for event loop fundamentals and `TaskGroup`
 - See `../../backend/api_gateway_patterns/` for circuit breaker concepts at the gateway layer
 - See `../../llm/case_studies/cross_cutting/streaming_at_scale.md` for async SSE streaming patterns

@@ -23,7 +23,7 @@ Core capabilities covered in this module:
 - OIDC and third-party OAuth2 (Google, GitHub): authorization code flow
 - CSRF protection: SameSite cookies, double-submit cookie pattern
 - Token blacklisting with Redis for explicit logout
-- Cross-links: `../dependency_injection_in_fastapi/README.md`, `../configuration_and_settings_management/README.md`
+- Cross-links: `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`, `../configuration_and_settings_management/configuration_and_settings_management.md`
 
 Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
 

@@ -29,8 +29,8 @@ Key capabilities covered in this module:
 - Auto-generated OpenAPI/Swagger at `/docs` and `/openapi.json`
 
 Cross-references:
-- For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/README.md`
-- For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/README.md`
+- For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`
+- For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/rest_api_design.md`
 
 ---
 
@@ -1510,5 +1510,5 @@ approach: tests can inject a stub resource pool without monkey-patching global s
 ---
 
 *Cross-references:*
-- *For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/README.md`*
-- *For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/README.md`*
+- *For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`*
+- *For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/rest_api_design.md`*

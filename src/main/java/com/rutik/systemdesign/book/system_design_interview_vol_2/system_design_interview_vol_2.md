@@ -150,19 +150,19 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| 1 | `01_proximity_service/README.md` | done |
-| 2 | `02_nearby_friends/README.md` | done |
-| 3 | `03_google_maps/README.md` | done |
-| 4 | `04_distributed_message_queue/README.md` | done |
-| 5 | `05_metrics_monitoring_and_alerting/README.md` | done |
-| 6 | `06_ad_click_event_aggregation/README.md` | done |
-| 7 | `07_hotel_reservation_system/README.md` | done |
-| 8 | `08_distributed_email_service/README.md` | done |
-| 9 | `09_s3_like_object_storage/README.md` | done |
-| 10 | `10_real_time_gaming_leaderboard/README.md` | done |
-| 11 | `11_payment_system/README.md` | done |
-| 12 | `12_digital_wallet/README.md` | done |
-| 13 | `13_stock_exchange/README.md` | done |
+| 1 | `01_proximity_service/01_proximity_service.md` | done |
+| 2 | `02_nearby_friends/02_nearby_friends.md` | done |
+| 3 | `03_google_maps/03_google_maps.md` | done |
+| 4 | `04_distributed_message_queue/04_distributed_message_queue.md` | done |
+| 5 | `05_metrics_monitoring_and_alerting/05_metrics_monitoring_and_alerting.md` | done |
+| 6 | `06_ad_click_event_aggregation/06_ad_click_event_aggregation.md` | done |
+| 7 | `07_hotel_reservation_system/07_hotel_reservation_system.md` | done |
+| 8 | `08_distributed_email_service/08_distributed_email_service.md` | done |
+| 9 | `09_s3_like_object_storage/09_s3_like_object_storage.md` | done |
+| 10 | `10_real_time_gaming_leaderboard/10_real_time_gaming_leaderboard.md` | done |
+| 11 | `11_payment_system/11_payment_system.md` | done |
+| 12 | `12_digital_wallet/12_digital_wallet.md` | done |
+| 13 | `13_stock_exchange/13_stock_exchange.md` | done |
 
 ---
 

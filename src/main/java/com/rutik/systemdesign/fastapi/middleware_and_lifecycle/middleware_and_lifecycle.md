@@ -38,8 +38,8 @@ Key capabilities covered in this module:
 Python version: 3.11/3.12. FastAPI version: 0.93+. Starlette version: 0.20+.
 
 Cross-references:
-- ASGI fundamentals: `../fastapi_fundamentals_asgi/README.md`
-- Dependency injection and yield dependencies: `../dependency_injection_in_fastapi/README.md`
+- ASGI fundamentals: `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
+- Dependency injection and yield dependencies: `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`
 - REST API design principles: `../../../hld/case_studies/`
 
 ---

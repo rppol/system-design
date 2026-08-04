@@ -22,9 +22,9 @@ Key capabilities this module covers:
 - Route ordering gotchas, OpenAPI customisation, large body handling
 
 Cross-references:
-- Dependency injection on route handlers: `../dependency_injection_in_fastapi/README.md`
-- ASGI protocol and Starlette internals: `../fastapi_fundamentals_asgi/README.md`
-- Pydantic v2 request/response model validation: `../pydantic_v2_deep_dive/README.md`
+- Dependency injection on route handlers: `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`
+- ASGI protocol and Starlette internals: `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
+- Pydantic v2 request/response model validation: `../pydantic_v2_deep_dive/pydantic_v2_deep_dive.md`
 
 ---
 

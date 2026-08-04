@@ -147,22 +147,22 @@ completed and diagram-linted.
 
 | # | File | Status |
 |---|------|--------|
-| 1 | `01_scale_from_zero_to_millions_of_users/README.md` | done |
-| 2 | `02_back_of_the_envelope_estimation/README.md` | done |
-| 3 | `03_a_framework_for_system_design_interviews/README.md` | done |
-| 4 | `04_design_a_rate_limiter/README.md` | done |
-| 5 | `05_design_consistent_hashing/README.md` | done |
-| 6 | `06_design_a_key_value_store/README.md` | done |
-| 7 | `07_design_a_unique_id_generator/README.md` | done |
-| 8 | `08_design_a_url_shortener/README.md` | done |
-| 9 | `09_design_a_web_crawler/README.md` | done |
-| 10 | `10_design_a_notification_system/README.md` | done |
-| 11 | `11_design_a_news_feed_system/README.md` | done |
-| 12 | `12_design_a_chat_system/README.md` | done |
-| 13 | `13_design_a_search_autocomplete_system/README.md` | done |
-| 14 | `14_design_youtube/README.md` | done |
-| 15 | `15_design_google_drive/README.md` | done |
-| 16 | `16_the_learning_continues/README.md` | done |
+| 1 | `01_scale_from_zero_to_millions_of_users/01_scale_from_zero_to_millions_of_users.md` | done |
+| 2 | `02_back_of_the_envelope_estimation/02_back_of_the_envelope_estimation.md` | done |
+| 3 | `03_a_framework_for_system_design_interviews/03_a_framework_for_system_design_interviews.md` | done |
+| 4 | `04_design_a_rate_limiter/04_design_a_rate_limiter.md` | done |
+| 5 | `05_design_consistent_hashing/05_design_consistent_hashing.md` | done |
+| 6 | `06_design_a_key_value_store/06_design_a_key_value_store.md` | done |
+| 7 | `07_design_a_unique_id_generator/07_design_a_unique_id_generator.md` | done |
+| 8 | `08_design_a_url_shortener/08_design_a_url_shortener.md` | done |
+| 9 | `09_design_a_web_crawler/09_design_a_web_crawler.md` | done |
+| 10 | `10_design_a_notification_system/10_design_a_notification_system.md` | done |
+| 11 | `11_design_a_news_feed_system/11_design_a_news_feed_system.md` | done |
+| 12 | `12_design_a_chat_system/12_design_a_chat_system.md` | done |
+| 13 | `13_design_a_search_autocomplete_system/13_design_a_search_autocomplete_system.md` | done |
+| 14 | `14_design_youtube/14_design_youtube.md` | done |
+| 15 | `15_design_google_drive/15_design_google_drive.md` | done |
+| 16 | `16_the_learning_continues/16_the_learning_continues.md` | done |
 
 ---
 
