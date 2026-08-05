@@ -522,19 +522,19 @@ Write latency to a well-tuned KurrentDB or PostgreSQL event store: p50 ~1ms, p99
 
 ## 11. Technologies & Tools
 
-**KurrentDB**: Purpose-built event store. Native persistent subscriptions, catch-up subscriptions, competing consumers, server-side projections (JavaScript). Strong consistency within a stream. Available self-hosted or as Kurrent Cloud. Write throughput: ~10,000 events/second per node on standard hardware.
+- **KurrentDB** — purpose-built event store. Native persistent subscriptions, catch-up subscriptions, competing consumers, server-side projections (JavaScript). Strong consistency within a stream. Available self-hosted or as Kurrent Cloud. Write throughput: ~10,000 events/second per node on standard hardware.
 
-**Apache Kafka**: Durable, ordered, partitioned event log. Consumer groups as competing consumers. Compacted topics for snapshot-like behavior (latest value per key). Not a purpose-built event store — no per-stream optimistic concurrency. Best for high-throughput platform-level event streaming. Typical write latency: ~5ms p99 on same-AZ, ~15ms cross-AZ.
+- **Apache Kafka** — durable, ordered, partitioned event log. Consumer groups as competing consumers. Compacted topics for snapshot-like behavior (latest value per key). Not a purpose-built event store — no per-stream optimistic concurrency. Best for high-throughput platform-level event streaming. Typical write latency: ~5ms p99 on same-AZ, ~15ms cross-AZ.
 
-**Axon Framework + AxonServer** (Java): Batteries-included ES+CQRS framework. Annotations for aggregates, event handlers, saga handlers. AxonServer provides event routing, dead-letter queue, and event store. Strong DDD alignment.
+- **Axon Framework**, **AxonServer** — Java; batteries-included ES+CQRS framework. Annotations for aggregates, event handlers, saga handlers. AxonServer provides event routing, dead-letter queue, and event store. Strong DDD alignment.
 
-**Marten** (.NET): Event sourcing on PostgreSQL. Uses JSONB columns for events. No separate event store required — familiar operational model for teams already running Postgres.
+- **Marten** — .NET event sourcing on PostgreSQL. Uses JSONB columns for events. No separate event store required — familiar operational model for teams already running Postgres.
 
-**Eventuate Tram**: Microservices event sourcing and saga framework. Supports Kafka or RabbitMQ as the event transport. Provides saga orchestration primitives with compensating transaction support.
+- **Eventuate Tram** — microservices event sourcing and saga framework. Supports Kafka or RabbitMQ as the event transport. Provides saga orchestration primitives with compensating transaction support.
 
-**PostgreSQL + events table**: Lightweight event store for lower-scale systems. A single `events` table with `(aggregate_id, event_version, event_type, occurred_at, payload JSONB)` and a unique constraint on `(aggregate_id, event_version)` provides optimistic concurrency. LISTEN/NOTIFY can trigger projectors. Suitable for up to ~1M events/day before dedicated event store tooling is justified.
+- **PostgreSQL** — a lightweight event store for lower-scale systems. A single `events` table with `(aggregate_id, event_version, event_type, occurred_at, payload JSONB)` and a unique constraint on `(aggregate_id, event_version)` provides optimistic concurrency. LISTEN/NOTIFY can trigger projectors. Suitable for up to ~1M events/day before dedicated event store tooling is justified.
 
-**Redis Streams**: Append-only log with consumer groups. Suitable for short-retention event streaming within a single microservice boundary. Not a durable event store for long-term history.
+- **Redis Streams** — append-only log with consumer groups. Suitable for short-retention event streaming within a single microservice boundary. Not a durable event store for long-term history.
 
 ---
 

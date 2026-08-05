@@ -843,23 +843,23 @@ than by whether the debate is still producing value.
 
 ## 11. Technologies & Tools
 
-**[LangGraph](../agentic_frameworks/langgraph.md)** — first-class support for multi-agent debate via StateGraph with conditional edges for convergence detection. Round state is passed through the graph's shared state object. Recommended for production deployments.
+- **[LangGraph](../agentic_frameworks/langgraph.md)** — first-class support for multi-agent debate via StateGraph with conditional edges for convergence detection. Round state is passed through the graph's shared state object. Recommended for production deployments.
 
-**LangChain AgentExecutor** — can orchestrate debate via sequential chain with memory, but requires manual context management. Suitable for simpler 2-agent patterns.
+- **LangChain AgentExecutor** — can orchestrate debate via sequential chain with memory, but requires manual context management. Suitable for simpler 2-agent patterns.
 
-**Anthropic SDK (Python/TypeScript)** — direct API access. Use `asyncio.gather` for parallel round-0 calls. No built-in debate orchestration; implement as shown in Section 6.
+- **Anthropic SDK** — Python and TypeScript; direct API access. Use `asyncio.gather` for parallel round-0 calls. No built-in debate orchestration; implement as shown in Section 6.
 
-**OpenAI Responses / Conversations API** — server-side conversation state: a Conversation object (passed as `conversation="conv_..."` on each Response) holds debate history natively, but one conversation is one agent, so an N-agent debate needs N conversations plus manual cross-agent context injection. No built-in debate orchestration — round-0 parallelism and answer fusion are yours to write.
+- **OpenAI Responses API** — server-side conversation state: a Conversation object (passed as `conversation="conv_..."` on each Response) holds debate history natively, but one conversation is one agent, so an N-agent debate needs N conversations plus manual cross-agent context injection. No built-in debate orchestration — round-0 parallelism and answer fusion are yours to write.
 
-**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. The class is `RoundRobinGroupChat`, imported from `autogen_agentchat.teams` in the `autogen-agentchat` package; there is no `RoundRobinSpeakerSelection` class, so do not reach for one. Most feature-complete out-of-the-box for multi-agent debate.
+- **[AutoGen](../agentic_frameworks/autogen.md)** — Microsoft; built-in group chat with round-robin and broadcast modes. The class is `RoundRobinGroupChat`, imported from `autogen_agentchat.teams` in the `autogen-agentchat` package; there is no `RoundRobinSpeakerSelection` class, so do not reach for one. Most feature-complete out-of-the-box for multi-agent debate.
 
-**CrewAI** — sequential and hierarchical process modes. Hierarchical mode with a manager agent approximates the judge pattern. Less flexible than LangGraph for custom convergence logic.
+- **CrewAI** — sequential and hierarchical process modes. Hierarchical mode with a manager agent approximates the judge pattern. Less flexible than LangGraph for custom convergence logic.
 
-**[DSPy](../agentic_frameworks/dspy.md)** — `dspy.majority` module implements majority voting as a first-class primitive. Debate can be expressed as a custom `Module` chaining `dspy.Predict` calls.
+- **[DSPy](../agentic_frameworks/dspy.md)** — `dspy.majority` module implements majority voting as a first-class primitive. Debate can be expressed as a custom `Module` chaining `dspy.Predict` calls.
 
-**Guidance / LMQL** — constrained generation to enforce `FINAL ANSWER:` format and extract answers without post-processing heuristics.
+- **Guidance**, **LMQL** — constrained generation to enforce `FINAL ANSWER:` format and extract answers without post-processing heuristics.
 
-**Cost tracking** — LangSmith, Langfuse, or Arize Phoenix for per-round token attribution. Essential for catching context-bloat issues in production.
+- **Cost tracking:** **LangSmith**, **Langfuse**, **Arize Phoenix** — per-round token attribution. Essential for catching context-bloat issues in production.
 
 ---
 

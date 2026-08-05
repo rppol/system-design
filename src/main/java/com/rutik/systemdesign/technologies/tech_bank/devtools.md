@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: devtools -->
 
-The 299 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 301 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Build & test tooling** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1627,6 +1627,16 @@ You import an existing artifact — an OpenAPI or AsyncAPI document, a Postman c
 
 That symmetry is the point — one artifact drives both the mock and the conformance check, so the mock cannot drift into fiction. It covers asynchronous protocols too, publishing mock messages to Kafka or MQTT. Where it is weaker than WireMock is dynamic behaviour: it is example-driven, not a programmable stub server.
 
+### Miro
+**Short:** Online collaborative whiteboard; in this repo it is the canvas a distributed team runs an event storming session on.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/version-control-and-workbench @1
+
+An effectively unbounded shared canvas with sticky notes, frames, connectors and live multi-user cursors. Event storming needs very little more than that: enough wall to hold a domain's worth of notes, a colour convention everyone can see being applied in real time, and an artifact that still exists after the session, which a physical wall does not give you without someone photographing it.
+
+Reach for it when the people modelling a domain are not in the same room. The costs are the ones any remote board has -- it loses the everyone-standing-at-the-wall quality co-located teams prefer, and a board becomes unreadable once the note count grows unless someone is disciplined about frames and naming.
+
 ### MockIntegration
 **Short:** Spring Integration test helper providing mock message channels, handlers and sources for flow assertions.
 **Kind:** api
@@ -1708,6 +1718,16 @@ Python-superset compatibility is a goal it has not fully reached, so treat exist
 A scenario declares a driver — usually Docker or Podman — and Molecule runs a fixed sequence against a freshly created instance: `create`, `converge` to apply the role, `idempotence` which converges a second time and fails if any task reports changed, `verify` for assertions written in Ansible or Testinfra, then `destroy`. The idempotence step is the one that earns its keep, because a role that reports changes on every run is the most common Ansible defect and nothing else catches it.
 
 Multiple scenarios cover different distributions or variable sets. Container instances are the tradeoff: systemd, kernel modules and networking behave differently there than on a VM, so anything depending on those needs a VM driver or a real staging host.
+
+### MURAL
+**Short:** Online collaborative whiteboard in the same category as Miro, distinguished by facilitation features for running a workshop.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/version-control-and-workbench @1
+
+Same shape as Miro -- an infinite canvas of sticky notes, frames and connectors edited by many people at once -- with the product's emphasis on the person running the session rather than the artifact: a private mode so participants write their own notes before seeing anyone else's, timers to box an activity, and voting to converge on what matters.
+
+That emphasis is the reason to pick it over the alternative for a structured workshop such as event storming, where the order of divergence and convergence is the method rather than an accident. For a board that mostly gets drawn on and referred to later the two are interchangeable, and the real decision is usually which one the organisation already licenses.
 
 ### mvn dependency:tree
 **Short:** Maven goal printing the resolved dependency tree, used to find version conflicts and unwanted transitives.

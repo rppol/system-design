@@ -741,32 +741,32 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 ## 11. Technologies and Tools
 
 **Kafka Ecosystem**
-- Apache Kafka — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Java 17, 21 and 25 are fully supported; Java 11 covers only a subset of modules (clients, Streams and related). Run brokers on the most recent LTS, Java 25.
-- Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
-- ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
-- Kafka Connect — scalable framework for source and sink connectors, with a large catalogue on Confluent Marketplace (formerly Confluent Hub): JDBC, Elasticsearch, S3, Debezium CDC and so on. Do not quote a connector count — Confluent's own pages state 120+, 150+ and 200+ depending on which product surface is being counted, so there is no figure worth carrying.
-  - Debezium — the CDC source-connector family that runs inside Kafka Connect. This module owns Kafka itself; [`technologies/debezium_change_data_capture`](../../technologies/debezium_change_data_capture/debezium_change_data_capture.md) owns the connector: snapshots, replication slots, offsets and schema history, the `EventRouter` outbox transform, and why a stalled connector fills the source database's disk. It also states the direction of influence on the DBLog story above — Netflix's watermark technique was adopted **by** Debezium, as incremental snapshots.
-- Kafka MirrorMaker 2 — cross-cluster replication for disaster recovery and geo-replication.
+- **Apache Kafka** — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Java 17, 21 and 25 are fully supported; Java 11 covers only a subset of modules (clients, Streams and related). Run brokers on the most recent LTS, Java 25.
+- **Kafka Streams** — embedded Java library for stateful stream processing. No separate cluster required.
+- **ksqlDB** — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
+- **Kafka Connect** — scalable framework for source and sink connectors, with a large catalogue on Confluent Marketplace (formerly Confluent Hub): JDBC, Elasticsearch, S3, Debezium CDC and so on. Do not quote a connector count — Confluent's own pages state 120+, 150+ and 200+ depending on which product surface is being counted, so there is no figure worth carrying.
+  - **Debezium** — the CDC source-connector family that runs inside Kafka Connect. This module owns Kafka itself; [`technologies/debezium_change_data_capture`](../../technologies/debezium_change_data_capture/debezium_change_data_capture.md) owns the connector: snapshots, replication slots, offsets and schema history, the `EventRouter` outbox transform, and why a stalled connector fills the source database's disk. It also states the direction of influence on the DBLog story above — Netflix's watermark technique was adopted **by** Debezium, as incremental snapshots.
+- **Kafka MirrorMaker 2** — cross-cluster replication for disaster recovery and geo-replication.
 
 **Schema Management**
-- Confluent Schema Registry — supports Avro, Protobuf, JSON Schema. REST API for schema management. Compatibility modes: NONE, BACKWARD, BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE.
-- AWS Glue Schema Registry — managed equivalent for AWS deployments. Integrates with MSK (Managed Streaming for Kafka).
+- **Confluent Schema Registry** — supports Avro, Protobuf, JSON Schema. REST API for schema management. Compatibility modes: NONE, BACKWARD, BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE.
+- **AWS Glue Schema Registry** — managed equivalent for AWS deployments. Integrates with MSK (Managed Streaming for Kafka).
 
 **Managed Kafka**
-- Confluent Cloud — fully managed Kafka with enterprise features (RBAC, audit logs, cluster linking).
-- Amazon MSK — managed Kafka on AWS. MSK Serverless for unpredictable workloads.
-- Aiven for Kafka — managed Kafka across AWS, GCP, Azure.
+- **Confluent Cloud** — fully managed Kafka with enterprise features (RBAC, audit logs, cluster linking).
+- **Amazon MSK** — managed Kafka on AWS. MSK Serverless for unpredictable workloads.
+- **Aiven for Kafka** — managed Kafka across AWS, GCP, Azure.
 
 **Monitoring**
-- Confluent Control Center — commercial UI for consumer lag, broker health, Schema Registry. Ships separately from Confluent Platform as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and stores its metrics in Prometheus rather than an internal Kafka Streams pipeline.
-- Kafdrop — open-source web UI for topic/message inspection.
-- Burrow (LinkedIn) — consumer lag monitoring with rule-based alerting.
-- KEDA (Kubernetes) — event-driven autoscaling based on Kafka consumer group lag.
-- JMX metrics exposed by brokers — integrate with Prometheus via JMX Exporter.
+- **Confluent Control Center** — commercial UI for consumer lag, broker health, Schema Registry. Ships separately from Confluent Platform as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and stores its metrics in Prometheus rather than an internal Kafka Streams pipeline.
+- **Kafdrop** — open-source web UI for topic/message inspection.
+- **Burrow** — LinkedIn's consumer lag monitoring with rule-based alerting.
+- **KEDA** — Kubernetes event-driven autoscaling based on Kafka consumer group lag.
+- **JMX Exporter** — scrapes the JMX metrics every broker exposes and presents them to Prometheus.
 
 **Spring Integration**
-- Spring Kafka (`spring-kafka`) — `@KafkaListener`, `KafkaTemplate`, `KafkaTransactionManager`.
-- Spring Cloud Stream — binder abstraction for Kafka and RabbitMQ. Handlers are plain `Supplier<T>` / `Function<T,R>` / `Consumer<T>` beans, bound to destinations by `spring.cloud.stream.function.definition`.
+- **Spring Kafka** — the `spring-kafka` artifact: `@KafkaListener`, `KafkaTemplate`, `KafkaTransactionManager`.
+- **Spring Cloud Stream** — binder abstraction for Kafka and RabbitMQ. Handlers are plain `Supplier<T>` / `Function<T,R>` / `Consumer<T>` beans, bound to destinations by `spring.cloud.stream.function.definition`.
 
 ---
 

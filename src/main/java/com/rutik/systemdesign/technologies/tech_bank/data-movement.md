@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 148 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 153 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -68,6 +68,16 @@ Reach for it when the problem is breadth -- many low-volume SaaS and database so
 You write a DAG in Python: tasks are operator instances, dependencies are `>>` edges, and the scheduler walks the graph, submitting ready tasks to an executor (Celery, Kubernetes, or local) while a metadata database — usually PostgreSQL — holds every run's state. Retries, SLAs, sensors that wait on an external condition, and backfill over a historical date range come with it, which is why it became the default for nightly ETL and training pipelines.
 
 The rule people learn late is that Airflow is an orchestrator, not a compute engine: tasks should trigger Spark, dbt, or a training job and let data move through storage, because passing real data between tasks via XCom pushes it through the metadata DB. Reach for it for scheduled batch work with real dependency structure; it is a poor fit for streaming, sub-minute latency, or a workflow that branches differently for every event.
+
+### Aiven for Kafka
+**Short:** Managed Apache Kafka across AWS, GCP, Azure and others, run as single-tenant clusters rather than shared multi-tenant capacity.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2, platform-delivery/cloud-platform-and-cost @3
+
+You pick a cloud, a region and a plan, and Aiven provisions dedicated virtual machines running upstream Apache Kafka rather than a fork, so client libraries, configuration keys and operational knowledge transfer unchanged. The surrounding pieces are separate managed services you enable and wire together -- Kafka Connect for connectors, Karapace for the schema registry and REST proxy, Flink for stream processing, and metric integrations that push into Prometheus, Datadog or a managed Grafana.
+
+Reach for it when the appeal is running the same Kafka on more than one cloud from a single control plane, or when you want a managed cluster that is yours rather than a slice of someone else's. The single-tenant model is also the cost floor: the smallest useful plan is a real set of VMs, so it does not thin out for a low-traffic service the way a serverless offering does. Confluent Cloud and Amazon MSK are the comparison, and the tie-breaker is usually which clouds you are actually on.
 
 ### Amazon Kinesis
 **Short:** AWS-managed streaming service whose Data Streams shards carry ordered records for a fixed retention window.
@@ -759,6 +769,16 @@ Two pieces do most of the work: `Parallel` with `delayed` spreads a loop across 
 
 This is what `n_jobs` means inside scikit-learn, and the usual way a fitted estimator is written to a file. Reach for it for single-machine parallelism over independent work and for caching in a research loop. The costs are process startup and data transfer dominating small tasks, and a persisted model tied to the library versions that wrote it. Ray or Dask is the step up once the work has to span machines.
 
+### Kafdrop
+**Short:** Open-source web UI for Kafka: browse brokers, topics, partitions and consumer groups, and read the messages on a partition.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, observability/metrics-and-monitoring @2
+
+It is a small self-contained web application that connects to a cluster as an ordinary Kafka client and renders what the admin and consumer APIs already expose: broker list, per-topic partition layout with leader and in-sync replica sets, configured retention and cleanup policy, consumer groups with their committed offsets and lag, and a message viewer that fetches from a chosen partition and offset. Pointing it at a schema registry lets it deserialize Avro or Protobuf payloads instead of showing bytes.
+
+Reach for it when the question is what is actually on this topic -- verifying a producer's output, checking a key's partition, confirming a consumer group's position -- which is exactly the question a metrics dashboard cannot answer. Two things to plan for: it renders message payloads, so anyone who can reach the page can read your data and it belongs behind an authenticating proxy with a restricted Kafka principal; and browsing a busy topic is a real fetch against the brokers, so it is a debugging tool rather than something to leave open on a wall display. For lag alerting proper, an exporter feeding Prometheus is the right shape.
+
 ### Kafka Connect
 **Short:** Kafka's source/sink connector framework for moving data in and out of the log, including Debezium CDC and S3 sinks.
 **Kind:** tech
@@ -766,6 +786,16 @@ This is what `n_jobs` means inside scikit-learn, and the usual way a fitted esti
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @3
 
 Connect is a worker process -- standalone, or a distributed cluster that rebalances tasks and keeps its config, offsets and status in internal Kafka topics -- that runs connector plugins: a source connector pulls from an external system into topics, a sink connector writes topics out. You configure a connector with JSON over its REST API instead of writing code; Single Message Transforms handle field renames, masking and routing in flight, and converters (Avro, Protobuf or JSON Schema, usually with a schema registry) decide the wire format. Debezium source connectors reading the database transaction log are the standard change-data-capture path, and the S3, JDBC and Elasticsearch sinks cover most egress. Reach for it when the job genuinely is move-and-lightly-reshape; anything needing joins, windows or real business logic belongs in a stream processor such as Kafka Streams or Flink.
+
+### Kafka MirrorMaker 2
+**Short:** Kafka's Connect-based cross-cluster replicator: mirrors topics, configs, ACLs and translated consumer offsets for DR and geo-replication.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @2
+
+It is a set of Kafka Connect connectors rather than a bespoke process: a source connector consumes from the remote cluster and produces locally, a checkpoint connector translates each consumer group's committed offsets into the equivalent position on the target, and a heartbeat connector emits a steady signal that makes replication lag measurable. It can run inside an existing Connect cluster, as a dedicated MirrorMaker cluster, or standalone. The default replication policy prefixes a mirrored topic with the source cluster's alias, which is what stops two clusters mirroring each other into an infinite loop; an identity policy keeps the original name at the cost of having to prevent cycles yourself.
+
+Reach for it for disaster recovery to a second region, for aggregating regional clusters into one, or for migrating a cluster with consumers still running. The thing that surprises people is that offsets are not portable: partition N's offset 8,000 on the source is a different message on the target, which is precisely why checkpoints exist and why a failover plan that just repoints consumers at the other cluster replays or skips data. Replication is asynchronous, so a non-zero recovery point objective is inherent, and the prefixed topic names have to be handled by whatever subscribes after failover.
 
 ### Kafka Streams
 **Short:** Java library for stateful stream processing directly on Kafka topics: joins, aggregations, exactly-once state stores.
@@ -806,6 +836,26 @@ Reach for it when the event log is the source of truth and you want stream-level
 It receives OpenLineage run events over HTTP -- each naming a job, a run, and the input and output datasets -- and stores them in PostgreSQL as a versioned model of jobs, datasets and runs, so the lineage graph reflects what actually executed rather than what a static declaration claimed. Because job and dataset versions are tracked over time, you can ask which run produced a table's current contents, what the job's code and schema looked like then, and what downstream consumers a column change would break.
 
 Reach for it when pipelines already emit OpenLineage -- integrations exist for Airflow, Spark, dbt and Flink -- and you want a self-hosted lineage service without adopting a full catalog product. Its scope is deliberately narrow: no business glossary, no quality checks, no access governance. DataHub, OpenMetadata or a commercial catalog is the answer when discovery and governance matter as much as lineage does.
+
+### Marten
+**Short:** .NET library turning PostgreSQL into a document store and an event store, with JSONB storage and inline, live or async projections.
+**Kind:** tech
+**Lang:** csharp
+**Roles:** data-movement/event-streaming-and-processing @1, data-stores/document @2, data-stores/relational @3
+
+Events are appended to a named stream as rows carrying a JSONB body, a sequence number within the stream and a global sequence across the store, with a unique constraint on stream and version providing optimistic concurrency the same way a hand-rolled events table would. Read models are projections, and the choice of when they run is the design decision: inline projections update in the same transaction as the append, so the read model is never stale but the write path pays for it; live projections fold the stream on demand and store nothing; asynchronous projections are advanced by a background daemon reading the global sequence, which is the scalable option and the one that introduces eventual consistency. The document side of the library stores aggregates as JSONB documents with indexes projected out of the JSON, so projections have somewhere natural to land.
+
+Reach for it on a .NET system that is already running PostgreSQL and wants event sourcing without adopting a second datastore -- one backup story, one connection string, one thing to operate, and the events are queryable with ordinary SQL. The limit is the one Postgres imposes: throughput and retention are a single database's, so a stream count or an append rate that would need partitioning across nodes is the point at which a purpose-built event store or a log earns its own operational cost.
+
+### MassTransit
+**Short:** .NET messaging framework over RabbitMQ, Azure Service Bus, SQS or Kafka, adding typed consumers, saga state machines and retry policies.
+**Kind:** tech
+**Lang:** csharp
+**Roles:** data-movement/message-broker @1, data-movement/workflow-and-durable-execution @2, apis-frameworks/design-patterns-and-principles @3
+
+You declare message contracts as plain .NET types and consumers as classes, and the framework derives the broker topology from those types -- exchanges or topics named for the message, queues named for the endpoint, bindings between them -- so publish and subscribe work without anyone writing broker configuration. On top of that sit the pieces every messaging system eventually needs: retry and redelivery policies distinguishing a transient failure from a poison message, a transactional outbox so a database write and the message it should produce cannot diverge, request-response over a reply queue, and scheduling.
+
+Its saga support is why it appears in event-driven designs rather than just as a client library. A saga is a state machine over a correlated identifier, persisted to a database between events, so a multi-service business transaction and its compensating steps are one readable definition rather than a scattering of handlers. Reach for it on .NET when you want that plus transport independence; the cost of the abstraction is the topology it creates for you, which is convenient until a non-MassTransit producer or consumer has to interoperate with those conventions.
 
 ### Materialize
 **Short:** Streaming database that keeps SQL views incrementally up to date over Kafka and CDC feeds.

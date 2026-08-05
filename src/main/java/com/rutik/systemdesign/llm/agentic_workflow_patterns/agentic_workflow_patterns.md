@@ -1274,19 +1274,19 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 - Do not use `multiprocessing` for LLM API calls — process overhead is wasted for I/O-bound work
 
 **Workflow Orchestration Frameworks**
-- **[LangGraph](../agentic_frameworks/langgraph.md)**: Graph-based workflow engine; nodes are LLM calls or tools; edges define control flow; native support for cycles (evaluator-optimizer loops), conditional routing, and parallel branches. State is persisted between nodes via a typed `State` dict.
-- **Prefect / Airflow**: Suitable when LLM calls are one step in a broader data pipeline that includes SQL queries, file I/O, and API calls. Adds scheduling, retry policies, and observability.
-- **Temporal**: Durable workflow execution; survives process restarts mid-chain; useful for long-running orchestrator-worker pipelines where workers may take minutes.
-- **AWS Step Functions**: Managed state machines; native parallel execution (Map state); integrates with Bedrock for LLM calls.
+- **[LangGraph](../agentic_frameworks/langgraph.md)** — Graph-based workflow engine; nodes are LLM calls or tools; edges define control flow; native support for cycles (evaluator-optimizer loops), conditional routing, and parallel branches. State is persisted between nodes via a typed `State` dict.
+- **Prefect / Airflow** — Suitable when LLM calls are one step in a broader data pipeline that includes SQL queries, file I/O, and API calls. Adds scheduling, retry policies, and observability.
+- **Temporal** — Durable workflow execution; survives process restarts mid-chain; useful for long-running orchestrator-worker pipelines where workers may take minutes.
+- **AWS Step Functions** — Managed state machines; native parallel execution (Map state); integrates with Bedrock for LLM calls.
 
 **Observability**
-- **Langfuse**: Open-source LLM observability; traces each step in a chain as a span; captures input, output, latency, and token counts per step
-- **Arize Phoenix**: Session-level tracing for multi-step pipelines; supports evaluator scoring as a first-class concept
-- **OpenTelemetry**: Standard tracing SDK; instrument each workflow step with a span; export to Datadog, Honeycomb, or Jaeger
+- **Langfuse** — Open-source LLM observability; traces each step in a chain as a span; captures input, output, latency, and token counts per step
+- **Arize Phoenix** — Session-level tracing for multi-step pipelines; supports evaluator scoring as a first-class concept
+- **OpenTelemetry** — Standard tracing SDK; instrument each workflow step with a span; export to Datadog, Honeycomb, or Jaeger
 
 **Prompt Management**
-- **LangSmith Hub**: Version and A/B test prompts used in each workflow step
-- **Anthropic Console**: Prompt playground for iterating on system prompts for individual workflow nodes
+- **LangSmith Prompt Hub** — version and A/B test prompts used in each workflow step
+- **Anthropic Console** — Prompt playground for iterating on system prompts for individual workflow nodes
 
 ---
 

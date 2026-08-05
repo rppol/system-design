@@ -693,37 +693,37 @@ In vLLM this is `--enable-eplb` on top of `--enable-expert-parallel`, with `--ep
 
 ### Inference Frameworks
 
-**vLLM** — First-class Mixtral/MoE support. Implements fused CUDA kernels for expert dispatch. Supports tensor parallelism and pipeline parallelism for MoE. Recommended for production MoE serving. Expert parallelism is a separate opt-in flag, `--enable-expert-parallel`; without it the MoE layers follow tensor-parallel sharding. The EP size is derived, not set by hand: `EP_SIZE = TP_SIZE x DP_SIZE`.
+- **vLLM** — First-class Mixtral/MoE support. Implements fused CUDA kernels for expert dispatch. Supports tensor parallelism and pipeline parallelism for MoE. Recommended for production MoE serving. Expert parallelism is a separate opt-in flag, `--enable-expert-parallel`; without it the MoE layers follow tensor-parallel sharding. The EP size is derived, not set by hand: `EP_SIZE = TP_SIZE x DP_SIZE`.
 
-**TensorRT-LLM** — NVIDIA's inference framework. Provides fused MoE kernels and wide expert parallelism, with FP8 (and on Blackwell, NVFP4) quantization for expert weights. Its published MoE optimization work now centres on Hopper and Blackwell — "MoE as Dense GEMM" low-latency MoE and the "Scaling Expert Parallelism in TensorRT LLM" series are both Blackwell-first — so treat A100 as supported-but-not-the-tuning-target. Best raw throughput for current NVIDIA datacentre hardware.
+- **TensorRT-LLM** — NVIDIA's inference framework. Provides fused MoE kernels and wide expert parallelism, with FP8 (and on Blackwell, NVFP4) quantization for expert weights. Its published MoE optimization work now centres on Hopper and Blackwell — "MoE as Dense GEMM" low-latency MoE and the "Scaling Expert Parallelism in TensorRT LLM" series are both Blackwell-first — so treat A100 as supported-but-not-the-tuning-target. Best raw throughput for current NVIDIA datacentre hardware.
 
-**llama.cpp** — CPU and consumer GPU MoE inference. Supports Mixtral via GGUF format. `--cpu-moe` / `--n-cpu-moe N` keep the MoE expert tensors (all layers, or the first N) resident in CPU RAM while the shared attention stack stays on GPU — it is a static tensor placement, not on-demand paging of the "inactive" experts to GPU. Reduces VRAM requirement at latency cost.
+- **llama.cpp** — CPU and consumer GPU MoE inference. Supports Mixtral via GGUF format. `--cpu-moe` / `--n-cpu-moe N` keep the MoE expert tensors (all layers, or the first N) resident in CPU RAM while the shared attention stack stays on GPU — it is a static tensor placement, not on-demand paging of the "inactive" experts to GPU. Reduces VRAM requirement at latency cost.
 
-**SGLang** — First-class MoE support through `FusedMoE` and its expert-parallel variant `DeepEPMoE`, with DeepEP/MoriEP communication backends and an expert-parallel load balancer (EPLB); see its `advanced_features/expert_parallelism` docs. RadixAttention is its prefix cache, orthogonal to the MoE layers, which is what makes it strong on multi-turn workloads over a shared prefix.
+- **SGLang** — First-class MoE support through `FusedMoE` and its expert-parallel variant `DeepEPMoE`, with DeepEP/MoriEP communication backends and an expert-parallel load balancer (EPLB); see its `advanced_features/expert_parallelism` docs. RadixAttention is its prefix cache, orthogonal to the MoE layers, which is what makes it strong on multi-turn workloads over a shared prefix.
 
-**Ollama** — Bundles llama.cpp, supports Mixtral for local deployment. Easy setup but limited expert parallelism control.
+- **Ollama** — Bundles llama.cpp, supports Mixtral for local deployment. Easy setup but limited expert parallelism control.
 
 ### Training Frameworks
 
-**Megatron-LM** — NVIDIA's training framework. Full support for expert parallelism, tensor parallelism, pipeline parallelism, and data parallelism combined (4D parallelism), plus dropless MoE (`--moe-expert-capacity-factor` defaults to unset), aux-loss and z-loss coefficients, and upcycling. Note that DeepSeek-V3 was NOT trained on Megatron — the paper states it used DeepSeek's own HAI-LLM framework with 16-way pipeline parallelism, 64-way expert parallelism and ZeRO-1 data parallelism.
+- **Megatron-LM** — NVIDIA's training framework. Full support for expert parallelism, tensor parallelism, pipeline parallelism, and data parallelism combined (4D parallelism), plus dropless MoE (`--moe-expert-capacity-factor` defaults to unset), aux-loss and z-loss coefficients, and upcycling. Note that DeepSeek-V3 was NOT trained on Megatron — the paper states it used DeepSeek's own HAI-LLM framework with 16-way pipeline parallelism, 64-way expert parallelism and ZeRO-1 data parallelism.
 
-**DeepSpeed** — Microsoft's training library. MoE support via `deepspeed.moe`. Integrates with ZeRO optimizer. Easier to use than Megatron for teams without NVIDIA-specific expertise.
+- **DeepSpeed** — Microsoft's training library. MoE support via `deepspeed.moe`. Integrates with ZeRO optimizer. Easier to use than Megatron for teams without NVIDIA-specific expertise.
 
-**FSDP (PyTorch)** — Supports MoE via expert sharding. Less battle-tested than Megatron for very large MoE but simpler for medium scale.
+- **FSDP** — PyTorch; supports MoE via expert sharding. Less battle-tested than Megatron for very large MoE but simpler for medium scale.
 
 ### Model Formats and Serving
 
-**GGUF** — llama.cpp format, supports Mixtral. Quantized variants (Q4_K_M, Q5_K_M) reduce memory substantially.
+- **GGUF** — llama.cpp format, supports Mixtral. Quantized variants (Q4_K_M, Q5_K_M) reduce memory substantially.
 
-**SafeTensors** — HuggingFace format for Mixtral weights. 93.4GB bfloat16 for Mixtral 8x7B.
+- **SafeTensors** — HuggingFace format for Mixtral weights. 93.4GB bfloat16 for Mixtral 8x7B.
 
-**AWQ / GPTQ** — Post-training quantization for expert weights. Produce the checkpoints with `llm-compressor` (the vLLM project's compression library, which implements both AWQ and GPTQ) or GPTQModel; vLLM and TensorRT-LLM load the resulting quantized weights directly. INT4 quantization reduces Mixtral from ~93GB to ~23GB of weights (46.7B x 0.5 bytes) plus group scales, enabling 2x A100 serving instead of 4x.
+- **AWQ**, **GPTQ** — post-training quantization for expert weights. Produce the checkpoints with `llm-compressor` (the vLLM project's compression library, which implements both AWQ and GPTQ) or GPTQModel; vLLM and TensorRT-LLM load the resulting quantized weights directly. INT4 quantization reduces Mixtral from ~93GB to ~23GB of weights (46.7B x 0.5 bytes) plus group scales, enabling 2x A100 serving instead of 4x.
 
 ### Monitoring
 
-**Expert utilization dashboards** — Custom Prometheus metrics tracking per-expert token counts per batch. Essential for detecting expert collapse and load imbalance in production.
+- **Prometheus** — custom metrics tracking per-expert token counts per batch. Essential for detecting expert collapse and load imbalance in production.
 
-**Weights & Biases / MLflow** — Track expert utilization distribution over training. Plot histogram of tokens per expert per 1000 steps.
+- **Experiment tracking:** **Weights & Biases**, **MLflow** — track expert utilization distribution over training. Plot histogram of tokens per expert per 1000 steps.
 
 ---
 

@@ -445,31 +445,31 @@ Sending an email, updating analytics, and refreshing a cache all synchronously a
 ## Technologies and Tools
 
 ### Application Scaling
-- **Kubernetes (k8s)**: Container orchestration with Horizontal Pod Autoscaler (HPA)
-- **AWS Auto Scaling Groups**: EC2-based auto-scaling with lifecycle hooks
-- **Google Cloud Run**: Serverless containers that scale to zero
-- **AWS Lambda / Google Cloud Functions**: Function-level scaling, no server management
+- **Kubernetes (k8s)** — Container orchestration with Horizontal Pod Autoscaler (HPA)
+- **Auto Scaling** — EC2 auto-scaling groups with lifecycle hooks
+- **Cloud Run** — Google serverless containers that scale to zero
+- **AWS Lambda**, **Cloud Run functions** — function-level scaling, no server management
 
 ### Load Balancers
-- **Nginx**: High-performance L7 load balancer and reverse proxy
-- **HAProxy**: Extremely fast L4/L7 load balancer
-- **AWS ALB/NLB**: Managed load balancers with auto-scaling integration
-- **Envoy**: Modern L7 proxy used in service meshes
+- **Nginx** — High-performance L7 load balancer and reverse proxy
+- **HAProxy** — Extremely fast L4/L7 load balancer
+- **Managed load balancers:** **AWS ALB**, **AWS NLB** — auto-scaling integration
+- **Envoy** — Modern L7 proxy used in service meshes
 
 ### Stateless Session Management
-- **Redis**: In-memory key-value store for session externalization
-- **JWT (JSON Web Tokens)**: Stateless authentication tokens — no server-side storage needed
+- **Redis** — In-memory key-value store for session externalization
+- **JWT (JSON Web Tokens)** — Stateless authentication tokens — no server-side storage needed
 
 ### Database Scaling
-- **ProxySQL / PgBouncer**: Database proxy and connection pooler
-- **Vitess**: MySQL sharding and scaling (used by YouTube)
-- **Citus**: PostgreSQL extension for horizontal sharding
-- **Amazon RDS Aurora**: Auto-scaling storage, read replicas, multi-AZ
+- **ProxySQL / PgBouncer** — Database proxy and connection pooler
+- **Vitess** — MySQL sharding and scaling (used by YouTube)
+- **Citus** — PostgreSQL extension for horizontal sharding
+- **Amazon RDS Aurora** — Auto-scaling storage, read replicas, multi-AZ
 
 ### Distributed Databases (Built for Scale)
-- **Cassandra**: Masterless, linear horizontal scaling, built for write-heavy workloads
-- **DynamoDB**: Fully managed, single-digit millisecond at any scale
-- **CockroachDB**: Distributed SQL with horizontal scaling and strong consistency
+- **Cassandra** — Masterless, linear horizontal scaling, built for write-heavy workloads
+- **DynamoDB** — Fully managed, single-digit millisecond at any scale
+- **CockroachDB** — Distributed SQL with horizontal scaling and strong consistency
 
 ---
 

@@ -524,30 +524,30 @@ A producer team renamed the field `customerId` to `userId` in an integration eve
 ## 11. Technologies and Tools
 
 **Message Brokers**
-- Apache Kafka — high-throughput, durable, replay-capable. De facto standard for integration events at scale. KRaft (Kafka's own Raft-based metadata quorum) removes the ZooKeeper dependency: production-ready for new clusters since 3.3, and the ONLY supported mode since Kafka 4.0 (18 March 2025), which shipped without ZooKeeper entirely. A 3.x cluster must migrate to KRaft on 3.9 before it can upgrade to 4.x.
-- RabbitMQ — smart broker with routing, exchange types (direct, topic, fanout, headers). Better for complex routing logic. Classic and quorum queues are destructive-read (a consumed message is gone), but stream queues, added in RabbitMQ 3.9, are an append-only log with non-destructive consumption: consumers attach at an absolute offset or a timestamp and can re-read the same data, so replay is available if you choose that queue type.
-- Amazon SQS/SNS — managed, serverless. SQS for point-to-point queuing, SNS for fan-out. Neither offers Kafka-style consumer groups. SQS has no replay — a message is gone once deleted. SNS replay exists only for FIFO topics with an archive policy (retention 1 to 365 days, launched October 2023); a subscriber then sets a replay policy over a start/end point in that archive.
-- Amazon EventBridge — event bus with schema registry, archive, replay, and cross-account routing.
-- Apache Pulsar — multi-tenant, geo-replication, tiered storage. Suitable for multi-region event streaming.
+- **Apache Kafka** — high-throughput, durable, replay-capable. De facto standard for integration events at scale. KRaft (Kafka's own Raft-based metadata quorum) removes the ZooKeeper dependency: production-ready for new clusters since 3.3, and the ONLY supported mode since Kafka 4.0 (18 March 2025), which shipped without ZooKeeper entirely. A 3.x cluster must migrate to KRaft on 3.9 before it can upgrade to 4.x.
+- **RabbitMQ** — smart broker with routing, exchange types (direct, topic, fanout, headers). Better for complex routing logic. Classic and quorum queues are destructive-read (a consumed message is gone), but stream queues, added in RabbitMQ 3.9, are an append-only log with non-destructive consumption: consumers attach at an absolute offset or a timestamp and can re-read the same data, so replay is available if you choose that queue type.
+- **AWS SQS**, **AWS SNS** — managed and serverless: SQS for point-to-point queuing, SNS for fan-out. Neither offers Kafka-style consumer groups. SQS has no replay — a message is gone once deleted. SNS replay exists only for FIFO topics with an archive policy (retention 1 to 365 days, launched October 2023); a subscriber then sets a replay policy over a start/end point in that archive.
+- **EventBridge** — AWS event bus with schema registry, archive, replay, and cross-account routing.
+- **Apache Pulsar** — multi-tenant, geo-replication, tiered storage. Suitable for multi-region event streaming.
 
 **Schema Management**
-- Confluent Schema Registry — Avro, Protobuf, JSON Schema. Compatibility modes: BACKWARD (the default), BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE, NONE. The non-transitive modes check a new schema only against the latest registered version; the `_TRANSITIVE` variants check it against every previous version.
-- AWS Glue Schema Registry — managed schema registry for AWS ecosystem.
+- **Confluent Schema Registry** — Avro, Protobuf, JSON Schema. Compatibility modes: BACKWARD (the default), BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE, NONE. The non-transitive modes check a new schema only against the latest registered version; the `_TRANSITIVE` variants check it against every previous version.
+- **AWS Glue Schema Registry** — managed schema registry for AWS ecosystem.
 
 **Event Storming**
-- Miro, MURAL — remote collaboration boards for digital event storming.
-- Physical sticky notes — preferred for co-located teams for tactile engagement.
-- EventStorming.com — Alberto Brandolini's original methodology documentation.
+- **Collaboration boards:** **Miro**, **MURAL** — remote boards for digital event storming.
+- Physical sticky notes, preferred by co-located teams for tactile engagement.
+- Alberto Brandolini's original methodology documentation lives at eventstorming.com.
 
 **Observability**
-- Jaeger, Zipkin — distributed tracing. Propagate correlationId as trace ID.
-- Confluent Control Center / Kafdrop — consumer lag monitoring.
-- Datadog, Grafana — dashboards for consumer lag, DLQ depth, event processing latency.
+- **Tracing:** **Jaeger**, **Zipkin** — propagate the correlationId as the trace ID.
+- **Consumer lag:** **Confluent Control Center**, **Kafdrop**.
+- **Dashboards:** **Datadog**, **Grafana** — consumer lag, DLQ depth, event processing latency.
 
 **Frameworks**
-- Axon Framework — Java framework for event-driven microservices, CQRS, event sourcing.
-- Spring Cloud Stream — abstraction over Kafka/RabbitMQ with binder model.
-- MassTransit (.NET) — saga orchestration and choreography with RabbitMQ/Azure Service Bus.
+- **Axon Framework** — Java framework for event-driven microservices, CQRS, event sourcing.
+- **Spring Cloud Stream** — abstraction over Kafka/RabbitMQ with binder model.
+- **MassTransit** — .NET saga orchestration and choreography with RabbitMQ/Azure Service Bus.
 
 ---
 

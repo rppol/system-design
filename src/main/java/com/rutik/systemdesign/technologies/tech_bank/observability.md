@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 288 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 290 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -300,6 +300,16 @@ Reach for it whenever the question is what changed and who changed it, since an 
 In the incident path its job is narrow: hold the page an alert links to, addressably, so the on-call opens one URL and finds what this alert means, what to check first, which dashboard and query to open, and the mitigation with its blast radius. Search, page hierarchy and permissions are what make it the default over a folder of documents.
 
 The cost is drift. A runbook describing a system two rewrites ago is worse than none, and a wiki has no build that fails when it goes stale -- which is the argument for keeping whatever must track the code as runbooks-as-code in Git beside the alert rule, and leaving here the material that is genuinely prose.
+
+### Confluent Control Center
+**Short:** Confluent's commercial web console for Kafka: broker health, consumer lag, topic browsing and Schema Registry management in one place.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1, data-movement/event-streaming-and-processing @2, observability/alerting-and-incident-response @3
+
+It is the operator's single screen for a Confluent Platform cluster: brokers and their health, topic and partition layout, per-consumer-group lag, message inspection, Schema Registry subjects and compatibility settings, and connector status. The next-generation package ships separately from Confluent Platform on its own release cadence and keeps its metrics in Prometheus, rather than deriving them through the internal Kafka Streams pipeline earlier versions ran -- which matters operationally, because that pipeline and its internal topics were themselves a load on the cluster being monitored.
+
+Reach for it when you are already licensed for Confluent Platform and want one supported console instead of assembling dashboards. It is not a reason to adopt the platform on its own: an exporter feeding Prometheus and Grafana covers lag and broker metrics, Burrow covers lag evaluation without static thresholds, and Kafdrop covers message browsing, all on open-source Kafka.
 
 ### Cortex
 **Short:** Horizontally scalable, multi-tenant long-term storage behind Prometheus remote-write.
@@ -904,6 +914,16 @@ The modern entry point for both operations is `jcmd`, whose `GC.class_histogram`
 **Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @2
 
 A benchmark is a `@Benchmark`-annotated method; JMH generates a harness around it, forks a fresh JVM per trial, runs warmup iterations until the JIT has compiled and profiles have settled, then measures -- which is why its numbers so often disagree with a hand-written `System.nanoTime()` loop. The hard problem it solves is the optimiser deleting your work: a JIT that proves a result is unused removes the computation you meant to time, so you return the value or feed it to a `Blackhole`, and take inputs from `@State` objects rather than constants the compiler can fold. Modes cover throughput, average time and sampled percentile distributions, and `@Fork(jvmArgs = ...)` lets you compare GC or flag settings within one run. Reach for it for any micro-scale claim -- collection choice, string handling, a stream versus a loop -- while remembering that a microbenchmark measures a method in isolation and cannot tell you whether that method matters.
+
+### JMX Exporter
+**Short:** Prometheus exporter that maps a JVM's JMX MBeans to metrics, run as a Java agent inside the process or as a standalone scraper.
+**Kind:** tech
+**Lang:** java
+**Roles:** observability/metrics-and-monitoring @1, data-movement/event-streaming-and-processing @3
+
+Every JVM publishes its internals as JMX management beans, and this exporter republishes a selected subset on an HTTP endpoint in Prometheus text format. A YAML configuration holds an ordered list of rules; each rule matches a regular expression against the bean's object name and attribute, and names the resulting metric, promotes captured groups into labels, and sets its type. The first matching rule wins, so ordering is the control you have. There are two deployment forms: as a `-javaagent` inside the target JVM, which is the usual choice, or as a separate process connecting over remote JMX, which costs a round trip on every scrape and needs the remote JMX port open.
+
+It is the generic answer for anything on the JVM that has no purpose-built exporter -- Kafka brokers most often, where broker-internal figures such as request-handler idle ratio and under-replicated partitions live only in JMX. The trap is cardinality: with no rules, or with permissive ones, per-topic and per-partition beans on a busy broker produce an enormous series count, so restrict the beans collected and write explicit rules rather than exporting everything and filtering later. A curated exporter for a specific product, where one exists, saves that configuration work.
 
 ### journalctl
 **Short:** systemd journal query CLI: kernel ring buffer and unit logs, where OOM kills and driver errors surface.

@@ -492,17 +492,17 @@ constitution version corresponds to each model release.
 **Anthropic CAI paper (2022):** The original paper -- "Constitutional AI: Harmlessness from
 AI Feedback." arxiv.org/abs/2212.08073. Required reading for understanding the full pipeline.
 
-**HuggingFace TRL (Transformer Reinforcement Learning):** Library for PPO, DPO, and reward
+- **TRL** — HuggingFace Transformer Reinforcement Learning: library for PPO, DPO, and reward
 model training in Python. Used to implement the RL-CAI training loop. Supports distributed
 training with Accelerate.
 
 **Alignment Handbook (HuggingFace):** Reference implementations of alignment techniques
 including DPO and reward model training. Companion to TRL.
 
-**Meta Llama Guard:** Open-weights constitutional safety classifier. `meta-llama/Llama-Guard-3-8B`.
+- **Llama Guard** — Meta's open-weights constitutional safety classifier. `meta-llama/Llama-Guard-3-8B`.
 Useful as a reference for constitution structure and harm category design.
 
-**NVIDIA NeMo Guardrails:** Inference-time constitutional enforcement via programmable
+- **NeMo Guardrails** — NVIDIA; inference-time constitutional enforcement via programmable
 guardrails. Complementary to CAI training -- CAI bakes values into weights; NeMo
 Guardrails enforces them at inference time as a defense-in-depth layer. See
 [guardrails_and_content_safety/](../guardrails_and_content_safety/guardrails_and_content_safety.md) for the

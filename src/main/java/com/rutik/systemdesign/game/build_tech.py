@@ -544,6 +544,7 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     # key beside the eight modules citing "NVIDIA Triton". Alias both -- a future author
     # reaching for the official name should not have to know which half we indexed.
     "nvidia triton inference server": "nvidia triton",
+    "amazon rds aurora": "aurora",
     # Maxwell is DELIBERATELY NOT ALIASED, though it looks like the same case. The CDC
     # daemon's bare name collides with NVIDIA's Maxwell GPU architecture, which cuda/
     # discusses at length -- an alias would silently turn a future cuda §11 "Maxwell"
@@ -838,6 +839,9 @@ TECH_LABELS = {
     # heading in search-retrieval.md, and the record silently becomes an orphan while the
     # tool is still taught. Pin every name whose bank record could lose this vote.
     "lucene": "Lucene",
+    # Same vote hazard, opposite direction: the bank record is lowercase `### safetensors`
+    # and two modules write the camel-case brand form, so the label flipped and orphaned it.
+    "safetensors": "safetensors",
     "claude": "Claude",
     "cloudformation": "AWS CloudFormation",
     "cloudwatch": "AWS CloudWatch",

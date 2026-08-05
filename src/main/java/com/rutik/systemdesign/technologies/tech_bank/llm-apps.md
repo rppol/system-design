@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: llm-apps -->
 
-The 246 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 248 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **LLM apps & agents** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -328,6 +328,16 @@ Reach for it as the workhorse: the model behind the agent loop, the extraction p
 It is a client-executed tool: Anthropic defines the schema and the model's action vocabulary, but the environment is yours to supply and the actions are yours to execute, with a reference container image showing one way to do it. Coordinate accuracy depends on the resolution you report and the image you send back, which is also what determines the token cost of every step.
 
 Reach for it when the target is a whole desktop rather than a browser, and treat the harness as the engineering work -- action execution, screenshot cadence, resolution, and a step budget that stops a confused loop. For web tasks a browser tool driven by the accessibility tree is faster, cheaper and far more reliable, because it acts on named elements instead of pixels.
+
+### Anthropic Console
+**Short:** Anthropic's web console: a Workbench for iterating on prompts, evaluation test cases, plus API keys, workspaces and usage tracking.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/prompting-context-and-structured-output @1, ml-lifecycle/evaluation-and-benchmarks @2, platform-delivery/cloud-platform-and-cost @3
+
+The Workbench is the part engineers use daily: a system prompt, a message list, a model and sampling parameters, run and inspect, with tool definitions available so a function-calling prompt can be exercised without writing a client. Alongside it sit helpers that draft or rewrite a prompt from a description of the task, and an evaluation surface where a prompt is run against a set of test inputs so two versions can be compared side by side rather than judged from one lucky sample. The account-level half of the console is where API keys are issued, workspaces separate one project's keys and spend limits from another's, and usage and cost are broken down.
+
+Reach for it as the design surface for a prompt before that prompt becomes code, and for the evaluation pass that stops prompt changes being decided by vibes. What it is not is a runtime: the console exports a prompt as SDK code and your repository then owns the copy, so nothing keeps the version you tested and the version you shipped in step. A prompt registry the application pulls at runtime is a different product category, and versioning discipline in your own repository is the alternative.
 
 ### Anthropic tool use
 **Short:** Claude's function-calling interface: JSON tool schemas the model selects and fills, plus constrained outputs.
@@ -980,6 +990,16 @@ The instructive detail is what it does not trust the model with: arithmetic and 
 It supplies the glue around a model call: prompt templates, output parsers, document loaders and splitters, retrievers, memory, and a large catalogue of provider and vector-store integrations. LCEL composes those pieces with the `|` operator into runnables that stream, batch and run branches in parallel for free, and `create_agent` wraps the tool-calling loop.
 
 Reach for it to get a RAG or agent pipeline standing quickly and to swap providers without rewriting. The abstractions also hide the prompt and the actual request, which makes debugging and cost accounting harder -- pin the version strictly, since the surface moves, and expect that a settled pipeline is often clearer rewritten against the provider SDK.
+
+### LangChain AgentExecutor
+**Short:** LangChain's original agent runtime: it loops an agent's tool choice, runs the tool, appends the observation, and stops on a finish or a limit.
+**Kind:** api
+**Lang:** python
+**Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @2
+
+You construct an agent that returns either an action -- a tool name and its arguments -- or a finish, and hand it plus the tool list to the executor, which runs the loop: invoke the agent, execute the chosen tool, append the result to the accumulated intermediate steps, and pass the whole thing back in on the next turn. The guards are constructor arguments: a maximum iteration count and a wall-clock budget so a confused agent cannot spin forever, an early-stopping mode, a parsing-error handler that feeds a malformed tool call back to the model instead of raising, and a flag to return the intermediate steps for inspection.
+
+It is the legacy runtime, and knowing that is the point of the record: the executor's loop is fixed, its state is an opaque list of steps rather than something you can shape, and there is no built-in place to interrupt, checkpoint, resume or branch. That is why the pre-1.0 executors moved into the compatibility package and why new work goes to the current agent factory or a graph runtime. Reach for it only in a codebase already built on it, where the two-line construction is genuinely cheaper than a migration.
 
 ### LangChain create_agent
 **Short:** LangChain factory building a ReAct-style tool-calling agent loop with middleware hooks for guards and summarization.
