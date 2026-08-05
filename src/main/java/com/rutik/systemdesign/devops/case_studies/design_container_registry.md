@@ -507,48 +507,55 @@ cosign sign --yes "${REGISTRY}/myapp@${DIGEST}"
 The admission controller verifies at pod admit time. Here is the critical mistake teams make:
 
 ```yaml
-# Kyverno ClusterPolicy — admission-time signature verification
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+# Kyverno ImageValidatingPolicy — admission-time signature verification.
+# NOT kyverno.io/v1 ClusterPolicy: 1.17 deprecated it and split its rule kinds into
+# separate CEL types; removal targets v1.20 (Oct 2026).
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
 metadata:
   name: verify-image-signature
 spec:
-  rules:
-    - name: check-signature
-      match:
-        any:
-          - resources:
-              kinds: [Pod]
-      verifyImages:
-        - imageReferences:
-            - "registry.internal/prod/*"
-          failureAction: Enforce   # per-rule: block at admission, don't just audit
+  validationActions: [Deny]        # block at admission, don't just audit
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  matchImageReferences:
+    - glob: "registry.internal/prod/*"
 
-          # ─────────────────────────────────────────────────────────────
-          # BROKEN: this only checks that *a* keyless signature EXISTS.
-          # ANY Fulcio-issued identity passes — an attacker who can run a
-          # GitHub Action in ANY public repo can sign your image and admit it.
-          # attestors:
-          #   - entries:
-          #       - keyless:
-          #           roots: |
-          #             -----BEGIN CERTIFICATE-----  (Fulcio root)
-          #           # no subject/issuer pinning → "signed by SOMEONE" == pass
-          # ─────────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # BROKEN: this only checks that *a* keyless signature EXISTS.
+  # ANY Fulcio-issued identity passes — an attacker who can run a
+  # GitHub Action in ANY public repo can sign your image and admit it.
+  # attestors:
+  #   - cosign:
+  #       keyless:
+  #         roots: |
+  #           -----BEGIN CERTIFICATE-----  (Fulcio root)
+  #         # no identities pinning → "signed by SOMEONE" == pass
+  # ─────────────────────────────────────────────────────────────
 
-          # FIX: pin BOTH the OIDC issuer AND the exact signer subject.
-          # Only your org's workflow identity can produce an admissible signature.
-          attestors:
-            - entries:
-                - keyless:
-                    roots: |
-                      -----BEGIN CERTIFICATE-----
-                      MIIB... (Fulcio root CA)
-                      -----END CERTIFICATE-----
-                    subject: "https://github.com/myorg/*/.github/workflows/release.yml@refs/heads/main"
-                    issuer: "https://token.actions.githubusercontent.com"
-                    rekor:
-                      url: https://rekor.sigstore.dev   # require transparency-log inclusion
+  # FIX: pin BOTH the OIDC issuer AND the exact signer subject.
+  # Only your org's workflow identity can produce an admissible signature.
+  attestors:
+    - name: myorg
+      cosign:
+        keyless:
+          roots: |
+            -----BEGIN CERTIFICATE-----
+            MIIB... (Fulcio root CA)
+            -----END CERTIFICATE-----
+          identities:
+            - subject: "https://github.com/myorg/*/.github/workflows/release.yml@refs/heads/main"
+              issuer: "https://token.actions.githubusercontent.com"
+          ctlog:
+            url: https://rekor.sigstore.dev     # require transparency-log inclusion
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.myorg])).all(e, e > 0)
+      message: "image is not signed by myorg's release workflow identity"
 ```
 
 The same pin in cosign CLI form (used by the policy-controller and CI gate):

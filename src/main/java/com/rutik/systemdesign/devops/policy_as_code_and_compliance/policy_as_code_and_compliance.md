@@ -296,19 +296,32 @@ Sub-second on a 50-pod rollout is why admission enforcement is affordable. The n
 **Kyverno mutate example** — inject a secure default so developers do not have to:
 
 ```yaml
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
 metadata: { name: add-seccomp }
 spec:
-  rules:
-    - name: default-seccomp
-      match: { any: [{ resources: { kinds: ["Pod"] } }] }
-      mutate:
-        patchStrategicMerge:
-          spec:
-            securityContext:
-              seccompProfile: { type: RuntimeDefault }
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{ spec: Object.spec{
+            securityContext: Object.spec.securityContext{
+              seccompProfile: Object.spec.securityContext.seccompProfile{
+                type: "RuntimeDefault" } } } }
 ```
+
+Kyverno 1.17 deprecated `kyverno.io/v1 ClusterPolicy` (removal targets v1.20, Oct 2026)
+and split its rule kinds into separate CEL types under `policies.kyverno.io/v1`:
+`ValidatingPolicy`, `MutatingPolicy`, `GeneratingPolicy`, `ImageValidatingPolicy` and
+`DeletingPolicy`. A mutation is now a CEL `ApplyConfiguration` expression rather than a
+strategic-merge patch — more verbose, but one expression language across every policy
+type instead of a per-rule DSL.
 
 **Policy testing.** OPA ships a test runner; a policy without tests is unverified.
 

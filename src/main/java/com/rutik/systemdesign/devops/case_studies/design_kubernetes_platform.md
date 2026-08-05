@@ -521,42 +521,54 @@ spec:
 Guardrails must be enforced *before* an object is persisted, on every cluster, identically. We run Kyverno as a validating + mutating webhook, with policies shipped by GitOps to the whole fleet.
 
 ```yaml
-# Reject :latest tags and non-allowlisted registries; mutate-in the cost-center label.
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+# Reject :latest tags and non-allowlisted registries; require team/cost-center labels.
+# Kyverno 1.17 deprecated kyverno.io/v1 ClusterPolicy (removal targets v1.20, Oct 2026).
+# The migration is NOT a rename: a ClusterPolicy bundled rules of every kind AND every
+# match target in one object, and matchConstraints is now policy-level — so this one
+# object becomes TWO, split by what they match.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
 metadata:
-  name: image-and-label-guardrails
+  name: pod-image-guardrails
 spec:
-  background: true
-  rules:
-    - name: disallow-latest-tag
-      match: { any: [{ resources: { kinds: [Pod] } }] }
-      validate:
-        failureAction: Enforce            # per-rule: block, don't just audit
-        message: "Image tag ':latest' is not allowed; pin a digest or semver."
-        pattern:
-          spec:
-            containers:
-              - image: "!*:latest"
-    - name: registry-allowlist
-      match: { any: [{ resources: { kinds: [Pod] } }] }
-      validate:
-        failureAction: Enforce
-        message: "Images must come from 123456789.dkr.ecr.us-east-1.amazonaws.com"
-        pattern:
-          spec:
-            containers:
-              - image: "123456789.dkr.ecr.us-east-1.amazonaws.com/*"
-    - name: require-team-label
-      match: { any: [{ resources: { kinds: [Namespace] } }] }
-      validate:
-        failureAction: Enforce
-        message: "Namespaces must carry a 'team' and 'cost-center' label."
-        pattern:
-          metadata:
-            labels:
-              team: "?*"
-              cost-center: "?*"
+  validationActions: [Deny]              # block, don't just audit
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  validations:
+    - expression: "object.spec.containers.all(c, !c.image.endsWith(':latest'))"
+      message: "Image tag ':latest' is not allowed; pin a digest or semver."
+    - expression: >-
+        object.spec.containers.all(c,
+          c.image.startsWith('123456789.dkr.ecr.us-east-1.amazonaws.com/'))
+      message: "Images must come from 123456789.dkr.ecr.us-east-1.amazonaws.com"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: namespace-ownership-labels
+spec:
+  validationActions: [Deny]
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [namespaces]
+  validations:
+    - expression: >-
+        'team' in object.metadata.?labels.orValue({}) &&
+        'cost-center' in object.metadata.?labels.orValue({})
+      message: "Namespaces must carry a 'team' and 'cost-center' label."
 ```
 
 Equivalent guardrails can be expressed in OPA Gatekeeper's Rego if the org standardizes on OPA elsewhere:

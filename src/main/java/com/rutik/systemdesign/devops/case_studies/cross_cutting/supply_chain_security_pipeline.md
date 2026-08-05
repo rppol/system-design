@@ -277,29 +277,45 @@ cosign verify ghcr.io/acme/app@sha256:abcd... \
 **Kyverno alternative** for the same gate, for shops that prefer one policy engine over the dedicated controller:
 
 ```yaml
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy            # NOT kyverno.io/v1 ClusterPolicy — see note below
 metadata:
   name: verify-acme-images
 spec:
+  validationActions: [Deny]            # fail closed
   webhookConfiguration:
     timeoutSeconds: 10
-  rules:
-    - name: check-keyless-signature
-      match:
-        any:
-          - resources: { kinds: [Pod] }
-      verifyImages:
-        - imageReferences: ["ghcr.io/acme/*"]
-          failureAction: Enforce         # per-rule, fail closed
-          attestors:
-            - entries:
-                - keyless:
-                    issuer: https://token.actions.githubusercontent.com
-                    subject: "https://github.com/acme/app/.github/workflows/release.yml@refs/tags/*"
-                    rekor:
-                      url: https://rekor.sigstore.dev
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  matchImageReferences:
+    - glob: "ghcr.io/acme/*"
+  attestors:
+    - name: acme
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subject: "https://github.com/acme/app/.github/workflows/release.yml@refs/tags/*"
+          ctlog:
+            url: https://rekor.sigstore.dev
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.acme])).all(e, e > 0)
+      message: "unsigned image, or signed by an identity that is not acme's release workflow"
 ```
+
+**Why this is an `ImageValidatingPolicy` and not a `ClusterPolicy`.** Kyverno 1.17
+(Feb 2026) deprecated `kyverno.io/v1 ClusterPolicy` and promoted the CEL policy types to
+`policies.kyverno.io/v1`; removal targets v1.20 (Oct 2026). The migration is not a rename:
+a `ClusterPolicy` bundled validate, mutate, generate and verifyImages rules in one object,
+and those split into `ValidatingPolicy`, `MutatingPolicy`, `GeneratingPolicy` and
+`ImageValidatingPolicy`. Signature checking is the last of those. Note also that the
+verification is now an explicit CEL expression over `images.containers` rather than an
+implicit consequence of the `verifyImages` block — you can see what is being asserted.
 
 ---
 

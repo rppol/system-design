@@ -923,7 +923,7 @@ total = ∫ overlap_cost(t) dt   over the 6-month window
 
 ### Worked example — DB tier sizing + monthly cost during overlap
 
-Target Aurora PostgreSQL for the orders cluster, sized for 120k writes/s aggregate (orders is ~30k/s of that):
+Target Aurora PostgreSQL for the orders cluster, sized for 120k writes/s aggregate (orders is ~30k/s of that). The `db.r6g.4xlarge` figure is an ASSUMED all-in Aurora instance cost of ~$2,100/mo, used consistently here and in [`design_multi_region_dr_architecture`](design_multi_region_dr_architecture.md) so the two models are comparable; price it for your own region before planning against it. Aurora storage and I/O are billed separately and are their own row below.
 
 | Resource | Spec | Qty | Monthly (on-demand, us-east-1, approx) |
 |---|---|---|---|
