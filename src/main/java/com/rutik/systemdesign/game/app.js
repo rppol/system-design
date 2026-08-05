@@ -288,7 +288,7 @@ const STUDY_ORDER = {
   ml: [
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
     "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection","ml/imbalanced_data_and_leakage_traps",
-    "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/generative_models",
+    "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/pytorch_deep_dive","ml/generative_models",
     "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/information_retrieval_and_search","ml/speech_and_audio_ml","ml/multi_task_and_multi_objective_learning","ml/time_series_forecasting","ml/anomaly_detection","ml/reinforcement_learning",
     "ml/ml_system_design","ml/data_pipelines_and_processing","ml/distributed_training","ml/experiment_tracking_and_versioning","ml/mlflow_deep_dive","ml/gpu_and_hardware_optimization","ml/active_learning_and_weak_supervision",
     "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",

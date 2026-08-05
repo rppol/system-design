@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 46 Modules
+## Module List — 47 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -22,6 +22,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `convolutional_neural_networks/` | 3 | Conv2D, pooling, ResNet, EfficientNet, transfer learning | — |
 | `recurrent_neural_networks/` | 3 | LSTM, GRU, vanishing gradients, seq2seq, teacher forcing | — |
 | `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
+| `pytorch_deep_dive/` | 3 | Storage/strides/views, autograd tape, caching allocator, torch.compile guards and recompilation, autocast policy, DataLoader workers, nn.Module internals, torch.export | — |
 | `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
 | `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
 | `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |

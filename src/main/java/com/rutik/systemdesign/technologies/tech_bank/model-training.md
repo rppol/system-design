@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: model-training -->
 
-The 156 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 162 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Model training** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -241,6 +241,16 @@ Reach for it for research and for cross-device or cross-silo setups where the ra
 Parameters, gradients and optimizer state are sharded across ranks; a unit's full parameters are all-gathered just before its forward and backward and freed immediately after, so peak memory falls roughly with world size in exchange for extra communication. That trade is what makes a model too large for one GPU trainable at all, and it is why the wrapping granularity matters: wrap too coarsely and the peak barely moves, too finely and the collectives dominate the step.
 
 FSDP2 (`fully_shard`) applies bottom-up per transformer block and represents each shard as a DTensor, which lets it compose with tensor or pipeline parallelism, `torch.compile` and per-parameter mixed precision instead of fighting them. In practice it is paired with activation checkpointing and bf16, and the first thing to check when throughput disappoints is whether communication is overlapping with compute.
+
+### FSDP2
+**Short:** PyTorch's per-parameter DTensor sharding through fully_shard, the successor to FSDP1's flat-parameter wrapping.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/distributed-training @1, model-training/deep-learning-framework @2
+
+The original FSDP flattened each wrapped unit's parameters into one contiguous buffer, which made sharding efficient but made every parameter's identity disappear — mixed precision per parameter, tensor parallelism underneath, and optimizer state that referred to real parameters all became awkward. FSDP2 shards each parameter individually as a `DTensor` carrying its own device mesh and placement, applied with `fully_shard` rather than by wrapping a module in a class.
+
+The practical gain is composition: because a parameter stays a parameter, FSDP2 layers cleanly under tensor parallelism and pipeline parallelism on the same mesh, and `torch.compile` can trace through it. Reach for it for new sharded-training code. The cost of the migration is that checkpoints and any code reaching into `FlatParameter` internals do not carry over unchanged, so plan the checkpoint format alongside the switch — see `torch.distributed.checkpoint` for the resharding story.
 
 ### FullyShardedDataParallel
 **Short:** PyTorch wrapper that shards parameters, gradients and optimizer state across ranks, the ZeRO-3 equivalent.
@@ -533,6 +543,16 @@ Reach for it for pretraining and continued pretraining at the scale where a sing
 Merging combines several fine-tunes of a shared base model into one set of weights with no gradient steps at all, and mergekit implements the published recipes behind a YAML file: linear averaging, SLERP between two models, task arithmetic over the difference vectors from the base, TIES which resolves sign conflicts and drops small-magnitude changes, DARE which randomly prunes and rescales them, and passthrough which stacks layer ranges into a deeper model. Tensors stream from disk, so a merge runs without loading everything into memory.
 
 Reach for it to combine capabilities tuned separately, or to recover general ability lost in specialization, for the cost of a few minutes rather than a training run. The models must share an architecture and lineage, results are unpredictable enough that you evaluate rather than assume, and a merge cannot add knowledge none of the ingredients had.
+
+### MLX
+**Short:** Apple's array and neural-network framework for Apple silicon, built on unified memory with lazy evaluation.
+**Kind:** tech
+**Lang:** python, cpp
+**Roles:** model-training/deep-learning-framework @1, inference/inference-engine @2, gpu/gpu-portability-and-precision @3
+
+The API is deliberately close to NumPy plus a small `mlx.nn` layer, so a PyTorch-shaped model ports with modest effort. Two design choices differ from PyTorch. Arrays live in unified memory rather than on a device, so there is no `.to("gpu")` and operations on the CPU and the GPU read the same buffer. And evaluation is lazy — graphs build until something forces them, which lets the runtime fuse work it would otherwise dispatch one operation at a time.
+
+Reach for it when the target hardware is a Mac and you want the whole machine's memory available to the model, which is the case that makes local fine-tuning and local LLM inference practical on a laptop. It is not a portability story: there is no CUDA or ROCm backend, and the ecosystem of pretrained checkpoints, distributed-training machinery and profiling tools is a fraction of PyTorch's.
 
 ### mlxtend EnsembleVoteClassifier
 **Short:** mlxtend estimator combining fitted models by hard or soft voting, with optional per-model weights.
@@ -1128,11 +1148,31 @@ The loop it implies -- zero the gradients, forward, compute the loss, backward, 
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2
 
+### torch.distributed.checkpoint
+**Short:** PyTorch's sharded checkpoint API: every rank writes its own shard in parallel, and the result reshards on load.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/distributed-training @1, ml-lifecycle/ml-platform-and-pipelines @3
+
+Usually written DCP. Paired with `SHARDED_STATE_DICT`, each rank emits its own parameters as `DTensor`s and DCP writes them concurrently, which is the only workable way to checkpoint a model too large for one node: `FULL_STATE_DICT` gathers the whole unsharded model onto one rank, so `torch.save(model.state_dict())` OOMs at exactly the scale where checkpointing matters.
+
+The operational property that decides adoption is **resharding**. A checkpoint written by 64 ranks loads into a 32-rank job, so a run resumes on whatever capacity the cluster gives you back rather than on the topology it died with. Convert to `FULL_STATE_DICT` once, offline, when you publish a model; `LOCAL_STATE_DICT` returns opaque flat parameters and is almost never what you want.
+
 ### torch.func
 **Short:** PyTorch's functional transforms - functional_call, grad, vmap - for treating parameters as arguments, as MAML needs.
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, inference/compiler-and-runtime-optimization @3
+
+### torch.nn.attention
+**Short:** PyTorch's attention submodule: sdpa_kernel picks which fused SDPA backend runs, and FlexAttention compiles custom masks.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/deep-learning-framework @1, gpu/kernel-programming @2, inference/inference-engine @3
+
+`sdpa_kernel` is a context manager that constrains which backend `scaled_dot_product_attention` may dispatch to — `FLASH_ATTENTION`, `EFFICIENT_ATTENTION`, `CUDNN_ATTENTION` or `MATH`. That matters because the fast paths have eligibility conditions on dtype, head dimension, mask shape and alignment, and when one is not met SDPA silently falls back to the materializing `MATH` path, which is where an unexplained memory blow-up on long sequences comes from. Pinning the backend turns that silent fallback into a loud error you can act on.
+
+FlexAttention is the other half: it takes a Python `score_mod` or `mask_mod` function and compiles a fused kernel for it, so ALiBi, sliding-window, document-boundary and other custom masks get FlashAttention-class performance without anyone hand-writing a kernel. Reach for it instead of building an explicit mask tensor, which costs quadratic memory in sequence length.
 
 ### torch.nn.Embedding.from_pretrained
 **Short:** Builds an embedding layer from a pretrained matrix such as GloVe or word2vec, optionally frozen, with a padding index.
@@ -1194,6 +1234,16 @@ The loop it implies -- zero the gradients, forward, compute the loss, backward, 
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1
 
+### torch.utils.checkpoint
+**Short:** PyTorch activation checkpointing: run a segment under no_grad, keep only its inputs, and re-run it during backward.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @2, gpu/gpu-profiling-and-debugging @3
+
+`checkpoint(fn, *args, use_reentrant=False)` trades compute for activation memory. Checkpointing every layer of an N-layer network holds O(1) activations for roughly one extra forward pass — about 33% more compute for a forward-plus-backward step; checkpointing every sqrt(N)-th layer holds O(sqrt(N)) and is usually the right point. **Always pass `use_reentrant=False`**: the reentrant implementation cannot handle a segment with no `requires_grad` inputs, breaks under `torch.autograd.grad` as opposed to `backward`, does not compose with `torch.compile`, and omitting the argument warns.
+
+Three things it breaks, and the first two are silent. Dropout must produce the same mask on recompute, so PyTorch stashes and restores CPU and CUDA RNG state by default (`preserve_rng_state=True`) — turning that off to save the stash cost gives you a subtly wrong gradient. BatchNorm running statistics are updated **twice** per step because the forward genuinely runs twice, unless the module is in eval mode or you use `SyncBatchNorm`. And reentrant checkpointing under DDP needs `static_graph=True` or `find_unused_parameters=True`, because the recompute confuses the autograd hook bookkeeping.
+
 ### torch.utils.data.DataLoader
 **Short:** PyTorch iterator batching, shuffling and multi-process-loading a Dataset, with pinned memory for fast GPU copies.
 **Kind:** api
@@ -1253,6 +1303,16 @@ Reach for it to run a real multi-node pretraining job on PyTorch-native machiner
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/fine-tuning-and-peft @1, model-training/distributed-training @3
+
+### transformers Trainer
+**Short:** Hugging Face's batteries-included training loop: pass a model, a dataset and TrainingArguments and it runs the whole loop.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/deep-learning-framework @1, model-training/fine-tuning-and-peft @2, model-training/distributed-training @3
+
+`TrainingArguments` is the whole configuration surface — learning rate and schedule, gradient accumulation, `fp16`/`bf16`, `gradient_checkpointing`, evaluation and save strategies, logging integrations — and `Trainer` supplies the loop, the evaluation pass, checkpoint resumption and callbacks around them. `Seq2SeqTrainer` extends it for generation, and TRL's SFT and preference trainers subclass it.
+
+It is worth knowing which of its conveniences are plain PyTorch mechanisms in disguise, because that is what you debug when one misbehaves: `gradient_checkpointing_enable()` is `torch.utils.checkpoint` applied per block, the `fp16`/`bf16` flags are `torch.amp` autocast plus a `GradScaler`, and the distributed strategy is `accelerate` underneath selecting DDP, FSDP or DeepSpeed from a config file. Reach for it for standard supervised fine-tuning; write your own loop when the loop is the research.
 
 ### TRL
 **Short:** HuggingFace post-training library: SFT, DPO, GRPO, RLOO, KTO and reward-model trainers over transformers.

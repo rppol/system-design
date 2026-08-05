@@ -539,6 +539,11 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     # is the safety net so the next one does not re-split the product in two. Safe because
     # "Ansible Vault" and "Azure Key Vault" are their own keys, not this one.
     "vault": "hashicorp vault",
+    # The bare "triton inference server" was already aliased; the VENDOR-PREFIXED form was
+    # not, so ml/pytorch_deep_dive writing NVIDIA's own full product name minted a second
+    # key beside the eight modules citing "NVIDIA Triton". Alias both -- a future author
+    # reaching for the official name should not have to know which half we indexed.
+    "nvidia triton inference server": "nvidia triton",
     # Maxwell is DELIBERATELY NOT ALIASED, though it looks like the same case. The CDC
     # daemon's bare name collides with NVIDIA's Maxwell GPU architecture, which cuda/
     # discusses at length -- an alias would silently turn a future cuda §11 "Maxwell"

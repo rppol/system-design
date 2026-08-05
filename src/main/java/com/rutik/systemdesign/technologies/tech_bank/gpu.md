@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: gpu -->
 
-The 205 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 208 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **GPU & parallel** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1385,6 +1385,16 @@ Reach for it when you want the CUDA model itself from Python with nothing in bet
 **Lang:** python
 **Roles:** gpu/gpu-portability-and-precision @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
 
+### PYTORCH_CUDA_ALLOC_CONF
+**Short:** Environment variable tuning PyTorch's caching allocator; expandable_segments:True is the usual fix for fragmentation.
+**Kind:** api
+**Lang:** python
+**Roles:** gpu/gpu-profiling-and-debugging @1, runtime-systems/memory-processes-and-os @2
+
+The signature of the problem it solves is an OOM whose own message says there is room — "reserved by PyTorch but unallocated" running to gigabytes, held in cached blocks none of which is large enough for the request. Variable sequence lengths, a validation loop at a different batch size, and `torch.compile` autotuning workspaces are the classic causes. `expandable_segments:True` backs a segment with CUDA virtual memory so it can grow in place instead of the allocator needing a new contiguous physical region, and it removes most fragmentation OOMs at close to no cost. `max_split_size_mb` and `garbage_collection_threshold` are the older, blunter knobs, and options combine with commas.
+
+The trap is why this is an environment variable rather than a function call: **the allocator reads it once at first CUDA initialization**, so setting it after your first `.cuda()` does nothing at all and looks exactly like the setting not working. Export it before the process starts. Two caveats on `expandable_segments`: it can interact badly with a library that takes raw pointers into PyTorch memory and assumes a stable mapping, and it changes what a memory snapshot looks like, so profile with the setting you intend to ship.
+
 ### ROCm
 **Short:** AMD's GPU compute stack: HIP runtime plus rocBLAS/MIOpen/rocProf, mirroring the CUDA library and tooling roles.
 **Kind:** tech
@@ -1517,6 +1527,16 @@ It targets recent tensor-core hardware specifically, building on the asynchronou
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2
 
+### torch.cuda.memory._record_memory_history
+**Short:** Starts PyTorch's memory snapshot recorder, logging every allocation and free with a Python stack for offline viewing.
+**Kind:** api
+**Lang:** python
+**Roles:** gpu/gpu-profiling-and-debugging @1, observability/profiling-and-performance @3
+
+Call it with a `max_entries` budget before the region you care about, dump with `torch.cuda.memory._dump_snapshot("snapshot.pickle")` in a `finally` block so an OOM still produces a file, and stop with `_record_memory_history(enabled=None)`. The pickle renders as a clickable allocation timeline in PyTorch's memory-viz page, where each block carries the stack that allocated it. It is the right tool for an OOM, in a way that reading `memory_allocated()` is not.
+
+The skill is the reading order. A sawtooth returning to the same floor every step is a sizing problem, and the peak is almost always at the top of backward for the first few layers, where all forward activations are still alive and gradients are materializing. A staircase that never returns is a leak: sort live blocks by age and read the stack on anything allocated in step 1 and still alive at step 20 — in practice a Python list holding tensors that still carry `grad_fn`, a forward hook storing undetached outputs, a metric object accumulating tensors instead of floats, or a stray `create_graph=True`.
+
 ### torch.cuda.Stream
 **Short:** PyTorch handle on a CUDA stream, used to overlap compute with pinned-memory host-device copies.
 **Kind:** api
@@ -1546,6 +1566,16 @@ It targets recent tensor-core hardware specifically, building on the asynchronou
 **Kind:** api
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2
+
+### TORCH_LOGS
+**Short:** Environment variable selecting PyTorch's diagnostic log streams; the entry point for debugging torch.compile.
+**Kind:** api
+**Lang:** python
+**Roles:** gpu/gpu-profiling-and-debugging @1, inference/compiler-and-runtime-optimization @2
+
+It takes a comma-separated list of artifact names. `TORCH_LOGS="recompiles"` prints the exact guard that failed on every recompilation, which is the one that finds a recompile storm; `graph_breaks` names the bytecode that ended a graph; `output_code` dumps the Triton or C++ Inductor generated; and a `+` prefix such as `+dynamo` turns a component up to very verbose. `TORCH_COMPILE_DEBUG=1` is the heavier sibling that dumps the intermediate FX graphs as well.
+
+Reach for it the moment a compiled model is slower than you expected, because none of the three `torch.compile` failure modes announces itself: a graph break is not an error and warns nothing, a recompilation looks like normal warm-up, and hitting `recompile_limit` silently reverts the frame to eager forever. The programmatic counterparts are `torch._dynamo.utils.compile_times()` and `torch._dynamo.explain(fn)(*args)`, which are what you assert on in CI rather than reading logs by eye.
 
 ### vendor ICDs
 **Short:** OpenCL's Installable Client Driver mechanism: each vendor ships an ICD, host code enumerates all at runtime.

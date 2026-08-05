@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: inference -->
 
-The 88 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 93 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Inference & optimization** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -28,6 +28,26 @@ Prompt caching is explicit: you place a `cache_control` breakpoint at the end of
 Around the core chat endpoint sits the rest of the surface: a batch mode for work that tolerates latency, token counting so a prompt can be sized before it is sent, file and document handling, and long context windows that change the shape of a request, since whole documents and codebases go into the prompt rather than through a retrieval layer. The same models are also offered through cloud marketplaces, which matters when data residency or an existing cloud contract decides where inference may run.
 
 Reach for it when the work is text and reasoning and you want no training or serving infrastructure at all. Design around the two things you do not control: rate limits, which are per-organization and shape how much concurrency you can actually use, and model retirement, which means pinning a model identifier and keeping an evaluation set you can re-run whenever you have to move.
+
+### AOTAutograd
+**Short:** The torch.compile stage that traces forward and backward together into one ATen graph, then partitions it back into two.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/compiler-and-runtime-optimization @1, model-training/deep-learning-framework @2
+
+TorchDynamo hands it an FX graph of the forward only. AOTAutograd re-traces that graph ahead of time to build a joint forward-and-backward graph lowered to ATen operators, then splits it into a forward graph and a backward graph for Inductor to compile. This is why `torch.compile` speeds up training and not just inference, and why the first backward pass is slow as well as the first forward.
+
+The part worth knowing operationally is the partitioner: it decides which intermediate values the forward saves and which the backward recomputes, which is automatic, targeted activation checkpointing. That is the reason compiled peak memory can differ from eager in either direction, and the reason a memory comparison between eager and compiled is not a like-for-like measurement.
+
+### AOTInductor
+**Short:** Compiles an ExportedProgram into a self-contained .pt2 archive of precompiled kernels that runs with no Python at runtime.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/compiler-and-runtime-optimization @1, inference/model-format-and-edge @2, inference/model-server @3
+
+It is the ahead-of-time half of the PyTorch 2 compiler stack: where `torch.compile` is a JIT that compiles on first call and needs a live Python interpreter, AOTInductor takes the `ExportedProgram` produced by `torch.export` and emits a packaged artifact with the kernels already built. `torch._inductor.aoti_compile_and_package` writes it and `torch._inductor.aoti_load_package` loads it back, and the same archive is what NVIDIA Triton's `torch_aoti` platform consumes.
+
+Reach for it when a warm-up cliff or a Python runtime is unacceptable — a latency SLO, a C++ service, an edge target. The trap is that everything `torch.export` refuses, AOTInductor never sees: get the model correct and fast under `torch.compile` first, because an export failure is much harder to diagnose than a graph break.
 
 ### AutoAWQ
 **Short:** Toolkit that applies AWQ 4-bit activation-aware weight quantization to Hugging Face LLMs.
@@ -788,6 +808,16 @@ Its practical uses are as a speculative-decoding draft model for a larger Llama,
 **Lang:** python
 **Roles:** inference/compiler-and-runtime-optimization @1, gpu/kernel-programming @2
 
+### torch.export
+**Short:** PyTorch's ahead-of-time whole-graph capture, producing a serializable ExportedProgram with no graph breaks allowed.
+**Kind:** api
+**Lang:** python
+**Roles:** inference/model-format-and-edge @1, inference/compiler-and-runtime-optimization @2
+
+`export(model.eval(), example_args, dynamic_shapes=...)` returns an `ExportedProgram` you can save with `torch.export.save`, feed to AOTInductor for a `.pt2` archive, or lower to ExecuTorch. `Dim` ranges name which dimensions may vary, and `Dim.AUTO` and `Dim.DYNAMIC` let export infer them instead. `torch.onnx.export` is now built on it as well.
+
+The behavioural difference from `torch.compile` is the one to say out loud: export **refuses rather than falling back**. There are no graph breaks, so anything the tracer cannot capture — a data-dependent shape is the usual one — is an error, remedied with `torch.cond`, a `torch._check()` bound, or a `Dim` range. Note also that `strict` now defaults to `False`, using a `__torch_function__`-based tracer that accepts far more real-world code than the original Dynamo-strict path; opt into `strict=True` when you want the stronger soundness guarantee.
+
 ### torch.nn.utils.prune
 **Short:** PyTorch's built-in pruning utilities; masks weights to zero without shrinking tensors, so speed needs more work.
 **Kind:** api
@@ -804,6 +834,16 @@ torchao quantizes a model in place, swapping a linear layer's weights for a low-
 
 Being PyTorch-native, it composes with compile and distributed training in ways an external quantization library often does not. Which configuration is actually fast depends closely on your GPU generation, so measure rather than assuming lower precision always wins.
 
+### TorchDynamo
+**Short:** The CPython frame-evaluation hook behind torch.compile: it captures an FX graph plus guards straight from bytecode.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/compiler-and-runtime-optimization @1, devtools/compiler-toolchain-and-codegen @2
+
+Dynamo installs a PEP 523 frame hook, symbolically executes your function's bytecode, and emits an FX graph of the tensor operations together with a set of guards — cheap runtime predicates covering dtype, device, rank, contiguity, `requires_grad`, the values of Python scalars and strings it baked in, and object identities. When a guard fails it compiles a new specialization; when it cannot trace a piece of bytecode it takes a graph break, runs that piece in Python, and starts a new graph.
+
+Recompilation is the failure mode, and the modern cause is not the one most advice names. `automatic_dynamic_shapes` is on by default, so ten distinct tensor shapes cost two compilations, not ten, and the same promotion now applies to Python `int` and `float` arguments. What still storms is anything that cannot be made symbolic: a `str` argument recompiles once per distinct value, and so does dtype churn, device, rank and layout. Past `recompile_limit` — 8 per frame — Dynamo gives up and runs eager forever, with a warning nobody reads, so develop with `fullgraph=True` and diagnose with `TORCH_LOGS`.
+
 ### TorchInductor
 **Short:** PyTorch 2.x's default compiler backend: lowers the FX graph and emits fused Triton or C++ kernels.
 **Kind:** tech
@@ -813,6 +853,16 @@ Being PyTorch-native, it composes with compile and distributed training in ways 
 It is the backend `torch.compile` uses by default. Dynamo captures an FX graph, AOTAutograd splits forward from backward and lowers to ATen operators, and Inductor takes it from there: it decomposes into a small internal representation, fuses elementwise and reduction operations into as few kernels as possible, plans buffer reuse, and generates code, Triton for GPU and C++ with OpenMP for CPU, which is compiled and cached on disk so later runs skip the work.
 
 The gain comes mostly from fusion and from removing per-operation framework overhead, so memory-bound models benefit most and a model already dominated by large GEMMs benefits least. What to watch for is recompilation: a change in input shape, a dtype or a Python branch triggers a new graph, and a loop that recompiles every step is slower than eager. Turning on the recompile logs is how you find it.
+
+### TorchScript
+**Short:** PyTorch's legacy JIT and serialization format via torch.jit.script and trace; deprecated in 2.13 in favour of torch.compile and torch.export.
+**Kind:** tech
+**Lang:** python, cpp
+**Roles:** inference/compiler-and-runtime-optimization @1, inference/model-format-and-edge @2
+
+It compiled a module into a statically typed IR that could be saved and loaded from C++ with no Python present, which for years made it the standard way to ship a PyTorch model. Both entry points now emit a deprecation warning pointing at `torch.compile` or `torch.export`. Existing artifacts still load and still serve, including under Triton Inference Server, so nothing is broken — but nothing new should be written against it.
+
+Two characteristic failures are why it was replaced. Scripting demanded that your Python fit a restricted typed subset, so real models needed rewriting to be accepted at all. Tracing recorded a single execution, silently baking in the trace-time shapes and taking only the branch that ran, so a traced model could be quietly wrong on inputs it was never traced with — wrong output, no error. `torch.export` was designed to remove exactly that class of surprise by refusing to capture rather than capturing something incomplete.
 
 ### TorchServe
 **Short:** PyTorch's model server: package a .mar, expose HTTP/gRPC inference endpoints, version and scale handlers.

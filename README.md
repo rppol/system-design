@@ -676,6 +676,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Convolutional Neural Networks](src/main/java/com/rutik/systemdesign/ml/convolutional_neural_networks/convolutional_neural_networks.md) | Conv2D, pooling, ResNet skip connections, EfficientNet compound scaling, transfer learning |
 | [Recurrent Neural Networks](src/main/java/com/rutik/systemdesign/ml/recurrent_neural_networks/recurrent_neural_networks.md) | LSTM, GRU, vanishing gradients, bidirectional, seq2seq, teacher forcing, CTC loss |
 | [Training Deep Networks](src/main/java/com/rutik/systemdesign/ml/training_deep_networks/training_deep_networks.md) | LR warmup, gradient clipping, mixed precision, data augmentation, gradient accumulation |
+| [PyTorch Deep Dive](src/main/java/com/rutik/systemdesign/ml/pytorch_deep_dive/pytorch_deep_dive.md) | Storage/strides/views, autograd tape, caching allocator and OOM debugging, torch.compile guards and recompilation, autocast policy, DataLoader workers, torch.export |
 | [Generative Models](src/main/java/com/rutik/systemdesign/ml/generative_models/generative_models.md) | VAEs, GANs, Diffusion (DDPM), mode collapse, FID score, classifier-free guidance |
 
 #### Phase 4 — Domain Specializations
