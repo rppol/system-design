@@ -1147,6 +1147,10 @@ def main():
     # empty state, but a broken quiz would be a broken app.
     try:
         tech_index = build_tech_index(bank)
+        # A deep-dive-shaped page in neither pin list is FATAL under --strict, for the
+        # same reason an out-of-bounds **Short:** is: the page ships either way, and the
+        # only symptom of getting it wrong is a card that is quietly not there.
+        bank_errs.extend(tech_index.pop("deepErrs", []))
         with open(os.path.join(OUT_DIR, "tech.json"), "w", encoding="utf-8") as fh:
             json.dump(tech_index, fh, ensure_ascii=False, separators=(",", ":"))
         print(f"Wrote technologies index -> {OUT_DIR}/tech.json  "

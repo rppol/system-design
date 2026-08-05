@@ -4146,24 +4146,28 @@ async function renderTech() {
   const secsPresent = idx.secs || [...new Set(mods.map((m) => m.m.split("/")[0]))]
     .sort((a, b) => (secOrder.indexOf(a) + 1 || 99) - (secOrder.indexOf(b) + 1 || 99));
 
-  // The hand-written technologies/ deep dives, pinned above the derived index.
+  // The hand-written PRODUCT deep dives, pinned above the derived index.
   // [[moduleIdx, toolCount], ...] emitted by extract.py -- this used to be a filter over
   // 613 modules plus a whole-index pass over ~5,800 use-pairs, on every render.
-  const deepPairs = idx.deep || (() => {
-    const cnt = new Map();
-    techRows.forEach((t) => t.u.forEach((u) => cnt.set(u[0], (cnt.get(u[0]) || 0) + 1)));
-    return mods.map((m, i) => [i, cnt.get(i) || 0]).filter(([i]) => mods[i].m.startsWith("technologies/"));
-  })();
+  //
+  // No browser-side fallback any more, deliberately. The old one filtered on
+  // `m.startsWith("technologies/")`, which stopped being the rule when product pages
+  // began living in the section owning their domain -- Kafka in backend/, Redis in
+  // database/, PyTorch in ml/. Which pages are PRODUCT deep dives and which are CONCEPT
+  // pages that merely share the filename shape is a judgement call, authored in
+  // build_tech.py's PRODUCT_DEEP_DIVES / CONCEPT_DEEP_DIVES; it is not derivable here.
+  // An empty row is the honest degradation, and `--strict` fails before it can happen.
+  const deepPairs = idx.deep || [];
   const deep = deepPairs.map(([i]) => ({ m: mods[i], i }));
   const toolsIn = new Map(deepPairs);
   const deepHTML = deep.length ? `
     <h2 class="section-h">Hand-written deep dives</h2>
     <div class="grid tx-deep">${deep.map(({ m, i }) => `
-      <button class="tile tx-deepcard" data-p="${esc(techPath(m))}" data-a="" title="${esc(techName(m))}" style="--tile-accent:${accentOf("technologies")}">
+      <button class="tile tx-deepcard" data-p="${esc(techPath(m))}" data-a="" title="${esc(techName(m))}" style="--tile-accent:${accentOf(m.m.split("/")[0])}">
         <span class="tname">${esc(deepTitle(m))}</span>
         <span class="tmeta">${toolsIn.get(i)
-          ? `${toolsIn.get(i)} tools in its stack &middot; full module`
-          : "full module &middot; 14 sections"}</span>
+          ? `${toolsIn.get(i)} tools in its stack`
+          : "full module"} &middot; ${esc(SECTION_LABELS[m.m.split("/")[0]] || m.m.split("/")[0])}</span>
       </button>`).join("")}</div>` : "";
 
   // ---- [BANK] facet state ------------------------------------------------------

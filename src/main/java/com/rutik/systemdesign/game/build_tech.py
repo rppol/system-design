@@ -1093,6 +1093,76 @@ def _study_order():
         return {}
 
 
+# ---- deep dives pinned on the Technologies screen ---------------------------
+#
+# The screen pins the hand-written product deep dives above the derived index. This used
+# to be `m["m"].startswith("technologies/")`, which was correct when technologies/ was the
+# only place a product page could live -- and silently wrong the moment the placement rule
+# ("a product lives in the section owning its DOMAIN; technologies/ is for the homeless
+# ones") put Kafka in backend/, Redis in database/ and PyTorch in ml/. Nine product deep
+# dives existed and the screen showed none of them.
+#
+# The list is AUTHORED, not derived, because the filename is not a safe rule. Ten pages
+# match `*_deep_dive` or `*_internals` and are CONCEPT pages -- caching strategies, TCP/IP,
+# character encoding, indexing -- which have no business on a screen about tools. Naming
+# them explicitly in CONCEPT_DEEP_DIVES is what lets the guard below tell "deliberately
+# excluded" apart from "someone forgot", which is the distinction this repo keeps losing.
+#
+# Key is "<module id>/<source file>", so a deep-dive SUB-FILE addresses fine.
+# Anything under technologies/ is pinned automatically and needs no entry.
+PRODUCT_DEEP_DIVES = {
+    "backend/kafka_deep_dive/kafka_deep_dive.md",
+    "backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md",
+    "database/elasticsearch_internals/elasticsearch_internals.md",
+    "database/mysql_innodb_internals/mysql_innodb_internals.md",
+    "database/postgresql_internals/postgresql_internals.md",
+    "database/redis_internals/redis_internals.md",
+    "devops/observability_tracing_and_otel/opentelemetry_deep_dive.md",
+    "fastapi/pydantic_v2_deep_dive/pydantic_v2_deep_dive.md",
+    "java/jvm_internals/jvm_internals.md",
+    "llm/faiss_deep_dive/faiss_deep_dive.md",
+    "llm/vllm_deep_dive/vllm_deep_dive.md",
+    "ml/mlflow_deep_dive/mlflow_deep_dive.md",
+    "ml/pytorch_deep_dive/pytorch_deep_dive.md",
+}
+# Matches the same filename pattern but teaches a CONCEPT, not a product. Listed so the
+# guard stays silent about them and loud about anything new.
+CONCEPT_DEEP_DIVES = {
+    "backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md",
+    "backend/connection_pooling_deep_dive/connection_pooling_deep_dive.md",
+    "backend/database_types_deep_dive/database_types_deep_dive.md",
+    "backend/tcp_ip_deep_dive/tcp_ip_deep_dive.md",
+    "cs_fundamentals/character_encoding_deep_dive/character_encoding_deep_dive.md",
+    "database/indexing_deep_dive/indexing_deep_dive.md",
+    "database/storage_engines_internals/storage_engines_internals.md",
+    "java/collections_internals/collections_internals.md",
+    "llm/browser_agents_deep_dive/browser_agents_deep_dive.md",
+    "ml/natural_language_processing/tokenization_deep_dive.md",
+    "python/asyncio_and_event_loop/event_loop_internals.md",
+}
+DEEP_NAME_RE = re.compile(r"(?:_deep_dive|_internals)\.md$")
+
+
+def _deep_dive_pins(modules, tools_in):
+    """([[moduleIdx, toolCount], ...], [error, ...]) -- the pinned cards, plus a FATAL
+    complaint about any deep-dive-shaped page in neither list. Without the complaint the
+    next product page is simply absent from the screen, with a green build and nothing to
+    read: the exact failure this file's other guards exist to prevent."""
+    deep, errs = [], []
+    for i, m in enumerate(modules):
+        path = f"{m['m']}/{m['f']}"
+        in_tech_section = m["m"].startswith("technologies/")
+        if in_tech_section or path in PRODUCT_DEEP_DIVES:
+            deep.append([i, tools_in.get(i, 0)])
+        elif DEEP_NAME_RE.search(m["f"]) and path not in CONCEPT_DEEP_DIVES:
+            errs.append(
+                f"{path} looks like a deep dive but is in neither PRODUCT_DEEP_DIVES nor "
+                f"CONCEPT_DEEP_DIVES in build_tech.py -- add it to one. A product page "
+                f"left out is invisible on the Technologies screen; a concept page left "
+                f"in would be filed as a tool.")
+    return deep, errs
+
+
 def build_tech_index(bank=None):
     """{anchors, modules, tech, trade, secs, deep} -- the whole-repo technology +
     tradeoff index, with everything the Technologies screen used to recompute on EVERY
@@ -1300,16 +1370,15 @@ def build_tech_index(bank=None):
 
     # Sections present in the index, already in the app's canonical order.
     secs_present = sorted({m["m"].split("/")[0] for m in modules}, key=sec_rank)
-    # The hand-written technologies/ deep dives, pinned above the derived index, each with
-    # the number of indexed tools in its stack. That count used to cost a full pass over
-    # every tool's every use (~5,800 pairs) to label three cards.
+    # The hand-written product deep dives, pinned above the derived index, each with the
+    # number of indexed tools in its stack. That count used to cost a full pass over every
+    # tool's every use (~5,800 pairs) to label the cards.
     tools_in = {}
     for t in tech_out:
         for u in t["u"]:
             tools_in[u[0]] = tools_in.get(u[0], 0) + 1
-    deep = [[i, tools_in.get(i, 0)] for i, m in enumerate(modules)
-            if m["m"].startswith("technologies/")]
+    deep, deep_errs = _deep_dive_pins(modules, tools_in)
     return {"generatedAt": datetime.now(timezone.utc).isoformat(),
             "anchors": anchors, "modules": modules, "tech": tech_out, "trade": trade,
-            "secs": secs_present, "deep": deep}
+            "secs": secs_present, "deep": deep, "deepErrs": deep_errs}
 
