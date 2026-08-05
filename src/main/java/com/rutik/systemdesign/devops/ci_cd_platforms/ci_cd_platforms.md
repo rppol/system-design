@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {id-token: write, contents: read}   # OIDC for keyless cloud auth
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: docker/build-push-action@v7
         with: {push: true, tags: "${{ inputs.image }}:${{ github.sha }}", cache-from: type=gha, cache-to: "type=gha,mode=max"}
 ---

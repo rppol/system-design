@@ -180,7 +180,7 @@ jobs:
   test:
     runs-on: ubuntu-latest          # ephemeral runner: fresh VM per job
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: {node-version: 24, cache: npm}    # dependency cache -> faster installs
       - run: |
@@ -192,7 +192,7 @@ jobs:
     needs: test                      # gate: only build if tests pass
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: docker/build-push-action@v7
         with:
           push: true

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: ml-lifecycle -->
 
-The 176 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 177 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **MLOps & evaluation** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -44,6 +44,16 @@ free. Two things to plan: sync frequency is your freshness budget and continuous
 more, and embeddings are served by Vector Search rather than here. The legacy `featurestores`
 API and optimized online serving are on a published sunset schedule, so check which generation
 a tutorial targets.
+
+### Agent Platform Pipelines
+**Short:** Google Cloud's managed Kubeflow Pipelines runner, formerly Vertex AI Pipelines; serverless DAG execution with no cluster to operate.
+**Kind:** tech
+**Lang:** python
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, data-movement/workflow-and-durable-execution @2
+
+It executes pipelines authored with the KFP SDK on Google-managed infrastructure, so the DAG definition is portable Kubeflow while the control plane, scheduling and autoscaling are not yours to run. Steps are containers, artifacts and lineage are tracked between them, and it integrates with the rest of the platform's registry and metadata services.
+
+Reach for it when the team already writes KFP and the operational cost of a self-managed Kubeflow installation is the actual problem — that installation is substantial, and this removes it. The trade is the usual managed one: you inherit the platform's quota model and its version of the runtime rather than pinning your own, and portability holds at the SDK level rather than the deployment level.
 
 ### AgentBench
 **Short:** Benchmark suite that evaluates LLMs acting as agents across interactive environments; single-agent, not multi-agent.

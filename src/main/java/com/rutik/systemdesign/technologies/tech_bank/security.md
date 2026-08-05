@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 217 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 220 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -435,6 +435,16 @@ Do it because it cheapens every later defence: a scanner has less to report when
 
 It signs a container image or any OCI artifact and stores the signature as a companion object in the same registry, so verification needs nothing beyond registry access. `cosign verify` checks it against a public key or, in keyless mode, against a short-lived certificate that Fulcio issued for an OIDC identity such as a specific GitHub Actions workflow, with the event recorded in the Rekor transparency log. Keyless is the mode that matters in practice, because it removes the long-lived signing key that was the weak point of the whole idea. It also attaches attestations, an SBOM or SLSA provenance, as signed statements about the image. Pair it with an admission controller that rejects unsigned or unattested images, because a signature nobody verifies changes nothing.
 
+### Credo AI
+**Short:** Commercial AI governance platform: a registry of AI use cases, policy packs, evidence collection and generated model cards.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, applied-ml/interpretability-fairness-and-causal @2, ml-lifecycle/ml-platform-and-pipelines @3
+
+It treats governance as an inventory problem before a testing problem. Every AI use case is registered with its context — what it decides, about whom, under which regulation — and a policy pack turns that framing into a checklist of required evidence. Connectors to the platforms teams already train on, SageMaker, Azure ML and Databricks, pull model and evaluation metadata in so the artifacts, model cards, audit trails and policy compliance checks are assembled from the pipeline rather than typed into a document by hand.
+
+Reach for it when the number of models in production has outgrown a spreadsheet and someone outside engineering has to answer for them. What it cannot supply is the judgment: a policy pack states which evidence is required, not whether a fairness result is acceptable for your population, and a use case nobody registered is invisible to the platform no matter how well configured it is.
+
 ### cryptography
 **Short:** Python's standard crypto library: AES-GCM, RSA, ECDSA, X25519, X.509 and JWT-grade key operations.
 **Kind:** tech
@@ -761,6 +771,16 @@ The plugin sits between Helm and your values files: `helm secrets upgrade` decry
 
 Reach for it when Helm is the deployment path and secrets should be versioned alongside the chart. The dependency chain is the caveat, since a Helm plugin wrapping SOPS wrapping a key manager must all exist on whichever machine or runner performs the release. In a GitOps flow where the cluster reconciles rather than a person running Helm, the SOPS integrations in Flux or Argo CD, or the External Secrets operator, fit better.
 
+### Holistic AI
+**Short:** Commercial AI governance platform automating EU AI Act risk classification alongside bias, performance and robustness testing.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, applied-ml/interpretability-fairness-and-causal @2, ml-lifecycle/evaluation-and-benchmarks @3
+
+The platform's starting point is the regulatory question rather than the model: it walks a system through the risk classification the EU AI Act asks for, then runs the technical audits that tier demands — bias metrics across protected groups, performance testing, robustness testing — and keeps the results as the documentation the same regime expects. Connectors into model registries such as MLflow and Weights and Biases are what let an audit attach to a specific model version instead of to a name in a report.
+
+Reach for it when the compliance obligation is the driver and the audits have to be repeatable and evidenced, not run once in a notebook. Two limits are worth stating up front: automated risk classification is a structured questionnaire over your own description of the system, so a wrong description yields a confidently wrong tier, and a passing bias metric is evidence of one definition of fairness, not of a defensible system.
+
 ### IAM
 **Short:** AWS Identity and Access Management: users, roles, federation and the JSON policies that grant every API action.
 **Kind:** tech
@@ -780,6 +800,16 @@ The entire surface of AWS is one API guarded by this, so the discipline is grant
 It is the workforce front door across many AWS accounts. Users come from its own directory or an external identity provider over SAML with SCIM provisioning, and a permission set, effectively a named policy bundle, is assigned to a group for a set of accounts. Identity Center then provisions the corresponding role into each account, so a person picks an account and role from a portal and receives short-lived credentials, with `aws sso login` doing the same for the CLI and SDKs.
 
 Reach for it the moment there is more than one account, because the alternative is IAM users duplicated everywhere and access keys that outlive employment. It replaces what was called AWS SSO, so older documentation still uses that name. It governs human and cross-account access, while workloads should still take roles attached to the compute, whether instance profiles, task roles or IRSA.
+
+### IBM OpenPages
+**Short:** IBM's enterprise GRC platform; its AI governance module carries model risk workflows, policy management and regulatory content.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, applied-ml/interpretability-fairness-and-causal @3
+
+OpenPages is a governance, risk and compliance system of record first, and an AI tool second: risk registers, control libraries, policy management, issue and remediation workflow, and a subscription library of regulatory content that maps obligations onto those controls. The AI governance module reuses that machinery for models — a model becomes another governed object with an owner, an approval workflow, periodic review and evidence attached to it — which is why it appears in banks and insurers, where model risk management was already a regulated discipline before anything was called AI.
+
+Reach for it when AI governance has to land inside an enterprise GRC programme that already exists, so regulators see one register rather than a separate ML spreadsheet. It is not an ML testing tool and will not compute a fairness metric for you; it stores the result and the sign-off. The cost is the usual GRC cost: a heavyweight platform, a configuration project, and a workflow that only produces assurance if engineers actually feed it.
 
 ### InetAddressFilter
 **Short:** Spring Boot 4.1 filter blocking outbound requests to private or link-local addresses, mitigating SSRF.

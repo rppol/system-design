@@ -722,50 +722,50 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 ## 11. Technologies & Tools
 
 **Experiment Tracking:**
-- MLflow Tracking — open source, self-hosted or Databricks-managed; tracks runs, params, metrics, artifacts
-- Weights & Biases (W&B) — SaaS; richer visualization, team collaboration, sweeps for hyperparameter search
-- Neptune.ai — SaaS alternative; strong metadata management
+- **MLflow Tracking** — open source, self-hosted or Databricks-managed; tracks runs, params, metrics, artifacts
+- **Weights & Biases (W&B)** — SaaS; richer visualization, team collaboration, sweeps for hyperparameter search
+- **Neptune** — SaaS alternative; strong metadata management
 
 **Model Registry:**
-- MLflow Model Registry — open source; the lifecycle mechanism is mutable **aliases** (`@champion`, `@challenger`) plus key-value tags, so one model version can carry several labels at once and promotion is an atomic alias move. Also provides model signatures and a REST API
+- **MLflow Model Registry** — open source; the lifecycle mechanism is mutable **aliases** (`@champion`, `@challenger`) plus key-value tags, so one model version can carry several labels at once and promotion is an atomic alias move. Also provides model signatures and a REST API
 - Agent Platform Model Registry (formerly Vertex AI Model Registry) — GCP-managed; integrates with Agent Platform Endpoints
-- Amazon SageMaker Model Registry — AWS-managed; Model Groups + Model Package versions with an approval status; integrates with SageMaker Endpoints
+- **SageMaker Model Registry** — AWS-managed; Model Groups + Model Package versions with an approval status; integrates with SageMaker Endpoints
 
 **Pipeline Orchestration:**
-- Kubeflow Pipelines (KFP v2, SDK 2.x) — Kubernetes-native; KFP SDK for Python DAG definition; portable
-- Agent Platform Pipelines — managed KFP on GCP; Cloud Build integration; no infra management
-- Apache Airflow — general-purpose; widely used; less ML-native than KFP
-- Prefect / Dagster — modern workflow orchestrators; good Python-native experience
+- **Kubeflow Pipelines (KFP v2, SDK 2.x)** — Kubernetes-native; KFP SDK for Python DAG definition; portable
+- **Agent Platform Pipelines** — managed KFP on GCP; Cloud Build integration; no infra management
+- **Apache Airflow** — general-purpose; widely used; less ML-native than KFP
+- **Prefect / Dagster** — modern workflow orchestrators; good Python-native experience
 
 **Data Versioning:**
-- DVC (Data Version Control) — git-compatible; tracks large files in remote storage (S3, GCS); versioned datasets
-- Delta Lake / Iceberg — ACID-compliant table formats; time-travel queries for dataset versioning
+- **DVC (Data Version Control)** — git-compatible; tracks large files in remote storage (S3, GCS); versioned datasets
+- **Delta Lake** / **Apache Iceberg** — ACID-compliant table formats; time-travel queries for dataset versioning
 
 **Data Quality:**
-- Great Expectations (GX Core 1.x) — schema + distribution expectations; Python-API only (no CLI); integrates into Airflow and CI
-- Deepchecks — ML-specific checks including train-test drift, model performance degradation
-- Evidently AI — drift reports, data quality reports; integrates with MLflow
+- **Great Expectations (GX Core 1.x)** — schema + distribution expectations; Python-API only (no CLI); integrates into Airflow and CI
+- **Deepchecks** — ML-specific checks including train-test drift, model performance degradation
+- **Evidently AI** — drift reports, data quality reports; integrates with MLflow
 
 **CI/CD:**
-- GitHub Actions — YAML-based workflows; free tier for public repos; GitHub-native
-- GitLab CI/CD — strong for self-hosted enterprise deployments
-- Jenkins — widely deployed in existing enterprise estates; high flexibility, high maintenance overhead
+- **GitHub Actions** — YAML-based workflows; free tier for public repos; GitHub-native
+- **GitLab CI** — strong for self-hosted enterprise deployments
+- **Jenkins** — widely deployed in existing enterprise estates; high flexibility, high maintenance overhead
 
 **Serving and Traffic Management:**
-- Istio / Envoy — service mesh; fine-grained traffic splitting for canary deployments
-- Seldon Core — Kubernetes-native model serving; Core 2 has Experiments (HTTP traffic split for A/B and canary) and shadow deployment via a mirror model built in. Not open source any more: since 22 January 2024 all new releases of Core 1, Core 2, Alibi Explain and Alibi Detect are under the Business Source License 1.1 — free for non-production use, paid for production
-- BentoML — model packaging and serving; cloud-agnostic
-- Dynamo Triton (NVIDIA) — high-performance GPU serving; supports TensorRT, ONNX, PyTorch, Python backends
+- **Istio / Envoy** — service mesh; fine-grained traffic splitting for canary deployments
+- **Seldon Core** — Kubernetes-native model serving; Core 2 has Experiments (HTTP traffic split for A/B and canary) and shadow deployment via a mirror model built in. Not open source any more: since 22 January 2024 all new releases of Core 1, Core 2, Alibi Explain and Alibi Detect are under the Business Source License 1.1 — free for non-production use, paid for production
+- **BentoML** — model packaging and serving; cloud-agnostic
+- **Dynamo Triton (NVIDIA)** — high-performance GPU serving; supports TensorRT, ONNX, PyTorch, Python backends
 
 **Monitoring:**
-- Prometheus + Grafana — metrics collection and dashboards; pull-based
-- Evidently AI — open source drift and model performance monitoring
-- Arize AI — SaaS; model observability; embedding drift, prediction drift
-- Langfuse — LLM-specific observability (see `llm/llm_observability_and_monitoring/`)
+- **Prometheus + Grafana** — metrics collection and dashboards; pull-based
+- **Evidently AI** — open source drift and model performance monitoring
+- **Arize AI** — SaaS; model observability; embedding drift, prediction drift
+- **Langfuse** — LLM-specific observability (see `llm/llm_observability_and_monitoring/`)
 
 **Feature Stores:**
-- Feast — open source; offline (Parquet/BigQuery) + online (Redis/DynamoDB) stores
-- Tecton — SaaS feature platform; strong consistency guarantees
+- **Feast** — open source; offline (Parquet/BigQuery) + online (Redis/DynamoDB) stores
+- **Tecton** — SaaS feature platform; strong consistency guarantees
 - Agent Platform Feature Store (formerly Vertex AI Feature Store) — GCP-managed; feature data is registered from a BigQuery source and exposed through Bigtable online serving via feature view instances
 
 ---

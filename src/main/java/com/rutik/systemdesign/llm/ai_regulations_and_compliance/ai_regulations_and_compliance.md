@@ -935,88 +935,88 @@ Significant changes that trigger re-assessment include:
 
 ### Bias Detection and Fairness
 
-**Fairlearn** (Microsoft, open-source)
-- Metrics: `demographic_parity_difference`, `equalized_odds_difference`, `selection_rate`
-- Mitigation algorithms: `ExponentiatedGradient`, `GridSearch`, `ThresholdOptimizer`
-- Dashboard integration for interactive bias analysis
-- Install: `pip install fairlearn`
+- **Fairlearn** — Microsoft's open-source Python toolkit for measuring group-fairness disparities and mitigating them with constrained retraining or threshold tuning.
+  - Metrics: `demographic_parity_difference`, `equalized_odds_difference`, `selection_rate`
+  - Mitigation algorithms: `ExponentiatedGradient`, `GridSearch`, `ThresholdOptimizer`
+  - Dashboard integration for interactive bias analysis
+  - Install: `pip install fairlearn`
 
-**IBM AI Fairness 360 (AIF360)**
-- 70+ fairness metrics across 5 fairness dimensions
-- 10+ mitigation algorithms (pre-processing, in-processing, post-processing)
-- Python and R support
-- Install: `pip install aif360`
+- **AIF360 (AI Fairness 360)** — IBM-originated open-source fairness toolkit with 70+ metrics and mitigation algorithms at every stage of the pipeline.
+  - 70+ fairness metrics across 5 fairness dimensions
+  - 10+ mitigation algorithms (pre-processing, in-processing, post-processing)
+  - Python and R support
+  - Install: `pip install aif360`
 
 ### Explainability
 
-**SHAP (SHapley Additive exPlanations)**
-- Model-agnostic local and global explanations
-- `TreeExplainer` for tree-based models (fast); `KernelExplainer` for any model
-- Feature importance plots, waterfall plots, interaction plots
-- Install: `pip install shap`
+- **SHAP (SHapley Additive exPlanations)** — Model-agnostic local and global feature attributions, with a fast `TreeExplainer` for tree models and `KernelExplainer` for anything else.
+  - Model-agnostic local and global explanations
+  - `TreeExplainer` for tree-based models (fast); `KernelExplainer` for any model
+  - Feature importance plots, waterfall plots, interaction plots
+  - Install: `pip install shap`
 
-**LIME (Local Interpretable Model-agnostic Explanations)**
-- Local surrogate model approximating complex model behavior at specific instances
-- Suitable when SHAP is computationally expensive for large feature spaces
-- Install: `pip install lime`
+- **LIME (Local Interpretable Model-agnostic Explanations)** — Fits a simple surrogate model around one instance to explain that single prediction, at lower cost than SHAP on wide feature spaces.
+  - Local surrogate model approximating complex model behavior at specific instances
+  - Suitable when SHAP is computationally expensive for large feature spaces
+  - Install: `pip install lime`
 
 ### Compliance Governance Platforms
 
-**Holistic AI** (commercial)
-- EU AI Act risk assessment automation
-- Bias auditing, performance testing, robustness testing integrated
-- Compliance workflow management and documentation generation
-- Connects to model registries (MLflow, W&B)
+- **Holistic AI** — Commercial AI governance platform automating EU AI Act risk assessment alongside bias, performance and robustness testing.
+  - EU AI Act risk assessment automation
+  - Bias auditing, performance testing, robustness testing integrated
+  - Compliance workflow management and documentation generation
+  - Connects to model registries (MLflow, W&B)
 
-**Credo AI** (commercial)
-- AI governance and risk management platform
-- Model cards, audit trails, policy compliance checks
-- Integration with ML platforms (SageMaker, Azure ML, Databricks)
+- **Credo AI** — Commercial AI governance and risk management platform producing model cards, audit trails and policy compliance checks.
+  - AI governance and risk management platform
+  - Model cards, audit trails, policy compliance checks
+  - Integration with ML platforms (SageMaker, Azure ML, Databricks)
 
-**IBM OpenPages with Watson** (commercial)
-- GRC platform with dedicated AI governance module
-- Risk assessment workflows, policy management, regulatory content library
+- **IBM OpenPages** — Commercial GRC platform whose AI governance module adds risk assessment workflows, policy management and a regulatory content library.
+  - GRC platform with dedicated AI governance module
+  - Risk assessment workflows, policy management, regulatory content library
 
 ### Documentation and Audit Trail
 
-**Weights & Biases (W&B)**
-- Experiment tracking doubles as compliance audit trail for training runs
-- Model registry with versioning and metadata — store bias audit results as artifact
-- Lineage tracking: connect training data version to model version to deployment
+- **Weights & Biases (W&B)** — Experiment tracking that doubles as a training-run audit trail, with a versioned model registry and data-to-model-to-deployment lineage.
+  - Experiment tracking doubles as compliance audit trail for training runs
+  - Model registry with versioning and metadata — store bias audit results as artifact
+  - Lineage tracking: connect training data version to model version to deployment
 
-**MLflow Model Registry**
-- Open-source model registry with versioning, stage transitions, and metadata
-- Store conformity assessment status, bias metrics, and documentation as model tags
-- Integration with most ML training frameworks
+- **MLflow Model Registry** — Open-source model registry whose versions, stage transitions and tags can carry conformity-assessment status and bias metrics.
+  - Open-source model registry with versioning, stage transitions, and metadata
+  - Store conformity assessment status, bias metrics, and documentation as model tags
+  - Integration with most ML training frameworks
 
-**Model Cards Toolkit** (Google, open-source)
-- Standardized model card generation from metadata and evaluation results
-- GitHub integration for version control of model cards
-- Install: `pip install model-card-toolkit`
+- **Model Card Toolkit** — Google's open-source generator that assembles a standardized model card from metadata and evaluation results.
+  - Standardized model card generation from metadata and evaluation results
+  - GitHub integration for version control of model cards
+  - Install: `pip install model-card-toolkit`
 
 ### Tamper-Resistant Logging
 
-**AWS S3 with S3 Object Lock**
-- WORM (Write Once Read Many) storage
-- Compliance mode: even root cannot delete objects before retention period expires
-- Minimum retention: 6 months for EU AI Act high-risk employment systems
+- **S3** — AWS object storage; S3 Object Lock turns a bucket into WORM storage suitable for a tamper-resistant audit log.
+  - WORM (Write Once Read Many) storage
+  - Compliance mode: even root cannot delete objects before retention period expires
+  - Minimum retention: 6 months for EU AI Act high-risk employment systems
 
-**Azure Immutable Blob Storage**
-- Time-based retention policies
-- Legal hold capability for regulatory investigations
-- Encryption at rest with customer-managed keys
+- **Blob Storage** — Azure's object storage; its immutable-storage policies supply time-based retention and legal hold for the same WORM guarantee.
+  - Time-based retention policies
+  - Legal hold capability for regulatory investigations
+  - Encryption at rest with customer-managed keys
 
 ### Supply Chain and Security
 
-**pip-audit**
-- Scans Python dependencies for known vulnerabilities
-- Integration with CI/CD pipelines for security compliance gates
-- Install: `pip install pip-audit`
+- **pip-audit** — Scans Python dependencies against known vulnerability advisories, wired into CI as a security compliance gate.
+  - Scans Python dependencies for known vulnerabilities
+  - Integration with CI/CD pipelines for security compliance gates
+  - Install: `pip install pip-audit`
 
-**Sigstore / cosign**
-- Cryptographic signing of model artifacts
-- Provides provenance — who trained this model, from what data, when
-- Increasingly relevant for GPAI training data transparency requirements
+- **Sigstore / cosign** — Cryptographic signing of model artifacts, establishing provenance for who trained a model, from what data, and when.
+  - Cryptographic signing of model artifacts
+  - Provides provenance — who trained this model, from what data, when
+  - Increasingly relevant for GPAI training data transparency requirements
 
 ---
 

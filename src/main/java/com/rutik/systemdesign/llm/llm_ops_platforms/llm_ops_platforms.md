@@ -748,59 +748,59 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
 
 ## 11. Technologies & Tools
 
-**MLflow** (Databricks, open-source 2018)
-- Components: MLflow Tracking (run logging), MLflow Models (packaging), MLflow Model Registry (lifecycle), MLflow Projects (reproducible runs), plus the MLflow 3 GenAI surfaces — Tracing, Prompt Registry, Evaluation and the AI Gateway. Internals at [`ml/mlflow_deep_dive`](../../ml/mlflow_deep_dive/mlflow_deep_dive.md)
-- Backend stores: local filesystem, PostgreSQL, MySQL, SQLite; artifact stores: S3, Azure Blob, GCS, DBFS
-- Integration: native Databricks, scikit-learn, PyTorch, TensorFlow, HuggingFace Transformers autologging
-- Self-host with `mlflow server --backend-store-uri postgresql://... --default-artifact-root s3://...`
+- **MLflow** — Databricks' open-source (2018) experiment tracking, model packaging and model registry, extended in MLflow 3 with GenAI tracing, a prompt registry and evaluation.
+  - Components: MLflow Tracking (run logging), MLflow Models (packaging), MLflow Model Registry (lifecycle), MLflow Projects (reproducible runs), plus the MLflow 3 GenAI surfaces — Tracing, Prompt Registry, Evaluation and the AI Gateway. Internals at [`ml/mlflow_deep_dive`](../../ml/mlflow_deep_dive/mlflow_deep_dive.md)
+  - Backend stores: local filesystem, PostgreSQL, MySQL, SQLite; artifact stores: S3, Azure Blob, GCS, DBFS
+  - Integration: native Databricks, scikit-learn, PyTorch, TensorFlow, HuggingFace Transformers autologging
+  - Self-host with `mlflow server --backend-store-uri postgresql://... --default-artifact-root s3://...`
 
-**Weights & Biases (W&B)**
-- Core features: run logging, W&B Sweeps (Bayesian/grid/random hyperparameter search), W&B Artifacts (dataset + model versioning), W&B Reports (collaborative analysis)
-- W&B Server: self-hosted enterprise version for data residency requirements
-- Integrations: HuggingFace Trainer autolog, PyTorch Lightning, JAX, TensorFlow
-- Pricing: free tier (100GB storage), Teams ($50/seat/month), Enterprise (custom)
+- **Weights & Biases (W&B)** — Hosted experiment tracking whose Sweeps, Artifacts and Reports add hyperparameter search, dataset/model versioning and collaborative analysis.
+  - Core features: run logging, W&B Sweeps (Bayesian/grid/random hyperparameter search), W&B Artifacts (dataset + model versioning), W&B Reports (collaborative analysis)
+  - W&B Server: self-hosted enterprise version for data residency requirements
+  - Integrations: HuggingFace Trainer autolog, PyTorch Lightning, JAX, TensorFlow
+  - Pricing: free tier (100GB storage), Teams ($50/seat/month), Enterprise (custom)
 
-**LangSmith**
-- Built by LangChain; deeply integrated with LangChain Expression Language and LangGraph
-- Features: nested run traces, LangSmith Hub (prompt registry), eval datasets, human annotation queues
-- Tracing: `LANGCHAIN_TRACING_V2=true` environment variable enables automatic tracing with zero code changes for LangChain applications
-- Self-hosted version available for enterprise customers (requires Kubernetes)
+- **LangSmith** — LangChain's tracing and evaluation platform, with nested run traces, a prompt registry, eval datasets and human annotation queues.
+  - Built by LangChain; deeply integrated with LangChain Expression Language and LangGraph
+  - Features: nested run traces, LangSmith Hub (prompt registry), eval datasets, human annotation queues
+  - Tracing: `LANGCHAIN_TRACING_V2=true` environment variable enables automatic tracing with zero code changes for LangChain applications
+  - Self-hosted version available for enterprise customers (requires Kubernetes)
 
-**LangFuse**
-- Open-source LLM observability; self-hostable via Docker Compose or Kubernetes Helm chart
-- SDKs: Python (`pip install langfuse`), TypeScript/JavaScript, REST API
-- Integrations: LangChain callback, LlamaIndex, OpenAI wrapper, direct SDK for any provider
-- Features: traces, scores, datasets, prompt management, cost tracking, user sessions
+- **Langfuse** — Open-source, self-hostable LLM observability covering traces, scores, datasets, prompt management and cost tracking.
+  - Open-source LLM observability; self-hostable via Docker Compose or Kubernetes Helm chart
+  - SDKs: Python (`pip install langfuse`), TypeScript/JavaScript, REST API
+  - Integrations: LangChain callback, LlamaIndex, OpenAI wrapper, direct SDK for any provider
+  - Features: traces, scores, datasets, prompt management, cost tracking, user sessions
 
-**Arize Phoenix**
-- Open-source; strong for embedding drift detection in RAG systems
-- Runs as a local server (`python -m phoenix.server.main serve`) with no external dependencies
-- Integrates with OpenTelemetry — traces exported as OTLP spans, compatible with existing observability infrastructure
+- **Arize Phoenix** — Open-source LLM and RAG observability that runs as a dependency-free local server and exports traces as OTLP spans.
+  - Open-source; strong for embedding drift detection in RAG systems
+  - Runs as a local server (`python -m phoenix.server.main serve`) with no external dependencies
+  - Integrates with OpenTelemetry — traces exported as OTLP spans, compatible with existing observability infrastructure
 
-**Helicone**
-- Reverse proxy: change `OPENAI_BASE_URL=https://oai.helicone.ai/v1` to enable logging with no other code changes
-- Captures: prompt, completion, tokens, cost, latency, user ID, custom properties
-- Limitations: only works with OpenAI and Anthropic-compatible APIs; no support for LangChain chain-level tracing
+- **Helicone** — Reverse-proxy LLM logging: repoint the base URL and prompt, completion, token, cost and latency data is captured with no other code change.
+  - Reverse proxy: change `OPENAI_BASE_URL=https://oai.helicone.ai/v1` to enable logging with no other code changes
+  - Captures: prompt, completion, tokens, cost, latency, user ID, custom properties
+  - Limitations: only works with OpenAI and Anthropic-compatible APIs; no support for LangChain chain-level tracing
 
-**Braintrust**
-- Combined eval + tracing platform
-- Scoring functions: custom Python functions or LLM-as-judge templates
-- A/B testing: route a percentage of production traffic to a new prompt version and compare scores in real time
-- Human review UI: annotators can score production traces sampled by the platform
+- **Braintrust** — Combined evaluation and tracing platform with custom or LLM-as-judge scoring functions, prompt A/B testing on live traffic and a human review UI.
+  - Combined eval + tracing platform
+  - Scoring functions: custom Python functions or LLM-as-judge templates
+  - A/B testing: route a percentage of production traffic to a new prompt version and compare scores in real time
+  - Human review UI: annotators can score production traces sampled by the platform
 
-**DeepEval**
-- pytest-style LLM unit testing: `deepeval test run tests/` integrates with existing CI pipelines
-- Built-in metrics: answer relevancy, faithfulness, hallucination detection, contextual precision, toxicity, bias, summarization
-- Custom metrics: extend `BaseMetric` class to implement domain-specific scoring
-- LLM judge: uses GPT-4o or Claude by default for automated scoring; configurable
+- **DeepEval** — pytest-style LLM unit-testing framework whose built-in metrics run as ordinary CI test cases.
+  - pytest-style LLM unit testing: `deepeval test run tests/` integrates with existing CI pipelines
+  - Built-in metrics: answer relevancy, faithfulness, hallucination detection, contextual precision, toxicity, bias, summarization
+  - Custom metrics: extend `BaseMetric` class to implement domain-specific scoring
+  - LLM judge: uses GPT-4o or Claude by default for automated scoring; configurable
 
-**Ragas**
-- RAG-specific evaluation framework
-- Faithfulness: measures whether the generated answer is supported by the retrieved context (scored by LLM judge)
-- Answer relevancy: measures whether the answer addresses the question (scored by LLM embedding similarity)
-- Context precision: are the top-k retrieved chunks actually relevant to the question?
-- Context recall: was all the information needed to answer the question present in the retrieved context?
-- Integrates with LangSmith and Arize Phoenix for pipeline-level evaluation
+- **RAGAS** — RAG-specific evaluation framework scoring faithfulness, answer relevancy, context precision and context recall.
+  - RAG-specific evaluation framework
+  - Faithfulness: measures whether the generated answer is supported by the retrieved context (scored by LLM judge)
+  - Answer relevancy: measures whether the answer addresses the question (scored by LLM embedding similarity)
+  - Context precision: are the top-k retrieved chunks actually relevant to the question?
+  - Context recall: was all the information needed to answer the question present in the retrieved context?
+  - Integrates with LangSmith and Arize Phoenix for pipeline-level evaluation
 
 ---
 

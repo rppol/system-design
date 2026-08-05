@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: llm-apps -->
 
-The 248 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 249 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **LLM apps & agents** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -888,6 +888,16 @@ Reach for it to copy a server as a starting point or to check whether one alread
 Its contribution is retriever-aware training: the model is fine-tuned with retrieved API documentation in the prompt, so it learns to depend on that text rather than on memorised signatures. That is what lets it stay correct when an API changes - update the retrieved docs and behaviour follows, instead of requiring another fine-tune - and it measurably reduces invented endpoints and arguments.
 
 Reach for it when the tool catalogue is large, versioned and outside your control. The pattern matters more than the checkpoint now that hosted models ship native function calling: retrieve the schema, then generate against it, rather than trusting anything the model remembers.
+
+### GPT-Engineer
+**Short:** Single-loop code-generation agent that clarifies requirements once, then emits a whole project in one pass.
+**Kind:** tech
+**Lang:** python
+**Roles:** llm-apps/agent-framework @1, devtools/compiler-toolchain-and-codegen @2
+
+It asks the model a short round of clarifying questions about an initial prompt, then generates the file tree and the contents of every file in one shot, writing them to disk. There is no role-play cast, no review phase and no iteration loop — which is exactly the point of comparing it to multi-agent systems like ChatDev and MetaGPT.
+
+Reach for it as the baseline in that comparison, or when the task genuinely is one-shot scaffolding. The single pass is also its ceiling: nothing re-reads the generated code against the requirement, so a misread in the clarification round propagates into every file with no stage that would catch it. Anything needing correction from test results wants an iterative agent instead.
 
 ### Guidance
 **Short:** Microsoft library for prompt templating with constrained generation and token healing into a fixed structure.

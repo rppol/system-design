@@ -325,7 +325,7 @@ The two numbers in the caption are the two ends of that range, not a contradicti
 perf-test:
   runs-on: ubuntu-latest
   steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Deploy to ephemeral env
       run: ./deploy-preview.sh
     - uses: grafana/setup-k6-action@v1

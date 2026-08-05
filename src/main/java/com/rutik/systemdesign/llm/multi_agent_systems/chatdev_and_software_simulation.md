@@ -908,15 +908,15 @@ next_agent.run(design)
 
 ## 11. Technologies & Tools
 
-**ChatDev (open source):** The original ChatDev implementation is available at `github.com/OpenBMB/ChatDev`. Built in Python, uses the OpenAI API. Includes a visualization UI (ChatChain Visualizer) for inspecting phase dialogues. Still actively maintained (commits through July 2026, ~34K stars).
+- **ChatDev** — open source; the original implementation is available at `github.com/OpenBMB/ChatDev`. Built in Python, uses the OpenAI API. Includes a visualization UI (ChatChain Visualizer) for inspecting phase dialogues. Still actively maintained (commits through July 2026, ~34K stars).
 
-**MetaGPT (open source):** Available at `github.com/FoundationAgents/MetaGPT` — the repository moved from `geekan/MetaGPT` to the FoundationAgents organization, and the old URL redirects. Python, with a provider layer covering OpenAI, Anthropic, and locally served models. Includes built-in roles, message bus, and schema definitions. Supports incremental mode where existing code files are reused rather than regenerated. ~70K stars.
+- **MetaGPT** — open source, available at `github.com/FoundationAgents/MetaGPT` — the repository moved from `geekan/MetaGPT` to the FoundationAgents organization, and the old URL redirects. Python, with a provider layer covering OpenAI, Anthropic, and locally served models. Includes built-in roles, message bus, and schema definitions. Supports incremental mode where existing code files are reused rather than regenerated. ~70K stars.
 
-**GPT-Engineer:** A simpler single-loop variant. Prompts the model to clarify requirements then generate all code in one pass. Lower token cost, lower quality for multi-file projects. Available at `github.com/AntonOsika/gpt-engineer`.
+- **GPT-Engineer** — a simpler single-loop variant. Prompts the model to clarify requirements then generate all code in one pass. Lower token cost, lower quality for multi-file projects. Available at `github.com/AntonOsika/gpt-engineer`.
 
-**Devin (Cognition AI):** Proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
+- **Devin** — Cognition AI, proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
 
-**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/coding_agents.md).
+- **SWE-agent** — Princeton NLP; academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/coding_agents.md).
 
 **Model options** (rates verified July 2026; re-check before budgeting):
 - gpt-4o: $2.50/1M input, $10/1M output — still served by the API, but no longer OpenAI's flagship
