@@ -19,7 +19,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `osi_model_and_networking/` | 7 layers, TCP/IP mapping, packet encapsulation, ARP, NAT, MTU | 15 |
 | `tcp_ip_deep_dive/` | 3-way handshake, congestion control, TIME_WAIT, socket tuning | 19 |
-| `udp_and_quic/` | UDP characteristics, QUIC 0-RTT, HTTP/3, DTLS | 12 |
+| `udp_and_quic/` | UDP characteristics, QUIC 0-RTT, HTTP/3, DTLS | 16 |
 | `http_protocols/` | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS | 15 |
 
 ### Phase 2 — API Design & Protocols
@@ -28,14 +28,14 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 15 |
 | `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 |
-| `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 12 |
-| `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 13 |
+| `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 |
+| `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 |
 
 ### Phase 3 — Performance Engineering
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 14 |
+| `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 16 |
 | `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 |
 | `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 16 |
 | `async_and_concurrency_patterns/` | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 |
@@ -46,11 +46,11 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `database_internals_and_indexing/` | B+tree, WAL, MVCC, index types, VACUUM, query planner | 16 |
 | `query_optimization/` | EXPLAIN ANALYZE, N+1 detection, pagination, batch inserts | 16 |
-| `database_migrations/` | Flyway vs Liquibase, zero-downtime patterns, expand-contract | 12 |
+| `database_migrations/` | Flyway vs Liquibase, zero-downtime patterns, expand-contract | 16 |
 | `distributed_transactions_and_consistency/` | 2PC problems, Saga, outbox pattern, idempotency keys | 15 |
 | `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 15 |
 
-> For deeper coverage: see [`../database/README.md`](../database/README.md) — 29 modules, 7 phases, principal-engineer level.
+> For deeper coverage: see [`../database/README.md`](../database/README.md) — 31 modules, 7 phases, principal-engineer level.
 
 ### Phase 5 — Resilience & Reliability
 
@@ -71,7 +71,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `backend_testing_strategies/` | Testing pyramid, test doubles, contract testing, mutation testing | 12 |
+| `backend_testing_strategies/` | Testing pyramid, test doubles, contract testing, mutation testing | 16 |
 | `load_and_performance_testing/` | k6, Gatling, JMeter, percentile analysis, coordinated omission | 16 |
 | `chaos_engineering/` | Steady-state hypothesis, fault injection, blast radius, GameDay | 16 |
 
@@ -82,7 +82,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `event_driven_fundamentals/` | Events vs commands, choreography vs orchestration, event storming | 15 |
 | `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 18 |
 | `rabbitmq_deep_dive/` | AMQP object model, confirms vs transactions, quorum queues (Raft), streams, prefetch, DLX, Khepri | 42 |
-| `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 11 |
+| `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 16 |
 | `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 16 |
 
 ### Phase 9 — Microservices Architecture

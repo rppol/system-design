@@ -217,8 +217,13 @@ The `game/` directory is an application, not study content — see
   declare no markers at all and are absent from `paths.json` — both are still bank
   sections with `STUDY_ORDER` entries, they just show no tier tabs. `book` has no
   interview subset to cut from chapter summaries (and its 3-segment ids would fail the
-  2-segment tier check outright); `technologies` is too small at 3 modules and gains a
-  tier at >= 4 (see `technologies/CLAUDE.md`). `cs_fundamentals`, `cuda` and `devops`
+  2-segment tier check outright); `technologies` has SEVEN modules and has
+  therefore passed the ">= 4 modules" threshold that was supposed to trigger tiering —
+  it stays untiered by a live deferral recorded in `technologies/CLAUDE.md`, not because
+  it is too small. That file's caveat still holds: with no deep-dive sub-files in the
+  section, its two tiers could differ only by membership, so the repo-wide "roughly half
+  of each principal list is material senior never sees" property is not yet expressible
+  there. This is an open decision, not a settled rule. `cs_fundamentals`, `cuda` and `devops`
   have a Senior tier and **zero principal modules** — `check_wiring()` skips a tier
   whose markers declare none, so demanding a Principal heading there is a false alarm,
   not a gap.

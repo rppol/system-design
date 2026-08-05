@@ -79,7 +79,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 `README.md` documents the **Full Path** (all 31 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
-**Senior** (20 modules) and **Principal** (13). They are different cuts, not nested
+**Senior** (21 modules) and **Principal** (14). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
 what migration, what you tell a team *not* to do), so principal is usually the smaller
 list and much of it is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file

@@ -313,7 +313,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | [Distributed Transactions & Consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | 2PC problems, Saga, outbox pattern, idempotency keys | 15 | Expert |
 | [Database Types Deep Dive](database_types_deep_dive/database_types_deep_dive.md) | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL — internals, tradeoffs, selection criteria | 18 | Expert |
 
-> For deeper coverage of every database topic above — storage engine internals, NoSQL deep dives, distributed consensus, polyglot persistence, production operations, and 6 end-to-end case studies — see the [Database Engineering](../database/README.md) section (28 modules, 7 phases, principal-engineer level).
+> For deeper coverage of every database topic above — storage engine internals, NoSQL deep dives, distributed consensus, polyglot persistence, production operations, and 6 end-to-end case studies — see the [Database Engineering](../database/README.md) section (31 modules, 7 phases, principal-engineer level).
 
 ### Phase 5 — Resilience & Reliability
 

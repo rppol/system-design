@@ -77,8 +77,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 45 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (25 modules) and **Principal** (15). They are
+`README.md` documents the **Full Path** (all 47 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (27 modules) and **Principal** (16). They are
 different cuts, not nested depths — senior is the craft (train it, debug the leakage,
 ship the serving path), principal is the judgment (which modelling approach at what cost,
 what failure modes, what you tell a team *not* to do), so principal is the smaller list
