@@ -14,7 +14,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 |------|-------|
 | Factual audit | **DONE — all 24 modules**, ~1,000 claims verified, ~145 corrections. Commits `312d0b4`, `ed1400a`, `e984f8c`, `60eed53` |
 | `**Short:**` MCQ summaries | **DONE — 427 of 427**, run after the audit as the ordering rule requires. Commit `6ce35a6` |
-| Case studies | **not audited** (6 case studies + `cross_cutting/`) |
+| Case studies | **AUDITED.** All 11 files (6 case studies + 5 `cross_cutting/`) — first pass 2026-08-04 in `c563ef86`, `13f9f445`, `4c1d2ccd`; re-audited 2026-08-05, which found two gaps the first pass left: the FlashAttention lineage stopped at FA3 (FA4 shipped 2026-03) and PyTorch's `allow_tf32` booleans are deprecated after 2.9 |
 
 ### What the audit found here, and why it is not what you would guess
 

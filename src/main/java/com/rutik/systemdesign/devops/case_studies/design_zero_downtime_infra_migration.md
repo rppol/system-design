@@ -681,7 +681,7 @@ Reverse CDC (target → source) during the bake window is what makes rollback *l
 ### Decision 6 — Dedicated bulk circuit vs sharing the production WAN
 
 - **Chosen**: A separate, temporary 100 Gbps Direct Connect for the 200TB historical bulk; the production circuit reserved for CDC + dual-write.
-- **Alternatives**: Stream all 200TB over the existing production Direct Connect. (An offline appliance would once have been the obvious third option; AWS Snow is closed to new customers and reaches end of support on 31 December 2026, so it is not available for this project.)
+- **Alternatives**: Stream all 200TB over the existing production Direct Connect. (An offline appliance would once have been the obvious third option; AWS Snow is closed to new customers and reaches end of support on 31 December 2026, so it is not available for this project. AWS's replacement for the physical path is the **Data Transfer Terminal** — a staffed facility you carry media into and upload over a local high-throughput link — but it is a booked time slot at one of ten sites worldwide, so it only competes with a dedicated circuit when a terminal sits near the source data center.)
 - **Rationale**: 200TB over the production link is ~2.8 days at a realistic 70% utilisation — 1.9 days even at a theoretical full pipe — and for all of it CDC and dual-write would be starved. A separate circuit removes the contention entirely and, at 100 Gbps, cuts the wire time to ~6.6 hours.
 - **Consequences**: Weeks of provisioning lead time for the connection and cross-connect, spent before the migration window opens rather than inside it; and the replication slot must be created before the copy starts so CDC resumes from `L0`.
 
@@ -747,7 +747,7 @@ Segment migrated core pipeline stores while ingesting **hundreds of thousands of
 | **Debezium** | PG, MySQL, Mongo, etc. | Yes (`initial` / `no_data`) | Open, Kafka-native, resumes from a pre-created slot at a known LSN | You operate Kafka + Connect; ops-heavy |
 | **Native logical replication** | Same-engine (PG→PG) | CDC (no snapshot copy) | Lowest overhead, exact fidelity | Same-engine only; no transform; version constraints |
 | **DataSync over a dedicated DX** | Bulk files/objects | Bulk only | Keeps 200TB off the production circuit; parallel, restartable | Needs a second circuit provisioned in advance; no live delta |
-| **AWS Snow Family** | Bulk, offline | Bulk only | Historically the zero-WAN option | **Not available** — closed to new customers Nov 2025, support ends 31 Dec 2026 |
+| **AWS Snow Family** | Bulk, offline | Bulk only | Historically the zero-WAN option | **Not available** — closed to new customers Nov 2025, support ends 31 Dec 2026. The physical-transfer successor is **AWS Data Transfer Terminal**: you book a slot and carry media to one of ten staffed sites, so it is geography-bound rather than shipped to you |
 
 ### Traffic Shifting
 

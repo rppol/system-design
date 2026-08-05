@@ -12,7 +12,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 |------|-------|
 | Factual audit | **DONE — all 41 modules**, ~1,560 claims verified against upstream docs, ~215 corrections. Commits `7f98bf4`, `9462731`, `ecd9414` |
 | `**Short:**` MCQ summaries | **DONE — 650 of 650**, run after the audit as the ordering below requires. Commit `6ce35a6` |
-| Case studies | **not audited.** 13 case studies + `cross_cutting/`; only one defect was fixed there opportunistically (4 invalid HCL blocks in `design_multi_region_dr_architecture.md`) |
+| Case studies | **AUDITED.** All 20 files — first pass in `863f8f71`, `7980271c`, `bf10f92d`, `250c05b6`, `e44fbe3b`; re-audited 2026-08-05, which still found the Terraform DynamoDB lock documented under the wrong key (`-md5` is the CHECKSUM item, not the lock), Kyverno field shapes deprecated in 1.13, GCR named as a live registry after its 2025 shutdown, and a log-pipeline cost line 3x its own stated rate |
 
 **Why the Short migration comes second here.** A `**Short:**` line written against an
 answer the audit later corrects becomes a wrong answer shipping as the CORRECT MCQ option,

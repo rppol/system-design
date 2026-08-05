@@ -271,7 +271,7 @@ flowchart TD
 | **Argo Rollouts controller** (per workload cluster) | Owns the `Rollout` CR; orchestrates canary traffic steps + `AnalysisRun`. |
 | **AnalysisTemplate / AnalysisRun** | Declarative metric queries (Prometheus/Datadog) that gate promotion. |
 | **Prometheus / Thanos** | Source of SLIs the analysis queries; see [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md). |
-| **Traffic router** | Istio VirtualService / Gateway API HTTPRoute / SMI — splits stable vs. canary. |
+| **Traffic router** | Istio VirtualService / Gateway API HTTPRoute / AWS ALB — splits stable vs. canary. |
 | **Secrets backend** | External Secrets Operator + AWS Secrets Manager, or SOPS-encrypted files. |
 
 ### Data flow narrative
@@ -699,7 +699,7 @@ func (c *Controller) reconcile(app *Application) {
 |------|------|-----------|------------|----------|
 | **ArgoCD** | GitOps CD controller | UI, RBAC, ApplicationSet fan-out, Rollouts integration | Central control plane = blast radius; needs sharding at scale | Many clusters + human-facing platform |
 | **Flux v2** | GitOps CD toolkit | Native CRDs, light, composable, no SPOF UI | No central UI; multi-cluster fan-out is manual | Per-cluster GitOps, edge, GitOps-toolkit composition |
-| **Argo Rollouts** | Progressive delivery | Canary + blue-green, AnalysisTemplate, traffic routing (Istio/SMI/Gateway) | Adds a `Rollout` CR (not vanilla Deployment) | Metric-gated canary on ArgoCD |
+| **Argo Rollouts** | Progressive delivery | Canary + blue-green, AnalysisTemplate, traffic routing (Istio/Gateway API/ALB) | Adds a `Rollout` CR (not vanilla Deployment) | Metric-gated canary on ArgoCD |
 | **Flagger** | Progressive delivery | Works with Deployments directly, webhooks for load test, Slack alerts | Couples to a mesh; less flexible step DSL than Rollouts | Flux shops, mesh-native canaries |
 | **Spinnaker** | Pipeline CD | Multi-cloud, mature canary (Kayenta) | Heavy, JVM-hungry, complex ops | Legacy multi-cloud orgs |
 

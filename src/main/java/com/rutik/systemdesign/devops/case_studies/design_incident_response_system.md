@@ -298,7 +298,7 @@ The single most common production failure is **a pager storm**: one root cause (
 # BROKEN: no grouping, no inhibition. A single node failure pages 50 times.
 route:
   receiver: oncall-pager
-  group_by: ['...']          # '...' means GROUP BY NOTHING -> every alert is its own page
+  group_by: ['...']          # '...' groups by ALL labels -> aggregation disabled, every alert is its own page
   group_wait: 0s             # page instantly, no time to correlate
   repeat_interval: 1m        # re-page every minute -> fatigue
 # (no inhibit_rules block at all -> node-down + 40 pod-down = 41 pages)
@@ -637,7 +637,7 @@ Failover is in-band first, and that is what buys the **< 10s** of N7: a send tha
 | **Jira Service Management (Operations)** | SaaS paging | Tight Jira/Atlassian integration, flexible routing rules, on-call bundled with JSM licensing | Paging is a feature of a broader ITSM suite; fewer telco regions than PD; Opsgenie tenants must migrate onto it before Opsgenie support ends in April 2027 | Atlassian-shop orgs |
 | **Grafana IRM** | SaaS paging (Grafana Cloud) | Native Grafana alerting integration, escalation chains, IRM bundles on-call with incident response | Grafana Cloud-centric — there is no supported self-hosted OSS build since Grafana OnCall OSS was archived | Grafana-centric shops already on Grafana Cloud |
 | **incident.io** | SaaS IR/coordination | Excellent Slack-native incident lifecycle, postmortems, on-call (newer) | Coordination-first; paging is newer than PD's | Slack-first incident coordination + postmortems |
-| **FireHydrant** | SaaS IR/coordination | Strong runbooks, retrospectives, ServiceNow integration | Coordination-first, pairs with a pager | Process/compliance-heavy orgs |
+| **FireHydrant (Freshworks)** | SaaS IR/coordination | Strong runbooks, retrospectives, ServiceNow integration | Coordination-first, pairs with a pager; now folded into Freshworks' ServiceOps portfolio after the Q1-2026 acquisition, so roadmap follows Freshservice | Process/compliance-heavy orgs |
 
 **Typical stack for this design:** Alertmanager (signal-plane dedup/inhibit) → PagerDuty (delivery plane, escalation, telco failover) → incident.io or Slack bot (coordination + postmortems) → ClickHouse + Grafana (MTTx analytics).
 

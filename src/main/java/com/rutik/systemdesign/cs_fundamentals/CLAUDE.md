@@ -12,7 +12,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 |------|-------|
 | Factual audit | **DONE — all 24 modules + all 26 `dsa_patterns` files**, ~2,500 claims verified, ~170 code blocks hand-executed, ~100 corrections. Commits `640ce22`, `b31a6b0`, `faf44a1`, `1923ffe` |
 | `**Short:**` MCQ summaries | **DONE — 704 of 704**, run after the audit. The count rose from 701: the Case-B reflow split apart 3 questions that had been written on the same line as the END of the previous answer, where `is_question_line()` could not see them. Commit `6ce35a6` |
-| Case studies | **not audited** (6 walkthrough case studies) |
+| Case studies | **AUDITED.** All 6 — first pass in `0e3acef5`, `3ee8c174`; re-audited 2026-08-05 by EXECUTING every code block and recomputing every worked example, which found 4 arithmetic defects a reading pass cannot catch (a brute-force call count understated 3.9x, a knapsack trace naming the wrong item and an impossible value, a complexity claim contradicting three other places in its own file, and a memory sum that did not add up) |
 
 ### How this section audits — read before dispatching anything here
 

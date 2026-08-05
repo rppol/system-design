@@ -801,7 +801,7 @@ for (char c : pattern) hash = (hash * BASE + c) % MOD;
 Using `children = [None] * 26` (fixed-size array) instead of a dict. Measured on CPython 3.13 with `sys.getsizeof` over a real 50,000-word English trie:
 
 - Array node: 64 B for the `__slots__` object + 264 B for the list (56 B header + 26 pointers × 8 B) = **328 bytes per node**, allocated whether or not the children exist.
-- Dict node: 64 B for the object + 184 B for the dict (CPython allocates that size for any dict of 1–5 entries, and most trie nodes have 1–3 children) = **219 bytes per node** measured across the whole trie.
+- Dict node: 64 B for the object + 184 B for the dict (CPython allocates that size for any dict of 1–5 entries, and most trie nodes have 1–3 children) = 248 B for a node that has children. Averaged over the whole trie the figure is **219 bytes per node**, because every leaf carries an empty dict, which is only 64 B.
 - For a 500,000-word trie with average length 10: up to 5,000,000 nodes, so ~1.6 GB array-based vs ~1.1 GB dict-based.
 
 Note the honest size of the win: **about 1.5x, not 4x.** A CPython dict is not a cheap object — the saving is real but small, and it is the wrong lever if you actually need to fit the dictionary in memory. Prefer dict over a 26-slot array, but reach for a radix trie or an FST when the memory number has to move by an order of magnitude.

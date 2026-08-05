@@ -18,7 +18,7 @@
 
 ### Non-Functional Requirements
 - Achieve at least 85% of the GPU's peak HBM bandwidth on the dominant (large-`N`) case — the accepted definition of "a reduction kernel is done being optimized" in this section, since a further compute-side optimization cannot help a memory-bound kernel
-- Latency for `N = 2^24` (16.7M elements, 64 MB) under 0.5 ms on an A100 (peak HBM ~1.6 TB/s) / under 0.3 ms on an H100 (peak HBM ~3 TB/s)
+- Latency for `N = 2^24` (16.7M elements, 64 MB) under 0.5 ms on an A100 40 GB (peak HBM ~1.6 TB/s) / under 0.3 ms on an H100 (peak HBM ~3 TB/s)
 - No dynamic memory allocation inside the hot path — all scratch buffers sized and allocated once, outside the timed region
 - The kernel must be re-launchable thousands of times per second (this is the inner primitive of a training loop's loss computation) without host-side overhead dominating — motivates minimizing kernel-launch count per reduction
 
@@ -172,7 +172,7 @@ and whether shared memory or a warp register shuffle carries the value).
 
 ## 4. Component Deep Dives
 
-Each rung below removes exactly one hardware inefficiency from the previous one. All kernels reduce one block's worth of shared memory to a single partial sum at `g_odata[blockIdx.x]`; a driver combines partial sums (Section 4.8). GB/s figures are measured-style numbers for a 64 MB (`N = 2^24`) FP32 array on an A100 (HBM2e, ~1.6 TB/s peak) unless noted — read them as the shape of the improvement, not a guarantee for any specific part/driver/ECC configuration.
+Each rung below removes exactly one hardware inefficiency from the previous one. All kernels reduce one block's worth of shared memory to a single partial sum at `g_odata[blockIdx.x]`; a driver combines partial sums (Section 4.8). GB/s figures are measured-style numbers for a 64 MB (`N = 2^24`) FP32 array on an A100 40 GB (HBM2, ~1.6 TB/s peak — the 80 GB part is HBM2e at ~2.0 TB/s, which would lower every percentage below) unless noted — read them as the shape of the improvement, not a guarantee for any specific part/driver/ECC configuration.
 
 ### 4.0 Baseline: Just Call the Library
 
@@ -247,7 +247,7 @@ The second defect is the `%` itself: integer modulo has no single-instruction fo
 |---|---|
 | Kernel time | 2.35 ms |
 | Achieved DRAM bandwidth | 28.6 GB/s |
-| % of peak HBM2e (1.6 TB/s) | 1.8% |
+| % of peak HBM2 (1.6 TB/s) | 1.8% |
 | Avg active threads/warp (`smsp__thread_inst_executed_per_inst_executed.ratio`) | ~20 of 32 — the divergence signature |
 | Shared-memory bank conflicts (`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`) | zero |
 
@@ -284,7 +284,7 @@ __global__ void reduce2_stridedIndex(const float* __restrict__ g_idata,
 |---|---:|---:|
 | Kernel time | 2.35 ms | 1.98 ms |
 | Achieved DRAM bandwidth | 28.6 GB/s | 33.9 GB/s |
-| % of peak HBM2e | 1.8% | 2.1% |
+| % of peak HBM2 | 1.8% | 2.1% |
 | Avg active threads/warp | ~20 of 32 | ~32 of 32 (divergence fixed) |
 | Shared-memory bank conflicts | zero | up to 8-way |
 
@@ -321,7 +321,7 @@ __global__ void reduce3_sequentialAddressing(const float* __restrict__ g_idata,
 |---|---:|---:|---:|
 | Kernel time | 2.35 ms | 0.68 ms | **3.5x** |
 | Achieved DRAM bandwidth | 28.6 GB/s | 98.7 GB/s | 3.5x |
-| % of peak HBM2e | 1.8% | 6.2% | — |
+| % of peak HBM2 | 1.8% | 6.2% | — |
 | Avg active threads/warp | ~20 of 32 | ~32 of 32 | — |
 | Bank conflicts | zero | zero | — |
 
@@ -408,7 +408,7 @@ __global__ void reduce4_firstAddDuringLoad(const float* __restrict__ g_idata,
 |---|---:|---:|---:|
 | Kernel time | 0.68 ms | 0.39 ms | 1.7x |
 | Achieved DRAM bandwidth | 98.7 GB/s | 172 GB/s | 1.7x |
-| % of peak HBM2e | 6.2% | 10.8% | — |
+| % of peak HBM2 | 6.2% | 10.8% | — |
 | Blocks launched | 65,536 | 32,768 | 2x fewer |
 
 ### 4.5 Rung 5 — Unroll the Last Warp (drop `__syncthreads` for `__syncwarp`)
@@ -472,7 +472,7 @@ __global__ void reduce5_unrollLastWarp(const float* __restrict__ g_idata,
 |---|---:|---:|---:|
 | Kernel time | 0.39 ms | 0.31 ms | 1.26x |
 | Achieved DRAM bandwidth | 172 GB/s | 216 GB/s | 1.26x |
-| % of peak HBM2e | 10.8% | 13.5% | — |
+| % of peak HBM2 | 10.8% | 13.5% | — |
 | `__syncthreads()` calls/block | 9 | 3 | — |
 
 ### 4.6 Rung 6 — Complete Unroll with Templates on Block Size
@@ -542,7 +542,7 @@ void launchReduce6(const float* d_in, float* d_out, int n, int block_size) {
 |---|---:|---:|---:|
 | Kernel time | 0.31 ms | 0.285 ms | 1.09x |
 | Achieved DRAM bandwidth | 216 GB/s | 235 GB/s | 1.09x |
-| % of peak HBM2e | 13.5% | 14.7% | — |
+| % of peak HBM2 | 13.5% | 14.7% | — |
 
 ### 4.7 Rung 7 — Warp-Shuffle Reduction (no shared memory) + Grid-Level Combine
 
@@ -657,13 +657,13 @@ Option A is simpler and portable; Option B avoids the second kernel-launch laten
 |---|---:|---:|---:|
 | Kernel time | 0.285 ms | 0.198 ms | 1.44x |
 | Achieved DRAM bandwidth | 235 GB/s | 339 GB/s | 1.44x |
-| % of peak HBM2e (1.6 TB/s) | 14.7% | 21.2% | — |
+| % of peak HBM2 (1.6 TB/s) | 14.7% | 21.2% | — |
 
 **Wait — 21% of peak, not 85-90%?** This is the correct, if counter-intuitive, ceiling for a *single grid-sized-to-one-block-per-SM* reduction on a mid-size array: at 108 blocks x 256 threads = 27,648 threads total, the grid does not have enough outstanding memory requests in flight to saturate HBM's queue depth the way a bandwidth-benchmark kernel (which typically launches 10-100x more threads with no combine step) does. Reaching 85%+ of peak in production requires a much larger grid (thousands of blocks, one element or a small fixed chunk per thread with grid-stride looping) rather than the "one block per SM" sizing shown above — `cub::DeviceReduce` (Section 4.0/6) tunes exactly this grid-sizing tradeoff per architecture, which is precisely why the library call matches or exceeds a hand-rolled rung-7 kernel unless you also hand-tune the launch configuration to the array size. The full ladder's real lesson is the *shape* of each fix (divergence -> bank conflicts -> idle threads -> sync overhead -> shared-memory traffic), not that rung 7 alone guarantees peak bandwidth — grid sizing is an eighth, size-dependent axis layered on top.
 
 ### 4.8 Summary Table — All Seven Rungs
 
-| Rung | Defect removed | Kernel time (A100, N=2^24) | GB/s | % of HBM2e peak |
+| Rung | Defect removed | Kernel time (A100, N=2^24) | GB/s | % of HBM2 peak |
 |---|---|---:|---:|---:|
 | 1. Interleaved `%` | baseline (divergent + bank-conflicted) | 2.35 ms | 28.6 | 1.8% |
 | 2. Interleaved strided index | divergence fixed; bank conflicts remain | 1.98 ms | 33.9 | 2.1% |
@@ -752,7 +752,7 @@ def benchmark_kernel(fn, n: int, warmup: int = 5, iters: int = 50) -> dict:
         "n": n,
         "elapsed_ms": elapsed_ms,
         "achieved_GBps": achieved_gbps,
-        "pct_of_hbm2e_peak": achieved_gbps / 1600.0 * 100.0,  # A100 ~1.6 TB/s
+        "pct_of_hbm2_peak": achieved_gbps / 1600.0 * 100.0,  # A100 ~1.6 TB/s
     }
 
 
@@ -766,7 +766,7 @@ def run_full_ladder_benchmark(n: int = 1 << 24) -> None:
     for label, stats in results.items():
         print(f"{label:28s} {stats['elapsed_ms']:.4f} ms  "
               f"{stats['achieved_GBps']:7.1f} GB/s  "
-              f"{stats['pct_of_hbm2e_peak']:5.1f}% of peak")
+              f"{stats['pct_of_hbm2_peak']:5.1f}% of peak")
 ```
 
 ### Regression Gate (CI)
@@ -797,9 +797,9 @@ Every new rung must pass `verify_rung()` (Section 4.3) against the FP64 CPU refe
 
 **Pitfall: reduction-order nondeterminism reported as a "flaky test."** A CI regression test compared a GPU-computed loss value across two different block-size configurations (256 vs 512) using `==` instead of `allclose`, and it failed intermittently depending on which build config ran — the team spent two days trying to find a data race before realizing that changing block size changes the reduction *tree shape*, which changes floating-point rounding order, which changes the last few mantissa bits of a non-associative sum. This is expected behavior, not a bug — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §5 on `atomicAdd` accumulation order and tree-shape-dependent nondeterminism. **Fix:** compare reduction results with an explicit tolerance (`rtol=1e-5` for FP32) in every test, never bitwise equality, and if bit-exact reproducibility is a hard requirement (regulatory audit), fix the block size and grid size as part of the deployed configuration, not just the kernel code.
 
-**Pitfall: assuming rung 7 alone gets you to peak bandwidth.** A team implemented the full warp-shuffle kernel (rung 7), measured 21% of peak HBM2e bandwidth, and filed a ticket believing something was still broken relative to `cupy.sum`'s ~88%. Nothing was broken — the gap is **grid sizing**, an eighth axis this ladder does not by itself solve: CUB's `AgentReduce` policy launches a much larger, size-and-architecture-tuned grid with several elements coarsened per thread via a grid-stride loop, which keeps far more memory requests in flight simultaneously than a "one block per SM" hand-rolled launch config. **Fix:** for a standalone reduction, stop optimizing hand-written kernel code once you reach rung 7 and switch to tuning grid size against measured achieved bandwidth (or just call CUB) rather than assuming more kernel-level cleverness is available.
+**Pitfall: assuming rung 7 alone gets you to peak bandwidth.** A team implemented the full warp-shuffle kernel (rung 7), measured 21% of peak HBM2 bandwidth, and filed a ticket believing something was still broken relative to `cupy.sum`'s ~88%. Nothing was broken — the gap is **grid sizing**, an eighth axis this ladder does not by itself solve: CUB's `AgentReduce` policy launches a much larger, size-and-architecture-tuned grid with several elements coarsened per thread via a grid-stride loop, which keeps far more memory requests in flight simultaneously than a "one block per SM" hand-rolled launch config. **Fix:** for a standalone reduction, stop optimizing hand-written kernel code once you reach rung 7 and switch to tuning grid size against measured achieved bandwidth (or just call CUB) rather than assuming more kernel-level cleverness is available.
 
-**Pitfall: TF32 silently changing FP32 reduction accuracy after a GPU generation upgrade.** Reduction itself does not involve a matmul, so it is not directly subject to TF32 — but a team using `cub::DeviceReduce` as part of a larger pipeline that *also* called `torch.matmul` upstream saw an "accuracy regression" after moving from a V100 to an A100 and initially suspected the reduction kernel. The actual cause was a TF32 path upstream — and the trap is that PyTorch's two TF32 switches have **opposite defaults**: `torch.backends.cuda.matmul.allow_tf32` is `False`, so `torch.matmul` is *not* the culprit people assume, while `torch.backends.cudnn.allow_tf32` is `True`, so the convolution layers feeding the matmul silently were. A direct cuBLAS call is a third case again, since cuBLAS's own default math mode permits TF32 on Ampere and later. **Fix:** when a numeric regression appears after a GPU generation change, audit every op in the pipeline for TF32/mixed-precision defaults — "we never turned TF32 on" is not the same statement as "TF32 is off" (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §4), not just the most recently touched kernel.
+**Pitfall: TF32 silently changing FP32 reduction accuracy after a GPU generation upgrade.** Reduction itself does not involve a matmul, so it is not directly subject to TF32 — but a team using `cub::DeviceReduce` as part of a larger pipeline that *also* called `torch.matmul` upstream saw an "accuracy regression" after moving from a V100 to an A100 and initially suspected the reduction kernel. The actual cause was a TF32 path upstream — and the trap is that PyTorch's two TF32 switches have **opposite defaults**: `torch.backends.cuda.matmul.fp32_precision` is `"ieee"`, so `torch.matmul` is *not* the culprit people assume, while `torch.backends.cudnn.conv.fp32_precision` is `"tf32"`, so the convolution layers feeding the matmul silently were. A direct cuBLAS call is a third case again, since cuBLAS's own default math mode permits TF32 on Ampere and later. **Fix:** when a numeric regression appears after a GPU generation change, audit every op in the pipeline for TF32/mixed-precision defaults — "we never turned TF32 on" is not the same statement as "TF32 is off" (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) §4), not just the most recently touched kernel.
 
 ---
 

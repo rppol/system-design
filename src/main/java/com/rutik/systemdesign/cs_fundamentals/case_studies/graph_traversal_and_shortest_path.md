@@ -397,8 +397,11 @@ def network_delay_time(times: list[list[int]], n: int, k: int) -> int:
         d, u = heapq.heappop(heap)
 
         # Stale-entry guard: if we have already found a shorter path to u, skip.
-        # Without this guard the algorithm is still correct but processes every
-        # stale entry, degrading to O(E log E) instead of O((V+E) log V).
+        # Without this guard the algorithm is still correct and pushes exactly the
+        # same entries, so the heap and its operation count are unchanged; what it
+        # costs is re-scanning u's adjacency list once per stale pop — 4.1x more
+        # edge scans in the benchmark in the next block. It is an inner-loop
+        # constant, not a change of complexity class.
         if d > dist[u]:
             continue
 

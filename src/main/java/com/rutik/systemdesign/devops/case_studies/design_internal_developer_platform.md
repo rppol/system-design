@@ -74,7 +74,7 @@ Catalog total (modeled entities)     ~4000  (100%)
 Users                                ~2000  (separate identity entities, excluded above)
 ```
 
-**Catalog refresh load.** Backstage refreshes each entity on a schedule (default 100s loop; we set 600s for stability at scale). With 4000 entities and a 10-minute target freshness:
+**Catalog refresh load.** Backstage refreshes each entity on a schedule (`catalog.processingInterval`; the default is randomized between 100 s and 150 s, and we set 600 s for stability at scale — the catalog jitters whatever you configure to spread load). With 4000 entities and a 10-minute target freshness:
 
 ```
 Refresh rate = 4000 entities / 600 s = ~6.7 entity-processings/sec

@@ -149,8 +149,9 @@ Pull-path origin egress (cache misses), 0.58 GB/s peak, ~0.06 GB/s avg:
 ```
 12,000 pushes/day → 12,000 scans/day = 0.14 scans/sec avg, ~1.4/sec peak.
 Trivy on a 200 MB image: ~20-40 s wall (layer extraction + vuln DB match).
-At 1.4/sec peak × 30 s = 42 concurrent scans needed; at 4 concurrent scans per
-8-vCPU worker that is ~15 worker pods (HPA cap 25 for headroom) — see §10.
+At 1.4/sec peak × 30 s = 42 concurrent scans; sized at a 0.7 utilization target
+that is 60 worker slots, and at 4 concurrent scans per 8-vCPU worker, ~15 worker
+pods (HPA cap 25 for headroom) — see §10.
 Vuln DB cached locally, refreshed every 6 h.
 ```
 
@@ -512,7 +513,6 @@ kind: ClusterPolicy
 metadata:
   name: verify-image-signature
 spec:
-  validationFailureAction: Enforce
   rules:
     - name: check-signature
       match:
@@ -522,6 +522,7 @@ spec:
       verifyImages:
         - imageReferences:
             - "registry.internal/prod/*"
+          failureAction: Enforce   # per-rule: block at admission, don't just audit
 
           # ─────────────────────────────────────────────────────────────
           # BROKEN: this only checks that *a* keyless signature EXISTS.
@@ -648,7 +649,7 @@ Two non-negotiables: (1) GC is **two-phase** — mark everything across all tags
 
 ## 5. Design Decisions & Tradeoffs
 
-### Decision 1: Managed (ECR/GCR/Artifact Registry) vs self-hosted (Harbor/Zot)
+### Decision 1: Managed (ECR / GCP Artifact Registry) vs self-hosted (Harbor/Zot)
 
 - **Alternatives**: AWS ECR, GCP Artifact Registry, vs self-hosted Harbor or Zot.
 - **Rationale**: At 50 clusters across 3 clouds/regions with custom promotion + signing policy, self-hosted Harbor gives replication, RBAC, Trivy integration, and cosign in one box without per-pull pricing. Managed ECR is simpler operationally but charges egress and is single-cloud.
@@ -710,7 +711,7 @@ Two non-negotiables: (1) GC is **two-phase** — mark everything across all tags
 
 **GitHub Container Registry (ghcr.io)** integrates tightly with GitHub Actions OIDC for keyless cosign signing — the workflow identity becomes the signer subject. It backs blobs on object storage with global CDN fronting for pull locality and exposes the OCI Referrers API for SBOMs and attestations attached to images.
 
-**Harbor (CNCF graduated)** is the de facto self-hosted choice at enterprise scale. It bundles Trivy/Clair scanning, cosign signing via the policy engine, project-scoped RBAC, robot accounts, and **replication rules** (push-based or pull-based, filtered by tag/label) to mirror between Harbor instances or to ECR/GCR. Large deployments run Harbor as origin with PostgreSQL HA + S3, fronted by regional read caches.
+**Harbor (CNCF graduated)** is the de facto self-hosted choice at enterprise scale. It bundles Trivy/Clair scanning, cosign signing via the policy engine, project-scoped RBAC, robot accounts, and **replication rules** (push-based or pull-based, filtered by tag/label) to mirror between Harbor instances or to ECR / GCP Artifact Registry. Large deployments run Harbor as origin with PostgreSQL HA + S3, fronted by regional read caches.
 
 **Uber Kraken** is a P2P registry built for Uber's scale: thousands of hosts pulling the same large image simultaneously would melt a centralized origin, so Kraken distributes blobs via a BitTorrent-like peer swarm. Origin seeds the torrent; hosts pull layers from each other. Uber reported distributing 20,000+ host pulls of multi-GB images in seconds where a centralized registry would saturate. This is the extreme of "the bottleneck is egress, not storage."
 

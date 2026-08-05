@@ -157,7 +157,7 @@ def unique_paths_brute(m: int, n: int, r: int, c: int) -> int:
     return paths
 ```
 
-For a 20x20 grid (19 rights and 19 downs), the path count is C(38, 19) = 35,345,263,800 ≈ 3.5 x 10^10 calls.
+For a 20x20 grid (19 rights and 19 downs), the path count is C(38, 19) = 35,345,263,800 ≈ 3.5 x 10^10. The *call* count is larger still: one call per distinct partial path, which sums to C(40, 20) - 1 = 137,846,528,819 ≈ 1.4 x 10^11.
 
 ---
 
@@ -376,7 +376,9 @@ def knapsack_01_broken(weights: List[int], values: List[int], capacity: int) -> 
 #   that prints the right answer teaches the reader nothing.
 #
 # A real counterexample: same items, capacity 6.
-#   knapsack_01_broken([2,3],[3,4],6) = 9  — item 1 (w=3,v=4) used twice.
+#   knapsack_01_broken([2,3],[3,4],6) = 9  — item 0 (w=2,v=3) used three times
+#                                            (weight 6, value 9). Two copies of
+#                                            item 1 would only reach 8.
 #   knapsack_01([2,3],[3,4],6)        = 7  — correct: each item at most once.
 #
 # The starkest one: weights=[1], values=[5], capacity=3.

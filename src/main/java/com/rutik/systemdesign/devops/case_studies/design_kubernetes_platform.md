@@ -275,7 +275,7 @@ Argo CD applies the Cluster manifests once; inside the management cluster, CAPI/
 
 ```yaml
 # cluster-prod-use1.yaml  — one cluster, fully declarative
-apiVersion: cluster.x-k8s.io/v1beta1
+apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
 metadata:
   name: prod-use1
@@ -284,13 +284,15 @@ metadata:
     tier: prod
     region: us-east-1
 spec:
+  # v1beta2 refs carry apiGroup, not apiVersion — CAPI reads the served version
+  # from the CRD, so a GitOps diff is never churned by a controller rewrite.
   infrastructureRef:
-    apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+    apiGroup: infrastructure.cluster.x-k8s.io
     kind: AWSManagedCluster       # infra side of an EKS cluster
     name: prod-use1
   controlPlaneRef:
-    apiVersion: controlplane.cluster.x-k8s.io/v1beta2
-    kind: AWSManagedControlPlane  # control-plane provider group, not infrastructure
+    apiGroup: controlplane.cluster.x-k8s.io   # control-plane provider group, not infrastructure
+    kind: AWSManagedControlPlane
     name: prod-use1-cp
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta2

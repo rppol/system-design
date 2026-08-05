@@ -237,7 +237,7 @@ jobs:
   build-sign-attest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: build
         run: |
           DIGEST=$(docker buildx build --push \
@@ -257,7 +257,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"                      # CRITICAL fails the release
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@v4
       - run: |
           cosign sign --yes ${{ steps.build.outputs.digest }}
           cosign attest --yes --type cyclonedx \
@@ -282,8 +282,8 @@ kind: ClusterPolicy
 metadata:
   name: verify-acme-images
 spec:
-  validationFailureAction: Enforce       # fail closed
-  webhookTimeoutSeconds: 10
+  webhookConfiguration:
+    timeoutSeconds: 10
   rules:
     - name: check-keyless-signature
       match:
@@ -291,6 +291,7 @@ spec:
           - resources: { kinds: [Pod] }
       verifyImages:
         - imageReferences: ["ghcr.io/acme/*"]
+          failureAction: Enforce         # per-rule, fail closed
           attestors:
             - entries:
                 - keyless:
