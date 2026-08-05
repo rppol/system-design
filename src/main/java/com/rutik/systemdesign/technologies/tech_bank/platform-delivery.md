@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: platform-delivery -->
 
-The 204 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 205 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Deploy & cloud** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1612,6 +1612,16 @@ Reach for it when infrastructure benefits from real abstraction and testing, and
 Puppet is declarative and agent-based. Nodes run an agent that contacts a Puppet server, which compiles a catalog for that node from manifests written in Puppet's own DSL plus the node's facts, and the agent then applies the catalog and reports back, by default every half hour. Because a manifest declares resources and their relationships rather than steps, the language deliberately has no execution order beyond the dependencies you state, which is the source of most confusion for people arriving from Ansible or shell.
 
 Reach for it on large fleets of long-lived machines where continuous enforcement is the point, since a change made by hand on a server is reverted at the next run and compliance can be reported across thousands of nodes. The costs are the server infrastructure, a DSL to learn, and a model that fits poorly with immutable infrastructure where machines are replaced rather than converged. Ansible is the agentless alternative for push-style work, and a Packer-baked image sidesteps the question entirely.
+
+### RabbitMQ Cluster Kubernetes Operator
+**Short:** CRD-driven RabbitMQ cluster lifecycle on Kubernetes, paired with a topology operator for declaring exchanges and queues as resources.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, data-movement/message-broker @2
+
+The official operator reconciles a `RabbitmqCluster` custom resource into a StatefulSet with the persistent volumes, services, configuration and plugin set a cluster needs, and handles scaling and rolling upgrades under the constraint that a broker restart must not cost a queue its quorum. Its companion Messaging Topology Operator extends the same model to the objects inside the broker, so exchanges, queues, bindings, policies and users become Kubernetes resources.
+
+That second half is what changes a design: broker topology stops being imperative setup and becomes declarative state living beside the application manifests and reconciled continuously. Reach for it whenever RabbitMQ runs on Kubernetes at all, because the alternative is a hand-maintained StatefulSet that gets the ordering of a quorum-aware rolling restart wrong. Note that the topology operator's reconciliation and the broker's own definitions import can both claim ownership of the same object, so pick one.
 
 ### Readiness and liveness
 **Short:** Distinct health probes: readiness gates traffic until dependencies load, liveness restarts a wedged process.

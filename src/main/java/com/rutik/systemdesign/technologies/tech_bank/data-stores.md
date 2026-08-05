@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-stores -->
 
-The 119 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 120 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Databases** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -466,6 +466,16 @@ Reach for it when a graph must be distributed across a cluster you already run a
 KeyDB is a fork of Redis that made the command loop multi-threaded: several I/O and worker threads share the keyspace behind fine-grained locking, so one instance can use several cores instead of one. It also added active-active replication, where two nodes both accept writes and replicate to each other with last-writer-wins resolution, which stock Redis does not offer, and it stays wire-compatible so existing clients work unchanged.
 
 Reach for it if a single cache node is CPU-bound and sharding is unattractive. Two cautions: active-active on a key-value store means silently discarded writes whenever the same key is touched in both places, so it suits partitioned or idempotent workloads only, and the fork's pace and its divergence from upstream are worth checking before adopting — Valkey and Dragonfly occupy the same niche.
+
+### Khepri
+**Short:** RabbitMQ's Raft-based tree-structured metadata store; replaced Mnesia and made partition-handling strategies unnecessary.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, data-access/transactions-and-consistency @2, data-movement/message-broker @3
+
+An Erlang library storing a tree of nodes replicated through Raft, built for RabbitMQ to hold cluster metadata: virtual hosts, users, exchanges, queues, bindings, policies and feature flags. It became the default for new clusters in RabbitMQ 4.2 and the only store in 4.3, when Mnesia was removed.
+
+The operational consequence is that metadata now needs an online majority, so a node on the minority side of a partition cannot declare a queue or change a policy. In exchange an entire category of configuration disappeared: the `cluster_partition_handling` strategies existed because Mnesia could accept conflicting writes on both sides of a split and then needed a reconciliation story, and Raft cannot, so those keys are now accepted and ignored. Upgrading is the part to plan -- enabling the migration feature flag deliberately on a healthy cluster is far safer than letting a booting node run the Mnesia-to-Khepri migration inside the upgrade window.
 
 ### LangChain VectorStores
 **Short:** LangChain's uniform interface over many vector databases so retrievers can swap backends.

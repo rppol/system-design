@@ -643,7 +643,7 @@ Two extensions to the basic segment-file model (§4.1) matter for both cost and 
 |---|---|---|
 | Who controls flow rate | Consumer — calls `poll()` when ready | Broker — pushes messages as fast as the consumer's prefetch/visibility settings allow |
 | Backpressure mechanism | Implicit — consumer simply polls less often; lag grows (§4.6) | Explicit — broker respects prefetch limits, visibility timeouts; can overwhelm a slow consumer if misconfigured |
-| Replay / re-read | Trivial — seek to any offset, even one already "consumed" by this group | Generally not possible — once ACKed, the message is gone (SQS) or requeued from scratch (RabbitMQ), no arbitrary seek |
+| Replay / re-read | Trivial — seek to any offset, even one already "consumed" by this group | Generally not possible — once ACKed the message is gone (SQS, RabbitMQ classic and quorum queues), no arbitrary seek. RabbitMQ streams are the exception and do seek by offset or timestamp |
 | Batching efficiency | Excellent — a single `poll()` returns a large batch from a contiguous log range | Limited by prefetch count; smaller, more frequent network round trips |
 | Multiple independent readers of the same data | Natural — each consumer group has its own offset; N groups read the same log N times independently | Awkward — typically requires fanning out to N separate queues (e.g., SNS -> multiple SQS queues) |
 | Latency floor | Slightly higher — `poll()` interval and fetch batching add a small delay vs. an immediate push | Lower for single-consumer, low-volume cases — broker pushes the instant a message arrives |

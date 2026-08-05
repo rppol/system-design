@@ -61,9 +61,9 @@ Key insight: The hardest problem in messaging is not sending messages — it is 
 |-----------|-------|----------|
 | Model | Log-based (append-only partitioned log) | Queue-based (message deleted on ack) |
 | Retention | Time/size-based (default 7 days) | Until consumed (or TTL) |
-| Replay | Yes — seek to any offset | No (once consumed, gone) |
+| Replay | Yes — seek to any offset | Streams only; classic and quorum queues delete on ack |
 | Ordering | Per-partition | Per-queue with 1 consumer |
-| Throughput | Very high (millions/s per partition) | High (tens of thousands/s) |
+| Throughput | Very high (millions/s per cluster) | ~30k/s per quorum queue at 1 KB, RF=3 |
 | Routing | Topic + partition key | Exchange routing (direct, topic, fanout, headers) |
 | Consumer model | Pull (poll loop) | Push (broker delivers) |
 | Use case | Event streaming, audit log, analytics | Task queues, RPC, complex routing |
@@ -676,7 +676,7 @@ public void publishOutboxEvents() {
 
 | Concern | Kafka | RabbitMQ |
 |---------|-------|----------|
-| Message replay | Yes — seek any offset | No — consumed messages gone |
+| Message replay | Yes — seek any offset | Streams only — classic and quorum queues delete on ack |
 | Routing flexibility | Low (topic + partition key) | High (exchange types, headers) |
 | Ordering guarantee | Within partition | Within single-consumer queue |
 | Message size | Best for small (<1MB) | Small to medium messages |

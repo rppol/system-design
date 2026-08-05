@@ -11,7 +11,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ---
 
-## Module List — 34 Modules (9 Phases)
+## Module List — 35 Modules (9 Phases)
 
 ### Phase 1 — Networking Fundamentals
 
@@ -81,6 +81,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `event_driven_fundamentals/` | Events vs commands, choreography vs orchestration, event storming | 15 |
 | `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 18 |
+| `rabbitmq_deep_dive/` | AMQP object model, confirms vs transactions, quorum queues (Raft), streams, prefetch, DLX, Khepri | 42 |
 | `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 11 |
 | `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 16 |
 
@@ -98,8 +99,8 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 34 modules = the "9-Phase Learning Path")
-plus two curated tiers: **Senior** (21 modules) and **Principal** (18). They are
+`README.md` documents the **Full Path** (all 35 modules = the "9-Phase Learning Path")
+plus two curated tiers: **Senior** (22 modules) and **Principal** (18). They are
 different cuts, not nested depths — senior is the craft (build it, debug it at 3am),
 principal is the judgment (which approach at what cost, what you tell a team *not* to
 do), so principal is usually the smaller list and much of it is material senior never
@@ -140,6 +141,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | `connection_pooling_deep_dive/` | `../java/jdbc_and_database/`, `../spring/spring_data_jpa/` |
 | `distributed_transactions_and_consistency/` | `../spring/spring_transactions/`, `../database/distributed_transactions/` |
 | `kafka_deep_dive/` | `../spring/spring_messaging/` |
+| `rabbitmq_deep_dive/` | `../spring/spring_messaging/`, `kafka_deep_dive/`, `messaging_patterns/` |
 | `auth_and_authorization_systems/` | `../spring/spring_security_architecture/`, `../spring/spring_security_jwt_oauth/` |
 | `caching_strategies_deep_dive/` | `../spring/spring_caching/`, `../database/database_caching_patterns/` |
 | `backend_testing_strategies/` | `../spring/spring_testing/` |
@@ -160,6 +162,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | Spring Framework | 7.x |
 | Spring Cloud | 2025.1.x "Oakwood" |
 | Kafka | 4.2+ (KRaft-only) |
+| RabbitMQ | 4.3.x (Khepri-only; Mnesia and mirrored classic queues both gone) |
 | Resilience4j | 2.4+ (`resilience4j-spring-boot4`) |
 | Micrometer | 1.17+ |
 | OpenTelemetry | 1.x |

@@ -100,6 +100,8 @@ const ACRONYMS = new Map(Object.entries({
   fastapi: "FastAPI", graphql: "GraphQL", postgresql: "PostgreSQL",
   javascript: "JavaScript", devops: "DevOps", github: "GitHub", openai: "OpenAI",
   pytorch: "PyTorch", tensorflow: "TensorFlow", numpy: "NumPy", k8s: "K8s",
+  rabbitmq: "RabbitMQ", amqp: "AMQP",
+  opentelemetry: "OpenTelemetry",
 }));
 // Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
 // the multi-column serpentine, so copy describing rows, hovering, or drawn
@@ -145,7 +147,7 @@ const STUDY_ORDER = {
     "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/observability_and_monitoring",
     "backend/backend_security_owasp","backend/auth_and_authorization_systems",
     "backend/backend_testing_strategies","backend/load_and_performance_testing","backend/chaos_engineering",
-    "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/event_sourcing_and_cqrs","backend/messaging_patterns",
+    "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/rabbitmq_deep_dive","backend/event_sourcing_and_cqrs","backend/messaging_patterns",
     "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
   ],
   book: [

@@ -105,7 +105,7 @@ Traditional Queue          Message Broker             Event Streaming
 | Dimension            | Queue (SQS)         | Message Broker (RabbitMQ) | Event Stream (Kafka)  |
 |----------------------|---------------------|---------------------------|-----------------------|
 | Storage model        | Delete on consume   | Delete on ACK             | Persistent log        |
-| Replay messages      | No                  | No                        | Yes                   |
+| Replay messages      | No                  | Streams only              | Yes                   |
 | Consumer model       | Competing consumers | Routing-based             | Consumer groups       |
 | Ordering             | FIFO (optional)     | Per-queue                 | Per-partition         |
 | Throughput           | Moderate            | Moderate                  | Very high             |
@@ -305,11 +305,11 @@ Use case: e-commerce order placement triggering billing, inventory, and notifica
 | Feature                   | Apache Kafka                      | RabbitMQ                         | AWS SQS                          |
 |---------------------------|-----------------------------------|----------------------------------|----------------------------------|
 | **Type**                  | Distributed event log             | Message broker (AMQP)            | Managed queue service            |
-| **Storage**               | Persistent log (configurable TTL) | In-memory + optional persistence | Managed (up to 14 days)          |
-| **Throughput**            | Millions msg/sec                  | ~50k–100k msg/sec                | Scales automatically (AWS)       |
+| **Storage**               | Persistent log (configurable TTL) | Queue-type dependent; streams are a replicated log | Managed (up to 14 days)          |
+| **Throughput**            | Millions msg/sec (per cluster)    | ~30k msg/sec per quorum queue, 1 KB, RF=3 | Scales automatically (AWS)       |
 | **Ordering**              | Per-partition                     | Per-queue                        | FIFO queues only                 |
 | **Consumer model**        | Pull (offset-based)               | Push (AMQP)                      | Pull (long polling)              |
-| **Replay**                | Yes (seek to offset)              | No                               | No                               |
+| **Replay**                | Yes (seek to offset)              | Streams only (offset/timestamp)  | No                               |
 | **Routing**               | Topic + partition key             | Exchanges, routing keys, bindings| Queue URL-based                  |
 | **Dead letter**           | Via config (DLT)                  | Built-in DLX                     | Built-in DLQ                     |
 | **Protocol**              | Custom binary (TCP)               | AMQP 0-9-1, STOMP, MQTT          | HTTPS/REST + SQS API             |
@@ -332,7 +332,7 @@ quadrantChart
     RabbitMQ: [0.5, 0.45]
     SQS: [0.08, 0.4]
 ```
-*Kafka trades the highest operational burden (brokers, KRaft controller quorum) for the highest throughput ceiling (millions of msg/sec); SQS inverts that trade — fully managed, but FIFO ordering is bought by serializing each MessageGroupId; RabbitMQ sits in between at ~50k–100k msg/sec with moderate ops. Positions are illustrative, drawn from the ratings in the table above.*
+*Kafka trades the highest operational burden (brokers, KRaft controller quorum) for the highest throughput ceiling (millions of msg/sec); SQS inverts that trade — fully managed, but FIFO ordering is bought by serializing each MessageGroupId; RabbitMQ sits in between — its own documentation cites ~30k msg/sec for a single quorum queue with 1 KB messages replicated to all three nodes of a cluster — with moderate ops. Positions are illustrative, drawn from the ratings in the table above.*
 
 ### Kafka Deep Dive
 
@@ -1130,7 +1130,7 @@ kafka-topics.sh --create \
 | Approach | Throughput | Ordering | Replay | Operational complexity |
 |----------|-----------|----------|--------|----------------------|
 | Kafka (chosen) | Very high (10M+/s) | Per-partition | Yes (offset reset) | High (broker ops) |
-| RabbitMQ | Medium (50k/s) | Per-queue FIFO | Limited | Medium |
+| RabbitMQ | ~30k/s per quorum queue at 1 KB, RF=3 | Per-queue FIFO | Streams only | Medium |
 | AWS SQS | Standard: near-unlimited; FIFO: bounded per group | FIFO queue only | No | Low (managed) |
 | AWS Kinesis | High | Per-shard | 24h default, up to 365 days | Medium (managed) |
 

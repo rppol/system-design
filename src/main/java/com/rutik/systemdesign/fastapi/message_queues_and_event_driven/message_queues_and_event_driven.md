@@ -677,7 +677,7 @@ alerting signal.
 | Tool | Protocol | Throughput | Replay | Routing | Python client |
 |------|----------|------------|--------|---------|---------------|
 | Apache Kafka | Proprietary | Millions msg/s | Yes (log retention) | Topic + partition key | aiokafka |
-| RabbitMQ | AMQP 0-9-1 | 50 k–200 k msg/s | No (DLQ only) | Exchange types | aio-pika |
+| RabbitMQ | AMQP 0-9-1, AMQP 1.0 | ~30 k msg/s per quorum queue at 1 KB, RF=3 | Streams only (offset/timestamp) | Exchange types | aio-pika |
 | AWS SQS | HTTP/HTTPS | ~3 k msg/s per queue (standard) | No | Queue + SNS fan-out | aiobotocore |
 | Redis Streams | RESP3 | ~500 k msg/s | Yes (XREAD > last ID) | Consumer groups | redis.asyncio |
 | NATS JetStream | NATS | ~10 M msg/s | Yes | Subject matching | nats-py |
@@ -757,14 +757,17 @@ Producers register a schema version before first publish; the registry assigns a
 
 Cancel the consumer asyncio task on `SIGTERM`, catch `CancelledError`, and call `await consumer.stop()` in the finally block. `consumer.stop()` triggers a final offset commit (if using auto-commit) and sends a LeaveGroup request so the broker can rebalance the partition to another consumer immediately rather than waiting for the session timeout (default 10 s). For manual commits, commit before calling `stop()`.
 
-**Q14: Why can Kafka consumers replay historical events while RabbitMQ queues cannot?**
-**Short:** Kafka retains an append-only log consumers can rewind, while RabbitMQ deletes messages once acknowledged.
+**Q14: Why can Kafka consumers replay historical events while RabbitMQ classic and quorum queues cannot?**
+**Short:** Kafka retains an append-only log consumers rewind; RabbitMQ classic and quorum queues delete on ack, though its streams do replay.
 
 Kafka retains messages in an append-only log for a configured time or size window regardless of
-whether any consumer has read them. A consumer group can reset its offset and re-read anything
-still inside that window, while RabbitMQ deletes a message the moment every bound consumer has
-acknowledged it, making it gone permanently. This makes Kafka the natural fit for event sourcing
-or reprocessing after a bug fix, while RabbitMQ requires an explicit archive if replay is needed.
+whether any consumer has read them, so a consumer group can reset its offset and re-read anything
+still inside that window. RabbitMQ's classic and quorum queues delete a message once it is
+acknowledged and expose no consumer-owned offset to rewind — but that is a property of those two
+queue types, not of the product. RabbitMQ **streams**, added in 3.9, are an append-only replicated
+log with non-destructive reads, where `x-stream-offset` accepts `first`, `last`, `next`, an
+absolute offset, a timestamp, or a relative interval. Pick a stream when replay matters and a
+quorum queue when each message is a unit of work exactly one consumer must perform.
 
 **Q15: How does saga choreography compare to saga orchestration for multi-service workflows?**
 **Short:** Choreography reacts to events with no coordinator; orchestration uses a central coordinator to track state.

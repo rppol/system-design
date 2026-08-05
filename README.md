@@ -545,6 +545,7 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 |--------|-------------|
 | [Event-Driven Fundamentals](src/main/java/com/rutik/systemdesign/backend/event_driven_fundamentals/event_driven_fundamentals.md) | Events vs commands vs queries, event taxonomy, choreography vs orchestration, event storming |
 | [Kafka Deep Dive](src/main/java/com/rutik/systemdesign/backend/kafka_deep_dive/kafka_deep_dive.md) | Producer internals (acks/batching/idempotence), consumer rebalancing, EOS, Kafka Streams, Schema Registry |
+| [RabbitMQ Deep Dive](src/main/java/com/rutik/systemdesign/backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md) | AMQP 0-9-1 object model, exchange/binding matching, confirms vs transactions, quorum queues (Raft), streams and replay, prefetch, DLX, Khepri |
 | [Event Sourcing and CQRS](src/main/java/com/rutik/systemdesign/backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | Events as source of truth, aggregate design, snapshots, projections, event upcasting, Axon Framework |
 | [Messaging Patterns](src/main/java/com/rutik/systemdesign/backend/messaging_patterns/messaging_patterns.md) | Outbox pattern (polling + Debezium CDC), transactional inbox, DLQ handling, Avro schema evolution |
 

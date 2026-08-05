@@ -924,7 +924,7 @@ Slack notification.
 | Broker | Throughput | Durability | Pub/Sub | Delay queues | Operational cost |
 |---|---|---|---|---|---|
 | Redis | ~100k msg/s | AOF/RDB (configurable) | Yes | Yes (ZADD) | Low |
-| RabbitMQ | ~50k msg/s | Disk-persistent queues | Yes (exchanges) | Via TTL+DLX | Medium |
+| RabbitMQ | ~30k msg/s per quorum queue at 1 KB, RF=3 | Disk-persistent queues | Yes (exchanges) | Via TTL+DLX, or the delayed-message-exchange plugin | Medium |
 | Amazon SQS | ~3k msg/s (standard) | Managed, very high | No | DelaySeconds | Zero ops |
 
 ---

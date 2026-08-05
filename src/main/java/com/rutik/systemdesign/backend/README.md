@@ -43,7 +43,7 @@ flowchart TD
         p7_test(["Testing Strategy"]) --> p7_load(["Load Testing"]) --> p7_chaos(["Chaos Engineering"])
     end
     subgraph P8["Phase 8 - Event-Driven Architecture"]
-        p8_eda(["EDA Fundamentals"]) --> p8_kafka(["Kafka Deep Dive"]) --> p8_es(["Event Sourcing"]) --> p8_msg(["Messaging Patterns"])
+        p8_eda(["EDA Fundamentals"]) --> p8_kafka(["Kafka Deep Dive"]) --> p8_rabbit(["RabbitMQ Deep Dive"]) --> p8_es(["Event Sourcing"]) --> p8_msg(["Messaging Patterns"])
     end
     subgraph P9["Phase 9 - Microservices Architecture"]
         p9_ms(["MS Fundamentals"]) --> p9_gw(["API Gateway"]) --> p9_mesh(["Service Mesh"]) --> p9_ops(["Operational Patterns"]) --> p9_container(["Container Patterns"])
@@ -67,14 +67,14 @@ The three columns run independently top-to-bottom (Phase 1/4/7, Phase 2/5/8, Pha
 
 ## Learning Paths
 
-This section is exhaustive by design — 34 modules across 9 phases, from OSI-layer networking through microservices architecture and container orchestration. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 35 modules across 9 phases, from OSI-layer networking through microservices architecture and container orchestration. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (34 modules)
+### Full Path (35 modules)
 
 The complete curriculum in the order above — see [9-Phase Learning Path](#9-phase-learning-path). Use it for genuine mastery: every networking layer (OSI, TCP/IP, UDP/QUIC), the full API surface (GraphQL, WebSockets/SSE), performance profiling, database migrations and the full database-types survey, the testing trio, event sourcing/CQRS and messaging patterns, service mesh, and container/deployment patterns. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (21 modules)
+### Senior Path (22 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -98,9 +98,10 @@ The complete curriculum in the order above — see [9-Phase Learning Path](#9-ph
 | 22 | [auth_and_authorization_systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | module page only |
 | 24 | [load_and_performance_testing](load_and_performance_testing/load_and_performance_testing.md) | module page only |
 | 27 | [kafka_deep_dive](kafka_deep_dive/kafka_deep_dive.md) | module page only |
-| 34 | [container_and_deployment_patterns](container_and_deployment_patterns/container_and_deployment_patterns.md) | module page only |
+| 28 | [rabbitmq_deep_dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | module page only |
+| 35 | [container_and_deployment_patterns](container_and_deployment_patterns/container_and_deployment_patterns.md) | module page only |
 
-**Not in this path** (13 of 34, Full Path only): `osi_model_and_networking`, `udp_and_quic`, `graphql`, `database_types_deep_dive`, `backend_testing_strategies`, `chaos_engineering`, `event_driven_fundamentals`, `event_sourcing_and_cqrs`, `messaging_patterns`, `microservices_fundamentals`, `api_gateway_patterns`, `service_mesh_and_service_discovery`, `distributed_system_operational_patterns`
+**Not in this path** (13 of 35, Full Path only): `osi_model_and_networking`, `udp_and_quic`, `graphql`, `database_types_deep_dive`, `backend_testing_strategies`, `chaos_engineering`, `event_driven_fundamentals`, `event_sourcing_and_cqrs`, `messaging_patterns`, `microservices_fundamentals`, `api_gateway_patterns`, `service_mesh_and_service_discovery`, `distributed_system_operational_patterns`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior backend engineering interview** actually probes — the protocols, performance levers, database internals, resilience patterns, security, and distributed-systems building blocks that come up in nearly every loop. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -132,14 +133,14 @@ A ruthless cut to what a **senior backend engineering interview** actually probe
 | 23 | [backend_testing_strategies](backend_testing_strategies/backend_testing_strategies.md) | module page only |
 | 25 | [chaos_engineering](chaos_engineering/chaos_engineering.md) | module page only |
 | 26 | [event_driven_fundamentals](event_driven_fundamentals/event_driven_fundamentals.md) | module page only |
-| 28 | [event_sourcing_and_cqrs](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | module page only |
-| 29 | [messaging_patterns](messaging_patterns/messaging_patterns.md) | module page only |
-| 30 | [microservices_fundamentals](microservices_fundamentals/microservices_fundamentals.md) | module page only |
-| 31 | [api_gateway_patterns](api_gateway_patterns/api_gateway_patterns.md) | module page only |
-| 32 | [service_mesh_and_service_discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | module page only |
-| 33 | [distributed_system_operational_patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | module page only |
+| 29 | [event_sourcing_and_cqrs](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | module page only |
+| 30 | [messaging_patterns](messaging_patterns/messaging_patterns.md) | module page only |
+| 31 | [microservices_fundamentals](microservices_fundamentals/microservices_fundamentals.md) | module page only |
+| 32 | [api_gateway_patterns](api_gateway_patterns/api_gateway_patterns.md) | module page only |
+| 33 | [service_mesh_and_service_discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | module page only |
+| 34 | [distributed_system_operational_patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | module page only |
 
-**Not in this path** (16 of 34, Full Path only): `osi_model_and_networking`, `tcp_ip_deep_dive`, `udp_and_quic`, `http_protocols`, `grpc_and_protobuf`, `graphql`, `websockets_and_sse`, `performance_profiling`, `connection_pooling_deep_dive`, `async_and_concurrency_patterns`, `database_internals_and_indexing`, `query_optimization`, `rate_limiting_in_depth`, `load_and_performance_testing`, `kafka_deep_dive`, `container_and_deployment_patterns`
+**Not in this path** (17 of 35, Full Path only): `osi_model_and_networking`, `tcp_ip_deep_dive`, `udp_and_quic`, `http_protocols`, `grpc_and_protobuf`, `graphql`, `websockets_and_sse`, `performance_profiling`, `connection_pooling_deep_dive`, `async_and_concurrency_patterns`, `database_internals_and_indexing`, `query_optimization`, `rate_limiting_in_depth`, `load_and_performance_testing`, `kafka_deep_dive`, `rabbitmq_deep_dive`, `container_and_deployment_patterns`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the judgment calls a staff backend engineer owns: which protocol and consistency model a system can afford, how it degrades under partial failure, and what you tell a team **not** to build. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -187,7 +188,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 
 ---
 
-## Module Table — 34 Modules
+## Module Table — 35 Modules
 
 ### Phase 1 — Networking Fundamentals (MAJOR DEEP DIVE)
 
@@ -257,6 +258,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 |--------|-------|------|------------|
 | [Event-Driven Fundamentals](event_driven_fundamentals/event_driven_fundamentals.md) | Events vs commands, choreography vs orchestration, event storming | 15 | Intermediate |
 | [Kafka Deep Dive](kafka_deep_dive/kafka_deep_dive.md) | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 18 | Expert |
+| [RabbitMQ Deep Dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | AMQP object model, confirms vs transactions, quorum queues, streams, prefetch, DLX, Khepri | 42 | Expert |
 | [Event Sourcing & CQRS](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | Event store, aggregates, snapshots, CQRS read models, Axon | 15 | Expert |
 | [Messaging Patterns](messaging_patterns/messaging_patterns.md) | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 15 | Advanced |
 

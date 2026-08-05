@@ -534,7 +534,7 @@ BACKWARD compatibility means the upgraded v2 consumer can read both the old v1 p
 | Broker | Throughput | Ordering | Replay | Routing | Best For |
 |--------|-----------|---------|--------|---------|---------|
 | Kafka | 1M+ msg/s | Per-partition | Yes (offset) | By partition key | Event streaming, audit log, high throughput |
-| RabbitMQ | ~50K msg/s | Per queue | Limited | Complex (exchanges) | Task queues, RPC, complex routing |
+| RabbitMQ | ~30K msg/s per quorum queue at 1 KB, RF=3 | Per queue | Streams only | Complex (exchanges) | Task queues, RPC, complex routing |
 | SQS | Elastic | FIFO queues | No (visibility timeout) | Topics via SNS | Serverless, AWS-native, decoupled tasks |
 
 ---
@@ -545,7 +545,7 @@ Use the outbox pattern whenever a service must publish an event as a side effect
 
 Use the transactional inbox whenever downstream message processing must be exactly-once (payment processing, inventory decrement, financial ledger updates). For idempotent operations like updating a cache or sending a notification, simpler deduplication (check-then-act) may be sufficient.
 
-Use Kafka when: you need replay capability, high throughput (> 50K msg/s), ordered processing per entity, or log-based event streaming. Use RabbitMQ when: you need complex routing (header-based, topic patterns), low latency message delivery, or per-message TTL. Use SQS when: you are fully on AWS, need serverless-friendly messaging, or want managed FIFO ordering without Kafka operational overhead.
+Use Kafka when: you need replay capability, throughput beyond what a single broker queue sustains, ordered processing per entity, or log-based event streaming. Use RabbitMQ when: you need complex routing (header-based, topic patterns), low latency message delivery, or per-message TTL. Use SQS when: you are fully on AWS, need serverless-friendly messaging, or want managed FIFO ordering without Kafka operational overhead.
 
 ---
 
@@ -625,7 +625,7 @@ BACKWARD compatibility means a newer schema version can read data written with a
 **Q: What is the difference between Kafka and RabbitMQ for event-driven architectures?**
 **Short:** Kafka is log-based with replay and high throughput; RabbitMQ is queue-based with complex routing and lower latency.
 
-Kafka is log-based: messages are retained for a configured duration (default 7 days) and consumers maintain their own offset. Any consumer can replay from any offset. Kafka preserves order within a partition. Throughput is very high (1M+ msg/s per cluster). Kafka is ideal for event streaming, audit logs, and scenarios requiring replay. RabbitMQ is queue-based: messages are removed from the queue once acknowledged. Complex routing is available (topic exchanges, header exchanges). Throughput is lower (~50K msg/s) but latency is lower (push-based vs poll-based). RabbitMQ is better for task queues, RPC patterns, and complex routing requirements. Use Kafka when you need replay and high throughput; use RabbitMQ when you need complex routing and low latency task distribution.
+Kafka is log-based: messages are retained for a configured duration (default 7 days) and consumers maintain their own offset. Any consumer can replay from any offset. Kafka preserves order within a partition. Throughput is very high (1M+ msg/s per cluster). Kafka is ideal for event streaming, audit logs, and scenarios requiring replay. RabbitMQ's classic and quorum queues are queue-based: messages are removed once acknowledged, though its third queue type, streams, is an append-only log that does support replay. Complex routing is available (topic exchanges, header exchanges). Per-queue throughput is lower — RabbitMQ's own docs cite ~30K msg/s for one quorum queue at 1 KB with 3-node replication — but latency is lower (push-based vs poll-based). RabbitMQ is better for task queues, RPC patterns, and complex routing requirements. Use Kafka when you need replay and high throughput; use RabbitMQ when you need complex routing and low latency task distribution.
 
 **Q: How do you handle message ordering with Kafka when multiple consumers process in parallel?**
 **Short:** Kafka only guarantees ordering within a partition, so use the entity ID as the partition key to preserve per-entity order.

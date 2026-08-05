@@ -402,19 +402,19 @@ Fat events (carrying full order data) allow consumers to process events without 
 The CQRS read model has a lag of 100-500ms between event publication and read model update. During this window, `GET /orders/{id}` may return 404 for a newly created order. Mitigation: the `POST /orders` response includes the full order resource, so the client has the data without needing to immediately query. For the redirect-after-create pattern, add an optimistic cache in the controller that holds the just-created order for 1 second.
 
 **Kafka vs RabbitMQ**:
-Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput, and retention-based storage (Kafka's default `log.retention.hours` is 168, i.e. 7 days). RabbitMQ would provide lower latency per message and richer routing, but classic and quorum queues offer no replay — the read model would be unrebuildable from events after a failure.
+Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput, and retention-based storage (Kafka's default `log.retention.hours` is 168, i.e. 7 days). RabbitMQ would provide lower latency per message and richer routing, but classic and quorum queues offer no replay — the read model would be unrebuildable from events after a failure. RabbitMQ **streams** would have supported replay, but the read-model rebuild also wanted the stream-processing ecosystem, which is Kafka's rather than RabbitMQ's.
 
-The most-cited head-to-head is Confluent's OpenMessaging benchmark on three i3en.2xlarge brokers with 3x replication, 1 KB messages, four producers and four consumers over 100 partitions: **Kafka 605 MB/s vs RabbitMQ 38 MB/s** peak stable throughput — Confluent's own summary is "15x faster than RabbitMQ and 2x faster than Pulsar" (Pulsar landed at 305 MB/s). Confluent reports MB/s only; dividing by the stated 1 KB message size puts that at roughly 605K vs 38K msg/s, which is our arithmetic, not a published figure. Treat this as directional, not universal — it is vendor-run, RabbitMQ was measured with mirrored queues, and RabbitMQ **Streams** (which do support replay) reach far higher rates than the queue figure below.
+The most-cited head-to-head is Confluent's OpenMessaging benchmark on three i3en.2xlarge brokers with 3x replication, 1 KB messages, four producers and four consumers over 100 partitions: **Kafka 605 MB/s vs RabbitMQ 38 MB/s** peak stable throughput — Confluent's own summary is "15x faster than RabbitMQ and 2x faster than Pulsar" (Pulsar landed at 305 MB/s). Confluent reports MB/s only; dividing by the stated 1 KB message size puts that at roughly 605K vs 38K msg/s, which is our arithmetic, not a published figure. Treat this as directional and now historical — it is vendor-run, and RabbitMQ was measured with **classic mirrored queues, a queue type removed entirely in RabbitMQ 4.0**, so the RabbitMQ half benchmarks software you can no longer install. Its replacements are quorum queues (RabbitMQ's own docs cite ~30k msg/s for one queue at 1 KB with 3-node replication) and streams, which do support replay and reach far higher rates than the queue figure below.
 
 ```mermaid
 xychart-beta
     title "Confluent OMB peak throughput, 1KB msgs, 3x replication"
-    x-axis ["Kafka", "RabbitMQ (mirrored queues)"]
+    x-axis ["Kafka", "RabbitMQ (mirrored, removed in 4.0)"]
     y-axis "MB / sec" 0 --> 700
     bar [605, 38]
 ```
 
-On that benchmark Kafka's log-based design sustained roughly 15x RabbitMQ's peak throughput, which is why it wins here despite RabbitMQ's lower per-message latency and richer routing — but the decisive factor for this design is not raw throughput, it is that `order-events` must support full-history replay to rebuild the read model.
+On that benchmark Kafka's log-based design sustained roughly 15x the peak throughput of a RabbitMQ queue type that no longer ships, which is why it wins here despite RabbitMQ's lower per-message latency and richer routing — but the decisive factor for this design is not raw throughput, it is that `order-events` must support full-history replay to rebuild the read model.
 
 ---
 

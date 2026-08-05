@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 142 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 148 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -78,6 +78,16 @@ The rule people learn late is that Airflow is an orchestrator, not a compute eng
 A stream is divided into shards, each an ordered sequence with its own throughput ceiling, and the partition key decides which shard a record lands on -- the same design decision Kafka's partition key makes, with the same consequence that ordering exists per shard and never per stream. Consumers track their own position through the Kinesis Client Library or enhanced fan-out, and records are retained for a configurable window rather than indefinitely, so replay is bounded by retention rather than by disk.
 
 Reach for it when the workload is already inside AWS and you would rather size shards than operate brokers; provisioned mode makes you manage shard counts while on-demand scales for you at a higher unit cost. It is the usual sink for a Kafka-free Debezium Server deployment, and the tradeoff against Kafka is fewer moving parts against a shorter retention window and a weaker replay story.
+
+### Amazon MQ for RabbitMQ
+**Short:** AWS-managed RabbitMQ; removes cluster operations at the cost of trailing upstream versions and an allowlisted plugin set.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/message-broker @1, platform-delivery/cloud-platform-and-cost @2
+
+A managed broker service running RabbitMQ on AWS-operated instances, handling provisioning, patching and multi-availability-zone deployment. It offers single-instance and clustered deployment modes, integrates with CloudWatch and VPC networking, and exposes the standard AMQP and management endpoints, so existing clients connect unchanged.
+
+The constraint to settle during design rather than during implementation is what the managed engine will not do: supported versions trail upstream, and plugins are an allowlist, so a community plugin such as the delayed-message exchange may simply be unavailable. That turns a feature choice into an architecture constraint. Read the supported-version and plugin pages before the design commits to anything version-specific.
 
 ### Amazon MSK
 **Short:** AWS-managed Apache Kafka: provisioned or serverless brokers with tiered storage, IAM auth and less tuning surface.
@@ -342,6 +352,16 @@ Delivery is at-least-once, and with `acks_late` a worker crash re-runs the task,
 The connector consumes the topics you name and batches records into ClickHouse inserts, mapping record fields onto table columns by name. Because ClickHouse rewards large infrequent inserts and punishes small frequent ones with runaway part counts and merge pressure, batch size and flush interval are the settings that actually decide whether the table stays healthy. Idempotence relies on the server deduplicating identical insert blocks, so a retried batch after a task failure does not duplicate rows.
 
 Reach for it when Kafka is already the transport and ClickHouse is the analytics store, and you want ingestion configured rather than coded. The alternative shipped by the database itself is a Kafka table engine feeding a materialized view, which removes Connect from the picture but moves the consumer inside the database, where failures become a database problem. Either way, schema evolution on the topic has to be planned against the table's column set.
+
+### CloudAMQP
+**Short:** Managed RabbitMQ hosting across the major clouds, with per-plan node counts and its own monitoring layer.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/message-broker @1, platform-delivery/cloud-platform-and-cost @2
+
+A hosting provider that runs RabbitMQ clusters on the major cloud platforms, sizing each plan by node count and instance class and layering its own metrics, alarms and log integration on top of the standard management plugin.
+
+It sits between self-hosting and a cloud vendor's own managed broker: closer to upstream than a vendor service tends to be, at the price of a third party in the dependency chain. Reach for it when you want RabbitMQ rather than a vendor's approximation of it, and check the per-plan node count against your queue type, because a quorum queue wants an odd number of nodes and a single-node plan cannot host a replicated one.
 
 ### Conductor OSS
 **Short:** JSON-DSL workflow engine for long-running orchestration and sagas; Netflix-created, now stewarded by Orkes.
@@ -939,6 +959,16 @@ Airflow's core ships the scheduler, the DAG model and the executor machinery, wh
 
 The practical consequence is dependency management: providers pull real client libraries, so an environment installing many of them accumulates conflicting version constraints, which is the usual reason a managed Airflow environment refuses to update. Install only the providers actually used, pin them, and prefer running work in a container or pod operator when an integration's dependency set would otherwise poison the scheduler's own environment.
 
+### Ra
+**Short:** The Erlang Raft implementation underneath RabbitMQ's quorum queues, streams and Khepri metadata store.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/message-broker @1, data-access/transactions-and-consistency @2
+
+A Raft library for the Erlang VM, written by the RabbitMQ team, providing leader election, log replication and membership changes for many state machines inside one node. Quorum queues, streams and the Khepri metadata store are each a Ra state machine, which is why they share a durability story and a majority requirement.
+
+You never configure Ra as a component, but its write-ahead-log settings are the knobs behind quorum-queue disk behaviour, and its majority rule is why an even-node cluster buys nothing over the odd number below it and why stretching a cluster across regions puts inter-region latency inside every publisher confirm. When quorum-queue memory or disk use surprises you, Ra's log is the thing you are actually looking at.
+
 ### RabbitMQ
 **Short:** AMQP broker with exchange-based routing and durable queues; common Celery/Dramatiq backend and STOMP relay.
 **Kind:** tech
@@ -947,7 +977,7 @@ The practical consequence is dependency management: providers pull real client l
 
 RabbitMQ is an AMQP 0-9-1 broker. Producers never name a queue; they publish to an exchange, and bindings decide which queues receive a copy — direct on an exact routing key, topic on a pattern, fanout to everything bound. Routing therefore lives in broker configuration and can change without redeploying producers. Queues are durable, each message is delivered to one consumer, and an unacknowledged message is requeued when that consumer dies.
 
-That is a work-queue model, not a log: once acknowledged a message is gone, and there are no consumer-owned offsets to rewind, which is the line between it and Kafka. Reach for it for task distribution and complex routing — it is the common Celery and Dramatiq backend, and its STOMP plugin makes it the external relay behind Spring's WebSocket messaging — and use quorum queues, which replicate through Raft, when a queue must survive losing a node.
+Classic and quorum queues are a work-queue model, not a log: once acknowledged a message is gone and there are no consumer-owned offsets to rewind. Its third queue type, streams, IS a log — append-only, Raft-replicated, non-destructive, addressable by offset or timestamp — so the line between it and Kafka is ecosystem and per-message cost rather than replay. Reach for it for task distribution and complex routing — it is the common Celery and Dramatiq backend, and its STOMP plugin makes it the external relay behind Spring's WebSocket messaging — and note that quorum queues, which replicate through Raft, are now the only replicated queue type rather than an upgrade, because classic queue mirroring was removed in 4.0.
 
 ### RabbitMQ STOMP plugin
 **Short:** RabbitMQ plugin exposing STOMP, letting browsers and app servers use the broker as a production relay.
@@ -958,6 +988,26 @@ That is a work-queue model, not a log: once acknowledged a message is gone, and 
 Enabling the plugin adds a STOMP listener alongside AMQP and maps STOMP destinations onto the broker's own objects: a queue destination is a durable queue, an exchange destination publishes with a routing key, a topic destination goes through the topic exchange, and temporary destinations support reply-to. Subscriptions carry an acknowledgement mode, so a client can acknowledge per message rather than relying on auto-ack, and a companion Web STOMP plugin exposes the same protocol over WebSocket so a browser can connect directly.
 
 This matters because an application's built-in simple STOMP broker keeps subscriptions in the memory of one process, so a second instance never sees the first instance's subscribers and fan-out silently breaks the moment you scale out. Pointing the application at RabbitMQ as an external relay moves that state into the broker and makes horizontal scaling work. The cost is a broker in the path of every message and its own capacity to plan.
+
+### rabbitmq-perf-test
+**Short:** Official RabbitMQ load generator for measuring throughput and latency against your own hardware, payload and queue type.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/message-broker @1, devtools/testing-and-mocking @2
+
+A command-line tool that drives configurable producer and consumer load at a broker and reports send and receive rates with latency percentiles. Every variable that moves a RabbitMQ throughput number by an order of magnitude is a flag: message size, queue type, persistence, publisher confirms and the confirm window, consumer acknowledgement mode, prefetch, and the number of queues and clients.
+
+It matters because published RabbitMQ throughput figures are close to meaningless without their conditions, and the most-quoted vendor comparison was run against classic mirrored queues, a queue type removed in 4.0. Reach for it before sizing a cluster, or before believing any number in a blog post. Run it from a machine other than the broker, or you are measuring your load generator.
+
+### rabbitmqadmin v2
+**Short:** Standalone Rust CLI over RabbitMQ's HTTP API, for scripting topology and exporting or importing definitions.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/message-broker @1, devtools/version-control-and-workbench @2
+
+A single binary driving the management plugin's HTTP API: declaring exchanges, queues, bindings, users, vhosts and policies, and exporting or importing a whole definitions document. That makes broker topology something a pipeline can apply and diff rather than something a person assembles in the management UI.
+
+It replaces the v1 Python script, whose download endpoint was removed in 4.3, so an automation job that fetched `rabbitmqadmin` from a running broker breaks on upgrade -- a small and easily missed piece of upgrade planning. It still needs the management plugin enabled and reachable, so it is not a substitute for `rabbitmqctl` on a node that is not fully up.
 
 ### Ray
 **Short:** Distributed Python compute framework; Train/Tune/Serve/Data on top, and the placement layer for multi-node vLLM.
@@ -1322,6 +1372,16 @@ Reach for it inside a TFX pipeline, where the statistics and schema components m
 The workflow is three calls: generate statistics for a batch, infer or load a schema, and validate the batch against it. Skew and drift thresholds are configured on the schema itself rather than at call time -- an infinity-norm bound on a categorical feature, a divergence bound on a numeric one -- so the tolerance is versioned alongside the feature definition. The failure modes are worth separating: schema skew is a structural difference between training and serving data, feature skew is a value computed differently in the two paths, and distribution skew is the same pipeline seeing different data.
 
 Reach for it when a training pipeline must fail loudly on a bad batch rather than quietly training on it, since a silently changed upstream column is the classic cause of a model that degrades with no alert firing. Its notebook visualizations are also the fastest way to see what actually changed. Budget for schema maintenance, and expect to relax inferred domains that were too tight on the first sample.
+
+### VMware Tanzu RabbitMQ
+**Short:** The commercial RabbitMQ distribution, and the route to support past a community series' end-of-life.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/message-broker @1
+
+A commercially supported packaging of RabbitMQ with a longer support window than the open-source series, aimed at organisations that cannot upgrade on the community cadence.
+
+The reason it enters a design conversation is rarely a feature: it is the answer to "our compliance window outlasts this release's community support". Check the specific version's support dates before treating a commercial distribution as a way to defer upgrading indefinitely, because a distribution several majors behind still misses the architectural changes -- the removal of classic queue mirroring, the move from Mnesia to Khepri -- that a later migration then has to absorb all at once.
 
 ### Workflows
 **Short:** Serverless state-machine orchestrators (Google Cloud Workflows and peers) that survive restarts between steps.
