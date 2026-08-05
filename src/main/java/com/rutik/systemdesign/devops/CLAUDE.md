@@ -73,6 +73,8 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 | 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
 | 8 — Specialized Platforms & Performance | ml_platform_and_gpu_infrastructure, event_streaming_operations, performance_and_load_testing |
 
+**Deep-dive sub-files — 1.** `observability_tracing_and_otel/opentelemetry_deep_dive.md` (2,037 lines, 36 Q&As): the OTel project-level mechanism — the spec / API-SDK / Collector three-layer split, per-signal data models, W3C context-propagation byte layout, consistent probability sampling (`ot=th` / `rv`), OTLP wire behaviour, Collector internals, semantic-convention migration, and cost arithmetic. It has **no `STUDY_ORDER` entry** — a sub-file groups under its parent via `splitModulePath()` — and is wired into the Senior tier through the parent page's `<!-- study-paths -->` block.
+
 **Q&A floor:** 15 per module (root CLAUDE.md hard floor). Deep modules aim higher (18+): kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos, ml_platform_and_gpu_infrastructure
 
 Backfill status (2026-07-16): the floor backlog is fully cleared — every module repo-wide now meets the 15-question floor (all former 11-14 modules raised to 16 across backend, database, devops, fastapi, hld, and python).

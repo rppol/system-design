@@ -95,7 +95,7 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 5 — Cloud | Intermediate | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation/showback |
 | 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | 6 — Observability & SRE | Advanced | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir/Cortex, cardinality |
 | 30 | [observability_logging](observability_logging/observability_logging.md) | 6 — Observability & SRE | Intermediate | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
-| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation — plus 1 deep-dive sub-file |
 | 32 | [visualization_and_alerting](visualization_and_alerting/visualization_and_alerting.md) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty/OpsGenie, alert fatigue, SLO burn-rate alerts |
 | 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | 6 — Observability & SRE | Advanced | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
 | 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | 6 — Observability & SRE | Intermediate | Incident command, severity levels, on-call rotations, blameless postmortems, runbooks, MTTR/MTTD |
@@ -220,7 +220,7 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 | 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | module page only |
 | 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | module page only |
 | 30 | [observability_logging](observability_logging/observability_logging.md) | module page only |
-| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | module page only |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 2 files |
 | 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | module page only |
 | 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | module page only |
 
@@ -412,6 +412,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | 29 | `observability_metrics_prometheus/observability_metrics_prometheus.md` | 6 | 7 | done | 15 |
 | 30 | `observability_logging/observability_logging.md` | 6 | 7 | done | 12 |
 | 31 | `observability_tracing_and_otel/observability_tracing_and_otel.md` | 6 | 7 | done | 12 |
+| 31a | `observability_tracing_and_otel/opentelemetry_deep_dive.md` | 6 | 7 | done | 36 |
 | 32 | `visualization_and_alerting/visualization_and_alerting.md` | 6 | 7 | done | 10 |
 | 33 | `sre_principles_and_slos/sre_principles_and_slos.md` | 6 | 7 | done | 15 |
 | 34 | `incident_management_and_oncall/incident_management_and_oncall.md` | 6 | 7 | done | 12 |

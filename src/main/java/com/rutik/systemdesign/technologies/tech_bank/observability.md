@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 258 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 286 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -145,6 +145,16 @@ Every AWS service publishes metrics into it with no setup, at one-minute granula
 
 Reach for it as the default on AWS, because it already collects most of what you need and is the only thing that sees inside the managed services. Billing follows custom metrics, alarms, ingested gigabytes and bytes scanned per query, so a high-cardinality dimension and unfiltered debug logging are where the bill comes from. Prometheus with Grafana is the alternative when PromQL or cross-cloud portability matters more.
 
+### AWS Distro for OpenTelemetry
+**Short:** AWS-supported build of the OpenTelemetry Collector and SDKs, with AWS components and Lambda layers that bundle the SDK.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, platform-delivery/cloud-platform-and-cost @3
+
+ADOT is upstream OpenTelemetry packaged and supported by AWS: a Collector distribution carrying AWS receivers and exporters alongside the standard component set, plus per-language SDK distributions and Lambda layers that instrument a function by adding a layer rather than a dependency. Because it speaks OTLP throughout, it exports to X-Ray, CloudWatch or any third-party backend without changing instrumentation.
+
+Reach for it when you want a vendor-supported collection tier without leaving the upstream component model, which is the same bargain Grafana Alloy and the Splunk distribution offer. The Lambda case is where it earns its place and also where the subtle setting lives: a function that lives 200 ms cannot report cumulative metrics usefully, so delta temporality is the first thing to check when serverless metrics look wrong.
+
 ### AWS X-Ray
 **Short:** AWS managed distributed tracing service; OTLP-compatible backend for service maps and latency analysis.
 **Kind:** tech
@@ -154,6 +164,16 @@ Reach for it as the default on AWS, because it already collects most of what you
 Services emit spans through the OpenTelemetry SDK or the AWS Distro for OpenTelemetry collector; X-Ray stitches them into end-to-end traces by trace id and derives a service map showing which service calls which and where latency and errors concentrate. Sampling is configured centrally, because tracing every request at high throughput costs far more than it teaches.
 
 It is the low-friction option when the system already runs on AWS, since Lambda, API Gateway and the SDKs propagate the trace header for you. Choose a vendor-neutral backend such as Jaeger or Tempo when you are multi-cloud or want the trace store to outlive the platform decision.
+
+### batch
+**Short:** OpenTelemetry Collector processor that groups spans, metric points or log records into larger payloads before export.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/logging @2
+
+It accumulates items until a size or timeout threshold is reached and emits one batch downstream, which is what makes the marginal cost of a span far below the cost of an export. By convention it goes last in the processor list, immediately before the exporters, so every earlier processor sees the smallest unit of work and the exporter sees the largest.
+
+Its weakness is durability. The processor returns success to the receiver as soon as data is in its in-memory buffer, so a Collector that is OOM-killed, SIGKILLed or evicted loses everything buffered after telling the sender it succeeded. Current guidance moves batching into the exporter's `sending_queue`, which can sit on a persistent queue backed by the `file_storage` extension and so acknowledge only once the data is on disk. The processor is still beta and carries no formal deprecation notice, so this is a shift in guidance rather than a removal.
 
 ### bcc
 **Short:** BPF Compiler Collection: eBPF-based Linux tracing tools for low-overhead kernel and application observability.
@@ -427,6 +447,16 @@ That index is also the bill. Storing logs in Elasticsearch costs several times w
 **Lang:** python
 **Roles:** observability/profiling-and-performance @1, runtime-systems/runtime-internals-and-types @3
 
+### file_storage
+**Short:** OpenTelemetry Collector extension giving components a durable on-disk store, most often behind a persistent sending queue.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @3
+
+Point an exporter's `sending_queue.storage` at a configured `file_storage` extension and the queue is written to a directory before anything is acknowledged, so a restart, an eviction or an OOM kill does not silently lose what was in flight. Receivers use it too, most usefully `filelog`, which checkpoints its read offsets there so a restart resumes rather than replays.
+
+Durability is not free. It puts pipeline throughput on the disk's fsync path, and it needs a real volume — an `emptyDir` disappears with the pod it was meant to protect against. Use it on the gateway tier, where losing a buffer loses data for every service at once, and let the agent tier drop fast instead.
+
 ### Filebeat
 **Short:** Lightweight Elastic log shipper that tails files and forwards lines to Logstash/Elasticsearch.
 **Kind:** tech
@@ -436,6 +466,26 @@ That index is also the bill. Storing logs in Elasticsearch costs several times w
 A harvester per file tails it line by line and records the read offset in a local registry, so a restart resumes exactly where it stopped instead of replaying or losing lines; the output is backpressure-aware, slowing the harvesters when Logstash or Elasticsearch cannot keep up rather than dropping data. Modules ship prebuilt parsing pipelines for common sources like nginx, and multiline patterns stitch a Java stack trace back into one event.
 
 It is deliberately dumber and far lighter than Logstash — the design is to run one small Go binary per host or as a Kubernetes DaemonSet and push heavy parsing into Elasticsearch ingest pipelines or a central Logstash. Reach for it when the job is "get these files off this box reliably"; anything requiring substantial enrichment belongs downstream.
+
+### filelog
+**Short:** OpenTelemetry Collector receiver that tails log files and turns each line into an OTLP log record.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/logging @1, observability/tracing-apm-and-llm-observability @3
+
+It watches a glob of paths, tracks read offsets so a restart resumes where it stopped, and runs a chain of operators over each line — JSON or regex parsing, timestamp and severity extraction — before emitting a `LogRecord`. On Kubernetes it is the standard DaemonSet path: the application writes structured JSON to stdout and the Collector reads it off the node.
+
+Choose it over exporting logs straight from the application's appender when durability matters, since a crashed process loses whatever the appender had buffered while the file survives. The costs are a serialise-and-reparse round trip and a timestamp gap: `observed_time_unix_nano` is when the Collector read the line, which on a backlogged file can be hours after `time_unix_nano`, and a query filtering on the wrong one finds nothing.
+
+### filter
+**Short:** OpenTelemetry Collector processor that drops spans, metric points or log records matching an OTTL condition.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/logging @2
+
+Conditions are OTTL expressions evaluated per item, so dropping probe traffic is one line such as `attributes["http.route"] == "/healthz"`, and `error_mode` decides what happens when a statement fails on an item. Position it early — after `memory_limiter`, but before `k8sattributes` — so you never pay API-server-backed enrichment for data you are about to discard.
+
+Where it does not help is metrics cardinality. By the time a series reaches the Collector the SDK has already allocated it, held it for the process lifetime and exported it, so a filter only removes the storage cost. An SDK View is the only control that prevents the allocation, and a Prometheus relabel rule is later still.
 
 ### FireHydrant
 **Short:** Incident-management platform automating declaration, role assignment, comms channels and retrospectives.
@@ -472,6 +522,16 @@ It is a Ruby process with a C core, heavier than Fluent Bit and lighter than Log
 **Kind:** api
 **Lang:** java
 **Roles:** observability/metrics-and-monitoring @1, runtime-systems/concurrency-and-async @2
+
+### forward
+**Short:** OpenTelemetry Collector connector that feeds one pipeline's output into another, so a shared prefix of processors runs exactly once.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @3
+
+A connector is simultaneously the exporter of one pipeline and the receiver of another; `forward` is the identity case, passing data through unchanged for the sole purpose of joining pipelines. The canonical use is factoring out a stage: redact in a first pipeline, export that redacted stream both to the `span_metrics` connector and onward through `forward` into a sampling pipeline, so redaction runs once instead of being copy-pasted into two processor lists.
+
+Reach for it whenever the same processors appear at the head of two pipelines. It is not a routing device and has no conditions — `routing` is the connector that chooses a destination by attribute.
 
 ### Grafana
 **Short:** Dashboard and alerting front-end that queries metrics, logs and traces from Prometheus, Loki, Tempo and friends.
@@ -550,6 +610,16 @@ The intended workflow is not to browse traces at all, but to arrive with an ID a
 It is the maintained Python 3 port of the Guppy toolkit, and in practice you use one entry point: a heap facade whose census walks every object the garbage collector knows about and returns a set partitioned by type, showing count, total size and each class's share of the heap. Sets support subtraction, so two snapshots taken around an operation give exactly what that operation retained.
 
 Reach for it when a long-running process grows and you need to know what is accumulating rather than where it was allocated. The walk is a stop-the-world census costing seconds and memory of its own, and it sees only Python objects, so a leak inside a C extension stays invisible. `tracemalloc` attributes growth to allocation sites instead, and memray covers native allocations that neither of them can see.
+
+### health_check
+**Short:** OpenTelemetry Collector extension exposing an HTTP endpoint that reports whether the Collector is up, for Kubernetes probes.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1, platform-delivery/kubernetes-and-orchestration @2
+
+Declare it under `extensions` and list it in `service.extensions`; it then serves on `0.0.0.0:13133` by default, which is what a liveness and readiness probe points at. Without it a Collector pod counts as healthy for as long as its process exists, so a Collector that has stopped accepting data is never restarted by the platform.
+
+Be clear about what it answers. It reports that the process is alive, not that the pipeline is delivering, and a Collector dropping everything passes it happily. The four counters on the Collector's own `:8888` telemetry endpoint answer the second question — `otelcol_exporter_send_failed_spans`, `otelcol_exporter_queue_size` against its capacity, `otelcol_processor_dropped_spans` and `otelcol_receiver_refused_spans` — and those are what an alert should watch.
 
 ### HealthIndicator
 **Short:** Spring Boot Actuator interface for contributing a custom check to the aggregated /health endpoint.
@@ -855,6 +925,16 @@ The technique is more useful than the command: take three dumps a few seconds ap
 
 Reach for it for the first thirty seconds of a memory or garbage-collection question: whether old generation grows and is never reclaimed, whether full collections are frequent, whether metaspace is climbing. It gives counters over time and nothing more, with no object, allocation site or stack, so once the shape of the problem is clear you move to a heap dump, Flight Recorder or a profiler for the cause.
 
+### k8sattributes
+**Short:** OpenTelemetry Collector processor that enriches telemetry with pod, namespace, deployment and node attributes from the Kubernetes API.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, platform-delivery/kubernetes-and-orchestration @2, observability/logging @2
+
+It associates each incoming batch with the pod that sent it, then attaches the `k8s.*` metadata you name under `extract.metadata` — namespace, pod, deployment, node. Running it needs `auth_type: serviceAccount` and a ServiceAccount with read access to the relevant objects, which is the usual reason it silently attaches nothing.
+
+Prefer it to in-process resource detection on Kubernetes for two reasons: it queries the API server once per Collector rather than once per pod, and it works for telemetry produced by things with no SDK to run a detector in, eBPF instrumentation included. Place it after `memory_limiter` and after any `filter` that drops traffic, because enriching a health-check span you are about to discard is pure cost.
+
 ### Kafka Exporter
 **Short:** Exporter that turns Kafka broker/consumer-group state and JMX metrics into Prometheus series for lag dashboards.
 **Kind:** tech
@@ -964,6 +1044,16 @@ Instrumented functions run roughly three to five times slower, so the workflow i
 Its part in an operations workflow is the same as any tracker's: retrospective action items become issues with owners, created automatically by the incident tool so nothing depends on someone remembering. What differs is deliberate constraint, since cycles, a triage inbox and enforced states mean remediation work gets scheduled into an iteration rather than accumulating in an unbounded backlog nobody grooms.
 
 Reach for it because incident processes fail at follow-through far more often than at response, and the durable fix is putting the work where the team already plans. Keep a label or project for incident-derived items so completion rate stays visible, otherwise they vanish among feature tickets. Jira does the same job, and which one you use matters far less than actually reviewing the list.
+
+### loadbalancing
+**Short:** OpenTelemetry Collector exporter that hashes a routing key so every span of a trace reaches the same downstream Collector.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, traffic-edge/proxy-and-load-balancer @2
+
+Its job is consistency, not load distribution. Routing keys are `traceID` (the default for traces), `service` (the default for logs and metrics), `resource`, `metric`, `streamID` and `attributes`; resolvers are `static`, `dns` (re-resolved on a timer, five seconds by default), `k8s` (watches EndpointSlice objects and needs RBAC) and `aws_cloud_map`. Stability is beta for traces and logs, development for metrics.
+
+It is mandatory in front of a multi-replica tail-sampling gateway and its absence is silent. Spans distribute across replicas, each replica evaluates trace-wide policies on a fragment, a latency policy under-measures the duration and a `status_code` policy misses an errored span sitting elsewhere — and the traces you keep are internally consistent, simply the wrong ones. Prefer the `k8s` resolver to `dns`, which keeps routing to an evicted pod until its next poll, and note that a gateway rollout reshuffles the hash ring, which is a further argument for a short `decision_wait`.
 
 ### Log4j 1.x
 **Short:** The original Log4j logging implementation, end-of-life since 2015; migrate to Log4j 2 or Logback rather than using it.
@@ -1078,6 +1168,16 @@ The peak snapshot is the payoff, naming which call sites hold the memory when us
 Estimating a data model from payload size is wrong by a wide margin, because per-key overhead — the key string, the dictionary entry, the object header — is roughly a hundred bytes before any value, which is why many tiny keys cost several times what the same fields cost inside one hash. This command reports the real figure and samples nested elements for large collections rather than walking all of them.
 
 Reach for it before committing to a key layout, and again when memory grows without an obvious cause. Pair it with OBJECT ENCODING, which explains why the number is what it is, and with the memory doctor and big-keys sampler for a whole-keyspace view.
+
+### memory_limiter
+**Short:** OpenTelemetry Collector processor that refuses incoming data above a heap threshold, and it must be the first processor in every pipeline.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, traffic-edge/rate-limiting-and-resilience @2
+
+It samples heap usage every `check_interval` against a hard limit (`limit_mib`, or `limit_percentage` of the cgroup on Linux) and a soft limit of the hard limit minus `spike_limit_mib`, which defaults to twenty percent of it. Above the soft limit it returns a non-permanent error to the preceding component, which an OTLP receiver turns into a retryable status so the sender backs off — genuine backpressure rather than a drop. Above the hard limit it additionally forces a Go garbage collection.
+
+Position is the whole mechanism and nothing validates it. Placed after `k8sattributes` the enrichment CPU has already been spent, and after `tail_sampling` the trace buffers have already been allocated, so the OOM happens in front of the safety valve while the config still reads as correct and the Collector starts cleanly. Two further traps: `check_interval` defaults to `0s`, which disables checking entirely, and `limit_mib` belongs at roughly eighty percent of the container limit, because the limiter measures only the Go heap while the process also holds stacks, the runtime and off-heap allocations.
 
 ### memory_profiler
 **Short:** Python line-by-line memory profiler; useful but slows the traced function several times over.
@@ -1438,6 +1538,26 @@ It is a pipeline assembled from component types in YAML: receivers accept data o
 
 The reason to run it rather than exporting straight from the SDK is that everything you will want to change later — sampling rate, redaction, which backend, sending to two during a migration — becomes configuration outside the application. The costs are another service to size and keep available, tail sampling requiring all spans of a trace to reach one instance, and a contrib distribution large enough to warrant trimming.
 
+### OpenTelemetry Collector Builder
+**Short:** Tool that generates and compiles a custom OpenTelemetry Collector binary containing only the components your config names.
+**Kind:** tech
+**Lang:** go
+**Roles:** observability/tracing-apm-and-llm-observability @1, devtools/build-and-dependency-management @2
+
+`ocb` reads a manifest holding a `dist` block and one `gomod` line per receiver, processor, exporter, connector and extension, generates a `main.go` that registers exactly those, resolves the modules and compiles. The output is typically a fraction of the size of the contrib image.
+
+The reason to bother when contrib exists is attack surface and config surface. Contrib carries hundreds of components at every stability level, all of them present in the image you scan and patch, and a config can reference one nobody intended to run. The cost is that you now own a build: every Collector upgrade is a version bump across every `gomod` line plus a compile, and a component whose module path changes breaks your build rather than your config. Start on contrib and move once the component list has stopped changing.
+
+### OpenTelemetry eBPF Instrumentation
+**Short:** Zero-code eBPF instrumentation, formerly Grafana Beyla, producing spans and RED metrics without touching the process at all.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2
+
+OBI attaches kernel and userspace probes to a running binary, so there is no SDK, no agent inside the process and no restart. It covers HTTP/1.1, HTTP/2 and gRPC plus several database and messaging protocols, emits runtime metrics for Go and the JVM, and runs standalone, as a Kubernetes DaemonSet, or as a Collector receiver. Grafana donated Beyla upstream in 2025 and continues to ship it as a downstream distribution with commercial support.
+
+What it cannot do decides where it belongs. It observes a socket write, not a checkout, so there are no business spans; encrypted traffic needs uprobes on the TLS library, which is hit-or-miss for statically linked or unusual stacks; injecting a `traceparent` into an outbound request from eBPF is genuinely hard, so traces fragment at every hop only it instruments; and it needs `CAP_BPF` and `CAP_PERFMON` at minimum plus a recent enough kernel. Treat it as a coverage floor beneath SDK instrumentation rather than a replacement for it.
+
 ### OpenTelemetry for LLM Apps
 **Short:** OpenTelemetry's GenAI semantic conventions, giving prompts, tool calls and agent hops standard span attributes.
 **Kind:** spec
@@ -1458,6 +1578,16 @@ The log data model is a record with a timestamp, severity number and text, a bod
 
 The payoff is one transport and one resource model across all three signals, so a collector can filter, redact and route logs exactly as it does spans, and a backend can jump from a trace to the lines it produced. It arrived after tracing and metrics and its support is younger, so the pragmatic pattern is often a dedicated log shipper alongside OTLP for the other two signals.
 
+### OpenTelemetry Operator
+**Short:** Kubernetes operator that reconciles Collector deployments and injects auto-instrumentation into pods through a mutating webhook.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, platform-delivery/kubernetes-and-orchestration @2
+
+It does two jobs. An `OpenTelemetryCollector` resource becomes a Deployment, DaemonSet or sidecar, and an `Instrumentation` resource — exporter endpoint, propagators, sampler, per-language environment — drives injection into any pod carrying an annotation such as `instrumentation.opentelemetry.io/inject-java: "true"`. The keys cover `inject-nodejs`, `inject-python`, `inject-dotnet`, `inject-go`, `inject-apache-httpd`, `inject-nginx` and `inject-sdk`, the last configuring the SDK by environment variable for a service already instrumented in code. Mechanically the webhook adds an init container named `opentelemetry-auto-instrumentation` that copies the agent onto a shared `emptyDir`, then sets `JAVA_TOOL_OPTIONS` or the language equivalent plus the `OTEL_*` variables on the app container.
+
+Two traps. The annotation belongs on the pod template at `spec.template.metadata.annotations`, and putting it on the Deployment's own metadata is silently ignored, because nothing rejects an unknown annotation. And Go is not an init container at all: it is a privileged eBPF sidecar needing `otel-go-auto-target-exe`, `privileged: true` and `runAsUser: 0`, it does not support multi-container pods, and it sits behind a feature gate.
+
 ### OpenTelemetry SDK/API
 **Short:** Vendor-neutral instrumentation SDK generating spans, metrics and logs, auto or manual, exported over OTLP.
 **Kind:** tech
@@ -1467,6 +1597,26 @@ The payoff is one transport and one resource model across all three signals, so 
 The split is the design. The API artifact holds the tracer, meter, logger and propagator interfaces, resolves to no-ops when nothing is installed, and is what a library depends on; the SDK holds the machinery an application configures, meaning resource detection, samplers, span processors, metric readers and views, and exporters. Auto-instrumentation agents install and configure the SDK from outside, which is how a service is traced without a code change.
 
 Reach for the API in shared code and the SDK exactly once, in the application. What you own afterwards is sampling — head sampling in the SDK is cheap and blind, tail sampling in the collector sees the whole trace and costs infrastructure — and attribute cardinality, since unbounded values are what make a backend expensive. Manual spans are for business logic; protocol spans come from instrumentation packages.
+
+### OpenTelemetry Specification
+**Short:** The normative OpenTelemetry documents: signal data models, API and SDK requirements, context propagation and the OTLP protocol.
+**Kind:** spec
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/logging @2
+
+It is prose plus protobuf definitions, versioned on its own cadence and separately from both the semantic conventions and the Collector. It fixes what a span, metric point and log record are, what an SDK must implement — samplers, span processors, views, resource detection, limits — how context crosses a boundary, and how an OTLP client retries, honours throttling and handles a partial-success response.
+
+Knowing it is a distinct layer matters for two reasons. Maturity is declared per signal here, not for the project: traces, metrics, logs and baggage are stable while profiles is in development with an OTLP path of `/v1development/profiles`. And teams that pin a specification version and then hunt for a Collector carrying it are conflating three artifacts that ship independently, since the Collector's own versioning tracks neither the spec nor the conventions.
+
+### OpenTelemetry Weaver
+**Short:** OpenTelemetry toolchain that generates code and documentation from semantic-convention YAML and checks a telemetry schema in CI.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, devtools/compiler-toolchain-and-codegen @2
+
+Weaver consumes the semantic-convention registry — attribute names, types, stability and requirement levels expressed as YAML — and renders it through templates into constants, typed helpers and documentation, so an attribute name in your code comes from the registry rather than from a string literal someone typed. It also runs as a policy check, which is how a build fails when telemetry drifts from the schema an organisation agreed on.
+
+Reach for it when your own attributes have quietly become a private convention that nothing enforces, or when several languages should be generated from one definition. It governs names, not behaviour: it will not tell you a span is missing, only that the one you emit is undeclared or spelled differently from the registry.
 
 ### opentelemetry-exporter-otlp
 **Short:** OpenTelemetry exporter shipping spans and metrics over OTLP to Jaeger, Tempo, Honeycomb or Datadog.
@@ -1505,6 +1655,16 @@ Reach for it as the first piece of tracing on a FastAPI service, and pair it wit
 It defines protobuf message shapes for traces, metrics and logs plus two transports for them: gRPC, and HTTP carrying either protobuf or JSON. The encoding is deliberately shared across signals and grouped by resource, so one export carries many spans sharing a service identity, and the specification covers retry and throttling behaviour so a backend can push back instead of being hammered by a client that will not slow down.
 
 Its importance is as much political as technical, because a single wire format is what makes the instrumentation-and-backend decoupling real, and every serious backend now accepts it. Reach for it as the default egress from an application or a collector. It is a transport rather than a storage or query format, so a backend still stores whatever suits it and there is no query side to the protocol.
+
+### otlphttp
+**Short:** OpenTelemetry Collector exporter that sends OTLP over HTTP on port 4318, as protobuf or JSON, rather than over gRPC.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/logging @2
+
+Same payload as the `otlp` exporter, different transport: a POST to `/v1/traces`, `/v1/metrics` or `/v1/logs` with `Content-Type: application/x-protobuf`, or `application/json` for the JSON mapping. Reach for it when something between you and the backend speaks HTTP but not gRPC — an L7 proxy, a CDN, or a vendor that publishes only an HTTPS ingest URL.
+
+Prefer protobuf to JSON everywhere except a browser. The JSON encoding costs roughly two to three times the bytes before compression and carries documented deviations from a plain protobuf-to-JSON mapping: trace and span ids are case-insensitive hex strings rather than base64, and enums must be sent as integers. Both encodings share the same `sending_queue` and `retry_on_failure` behaviour as every other exporter.
 
 ### OtlpMeterRegistry
 **Short:** Micrometer registry exporting meters over OTLP, so instrumentation written once survives a change of monitoring vendor.
@@ -1684,6 +1844,26 @@ It parses PostgreSQL's own logs and produces a self-contained HTML report: the s
 
 The cost is in the word "scans": it reads the whole relation, so on a large table it is heavy I/O and belongs off-peak. `pgstattuple_approx` samples instead, giving a usable estimate for heap tables at a fraction of the cost, which is the right default when you are surveying many tables rather than investigating one.
 
+### pprof
+**Short:** OpenTelemetry Collector extension serving Go's pprof endpoints, for profiling the Collector's own CPU, heap and goroutines.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, observability/tracing-apm-and-llm-observability @3
+
+The Collector is a Go binary, and this extension exposes the standard Go profiling surface from it, so `go tool pprof` can pull CPU, heap, goroutine, mutex and block profiles from a running instance. That is how you answer which component is burning the CPU or holding the heap, rather than inferring it from pipeline counters.
+
+Reach for it when a Collector is CPU-bound or being OOM-killed and a config review has not explained why: a tail-sampling buffer, an oversized `sending_queue` and a regex-heavy `transform` all look identical from outside and quite different in a heap profile. Treat the endpoint as privileged — it exposes internals and sampling costs CPU — so bind it to a management port rather than anything broadly reachable.
+
+### probabilistic_sampler
+**Short:** OpenTelemetry Collector processor that head-samples spans or log records from a hash, honouring the ot=th threshold when it is present.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/logging @3
+
+It makes a per-item decision derived from the trace id instead of buffering a trace, so it is cheap and stateless, and it is consistent across services because every stage computes the same function of the same id. When it reads and writes the `ot=th` and `ot=rv` fields in `tracestate` it participates in consistent probability sampling, which means a later stage can only raise the threshold and the surviving spans still carry a correct adjusted count.
+
+It is not a substitute for `tail_sampling` and does not pretend to be: it decides before the outcome exists, so it cannot keep every error or every slow request. The production pattern is both — a head decision that bounds what you transmit and a tail decision that bounds what you store.
+
 ### PROFILE
 **Short:** Neo4j Cypher prefix that runs a query and returns its execution plan with real row counts and db hits.
 **Kind:** api
@@ -1763,6 +1943,16 @@ Reach for it for any Python service Prometheus will scrape. Two things trip peop
 **Kind:** api
 **Lang:** java
 **Roles:** observability/metrics-and-monitoring @1, apis-frameworks/design-patterns-and-principles @3
+
+### prometheusremotewrite
+**Short:** OpenTelemetry Collector exporter that pushes OTLP metrics to any Prometheus remote-write endpoint: Prometheus, Mimir, Thanos or Cortex.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1, data-stores/time-series @3
+
+It converts OTLP metrics into remote-write and pushes them, which is the route into a Prometheus-compatible store whenever being scraped is awkward — a short-lived process, a network where the store cannot reach the workload, or metrics derived inside the Collector by a connector.
+
+The translation is where the surprises live. Dots become underscores, a unit suffix and `_total` are appended, and resource attributes do not become labels: they arrive on a separate `target_info` series with `service.name` mapped to `job` and `service.instance.id` to `instance`, so filtering by any other resource attribute means a join. Prometheus is natively cumulative, so delta temporality needs the Collector's `deltatocumulative` processor upstream, and exemplars only survive if the receiving store accepts them.
 
 ### Promtail
 **Short:** Loki's log collection agent: tails files, adds labels and ships lines to a Loki aggregator.
@@ -1914,6 +2104,16 @@ Version 1 shipped samples and labels and nothing else, so metadata, exemplars an
 
 Sender and receiver negotiate the version per connection, so a 2.0 sender talking to a 1.0 receiver falls back instead of failing. That is what makes it safe to enable on the sending side before every receiver in the path has been upgraded.
 
+### resourcedetection
+**Short:** OpenTelemetry Collector processor that fills in host, container and cloud resource attributes by querying the environment it runs in.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2
+
+You list detectors in order — `env`, `system`, `docker`, `ec2`, `eks` and the other cloud ones — and each contributes what it can discover: `host.name`, `cloud.region`, `cloud.account.id`, a container id. Order decides precedence, and because every cloud detector talks to a metadata endpoint, `timeout` is a value to set deliberately rather than inherit.
+
+It answers a different question from `k8sattributes`, which is why production configs usually run both: this one describes the machine and the cloud, that one describes the pod and its workload. Neither can invent `service.name` — that belongs to the application, and without it telemetry arrives as `unknown_service` no matter how much other resource metadata is attached.
+
 ### Rootly
 **Short:** Incident management platform automating declaration, roles, comms, timelines and retrospectives from chat.
 **Kind:** tech
@@ -1923,6 +2123,16 @@ Sender and receiver negotiate the version per connection, so a 2.0 sender talkin
 Declaring an incident from chat triggers a configured workflow: the channel and call bridge are created, roles assigned, a ticket and status-page update opened, the timeline populated automatically from events and pinned messages, and the retrospective generated from that timeline with action items pushed into the tracker. Services, teams and ownership come from a catalogue, so an incident attaches to the right owners without anyone choosing them.
 
 Reach for it when incident response must be repeatable across teams and you want the paperwork to happen without a human remembering it at three in the morning. The value is the recorded timeline and the follow-through rather than the declaration itself. Like everything in this category it detects nothing, competes closely with incident.io and FireHydrant on workflow ergonomics, and fails if declaring an incident feels expensive.
+
+### routing
+**Short:** OpenTelemetry Collector connector that sends telemetry into different pipelines based on an attribute or an OTTL condition.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/logging @2, observability/metrics-and-monitoring @2
+
+Statements evaluate per item and name the pipelines that item should go to, with a default for anything matching nothing. The standard use is per-tenant egress — route on a tenant attribute into a pipeline whose exporter, redaction and sampling belong to that tenant — and the next most common is cost tiering, where a noisy namespace is routed through a harsher sampler.
+
+Being a connector it is an exporter in one pipeline and a receiver in several others, so the routing decision is expressed in the pipeline graph rather than inside one component's config. Everything downstream of the split is duplicated configuration, so if the branches share a prefix of processors, keep that prefix upstream of the connector instead of repeating it in each branch.
 
 ### SDK
 **Short:** The OpenTelemetry API/SDK split: libraries depend only on the stable API while the SDK and exporters stay swappable.
@@ -1940,6 +2150,16 @@ The consequences in practice are that switching backends becomes configuration r
 **Lang:** *
 **Roles:** observability/profiling-and-performance @1, data-access/drivers-and-connection-pooling @2, observability/metrics-and-monitoring @3
 
+### Semantic Conventions
+**Short:** OpenTelemetry's versioned registry of attribute and metric names, which is what makes telemetry from unrelated code queryable together.
+**Kind:** spec
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, apis-frameworks/data-formats-and-api-contracts @2, observability/metrics-and-monitoring @2
+
+A span carrying `http.request.method` is queryable by a dashboard nobody wrote for you; a span carrying `httpMethod` is a private string with extra steps. The registry is machine-readable YAML, versioned independently of the specification, and stability is declared per area rather than as a whole: HTTP and database client spans are stable, messaging is in development, and the generative-AI conventions moved to their own repository and are not stable.
+
+The operational hazard is renaming. `db.statement` became `db.query.text`, `db.system` became `db.system.name`, `deployment.environment` became `deployment.environment.name` — and an instrumentation upgrade that adopts the new names blanks every dashboard keyed on the old ones, which reads as an instrumentation outage rather than as a rename. The survival mechanism is `OTEL_SEMCONV_STABILITY_OPT_IN`: set it to the area suffixed with `/dup` so both names are emitted, migrate every dashboard, alert and saved query, verify, then switch to the stable-only value. Instrumentation that starts dual-emitting must keep patching its existing major version for at least six months, and that is the migration window you actually have.
+
 ### Sentry AsyncioIntegration
 **Short:** Sentry SDK integration capturing unhandled asyncio task exceptions and emitting a span per task.
 **Kind:** api
@@ -1955,6 +2175,16 @@ The consequences in practice are that switching backends becomes configuration r
 Its centre is error capture: an unhandled exception is caught by an integration for your framework and the event carries the full stack with local variable values, the request, user and release context, and breadcrumbs describing what happened beforehand. The server groups events into issues by a fingerprint derived from the stack, so ten thousand occurrences of one bug appear as one issue with a count and a first-seen release.
 
 It also does performance tracing and profiling, but grouping and release tracking are the reason to use it, because a regression is attributed to the deploy that introduced it. Reach for it as the thing that tells you an exception happened at all, since logs require somebody to be looking. Sampling controls cost, and local variables and request bodies will capture secrets unless scrubbing is configured deliberately.
+
+### servicegraph
+**Short:** OpenTelemetry Collector connector that derives service dependency edges, with request, error and duration figures, from CLIENT/SERVER span pairs.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2
+
+It matches an outbound CLIENT span against the SERVER span it caused and emits metrics per edge, so the topology and its RED numbers come out as ordinary time series that any Prometheus-compatible store can hold — there is no graph database involved and no backend feature to buy.
+
+It depends entirely on span kinds being correct, which is the trap: a queue publish marked CLIENT rather than PRODUCER asks the connector to pair it with a consume that may happen hours later, inventing a synchronous edge that does not exist. It also has to see both halves of each pair in the same instance, so the routing argument that makes `loadbalancing` mandatory in front of tail sampling applies here as well.
 
 ### SHOW ENGINE INNODB STATUS
 **Short:** InnoDB status output: buffer pool hit rate, redo log usage, lock waits and the last deadlock.
@@ -2014,15 +2244,15 @@ The clock starts when a command begins executing and stops when it finishes, so 
 
 Reach for it first, because an expensive command is the commonest cause and the log names it immediately. Then treat an empty log beside a bad percentile as information rather than a contradiction, and move to the latency monitor, which sees the events the slow log structurally cannot.
 
-### spanmetrics connector
-**Short:** OpenTelemetry Collector connector that derives RED metrics - request rate, errors, duration - from the span stream.
-**Kind:** tech
+### span_metrics
+**Short:** OpenTelemetry Collector connector deriving RED metrics — a call counter and a duration histogram — from the span stream, in-process.
+**Kind:** api
 **Lang:** *
 **Roles:** observability/metrics-and-monitoring @1, observability/tracing-apm-and-llm-observability @2
 
-Configured as a connector in the collector, it sits between a traces pipeline and a metrics pipeline: every span passing through increments a request counter and observes a latency histogram, with dimensions taken from the span itself — service name, span name, kind, status code, and any attributes you list explicitly. The output is ordinary metrics, exported to Prometheus or anywhere else metrics go.
+It is simultaneously the exporter of a traces pipeline and the receiver of a metrics pipeline, so span-derived metrics never leave the process. Under the default namespace `traces.span.metrics` it emits a `calls` counter and a `duration` histogram, dimensioned by `service.name`, `span.name`, `span.kind` and `status.code` plus whatever else you name. The component type is `span_metrics`, with `spanmetrics` retained as a deprecated alias, and stability is alpha.
 
-It exists so you can sample traces aggressively and still hold exact rate, error and duration figures, because sampled traces produce misleading counts while unsampled traces are expensive. Reach for it when tracing is already in place and instrumenting metrics separately is duplicated work. The hazard is dimensions, since adding a high-cardinality span attribute multiplies series and is the standard way a tracing pipeline overwhelms a metrics backend.
+Placement decides whether it is useful or actively misleading. Downstream of a sampler it counts survivors, so a pipeline keeping every error and five percent of successes reports an error rate near forty percent on a service whose real rate is three — stable, plausible and wrong, which is exactly why it survives review. Tap it upstream of every sampler. Watch dimensions too, because each one multiplies the series count: `http.route` is usually affordable, `http.url` is a cardinality bomb, and `aggregation_cardinality_limit` is the backstop.
 
 ### Splunk
 **Short:** Enterprise log aggregation and search platform with dashboards and alerting over indexed machine data.
@@ -2033,6 +2263,16 @@ It exists so you can sample traces aggressively and still hold exact rate, error
 It ingests essentially any text stream through forwarders, indexes it by time with a schema applied at search time rather than at write time, and queries with SPL — a piped language whose statistical, correlation, and lookup commands make most log-analytics questions a single line. Alerts, dashboards, and long-retention archives are built on the same searches.
 
 Its reputation follows its pricing, historically tied to daily indexed volume, which is why mature deployments filter, sample, and route aggressively before data ever reaches an indexer. Reach for it in enterprises already invested in it, especially where security teams depend on its correlation searches; a greenfield logging stack usually starts cheaper on Elastic, Loki, or a columnar store.
+
+### Splunk Observability
+**Short:** Splunk's managed APM, metrics and RUM platform, distinct from its log-indexing product, with OpenTelemetry as the instrumentation path.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/alerting-and-incident-response @3
+
+It is the observability half of Splunk's portfolio rather than the log platform most people mean by the name: traces and service maps, infrastructure and application metrics, real-user monitoring and synthetics in one product. Instrumentation is OpenTelemetry rather than a proprietary agent, and Splunk ships its own Collector distribution and per-language SDK distributions to supply it.
+
+Reach for it where Splunk is already the enterprise standard and the logging platform is Splunk too, since pivoting from a trace to the lines it produced is the thing you are buying. Elsewhere it competes on the same terms as Datadog, Honeycomb and New Relic, and the decision that matters more than the vendor is keeping instrumentation on OTLP so the choice stays reversible.
 
 ### Spring Boot Actuator
 **Short:** Spring Boot module exposing health, metrics, config-refresh and migration-history endpoints over HTTP/JMX.
@@ -2124,6 +2364,18 @@ Reach for them for the outside-in availability indicator and for the journeys wh
 **Lang:** python
 **Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
 
+### tail_sampling
+**Short:** OpenTelemetry Collector processor that buffers a whole trace and then applies policies to it, keeping errors and slow requests rather than a blind fraction.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1
+
+Spans are held in a buffer keyed by trace id for `decision_wait`, thirty seconds by default, after which a policy list is evaluated against the assembled trace — `latency`, `status_code`, `string_attribute`, `numeric_attribute`, `probabilistic`, `rate_limiting` and `ottl_condition`, plus the combinators `and`, `not`, `drop` and `composite`. Deciding after the outcome is known is what head sampling structurally cannot do.
+
+Two costs, and both are silent. Memory is roughly arrival rate times `decision_wait` times serialised span size, so fifty thousand spans a second at thirty seconds and five hundred bytes is around 750 MB of span data before Go's allocator overhead — which is why the first move on a struggling gateway is to cut `decision_wait` rather than add replicas, since most traces complete in under two seconds. And `num_traces`, default fifty thousand, is a circular buffer: at five thousand new traces a second with a thirty-second wait you need a hundred and fifty thousand slots, and the excess is evicted before any policy runs, with nothing in the config erroring. Watch `otelcol_processor_tail_sampling_sampling_trace_removal_age`, and treat it sitting well below `decision_wait` as proof you are evicting rather than deciding.
+
+It also requires that one process see every span of a trace, which is an architectural constraint rather than a setting: it cannot run on a per-node DaemonSet, and it needs a `loadbalancing` tier keyed on `traceID` the moment the gateway has more than one replica.
+
 ### Telegraf
 **Short:** InfluxData's plugin-driven agent gathering metrics from hosts and services into a time-series backend.
 **Kind:** tech
@@ -2171,6 +2423,16 @@ That portability is the honest reason to start here, since you can adopt the ins
 **Kind:** api
 **Lang:** python
 **Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
+
+### transform
+**Short:** OpenTelemetry Collector processor that rewrites telemetry with OTTL statements — redact an attribute, rename a field, edit conditionally.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, security/privacy-and-compliance @2, observability/logging @2
+
+Statements are written in OTTL, the Collector's transformation language, and run per span, metric point or log record: `delete_key(span.attributes, "user.email")`, a `replace_pattern` over a SQL statement to blank its literals, or any edit guarded by a condition. `error_mode` decides whether a statement failing on one item drops it, is ignored, or halts the pipeline.
+
+This is where PII redaction belongs, because it is one place, auditable, and outside the application — sixty codebases become one config, and it is the only redaction point that a compliance reviewer can read in an afternoon. Two placement rules follow. Redact before any exporter and before any connector, or the connector copies the value into a metric label where it lives for the whole retention. And redact once, on the tier that fans out, rather than in each branch downstream of it.
 
 ### TurboFilter
 **Short:** Logback global filter returning ACCEPT/DENY/NEUTRAL before an event is created, suppressing noise without level edits.
@@ -2260,6 +2522,16 @@ Decorating a function marks it as a traced operation, after which every call is 
 
 Reach for it when Weights and Biases already holds training runs and artifacts and you want LLM traces under the same project and access control. The evaluation side pairs a versioned dataset with scorers to produce comparable runs instead of impressions. It is a hosted platform, so prompts and outputs leave your infrastructure unless you have an enterprise deployment, and an OpenTelemetry tracer is the portable alternative.
 
+### W3C Baggage
+**Short:** W3C standard for a baggage header carrying arbitrary key-value data to every downstream service in a trace.
+**Kind:** spec
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, security/privacy-and-compliance @2, apis-frameworks/data-formats-and-api-contracts @3
+
+It is a separate specification from Trace Context with its own header, of the form `baggage: user.tier=gold,tenant.id=acme`, capped at 64 list-members and 8,192 bytes with values percent-encoded. The legitimate use is narrow: carry something the root of a trace knows and a leaf needs, such as a tenant id used for shard routing eight hops down, where threading it through every intermediate signature would be absurd.
+
+Treat it as hazardous beyond that. It is injected on every outbound call, third parties included, so internal identifiers leave your perimeter by default. Baggage is not written to spans automatically, but the first thing most teams add is a span processor that copies all of it, at which point a `user.email` placed there by one team is in the trace store for all forty services, across compliance scopes span attributes never crossed. Header size is a real cost — 8 KB across a twenty-hop fan-out is 160 KB per request, and some proxies reject headers over 8 KB with a 431 — and every hop pays to parse and re-serialise it. Keep it to a handful of low-cardinality, non-sensitive, routing-relevant keys and allowlist what may be copied onto a span.
+
 ### W3C Trace Context
 **Short:** W3C standard defining the traceparent/tracestate HTTP headers that carry trace and span ids across service boundaries.
 **Kind:** spec
@@ -2329,3 +2601,13 @@ It is the simpler option beside Jaeger, and instrumentation today is normally wr
 Brave produces finished spans and this artifact carries them to a collector: an asynchronous reporter buffers spans in a bounded queue and a background thread flushes them in batches through a sender, whether that posts JSON over HTTP to the collector's span endpoint or writes to Kafka, so the request thread never waits on the trace backend and a slow collector drops spans rather than the application stalling.
 
 What matters operationally is the queue — its size, the message timeout, and the reporter's own dropped-span counters, which are the only place an undersized export path announces itself. Reach for it in an estate already running Brave and Zipkin, typically through the Micrometer Tracing Brave bridge. New systems generally use the OpenTelemetry SDK with an OTLP exporter, which Zipkin can still receive through a collector.
+
+### zpages
+**Short:** OpenTelemetry Collector extension serving live in-process diagnostic pages for pipeline state, extensions, feature gates and internal spans.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/profiling-and-performance @2
+
+Enable the extension and the Collector serves pages out of the running process with no backend involved: build and runtime information, the resolved pipeline graph, registered extensions, feature-gate state, and the Collector's own recent internal spans bucketed by latency and error. It is the fastest way to confirm that the config you just wrote produced the pipelines you meant.
+
+Be clear that it reports on the Collector's internals rather than on your telemetry, and that everything it shows is in memory, per instance, and gone on restart, so nothing there can be alerted on. Use the `:8888` metrics endpoint for anything you need to watch over time, and keep zpages on a management port rather than anywhere broadly reachable.

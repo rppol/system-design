@@ -1,7 +1,7 @@
 # Distributed Tracing & OpenTelemetry
 
 <!-- study-paths
-senior: observability_tracing_and_otel.md
+senior: observability_tracing_and_otel.md, opentelemetry_deep_dive.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
 > Phase 6 — Observability & SRE · Difficulty: Advanced
@@ -122,7 +122,7 @@ flowchart LR
     Apps(["apps<br/>OTel SDK · OTLP"]) -->|"batch +<br/>add resource attrs"| Agent("Agent Collector<br/>DaemonSet/sidecar")
     Agent -->|OTLP| Gateway{"Gateway Collector<br/>tail sampling"}
     Gateway -->|"keep ERROR + latency<br/>over 1s, sample 5% rest"| Backends("Jaeger / Tempo")
-    Gateway --> Metrics("metrics<br/>spanmetrics")
+    Gateway --> Metrics("metrics<br/>span_metrics")
     Backends -.->|trace_id| UI(["trace UI"])
     UI -.->|trace_id| Logs("logs<br/>Loki/ELK")
 
@@ -303,13 +303,13 @@ processors:
 #   (see tail_sampling policies above)
 ```
 
-### Generating metrics from spans (spanmetrics)
+### Generating metrics from spans (span_metrics)
 
 ```yaml
 # The collector can derive RED metrics (Rate, Errors, Duration) from spans -
 # so you get service-level latency histograms without separate instrumentation.
 connectors:
-  spanmetrics:
+  span_metrics:
     histogram: { explicit: { buckets: [100ms, 300ms, 1s, 3s] } }
     dimensions: [ { name: http.request.method }, { name: service.name } ]
 # exported as a metric the Prometheus pipeline scrapes -> p99 per service from traces.
@@ -360,7 +360,7 @@ This three-pillar pivot is the payoff of putting `trace_id` in logs (see [observ
 | Backend | Jaeger (indexed) | Tempo (object store) | Rich search vs cheap retention |
 | Instrumentation | Auto | Manual spans | Coverage/speed vs control/detail |
 | Export | Direct to backend | Via Collector | Coupling vs decoupling/buffering |
-| Metrics source | Separate instrumentation | spanmetrics from traces | Accuracy vs fewer moving parts |
+| Metrics source | Separate instrumentation | span_metrics from traces | Accuracy vs fewer moving parts |
 | Vendor | OSS (Jaeger/Tempo) | SaaS (Datadog/Honeycomb) | Cost/control vs managed convenience |
 
 ---
@@ -412,7 +412,7 @@ resp = http_client.post(downstream_url, json=payload, headers=headers)
 | Grafana Tempo | Object-storage trace backend, TraceQL, cheap retention |
 | Zipkin | Older trace backend |
 | W3C Trace Context | Standard propagation headers (`traceparent`/`tracestate`) |
-| spanmetrics connector | Derive RED metrics from spans |
+| span_metrics | Derive RED metrics from spans; connector type, renamed from the now-deprecated `spanmetrics` |
 | AWS X-Ray / Datadog / Honeycomb / Grafana Cloud | Managed tracing backends (OTLP-compatible) |
 | Grafana | Unified trace/metric/log correlation UI |
 
@@ -466,9 +466,9 @@ Inject the `trace_id` into every log line so you can jump from a span to the exa
 Semantic conventions are OpenTelemetry's standardized attribute names and structures — `http.request.method`, `db.system.name`, `db.query.text`, `service.name` — so telemetry is consistent regardless of language or library. Following them means backends, dashboards, and queries are portable and auto-instrumentation produces uniform data you can build generic alerts and span-metrics on. Inventing your own attribute names fragments your data and breaks vendor/tooling integrations.
 
 **Q10: How can you get latency metrics without instrumenting metrics separately?**
-**Short:** The Collector's spanmetrics connector derives RED metrics — rate, errors, duration — directly from spans, giving per-service latency and error rates for free.
+**Short:** The Collector's span_metrics connector derives RED metrics — rate, errors, duration — directly from spans, giving per-service latency and error rates for free.
 
-The Collector's spanmetrics connector derives RED metrics (Rate, Errors, Duration histograms) from the spans flowing through it, dimensioned by service and operation. You then scrape those as Prometheus metrics, getting per-service p50/p99 latency and error rates "for free" from your traces with one fewer instrumentation path to maintain. The tradeoff is the metrics are only as complete as your sampled spans, so combine with head/tail sampling awareness or use a pre-sampling tap.
+The Collector's `span_metrics` connector — the type was renamed from `spanmetrics`, which survives only as a deprecated alias — derives RED metrics (Rate, Errors, Duration histograms) from the spans flowing through it, dimensioned by service and operation. You then scrape those as Prometheus metrics, getting per-service p50/p99 latency and error rates "for free" from your traces with one fewer instrumentation path to maintain. The tradeoff is the metrics are only as complete as your sampled spans, so combine with head/tail sampling awareness or use a pre-sampling tap.
 
 **Q11: What's the difference between Jaeger and Tempo?**
 **Short:** Jaeger indexes traces in Cassandra or Elasticsearch for rich attribute search; Tempo stores traces cheaply in object storage indexed mainly by `trace_id`.
@@ -510,7 +510,7 @@ AWS X-Ray is a managed, OTLP-compatible tracing backend, so apps can export stan
 - **Follow semantic conventions** (`http.*`, `db.*`, `service.name`) for portable, queryable telemetry.
 - **Inject `trace_id` into logs and attach exemplars to metrics** for one-click three-pillar pivots.
 - **Redact PII/secrets in the Collector** (`attributes` delete); never attach raw bodies/headers to spans.
-- **Derive RED metrics with spanmetrics** to reduce duplicate instrumentation.
+- **Derive RED metrics with `span_metrics`** to reduce duplicate instrumentation.
 - **Keep app instrumentation conventions** consistent (see [../../backend/observability_and_monitoring](../../backend/observability_and_monitoring/observability_and_monitoring.md)).
 
 ---
