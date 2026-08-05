@@ -1034,7 +1034,7 @@ A: Because it lets `this` escape before the object is fully constructed: once th
 | `java.beans.PropertyChangeSupport` + `PropertyChangeListener` | The JDK's bound-property mechanism: add/remove listeners and fire only when the value actually changed | Fine-grained per-property notification on a mutable object |
 | `java.util.concurrent.Flow` (JDK 9+) | The Reactive Streams contract in the JDK — `Publisher`, `Subscriber`, `Subscription.request(n)` — i.e. Observer with backpressure | A fast subject would otherwise overwhelm a slow observer |
 | Project Reactor `Flux` / `Sinks`, RxJava 3 `Observable` / `Flowable` | Composable observation: filter, map, buffer, retry, and switch schedulers between subject and observer | Streams of events that need operators rather than a single callback |
-| Kafka, Redis Pub/Sub, AWS SNS | Cross-process observation with durability (Kafka) or fire-and-forget fan-out (Redis, SNS) | Observers live in other services |
+| Apache Kafka / Redis Pub/Sub / AWS SNS | Cross-process observation with durability (Kafka) or fire-and-forget fan-out (Redis, SNS) | Observers live in other services |
 | Micrometer `MeterRegistry` | Instrumentation of listener count and dispatch latency | Proving in production that a listener is slow or leaking |
 
 Two things reliably go wrong. **Listener leaks**: a subject holding strong references keeps every registered observer alive, so a long-lived subject plus short-lived observers is a heap leak — deregister in the same scope you register, or hold `WeakReference`s. And **exception propagation**: a synchronous observer that throws will, by default, abort the subject's notify loop and every observer after it, so wrap each dispatch or hand delivery to an executor.

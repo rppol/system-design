@@ -530,7 +530,7 @@ loud, early failure instead of an OOM under production load.
 | Codegen | `protoc`, `protoc-gen-grpc-java`, `protobuf-maven-plugin`, Gradle protobuf plugin |
 | Runtime | `io.grpc:grpc-netty`/`grpc-netty-shaded`, `grpc-protobuf`, `grpc-stub` |
 | Browser | gRPC-Web, Envoy, Connect (buf) |
-| Debugging | `grpcurl`, `grpcui`, BloomRPC/Kreya, server reflection |
+| Debugging | `grpcurl`, `grpcui`, BloomRPC, Kreya, server reflection |
 | Schema mgmt | Buf (`buf lint`, `buf breaking`), Protobuf schema registry |
 | Observability | grpc interceptors + OpenTelemetry, channelz |
 | Health/LB | grpc health checking protocol, xDS / service mesh |

@@ -543,7 +543,7 @@ file's PII pipeline, dedup, and canary gating still applies on top of it.
 |------|------|
 | Microsoft Presidio | Open-source PII detection (recognizers) + anonymization; the reference pipeline |
 | AWS Comprehend PII / GCP DLP / Azure PII | Managed PII detection APIs, multi-language |
-| Nightfall, Skyflow, Very Good Security | Commercial tokenization/PII vaults (pseudonymization with reversal) |
+| Nightfall / Skyflow / Very Good Security | Commercial tokenization/PII vaults (pseudonymization with reversal) |
 | Opacus / TensorFlow Privacy / dp-transformers | DP-SGD implementations and accountants |
 | text-dedup, MinHash/LSH, suffix-array pipelines | Corpus deduplication at scale |
 | Vec2Text (research) | Embedding-inversion attack tooling for red-teaming vector stores |

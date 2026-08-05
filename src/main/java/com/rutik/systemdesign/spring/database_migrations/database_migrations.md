@@ -697,8 +697,7 @@ A contributor's `git config core.autocrlf=true` silently rewrote every migration
 
 | Tool | Role |
 |---|---|
-| Flyway Community 10.x | SQL-first migrations, `flyway_schema_history`, callbacks |
-| Flyway Teams/Enterprise | Undo migrations, drift detection, dry-run scripting |
+| Flyway Community 10.x | SQL-first migrations, `flyway_schema_history`, callbacks; the paid Teams and Enterprise tiers add undo migrations, drift detection and dry-run scripting |
 | Liquibase OSS 4.x | Declarative changesets, built-in rollback, preconditions |
 | Liquibase Pro | Quality/policy checks, structured drift reporting |
 | Spring Boot `spring-boot-starter-data-jpa` | Auto-wires `EntityManagerFactory` as `@DependsOn` the migration bean |

@@ -658,7 +658,10 @@ All SDKs below are **official**, hosted under the `modelcontextprotocol` GitHub 
 | `modelcontextprotocol/csharp-sdk` | C# | Tier 1 | Client and server |
 | `modelcontextprotocol/java-sdk` | Java | Tier 2 | Client and server for the JVM |
 | `modelcontextprotocol/rust-sdk` | Rust | Tier 2 | Client and server |
-| Swift, Ruby, PHP, Kotlin SDKs | — | Tier 3 | Best-effort maintenance |
+| `modelcontextprotocol/swift-sdk` | Swift | Tier 3 | Best-effort maintenance |
+| `modelcontextprotocol/ruby-sdk` | Ruby | Tier 3 | Best-effort maintenance |
+| `modelcontextprotocol/php-sdk` | PHP | Tier 3 | Best-effort maintenance |
+| `modelcontextprotocol/kotlin-sdk` | Kotlin | Tier 3 | Best-effort maintenance |
 
 ### Reference Server Implementations
 

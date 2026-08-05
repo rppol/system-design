@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: apis-frameworks -->
 
-The 490 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 491 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **APIs & app frameworks** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -617,25 +617,6 @@ You give Apollo Server a schema plus a resolver map and it serves that schema ov
 
 Reach for it when the GraphQL layer itself is Node; if your services are Java or Python, use that ecosystem's GraphQL server rather than adding a Node hop purely for the schema.
 
-### Apollo/Relay clients
-**Short:** Browser-side GraphQL clients that issue queries, normalize results into a local cache and manage fragments.
-**Kind:** tech
-**Lang:** js
-**Roles:** apis-frameworks/rpc-graphql-and-streaming @1, caching/in-process-cache @3
-
-Both normalize responses into a client-side store and both build on fragments, but their
-philosophies differ sharply. Relay is opinionated and compiler-driven: a build step reads the
-fragments each component declares, composes them into one query per route, and generates typed
-artifacts, and it requires the schema to follow the Node and Connection conventions. Apollo
-Client imposes no build step and lets you write queries wherever you like, trading Relay's
-guarantees for flexibility.
-
-Choose Relay when the application is large, the schema is under your control and you want data
-requirements colocated with components and enforced by a compiler. Choose Apollo for almost
-everything else, since the ramp is shorter. The shared cost is the normalized cache itself:
-list mutations, pagination and eviction need explicit handling in both, and getting them wrong
-shows up as stale UI rather than as an error.
-
 ### app.exception_handler
 **Short:** FastAPI decorator registering a custom handler for an exception type, e.g. emitting RFC 9457 problem JSON.
 **Kind:** api
@@ -821,23 +802,22 @@ artifacts rather than the aggregate, or the jar and the cold start both balloon.
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, data-access/orm-and-data-mapping @3
 
-### BloomRPC/Kreya
-**Short:** GUI clients for exploring and calling gRPC services from reflection or proto files; the Postman of gRPC.
+### BloomRPC
+**Short:** Open-source desktop GUI gRPC client that loads `.proto` files and issues calls; the project is archived and unmaintained.
 **Kind:** tech
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, devtools/testing-and-mocking @3
 
-Both are desktop applications that load a service catalogue — from a `.proto` file or by
-server reflection — and render an editable request per method with response, status and
-metadata panes, plus saved collections and environment variables. BloomRPC was the early
-open-source option and is no longer actively developed; Kreya is the maintained
-commercial-with-free-tier successor and also handles REST and OpenAPI.
+It loads a `.proto` file or a directory of them and renders one editable JSON request per
+method with a response, status and metadata pane, so exploring an unfamiliar service needs no
+client code at all — which is why it was widely described as the Postman of gRPC. Unary and
+streaming calls both work and requests can be saved into collections.
 
-Reach for one when the audience wants a GUI: QA, front-end developers, or anyone debugging a
-mesh they did not build. The costs are that a saved collection is another artifact that drifts
-from the schema, that team sharing usually sits behind the paid tier, and that nothing here is
-scriptable. For CI, reproducible bug reports and anything you want in version control,
-`grpcurl` is the tool.
+The repository is archived and no longer developed, so it lags newer protobuf and gRPC
+features and is increasingly awkward to install on current operating systems. Kreya is the
+maintained successor with the same workflow, Postman has since grown native gRPC support, and
+`grpcurl` remains the answer for anything that must be scripted or checked into version
+control.
 
 ### Bridge
 **Short:** GoF structural pattern that splits an abstraction from its implementation so both can vary independently (JDBC, SLF4J).
@@ -1712,6 +1692,25 @@ clearer.
 **Lang:** java
 **Roles:** apis-frameworks/design-patterns-and-principles @1, devtools/compiler-toolchain-and-codegen @2, devtools/static-analysis-and-linting @3
 
+### Google Guice
+**Short:** Google's lightweight JVM dependency-injection container: bindings are written explicitly in Module classes rather than scanned.
+**Kind:** tech
+**Lang:** java
+**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @3
+
+Bindings are code: an `AbstractModule` subclass calls `bind(Service.class).to(ServiceImpl.class)`,
+and the `Injector` built from those modules resolves a constructor annotated `@Inject` by
+walking the dependency graph. Because the wiring sits in one readable place, a missing or
+ambiguous binding is reported when the injector is created rather than at the call site.
+Scopes such as `@Singleton`, `Provider<T>` for lazy or per-call construction, and
+`@Provides` methods for objects the container cannot build itself cover the rest.
+
+Reach for it in a JVM application that wants constructor injection without an application
+context and starters. The costs are the usual reflective-container ones: the graph is resolved
+at runtime, so a wiring mistake is a startup failure rather than a compile error, and a large
+module set is harder to follow than the generated code of a compile-time container such as
+Dagger, which Google maintains for exactly that reason.
+
 ### Google Guice @Singleton
 **Short:** Guice scope annotation giving a container-managed single instance per injector, outside any Spring context.
 **Kind:** api
@@ -2569,6 +2568,25 @@ on untrusted input, and prefer explicit `@JsonSubTypes` over a class name on the
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, apis-frameworks/web-framework-and-http-client @2
+
+### Jakarta CDI
+**Short:** The Jakarta EE dependency-injection standard: type-plus-qualifier resolution with scopes, interceptors, decorators and events.
+**Kind:** spec
+**Lang:** java
+**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/aop-middleware-and-scheduling @3
+
+A bean is discovered by scanning and an injection point is resolved by its type plus any
+qualifier annotations, so adding or swapping an implementation need not touch the consumer. On
+top of injection the specification defines contexts and scopes (`@ApplicationScoped`,
+`@RequestScoped`, `@SessionScoped`), interceptors and decorators for cross-cutting behaviour,
+producer methods for objects the container cannot construct, and both synchronous and
+asynchronous events.
+
+It is a specification rather than a product: Weld and Apache OpenWebBeans are the
+implementations, and it is what you get inside Quarkus, Helidon, Open Liberty and WildFly. The
+characteristic failure is ambiguous resolution — two beans matching one injection point is a
+deployment error, resolved with a qualifier or an `@Alternative`, never by hoping for an
+ordering.
 
 ### Jakarta CDI @ApplicationScoped
 **Short:** CDI scope giving one container-managed instance per application, injected through a client proxy.
@@ -3793,6 +3811,23 @@ The contrast with Swagger UI is what decides it: Swagger UI centres on an intera
 **Lang:** java
 **Roles:** apis-frameworks/dependency-injection-and-config @1
 
+### Relay
+**Short:** Meta's compiler-driven GraphQL client for React: components declare fragments and a build step composes one query per route.
+**Kind:** tech
+**Lang:** js
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1, caching/in-process-cache @3
+
+The compiler is the design. Each component declares exactly the fields it needs as a fragment,
+and a build step composes every fragment reachable from a route into a single query, emits
+typed artifacts for it, and normalizes the response into a store keyed by the schema's global
+object ids. Data requirements therefore live beside the component that uses them, and a
+component cannot read a field it did not declare.
+
+The price is that the schema must follow Relay's conventions — global ids through `Node`,
+cursor pagination through `Connection` — which is why the `Connection` shape spread far beyond
+Relay itself. Choose it for a large application on a schema you control and a team willing to
+run the compiler; Apollo Client imposes neither and is the shorter ramp for everything else.
+
 ### Relay Connection
 **Short:** GraphQL cursor-pagination convention of edges, nodes and pageInfo that clients like Relay expect.
 **Kind:** spec
@@ -4350,6 +4385,25 @@ It is the Spring team's integration of graphql-java with Spring Boot: `@Controll
 
 Reach for it as the default in a Spring Boot application, since it fits the bean, security and observability machinery already there. It is schema-first: the SDL is the contract and resolvers are written against it, which is a discipline rather than a limitation.
 
+### Spring Framework
+**Short:** The JVM's dominant application framework: an IoC container with constructor injection, proxy-based AOP, transactions and two web stacks.
+**Kind:** tech
+**Lang:** java
+**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/aop-middleware-and-scheduling @2
+
+The core is the `ApplicationContext`. Bean definitions arrive from component scanning,
+`@Configuration` classes and imported starters, and are resolved largely by type with
+qualifiers breaking ties and a lifecycle and scope model around them. Built on that sit
+proxy-based AOP, which is how declarative transactions, caching, retry and method security are
+implemented, the application-event publisher, the resource and expression abstractions, and
+both the servlet MVC and the reactive WebFlux web stacks.
+
+What matters for design is constructor injection: a class names only the interfaces it
+collaborates with, so the implementation is chosen outside it and a test supplies a different
+one by construction. The costs are that wiring errors surface at context startup rather than
+at compile time, and that the surface is large enough that most people meet it through Spring
+Boot's auto-configuration rather than by assembling a context themselves.
+
 ### Spring Integration MessageChannel
 **Short:** Spring Integration channel abstraction giving an explicit, monitorable topology of routers and transformers.
 **Kind:** api
@@ -4425,25 +4479,6 @@ concurrent publishing to one client needs `ConcurrentWebSocketSessionDecorator` 
 limits or you get an `IllegalStateException` under load. And every connection pins a client to
 one instance, so a load balancer needs sticky sessions and rolling deploys drop connections —
 the client must reconnect and resubscribe on its own.
-
-### Spring, Guice, or Jakarta CDI
-**Short:** The JVM's DI containers; constructor injection makes the abstraction the only thing a class names.
-**Kind:** tech
-**Lang:** java
-**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @2
-
-The three differ mainly in when and how binding happens. Spring builds bean definitions from
-annotations, configuration classes and starters, and resolves largely by type with qualifiers
-and a rich scope and lifecycle model. Guice binds explicitly in `Module` classes, so the
-wiring is code you read in one place and errors are found when the injector is created. CDI is
-the Jakarta standard, resolving by type plus qualifier annotations with interceptors,
-decorators and an events mechanism defined by specification.
-
-The thing all three make possible is the same and is what matters: a class declares its
-collaborators as constructor parameters typed as interfaces, so the concrete implementation is
-chosen outside it and a test supplies a different one by construction. The shared cost is that
-wiring errors move to startup rather than compile time — Guice's explicit modules and
-compile-time containers such as Dagger and Micronaut trade flexibility to move them back.
 
 ### spring-aspects
 **Short:** Spring's AspectJ weaving module, needed for @Configurable domain objects and self-invocation-proof aspects.
@@ -5182,24 +5217,6 @@ against the downstream concurrency the service can actually sustain rather than 
 reflexively, since more threads against a saturated database only moves the queue. On modern
 JDKs, enabling virtual threads changes the calculus, replacing the bounded pool with a
 per-request virtual thread and removing the classic exhaustion mode.
-
-### Tomcat/Jetty
-**Short:** The embedded servlet containers Spring Boot runs on; Boot 4 requires a Servlet 6.1 baseline.
-**Kind:** tech
-**Lang:** java
-**Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @3
-
-The choice matters less than it appears, because Spring Boot abstracts the container behind
-`ServerProperties` and swapping one for the other is a dependency exclusion plus a starter.
-Both are thread-per-request servlet containers with a bounded worker pool, both embed as a
-library rather than hosting a deployed archive, and both support HTTP/2 and WebSocket. Tomcat
-is the default and the more widely deployed; Jetty is more modular and lighter to embed.
-
-What actually determines throughput is the same for both: the worker pool size versus the
-concurrency your downstream dependencies can absorb, and whether any handler blocks. Undertow
-is the third option in the same family. If the workload is a very large number of mostly idle
-connections or streaming responses, no servlet container is the right answer and the reactive
-stack is — though virtual threads have narrowed that gap considerably.
 
 ### tools.jackson.core:jackson-core
 **Short:** Jackson 3's streaming core: JsonParser, JsonGenerator and the token factory the databind layers build on.

@@ -141,9 +141,9 @@ Anti-patterns are the one design topic with genuine automated detection, because
 | SpotBugs (with the FindSecBugs plugin) | Bytecode-level bug patterns, including mutable static state behind Singleton Abuse | Run on the compiled artifact, not the source |
 | Checkstyle | Magic numbers, class and method length, nesting depth | The cheapest gate to add first; purely syntactic and fast |
 | Error Prone | Compile-time detection of a large catalogue of real bug patterns, with suggested fixes | Attaches to javac, so violations are compile errors rather than a separate report |
-| jQAssistant or Structure101 | Package and module dependency graphs, cycle detection, and drift from the intended architecture | Periodic architecture review rather than per-commit |
+| jQAssistant / Structure101 | Package and module dependency graphs, cycle detection, and drift from the intended architecture | Periodic architecture review rather than per-commit |
 | JaCoCo | Coverage as a proxy signal — an anemic domain model and a god object both tend to leave large untested regions | Read it as a hint about where invariants are untested, never as a target to game |
-| IntelliJ IDEA inspections and refactorings | "Replace inheritance with delegation", "Extract delegate", "Introduce constant", plus live duplicate detection | The fastest path from detection to fix while the context is still loaded |
+| IntelliJ IDEA | Inspections and refactorings — "Replace inheritance with delegation", "Extract delegate", "Introduce constant", plus live duplicate detection | The fastest path from detection to fix while the context is still loaded |
 
 One caveat that matters more than the tool list: **these detect structure, not intent**. A class with 40 methods may be a legitimate facade, and a duplicated block may be two rules that only coincidentally look alike. Treat every finding as a question, and keep a documented suppression with a reason rather than lowering the threshold until the report is empty.
 

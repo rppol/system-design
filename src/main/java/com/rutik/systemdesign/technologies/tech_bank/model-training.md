@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: model-training -->
 
-The 157 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 156 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Model training** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -203,6 +203,25 @@ The penalty is a weighted sum of the L1 and L2 norms of the coefficient vector, 
 
 Reach for it when you have many predictors, expect most to be irrelevant, and know the survivors are correlated with each other -- which describes most genomics, text and sensor feature sets. Both hyperparameters need cross-validation, and coefficients are biased toward zero, so read them as a ranking rather than as effect sizes. Where interpretability is not the goal, gradient boosting almost always predicts better.
 
+### Flax
+**Short:** Google's neural-network library for JAX, supplying the layer, initialization and state-handling machinery JAX itself omits.
+**Kind:** tech
+**Lang:** python
+**Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @3
+
+In the Linen API a module declares submodules and a forward computation but holds no weights:
+`init` returns a parameter pytree and `apply` takes it as an explicit argument, so the model
+stays a pure function that `jit`, `grad` and `vmap` can transform and sharding that tree across
+a device mesh is an ordinary data operation. The newer NNX API keeps parameters on the module
+as ordinary attributes and converts to and from that functional form at the transform
+boundary, which is easier to read and debug at the cost of an explicit split.
+
+Optimizer state comes from Optax rather than from Flax, so a training step threads parameters
+and optimizer state through by hand — verbose next to PyTorch, and the reason a compiled step
+is fully deterministic and shardable. Reach for it when the work is already on JAX, especially
+on TPUs where XLA is the native compilation path; against it, most pretrained checkpoints,
+tutorials and third-party libraries target PyTorch.
+
 ### Flower
 **Short:** Framework-agnostic federated learning framework: FedAvg/FedProx/FedAdam strategies with PyTorch, TF or JAX clients.
 **Kind:** tech
@@ -348,16 +367,6 @@ The purpose is sim-to-real: train under domain randomization over physics parame
 **Roles:** model-training/deep-learning-framework @1, inference/compiler-and-runtime-optimization @2, gpu/kernel-programming @3
 
 It is the NumPy API plus composable function transformations: `grad` differentiates a pure function, `vmap` adds a batch dimension without rewriting the code, `jit` compiles it through XLA, and `pmap` or `shard_map` spread it across devices. The functional constraint is real, since arrays are immutable, state is threaded explicitly and randomness takes an explicit key, and that is both what makes the transformations composable and reproducible and what makes the code feel foreign coming from PyTorch. Reach for it for research where you differentiate or vectorize unusual mathematics, and for TPU work where XLA is the native path. Neural-network layers come from Flax or Equinox, because JAX itself deliberately ships none.
-
-### JAX/Flax
-**Short:** Google's functional array framework with jit/grad/vmap and XLA compilation, plus Flax layers; TPU-native.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @2, inference/compiler-and-runtime-optimization @3
-
-Flax supplies the neural-network layer JAX deliberately omits. A module declares submodules and calls them but holds no weights: `init` returns a parameter pytree and `apply` takes it as an explicit argument, which keeps the model a pure function that `jit`, `grad` and `vmap` can transform. Optimizer state comes from Optax, and both pytrees are threaded through the training step by hand -- verbose next to PyTorch, and the reason a compiled step is fully deterministic and shardable.
-
-Reach for it on TPUs, where XLA is the native compilation path, and for large-scale work where explicit device meshes give precise control over how a model is split. Against that, pretrained checkpoints, tutorials and third-party libraries overwhelmingly target PyTorch, so you spend time porting, and error messages from inside a traced function take practice to read.
 
 ### Keras
 **Short:** High-level neural-network API for building and training models; reference impl of many published architectures.
@@ -1056,16 +1065,6 @@ Reach for it when you are working in an existing TensorFlow codebase, targeting 
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2
-
-### TensorFlow/Keras
-**Short:** Google's deep-learning framework and its Keras layer API, including the standard loss and metric implementations.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/deep-learning-framework @1
-
-The pairing names the framework and its authoring API together, which is how most TensorFlow code is actually written: Keras layer, model, loss and metric classes on top, TensorFlow's tensors, gradient tape, `tf.data` pipelines and device placement underneath. The standard losses and metrics people cite by their Keras names live at this boundary, and custom training remains available by writing the step yourself around a gradient tape rather than calling `fit`.
-
-Reach for it inside an existing TensorFlow codebase, when targeting TPUs, or when the deployment target is TensorFlow Serving, a mobile runtime or the browser, where the export path is mature and well trodden. For new work the pull runs the other way, since pretrained checkpoints, papers and inference engines target PyTorch -- choosing this stack should follow from a deployment constraint rather than from preference.
 
 ### TextBrewer
 **Short:** PyTorch knowledge-distillation toolkit with configurable loss/intermediate-layer matching for compressing NLP models.

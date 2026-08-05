@@ -2521,8 +2521,8 @@ The honest summary for an interview: **vLLM optimises for serving many models we
 | OpenAI Triton (the kernel language) | The language many of vLLM's kernels are written in, which is why they are portable across GPU generations | Reading or contributing kernels |
 | NCCL | The collective library behind tensor-parallel all-reduces | Multi-GPU deployments; interconnect topology decides your TP degree |
 | Ray | Process placement and coordination for multi-node serving | Any deployment where the model spans more than one machine |
-| llm-compressor, AutoAWQ, GPTQModel | Producing FP8, AWQ, and GPTQ checkpoints that vLLM can load | Quantizing a model before serving; the conversion is offline and one-off |
-| xgrammar, llguidance, and outlines | Constrained-decoding backends behind vLLM's JSON-schema, regex, and grammar-guided output | Structured output; the backend choice affects both grammar coverage and per-token overhead |
+| llm-compressor / AutoAWQ / GPTQModel | Producing FP8, AWQ, and GPTQ checkpoints that vLLM can load | Quantizing a model before serving; the conversion is offline and one-off |
+| XGrammar / llguidance / Outlines | Constrained-decoding backends behind vLLM's JSON-schema, regex, and grammar-guided output | Structured output; the backend choice affects both grammar coverage and per-token overhead |
 | LMCache | KV-cache offloading and sharing across instances, integrated as a vLLM connector | Prefix reuse that must survive beyond one instance's GPU memory |
 | Prometheus and Grafana | Scraping the server's `/metrics` endpoint for `vllm:kv_cache_usage_perc`, `vllm:num_preemptions_total`, `vllm:num_requests_waiting`, and the TTFT and inter-token latency histograms | Production monitoring — these four are the undersizing signals |
 | Kubernetes with KServe, Ray Serve, or the vLLM production stack | Autoscaling, rollout, and routing around the engine | Anything beyond a single long-lived process |

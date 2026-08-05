@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: search-retrieval -->
 
-The 97 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 96 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Search & retrieval** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -286,16 +286,6 @@ Reach for it when you want Elastic's own stack rather than the fork, and want up
 Elasticsearch wraps Lucene in a distributed layer: documents are analyzed into an inverted index, indices are split into shards spread across nodes and replicated, and a query scatters to the shards and gathers the merged top results, so both corpus size and query throughput grow by adding nodes. Relevance defaults to BM25 and is tunable per field through analyzers, boosts and function scoring, and the same engine also serves aggregations, dense-vector nearest-neighbour search and learned sparse retrieval — which is why one cluster can back both log analytics and hybrid retrieval with rank fusion.
 
 Reach for it when you need real relevance ranking, filters and facets over text, rather than a wildcard `LIKE` scan in your relational database. Do not treat it as a system of record: there are no transactions across documents, refresh is near-real-time rather than immediate, and the primary shard count is fixed when the index is created, so capacity planning happens up front.
-
-### Elasticsearch/OpenSearch
-**Short:** Distributed inverted-index search engine and JSON document store, widely used as the log-aggregation backend.
-**Kind:** tech
-**Lang:** *
-**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/logging @2, data-stores/document @2, data-stores/vector-store @3
-
-The two engines share an ancestor and most of their surface, including the Lucene core, the shard and replica model and largely the same query DSL, which is why documentation, client patterns and operational instincts transfer between them. They diverged when Elastic changed licensing and AWS forked the last Apache-licensed release, and the gap has widened since: vector search, security defaults, the analytics plugins and the query languages each evolved separately, so a mapping, a plugin or a client from one is no longer guaranteed to work against the other.
-
-Treating them as one technology is fine for architecture and for reasoning about indexing, relevance, sharding and capacity. It stops being fine the moment you write configuration or pin a client library, where you must commit to a lineage and read its own documentation. Pick by ecosystem: Elastic's licensed features and Elastic Cloud on one side, the Apache-licensed fork and AWS's managed service on the other.
 
 ### explain API
 **Short:** Elasticsearch/OpenSearch endpoint returning the scoring breakdown for one document against one query.

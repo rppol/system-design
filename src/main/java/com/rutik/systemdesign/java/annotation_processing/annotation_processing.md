@@ -473,7 +473,7 @@ treating it as free.
 | Concern | Tools |
 |---------|-------|
 | Core API | JSR 269: `javax.annotation.processing`, `javax.lang.model` |
-| Codegen | JavaPoet (Square), Velocity/StringTemplate (older), KotlinPoet (Kotlin) |
+| Codegen | JavaPoet (Square), Apache Velocity, StringTemplate (both older), KotlinPoet (Kotlin) |
 | Registration | Google AutoService, hand-written `META-INF/services` |
 | Established processors | MapStruct, Dagger/Hilt, AutoValue, Immutables, JPA metamodel |
 | AST-mutation | Lombok (non-spec; `com.sun.tools.javac`) |

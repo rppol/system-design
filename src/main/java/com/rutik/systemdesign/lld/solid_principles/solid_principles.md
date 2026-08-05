@@ -208,9 +208,9 @@ SOLID violations are structural, which means much of the review can be automated
 | Checkstyle | SRP via hard ceilings on class length, method length, and parameter count | The cheapest first gate; purely syntactic |
 | PMD | ISP and SRP via excessive-public-count, coupling-between-objects, and god-class rules | Tune the ruleset; the defaults are noisy on real codebases |
 | Error Prone | LSP-adjacent contract bugs — missing `@Override`, inconsistent `equals` and `hashCode`, and mutability escapes | Runs inside javac, so findings are compile errors |
-| Spring, Guice, or Jakarta CDI | DIP in practice — constructor injection makes the abstraction the only thing a class names | Prefer constructor injection; field injection hides the dependency and defeats the point |
+| Spring Framework / Google Guice / Jakarta CDI | DIP in practice — constructor injection makes the abstraction the only thing a class names | Prefer constructor injection; field injection hides the dependency and defeats the point |
 | Mockito with constructor injection | DIP verification — if a class is hard to test without a real database, it depends on a concrete detail | Difficulty writing the test is the signal, before any tool reports anything |
-| jQAssistant or Structure101 | Dependency direction and cycles across packages and modules | Periodic architecture review rather than per-commit |
+| jQAssistant / Structure101 | Dependency direction and cycles across packages and modules | Periodic architecture review rather than per-commit |
 | IntelliJ IDEA refactorings — "Extract Interface", "Extract Delegate", "Replace inheritance with delegation" | Mechanical application of ISP, SRP, and composition-over-inheritance | The fastest route from a review comment to a safe change |
 
 The limitation is the same one every static rule has: **a tool sees shape, not responsibility**. A 300-line class can be perfectly cohesive and a 30-line one can have three reasons to change. Use the reports to find candidates for a human to read, and keep suppressions with a written reason instead of relaxing the threshold until the build is quiet.

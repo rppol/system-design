@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: gpu -->
 
-The 204 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 205 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **GPU & parallel** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1275,15 +1275,39 @@ You push and pop named ranges around regions of your own code, and the profiler 
 
 Add the ranges before you profile rather than after. Without them the hardest part of reading a large GPU trace is working out which phase of your program a given burst of kernels belongs to, and that is exactly the question the timeline cannot answer on its own.
 
-### oneAPI plugins for NVIDIA and AMD
-**Short:** Codeplay-built oneAPI DPC++ backends lowering SYCL to NVIDIA PTX or AMD GCN, so one SYCL source targets both.
+### oneAPI for AMD GPUs
+**Short:** Codeplay-built oneAPI plugin adding an AMD backend to the DPC++ compiler, so one SYCL source also targets ROCm hardware.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
 
-These plugins give the oneAPI DPC++ toolchain backends beyond Intel's own hardware: install the NVIDIA plugin and `icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda` lowers SYCL kernels to PTX, or the AMD plugin lowers them to GCN, from unmodified single-source C++. They are built by Codeplay, which is part of Intel and also maintains the oneMKL and oneDNN interface layers that dispatch to cuBLAS or rocBLAS underneath.
+Installed alongside the Intel oneAPI DPC++ toolchain, it registers a HIP backend so
+`icpx -fsycl -fsycl-targets=amdgcn-amd-amdhsa` with an offload architecture such as `gfx90a`
+produces AMD GPU code from unmodified single-source C++, and the SYCL runtime enumerates AMD
+devices through ROCm. The oneMKL and oneDNN interface layers dispatch to rocBLAS and MIOpen
+underneath, so library-backed code ports along with the kernels.
 
-This is the path when one SYCL codebase must run on Intel, NVIDIA and AMD accelerators instead of maintaining CUDA and HIP versions side by side. The catch is performance rather than correctness: a kernel tuned for one vendor's memory hierarchy and subgroup width rarely lands at native speed on another, so benchmark on every target before committing to the portability story.
+Reach for it to cover Intel, NVIDIA and AMD from one SYCL codebase instead of maintaining CUDA
+and HIP versions side by side. Expect a narrower supported-GPU list than ROCm itself, a hard
+dependency on particular ROCm and toolkit versions, and per-vendor tuning still required
+before portability turns into performance.
+
+### oneAPI for NVIDIA GPUs
+**Short:** Codeplay-built oneAPI plugin adding an NVPTX backend to the DPC++ compiler, so one SYCL source compiles to NVIDIA PTX.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
+
+Installed alongside the Intel oneAPI DPC++ toolchain, it registers a CUDA backend so
+`icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda` lowers SYCL kernels to PTX and the SYCL
+runtime enumerates NVIDIA devices through the CUDA driver. Codeplay, part of Intel, also
+maintains the oneMKL and oneDNN interface layers that dispatch to cuBLAS and cuDNN, so the
+library calls in a ported application keep working rather than needing a rewrite.
+
+This is the path when one SYCL codebase must run on Intel and NVIDIA hardware instead of
+maintaining a separate CUDA fork. The catch is performance rather than correctness: a kernel
+tuned for one vendor's memory hierarchy and subgroup width rarely lands at native speed on
+another, and the newest CUDA features surface here later than in nvcc.
 
 ### OpenAI Triton
 **Short:** Python-embedded DSL for writing block-level GPU kernels without CUDA C++; also the torch.compile codegen backend.

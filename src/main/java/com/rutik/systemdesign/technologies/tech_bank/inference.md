@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: inference -->
 
-The 89 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 88 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Inference & optimization** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -364,16 +364,6 @@ Run it once per target size from the original conversion and keep that source fi
 Work is expressed as a recipe of modifiers, covering GPTQ, AWQ, SmoothQuant, plain quantization and sparsity, applied by a single `oneshot` call over a calibration dataset or by a training loop when the recipe needs one. The output is saved in the compressed-tensors format, which records the scheme, group size and scales inside the checkpoint itself, so a serving engine loads it without being told separately how it was quantized.
 
 It is the vLLM project's own quantization path, which is the main reason to prefer it: the formats it emits are the ones that engine has fast kernels for, including weight-only INT4, INT8 and FP8 with static or dynamic activation scales, and 2:4 sparsity. Pick the scheme by hardware rather than by reputation, since FP8 needs Hopper or later while INT8 works across a much wider range of cards.
-
-### llm-compressor, AutoAWQ, GPTQModel
-**Short:** Offline quantization toolchains that produce FP8, AWQ and GPTQ checkpoints a serving engine can load.
-**Kind:** tech
-**Lang:** python
-**Roles:** inference/quantization-and-compression @1
-
-All three do the same job, taking a full-precision checkpoint, pushing a few hundred calibration samples through it, and writing out a smaller one in a format a serving engine has kernels for. They differ in the algorithm and in breadth: the single-purpose tools implement one method well, while the recipe-driven one composes methods and additionally covers FP8 and sparsity, emitting a checkpoint that carries its own scheme description rather than relying on a flag at load time.
-
-The choice is usually made by the destination rather than the algorithm: check which formats your engine has fast kernels for on your GPU generation, then pick a producer that emits one of them. Whichever you use, the calibration data should resemble production traffic, and the result must be evaluated on your own task, because the accuracy ordering between methods is model-dependent and does not transfer from published tables.
 
 ### LM Studio
 **Short:** Desktop app for downloading and chatting with local GGUF models, exposing an OpenAI-compatible local server.

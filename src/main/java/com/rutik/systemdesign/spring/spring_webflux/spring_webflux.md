@@ -864,7 +864,7 @@ public Mono<Order> createOrder(OrderRequest request) {
 | Reactor Netty | Default HTTP server for WebFlux; event-loop NIO |
 | `WebClient` | Non-blocking HTTP client; `RestClient` is the blocking-stack counterpart |
 | R2DBC | Reactive relational database driver specification |
-| `r2dbc-postgresql`, `r2dbc-mysql` | R2DBC driver implementations |
+| `r2dbc-postgresql` / `r2dbc-mysql` | R2DBC driver implementations |
 | Spring Data R2DBC | Repository abstraction over R2DBC |
 | Reactive Redis (`spring-data-redis` with Lettuce) | Non-blocking Redis client (Lettuce uses Netty) |
 | Reactive MongoDB (`spring-data-mongodb` reactive) | Non-blocking MongoDB driver |

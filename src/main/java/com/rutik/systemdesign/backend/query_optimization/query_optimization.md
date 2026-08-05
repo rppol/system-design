@@ -620,7 +620,7 @@ List<Order> orders = namedJdbcTemplate.query(
 | `datasource-proxy` | Java DataSource proxy for query counting |
 | `p6spy` | SQL interceptor with stack traces |
 | `Hibernate generate_statistics` | Query count and timing statistics |
-| `EXPLAIN ANALYZE` in DBeaver/DataGrip | GUI plan visualization |
+| DBeaver / DataGrip | GUI plan visualization of `EXPLAIN ANALYZE` output |
 | depesz EXPLAIN | Online PostgreSQL plan formatter |
 | `pg_hint_plan` (PostgreSQL) / `USE INDEX` (MySQL) | Per-query plan hints. PostgreSQL has no native hint syntax — the extension is the only per-query mechanism |
 

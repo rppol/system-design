@@ -574,7 +574,7 @@ a big-bang rewrite of anything business-critical — the failure surface is enor
 |---------|-------|
 | Saga orchestration | Temporal, Cadence, Camunda/Zeebe, Axon Framework |
 | Outbox / CDC | Debezium, Kafka Connect, Maxwell's Daemon |
-| Messaging | Apache Kafka, RabbitMQ, AWS SQS/SNS |
+| Messaging | Apache Kafka, RabbitMQ, AWS SQS, AWS SNS |
 | Idempotency / dedup | Postgres UNIQUE constraint, Redis SETNX + TTL |
 | Tracing | OpenTelemetry, Jaeger, AWS X-Ray, Zipkin |
 | Resilience (bulkhead/CB) | Resilience4j, Netflix Hystrix (legacy) |

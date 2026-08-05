@@ -1083,7 +1083,7 @@ tokens, Sonnet 5 at $3/$15, Opus 5 at $5/$25, and Fable 5 at $10/$50.
 | xFormers | Memory-efficient transformers | Meta's library |
 | Megatron-LM | Large-scale training | NVIDIA's framework |
 | DeepSpeed | ZeRO optimizer, distributed training | Microsoft |
-| JAX/Flax | TPU training | Google's ecosystem |
+| JAX / Flax | TPU training | Google's ecosystem |
 | GGUF format | Quantized model format | llama.cpp compatible |
 | SafeTensors | Safe model serialization | Replaces .bin/.pt files |
 

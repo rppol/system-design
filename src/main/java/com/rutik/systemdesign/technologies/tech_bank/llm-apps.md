@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: llm-apps -->
 
-The 244 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 246 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **LLM apps & agents** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1534,6 +1534,54 @@ It offers both synchronous and reactive server and client APIs with pluggable tr
 
 Reach for it when the tools you want to expose already live in a JVM service and rewriting them elsewhere is not sensible. Used bare it is more ceremony than the Python equivalent, and like every non-first-party SDK it trails the specification, so verify which protocol revision it implements before depending on a recent feature.
 
+### modelcontextprotocol/kotlin-sdk
+**Short:** The official Kotlin MCP SDK for building Model Context Protocol servers and clients on the JVM and Kotlin Multiplatform.
+**Kind:** tech
+**Lang:** java
+**Roles:** llm-apps/tool-use-and-mcp @1
+
+It is a Kotlin Multiplatform library built on coroutines and kotlinx.serialization, so
+handlers are suspending functions and a tool's input schema follows from the serializable
+types you declare rather than being written twice. Transports cover the locally spawned stdio
+process and streamable HTTP.
+
+Reach for it when the host is already Kotlin — an IDE plugin, an Android application, a Ktor
+service — and rewriting the integration in another language makes no sense. It sits below the
+first-party Python and TypeScript SDKs in maintenance commitment, so check the latest release
+and which dated protocol revision it implements before depending on a recent feature; a client
+that negotiates an older revision silently loses capabilities your server assumes.
+
+### modelcontextprotocol/php-sdk
+**Short:** The official PHP MCP SDK for building Model Context Protocol servers and clients from a PHP application.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1
+
+It exposes the core protocol — tools, resources and prompts — over the locally spawned stdio
+transport and streamable HTTP, with tool schemas derived from typed handler signatures so the
+declaration and the implementation cannot drift apart.
+
+Reach for it when the tools worth exposing already live in a PHP application and the
+alternative is a second service in another language purely to speak MCP. It is a
+best-effort-tier SDK, so newer protocol features and authorisation arrive later than in the
+first-party SDKs; check the last release and the protocol revision it implements before
+building on anything recent.
+
+### modelcontextprotocol/ruby-sdk
+**Short:** The official Ruby MCP SDK for building Model Context Protocol servers and clients from a Ruby or Rails application.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1
+
+It covers the core protocol — tools, resources and prompts — over the locally spawned stdio
+transport and streamable HTTP, with a server object you register handlers on and a client for
+the other direction. Mounting a server inside an existing Rack or Rails application is the
+usual deployment, so the tools reuse the authentication and models already there.
+
+Reach for it when the domain logic worth exposing is already Ruby. It is a best-effort-tier
+SDK rather than a first-party one, so it trails the specification: verify the last release and
+the dated protocol revision it implements before relying on a recent capability.
+
 ### modelcontextprotocol/rust-sdk
 **Short:** Rust SDK for building MCP servers and clients; a tier-2 official implementation of the protocol.
 **Kind:** tech
@@ -1543,6 +1591,22 @@ Reach for it when the tools you want to expose already live in a JVM service and
 An asynchronous implementation on the standard Rust runtime, with macro-based tool declaration deriving schemas from typed handler signatures, covering both server and client roles. Its natural uses are embedding an MCP endpoint inside an existing Rust service and shipping a small static binary as a local tool server.
 
 Reach for it when the surrounding code is already Rust. As a second-tier implementation it lags the first-party SDKs on newer protocol features and its API is still moving, so pin the crate version and expect breaking changes; if the language is negotiable, an official SDK removes a class of surprises.
+
+### modelcontextprotocol/swift-sdk
+**Short:** The official Swift MCP SDK for building Model Context Protocol servers and clients in Apple-platform and server-side Swift.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1
+
+It implements the core protocol on Swift concurrency, with `Codable` types for the message
+schema and transports covering the locally spawned stdio process and streamable HTTP, so both
+a macOS host application acting as a client and a server-side Swift process exposing tools are
+in scope.
+
+Reach for it when the surrounding application is a native Apple-platform app or a Swift
+service and running a sidecar in another language is not worth it. It is a best-effort-tier
+SDK, so protocol revisions and newer features land later than in the Python and TypeScript
+ones — check the last release and the implemented revision before depending on either.
 
 ### Nuance DAX Copilot
 **Short:** Healthcare vertical AI product that listens to a clinical visit and drafts the encounter note.
@@ -2090,16 +2154,6 @@ Its contribution is the agent-computer interface. Rather than handing a model a 
 
 It runs each task instance in a container against a real repository and is the open baseline that later agent papers compare against. Reach for it as a reference implementation to read, extend, or benchmark against; for daily engineering work a maintained commercial coding agent is more capable.
 
-### Swift, Ruby, PHP, Kotlin SDKs
-**Short:** The community-tier MCP SDKs for Swift, Ruby, PHP and Kotlin, behind the first-party Python/TypeScript ones.
-**Kind:** tech
-**Lang:** *
-**Roles:** llm-apps/tool-use-and-mcp @1
-
-These are community implementations for languages the core team does not staff. Each generally covers the core message set and the locally spawned transport, with streamable HTTP, authorisation and newer protocol features arriving later and unevenly, and maintenance depending on whoever volunteered.
-
-Reach for one when the host application is already in that language and rewriting the integration elsewhere is not sensible. Check two things before committing: the last commit date, and which dated protocol revision it implements -- a client that negotiates an old version silently loses features your server depends on. If the language is negotiable, an official SDK removes an entire class of surprise.
-
 ### Tabby
 **Short:** Self-hosted open-source coding assistant: an on-prem Copilot serving completions from models you control.
 **Kind:** tech
@@ -2223,16 +2277,6 @@ Reach for it when the agent already lives on Google Cloud and sessions, memory a
 Its optimisation is splitting the vocabulary per grammar state into tokens that can be decided from the token alone and tokens that need a stack check: the first group is precomputed into a cached bitmask and the second is a small remainder evaluated at runtime, with mask computation overlapped against GPU work. The result is that constrained decoding costs close to nothing per token, which is why serving engines adopted it as the default.
 
 You meet it as a backend flag rather than a library you call. Two things to keep in view: grammar compilation is real work amortised only when the same schema repeats, so a workload of many one-off schemas has a different cost profile; and it constrains syntax only -- a schema-valid answer can still be entirely wrong.
-
-### xgrammar, llguidance, and outlines
-**Short:** Constrained-decoding backends masking logits to a JSON schema, regex or grammar for guaranteed structured output.
-**Kind:** tech
-**Lang:** python
-**Roles:** llm-apps/prompting-context-and-structured-output @1, inference/inference-engine @2, apis-frameworks/data-formats-and-api-contracts @3
-
-All three solve the same problem the same way -- compile a schema, regex or grammar into an automaton over the tokenizer's vocabulary, then mask disallowed tokens at each decoding step -- and differ in how they pay for it: one precomputes a full index per schema, one caches the context-independent portion of the mask, one builds incrementally with no compilation stall. Serving engines expose them as interchangeable backends.
-
-Choose by workload shape rather than benchmark: many distinct one-off schemas favour a no-compile approach, one hot schema favours precomputation, and for most applications the default your engine ships is fine. What none of them change is the important caveat -- they guarantee structure, not correctness, and constraining hard can push the model off distribution into a well-formed but poor answer.
 
 ### yarn
 **Short:** YaRN - a RoPE rescaling method extending a model's usable context beyond its training length; a llama.cpp CLI option.

@@ -575,8 +575,8 @@ The asymmetry is the point: the 95% that is dropped is the traces that all look 
 | Category | Tools | Notes |
 |----------|-------|-------|
 | Metrics | Prometheus, VictoriaMetrics, Grafana Mimir, Datadog, Netflix Atlas | Pull-based (Prometheus) vs. push-based (StatsD/Datadog) collection models |
-| Dashboards / Alerting | Grafana, Datadog, PagerDuty/Opsgenie (routing) | Burn-rate alert rules (§6.3) typically defined as PromQL or Datadog Monitors |
-| Logs | Elasticsearch/OpenSearch (ELK), Grafana Loki, Splunk, Datadog Logs | Loki indexes only labels (not full text), trading query flexibility for much lower cost than ELK at scale |
+| Dashboards / Alerting | Grafana, Datadog, PagerDuty, Jira Service Management Operations | Burn-rate alert rules (§6.3) typically defined as PromQL or Datadog Monitors; PagerDuty and Jira Service Management Operations do the on-call routing |
+| Logs | Elasticsearch (ELK), OpenSearch, Grafana Loki, Splunk, Datadog Logs | Loki indexes only labels (not full text), trading query flexibility for much lower cost than ELK at scale |
 | Tracing | Jaeger, Zipkin, Grafana Tempo, Datadog APM, AWS X-Ray | Tempo/X-Ray store traces cheaply by indexing only trace IDs, relying on metrics/logs for discovery |
 | Instrumentation standard | OpenTelemetry (OTel) | Vendor-neutral SDK + Collector; emits to Prometheus, Jaeger, Datadog, etc. — the de facto standard since ~2022 |
 | Context propagation | W3C Trace Context (`traceparent`/`tracestate` headers) | Supersedes older vendor-specific formats (B3, X-Ray headers); OTel supports both |

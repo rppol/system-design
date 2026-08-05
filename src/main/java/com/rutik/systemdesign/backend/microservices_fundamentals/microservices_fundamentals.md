@@ -549,7 +549,7 @@ A bug is reported: "the payment page is slow sometimes." You have 15 services. W
 |---|---|
 | Service framework | Spring Boot, Quarkus, Micronaut, Dropwizard |
 | Sync communication | REST (HTTP/1.1, HTTP/2), gRPC (Protocol Buffers, HTTP/2 streaming) |
-| Async messaging | Apache Kafka, RabbitMQ, AWS SQS/SNS, Google Pub/Sub |
+| Async messaging | Apache Kafka, RabbitMQ, AWS SQS, AWS SNS, Google Pub/Sub |
 | Service discovery | Kubernetes Services (CoreDNS), Consul, Eureka (Spring Cloud Netflix) |
 | API gateway | Spring Cloud Gateway, Kong, AWS API Gateway, Nginx, Envoy |
 | Distributed tracing | Jaeger, Zipkin, AWS X-Ray, Micrometer Tracing + OpenTelemetry |

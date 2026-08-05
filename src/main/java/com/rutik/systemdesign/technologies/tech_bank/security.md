@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 215 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 217 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1147,11 +1147,24 @@ The method assumes a backdoored classifier has a small trigger that forces one l
 
 Reach for it when you inherit a model you cannot audit the training data for, such as a pretrained checkpoint or a supplier's artifact. Know the assumptions before trusting a clean result: it targets image classifiers with a manageable number of classes and small localised static triggers, and later work built backdoors that are large, distributed or input-dependent specifically to evade it. A negative result is weak evidence, not a clean bill of health.
 
-### Nightfall, Skyflow, Very Good Security
-**Short:** Commercial PII tokenization vaults that replace sensitive values with reversible tokens held outside your systems.
+### Nightfall
+**Short:** SaaS data-loss-prevention platform that detects and redacts PII, secrets and payment data in text, SaaS apps and API payloads.
 **Kind:** tech
 **Lang:** *
-**Roles:** security/privacy-and-compliance @1, security/secrets-and-cryptography @3
+**Roles:** security/privacy-and-compliance @1
+
+Detection is the product. Trained classifiers plus rules identify categories such as names,
+national identifiers, payment-card numbers, credentials and API keys, and each finding carries
+a confidence so a policy can act only above a chosen threshold. It is reached either as an API
+called on a string before that string leaves your system — the shape that matters for
+scrubbing an LLM prompt, a log line or a support ticket — or as an integration that scans a
+connected SaaS application and quarantines or redacts what it finds.
+
+Reach for it when the requirement is breadth of detection across many content types and the
+alternative is maintaining regular expressions nobody trusts. The costs are latency and
+per-request price on the API path, false positives that need tuning category by category, and
+the fact that the content is sent to a third party — which is precisely what some regulated
+workloads cannot do.
 
 ### Nimbus JOSE
 **Short:** Java JOSE/JWT library for signing, encrypting and validating tokens; used by Spring Security resource servers.
@@ -1675,6 +1688,25 @@ Reach for it for container images, model artifacts and build attestations such a
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, llm-apps/tool-use-and-mcp @3
 
+### Skyflow
+**Short:** Data-privacy vault: sensitive fields live in an isolated vault and your own systems store only format-preserving tokens.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, security/secrets-and-cryptography @3
+
+The pattern is de-scoping. A personal or payment value is written to the vault, which returns
+a token that your application stores instead; the real value never lands in your database,
+your logs or the analytics copies downstream of them, so those systems fall outside much of
+the compliance boundary. Detokenization is a separate authorized call with its own policy and
+audit trail, and the vault supports common operations over the protected values so routine
+lookups do not require pulling them back at all.
+
+Reach for it when the cheapest way to satisfy an auditor is for the sensitive value not to be
+in your systems, and when residency rules require a value to stay in a particular region. The
+costs are structural: the vault is an availability and latency dependency for anything that
+needs the real value, and adopting it means finding and migrating every existing copy, which
+is usually the hard part.
+
 ### SmoothLLM
 **Short:** Randomized-smoothing jailbreak defence: perturb a prompt many times and aggregate to break adversarial suffixes.
 **Kind:** concept
@@ -2014,6 +2046,24 @@ Reach for it as the default for new Kubernetes deployments on Vault: a declarati
 It demonstrates that an embedding is not a one-way hash. A model is trained to invert embeddings back to text by iterative correction: it proposes a candidate string, re-embeds it with the same encoder, compares against the target vector, and refines, repeating until the reconstruction closes in, which for short texts can recover a substantial part of the original wording. It needs query access to the embedding model in order to re-embed hypotheses, and a separate inversion model per encoder.
 
 Use it as the red-team argument that changes how vector stores are treated: if embeddings of customer messages, clinical notes or internal documents sit in a database with weaker access control than the source text, that database is approximately a copy of the text. The practical responses are to protect and encrypt the vector store as sensitive data, keep it inside your trust boundary rather than in a third-party index, and note that perturbing embeddings defends against this only at a measurable retrieval-quality cost.
+
+### Very Good Security
+**Short:** VGS's zero-data platform: inbound and outbound proxies swap card and PII values for aliases so raw data never enters your stack.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, security/secrets-and-cryptography @3
+
+The distinguishing mechanism is the proxy. Traffic is routed through VGS on the way in, where
+configured fields are redacted and your application receives aliases, and on the way out,
+where the real values are revealed just before the request reaches a downstream processor.
+Application code therefore never sees the raw data and usually barely changes, which is what
+lets a company inherit a compliance scope instead of building one.
+
+Reach for it when payment or identity data passes through a system you would rather keep out
+of audit scope, especially when several downstream processors each need the real values. The
+costs are the ones any proxy carries: it sits in the request path and becomes an availability
+dependency, the routes and field aliases are configuration that must stay correct as payloads
+change, and the vendor holds data the business cannot operate without.
 
 ### Visa Intelligent Commerce
 **Short:** Visa's agent-payment program: agent-scoped payment tokens with programmable controls and signed agent identity.

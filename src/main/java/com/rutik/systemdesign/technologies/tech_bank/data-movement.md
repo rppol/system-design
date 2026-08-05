@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 145 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 142 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -241,16 +241,6 @@ A publish goes to a topic and the service delivers a copy to every subscription,
 
 Reach for it when one event must reach several independent consumers, and for the operational notification path where alarms, budget and deployment events go. Its structural weakness is durability at the subscriber: an HTTPS or Lambda endpoint that is down depends entirely on the retry schedule, which is why the durable pattern is always one SQS queue per consumer so the backlog and the redrive policy belong to the consumer rather than the topic.
 
-### AWS SNS/SQS
-**Short:** AWS managed pub/sub topics (SNS) fanning out to durable queues (SQS) for asynchronous service-to-service messaging.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @3, platform-delivery/cloud-platform-and-cost @3
-
-The pairing exists because the two services cover different halves of asynchronous delivery: SNS pushes a copy of every publish to each subscription but holds no backlog, while SQS holds a backlog but has no fan-out. Subscribing one queue per consumer gives each consumer its own visibility timeout, retry behaviour, dead-letter queue and drain rate, raw message delivery strips the SNS envelope so handlers parse the payload directly, and a filter policy per subscription decides which messages reach which queue.
-
-Reach for this shape as the default event-distribution pattern inside AWS: producers publish once, adding a consumer means adding a subscription and a queue, and no producer changes. Its limits are the queue's limits -- no offsets, no replay, and a message a consumer deletes is gone from that consumer's copy only. EventBridge adds richer content-based routing and a schema registry; Kafka or Kinesis is the answer when consumers must re-read history.
-
 ### AWS SQS
 **Short:** Managed queue service: at-least-once standard queues and FIFO queues with a 5-minute dedup window, reached over HTTPS.
 **Kind:** tech
@@ -260,16 +250,6 @@ Reach for this shape as the default event-distribution pattern inside AWS: produ
 Consumers pull rather than being pushed to: a receive call hides a message for a visibility timeout, and unless the consumer deletes it inside that window the message reappears for someone else. That makes idempotent handlers and a visibility timeout longer than real processing time non-negotiable. A redrive policy moves a message to a dead-letter queue after a configured receive count, and long polling avoids burning API calls on empty receives.
 
 Reach for it to decouple a producer from a slow or bursty consumer inside AWS without operating broker infrastructure. It is a queue, not a log: a deleted message is gone, there is no replay and no independent fan-out to several consumer groups from the same stream, which is where Kafka or an SNS fan-out belongs instead.
-
-### AWS SQS/SNS
-**Short:** AWS managed queue (SQS) and pub/sub fan-out (SNS) for async messaging between services.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, platform-delivery/cloud-platform-and-cost @3
-
-SQS is a pull queue: a consumer receives a message, gets a visibility timeout to process it, and deletes it on success, with a redrive policy sending repeat failures to a dead-letter queue. Standard queues are at-least-once and unordered; FIFO queues add per-message-group ordering and deduplication at much lower throughput. SNS is the push side, fanning one publish out to many subscribers such as SQS queues, Lambda functions or HTTPS endpoints.
-
-The usual pattern is SNS fanning into one SQS queue per consumer, so each consumer owns its own backlog, retries and DLQ. Reach for them when you want managed async messaging with no brokers to run; do not reach for them when you need a replayable log, since a deleted message is gone and there is no offset to rewind.
 
 ### AWS Step Functions
 **Short:** Managed state-machine service (ASL JSON) for saga orchestration across services, with per-step retries and visibility.
@@ -776,16 +756,6 @@ Connect is a worker process -- standalone, or a distributed cluster that rebalan
 It is a library, not a cluster: you embed it in an ordinary application and scale by starting more instances, which the consumer group protocol rebalances across partitions. State for joins and aggregations lives in a local RocksDB store backed by a compacted changelog topic, so when an instance dies its state is replayed onto whichever instance takes over its partitions. Exactly-once processing comes from Kafka transactions that commit the output records and the input offsets together.
 
 Reach for it when both the input and the output are Kafka and you would rather not operate a separate processing cluster. Its limits follow from the same design: co-partitioning is required for joins, rebalances and state restore are the things that hurt in production, and a job reading from something other than Kafka belongs in Flink instead.
-
-### Kafka, Redis Pub/Sub, AWS SNS
-**Short:** Cross-process observer options: Kafka for durable replayable logs, Redis Pub/Sub and SNS for fire-and-forget fan-out.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, data-movement/event-streaming-and-processing @2
-
-The three differ mainly in what survives a subscriber being absent. Kafka retains a partitioned log, so a consumer has an offset, can be down for hours and catch up, and can replay history from the beginning. Redis Pub/Sub keeps nothing at all: a message reaches whoever is connected at that instant and is otherwise dropped, which is what makes it extremely fast and unusable as a record. SNS sits between them, with no retention or offsets but managed per-subscription retries and a dead-letter queue.
-
-The choice follows from the consequence of a lost message. Cross-instance WebSocket fan-out, cache invalidation and presence updates lose nothing by using Redis. Notification and integration events inside AWS fit SNS, normally with a queue per consumer so the backlog is durable. Anything another team will later want to re-read, audit or rebuild state from belongs in Kafka, and paying its operational cost for a fire-and-forget signal is the common overcorrection.
 
 ### ksqlDB
 **Short:** Streaming SQL engine over Kafka that turns continuous queries into Kafka Streams topologies with no application code.

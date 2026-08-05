@@ -720,7 +720,7 @@ def stable_cross_entropy(logits: np.ndarray, labels: np.ndarray) -> float:
 | SciPy stats | `entropy(pk, qk)` for KL divergence — `base` defaults to `e` (nats), and both `pk` and `qk` are auto-normalized to sum to 1; `differential_entropy` for continuous samples (added in SciPy 1.7.0) |
 | scikit-learn | `mutual_info_classif`, `mutual_info_regression`; entropy split criterion in DecisionTree |
 | PyTorch | `F.cross_entropy`, `F.kl_div`, `F.binary_cross_entropy_with_logits` (numerically stable) |
-| TensorFlow/Keras | `tf.keras.losses.CategoricalCrossentropy`, `tf.keras.losses.KLDivergence` |
+| TensorFlow / Keras | `tf.keras.losses.CategoricalCrossentropy`, `tf.keras.losses.KLDivergence` |
 | dit (Python) | Information-theoretic quantities for discrete distributions |
 | pyitlib (imported as `drv`) | 19 discrete information measures — entropy, conditional/joint entropy, mutual and conditional mutual information, JS divergence, interaction information — each with ML, MAP, James-Stein and Good-Turing estimators |
 

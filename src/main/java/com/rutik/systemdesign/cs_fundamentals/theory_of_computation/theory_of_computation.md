@@ -815,11 +815,11 @@ NP-completeness is a statement about the **worst case**, not about every instanc
 | `java.util.regex`, PCRE, Python `re` | Regex engine | Backtracking NFA simulation | Flexible (backreferences, lookaround) but exponential worst case |
 | ANTLR | Parser generator | Builds an LL(*) recursive-descent parser from a grammar | Popular for DSLs, SQL dialects, config languages |
 | yacc / bison | Parser generator | Builds an LALR (bottom-up) parser | Classic Unix toolchain; used inside many compilers |
-| MiniSat, Glucose, CryptoMiniSat, Kissat | SAT solver | CDCL search for a satisfying assignment | Kissat has topped recent SAT competitions; handles millions of clauses |
+| MiniSat / Glucose / CryptoMiniSat / Kissat | SAT solver | CDCL search for a satisfying assignment | Kissat has topped recent SAT competitions; handles millions of clauses |
 | Z3 | SMT solver | Satisfiability modulo theories (arithmetic, arrays, bitvectors) | Widely used in program verification and symbolic execution |
-| OR-Tools CP-SAT, Gurobi, CPLEX | ILP / constraint solver | Solves NP-hard scheduling, coloring, and packing at scale | Backbone of real timetabling, routing, and assignment systems (§14) |
+| OR-Tools CP-SAT / Gurobi / CPLEX | ILP / constraint solver | Solves NP-hard scheduling, coloring, and packing at scale | Backbone of real timetabling, routing, and assignment systems (§14) |
 | `dk.brics.automaton` | Automata library (Java) | Explicit DFA/NFA construction and minimization | Used inside Apache Lucene for regex-based queries |
-| TLA+, Coq | Formal methods | Model checking / interactive proof assistants | Bounded model checking sidesteps undecidability by checking only up to N steps |
+| TLA+ / Coq | Formal methods | Model checking / interactive proof assistants | Bounded model checking sidesteps undecidability by checking only up to N steps |
 
 ---
 

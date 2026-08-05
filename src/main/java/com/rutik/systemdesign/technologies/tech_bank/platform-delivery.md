@@ -45,16 +45,6 @@ Azure runs and upgrades the Kubernetes control plane — API server, etcd, sched
 
 Reach for it when you are already on Azure and want real Kubernetes rather than a proprietary container service. It removes the control-plane ops, not the need to understand Kubernetes itself.
 
-### Amazon ECS/Fargate
-**Short:** AWS container orchestrator, with Fargate running tasks serverlessly so there are no nodes to manage.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/container-and-image @2, platform-delivery/cloud-platform-and-cost @2
-
-The unit is a task definition, a versioned JSON document naming the containers, their CPU and memory, the IAM task role and the log configuration; a service then holds a desired count of tasks running and registers them into an ALB or NLB target group. In `awsvpc` network mode each task gets its own ENI with a VPC address and security group. Fargate is a launch type rather than a separate product: AWS runs each task in a managed microVM and bills vCPU and GB by the second, so there are no instances to patch or bin-pack.
-
-Reach for it when the workload is containers on AWS and you do not want Kubernetes's API surface or its upgrade cadence. The cost is portability and ecosystem, since there are no operators, no CRDs and no Helm; a platform team building tooling other teams consume is usually better served by EKS.
-
 ### Ansible
 **Short:** Agentless configuration management and orchestration driven by YAML playbooks over SSH.
 **Kind:** tech
@@ -228,6 +218,24 @@ Use it whenever workloads run on ECS, EKS or Lambda: images stay in-region, pull
 ECS is a control plane AWS operates: you never run a scheduler, you register capacity as EC2 container instances running the ECS agent or as Fargate, and it places tasks according to placement strategies and constraints. Capacity providers connect a service to an Auto Scaling group or to Fargate and Fargate Spot, so cluster scaling follows task demand. Rolling deployments have a circuit breaker that reverts a failed rollout on its own, and `ecs execute-command` opens a shell inside a running task with no SSH.
 
 It is markedly less to learn and operate than Kubernetes, and identity, logging and load balancing are native rather than add-ons. The limits appear when you want portability, a controller ecosystem, or anything expressed as a custom resource, and choosing it is choosing not to move off AWS. EKS is the alternative once the platform, rather than the application, is what you are building.
+
+### AWS Fargate
+**Short:** AWS's serverless compute engine for containers: ECS tasks and EKS pods run on managed microVMs with no nodes to size or patch.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/container-and-image @2, platform-delivery/cloud-platform-and-cost @2
+
+Fargate is a capacity type rather than a separate control plane: the ECS task definition or the
+EKS pod spec is unchanged, and choosing Fargate makes AWS place each task in its own managed
+microVM, give it an ENI in the VPC under `awsvpc` networking, and bill the requested vCPU and
+memory by the second. There is no instance to patch, bin-pack, scale or right-size, and the
+per-task isolation boundary is a VM rather than a shared kernel.
+
+Reach for it when the operational cost of running a node group outweighs the price premium,
+which is usually the case for bursty or low-density workloads and for teams with no platform
+engineering capacity. The limits follow from the isolation: no privileged containers or
+daemonsets, no GPUs, a fixed set of CPU-and-memory combinations, and start-up measured in tens
+of seconds. A dense, steady-state fleet is normally cheaper on EC2 capacity.
 
 ### AWS IPAM
 **Short:** AWS IP Address Manager: plans, allocates and audits VPC CIDR blocks across accounts so ranges never overlap.

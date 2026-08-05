@@ -458,7 +458,7 @@ requirement; REST wins when *simplicity and cacheability* dominate.
 | N+1 | `DataLoader`, `BatchLoaderRegistry`, `@BatchMapping` |
 | Transports | HTTP, WebSocket (`graphql-ws`), SSE |
 | Pagination | Relay Connection, Spring Data `Window`/`ScrollPosition`, `ScrollSubrange` |
-| Tooling | GraphiQL (built-in playground), schema introspection, Apollo/Relay clients |
+| Tooling | GraphiQL (built-in playground), schema introspection, Apollo Client, Relay (GraphQL client) |
 | Cost control | `maxQueryDepth`, complexity instrumentation, persisted queries |
 | Federation | Apollo Federation, Netflix DGS, GraphQL Federation spec |
 | Testing | `GraphQlTester`, `@GraphQlTest` slice |

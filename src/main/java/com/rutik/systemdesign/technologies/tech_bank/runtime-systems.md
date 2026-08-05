@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: runtime-systems -->
 
-The 449 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 454 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Runtime & OS** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -617,6 +617,25 @@ Reach for it when correctness is worth an order of magnitude more effort than te
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+### CPLEX
+**Short:** IBM's commercial LP and mixed-integer optimizer, shipped in CPLEX Optimization Studio with the OPL language and a docplex API.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+It solves the continuous relaxation with simplex or a barrier method and then branches, adding
+cutting planes and running presolve and heuristics until the gap between the incumbent
+solution and the best proven bound falls below a tolerance you set. The controls are the usual
+ones — time limit, MIP gap, emphasis, thread count — and it always reports a solution together
+with how far from optimal it might be. IBM packages it with the OPL modelling language, a
+`docplex` Python API, and a separate CP Optimizer engine for constraint programming.
+
+Reach for it where the organisation is already licensed, or where OPL models and CP Optimizer
+are part of the estate. It is commercial, with a free academic edition and a size-limited
+community edition. Against Gurobi the decision is usually procurement and existing tooling
+rather than a decisive performance gap; for pure scheduling and sequencing a
+constraint-programming engine is often the better model.
+
 ### CPython ast module
 **Short:** Python stdlib module that parses source into Python's own abstract syntax tree for inspection or rewriting.
 **Kind:** api
@@ -638,6 +657,25 @@ Reach for it when correctness is worth an order of magnitude more effort than te
 It uses the kernel checkpoint machinery to dump a running process, heap, initialized classes and JIT-compiled code included, to disk, then restores that image in a fresh process, so the JVM comes back warm with no class loading and no re-profiling. The coordinated half is an API: components implement before-checkpoint and after-restore hooks to close descriptors and rebuild pools, because a live connection cannot survive being dumped.
 
 Reach for it when JVM cold start is the actual problem, in serverless functions and fleets that scale out under load, taking time to first request from seconds to tens of milliseconds. The costs: the image holds everything in memory including secrets, every library must be checkpoint-aware, and it needs Linux and a supporting JDK. GraalVM native image solves the same problem at build time instead.
+
+### CryptoMiniSat
+**Short:** CDCL SAT solver with native XOR-clause handling and Gaussian elimination, aimed at cryptographic and algebraic instances.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+Encoding a long XOR constraint into conjunctive normal form costs an exponential number of
+clauses, and XOR constraints are exactly what cryptanalysis produces. CryptoMiniSat keeps them
+as first-class clauses and runs Gaussian elimination over them alongside ordinary
+conflict-driven clause learning, so a system of parity constraints is reasoned about
+algebraically instead of searched. It also does substantial inprocessing and ships Python
+bindings.
+
+Reach for it when the problem naturally contains parity constraints — cryptographic attacks,
+error-correcting codes, and the approximate model counting that samples solutions of such
+systems, where it is a common backend. On instances with no XOR structure it offers no
+advantage over a mainstream CDCL solver, and a modern competition solver will usually be
+faster.
 
 ### ctypes
 **Short:** Python stdlib FFI: call C libraries and lay out or inspect raw C-style memory buffers from pure Python.
@@ -923,6 +961,23 @@ Reach for it when the native image is a server rather than a short-lived process
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/memory-processes-and-os @3
 
+### Glucose
+**Short:** MiniSat-derived CDCL SAT solver whose learned-clause quality metric, the literal block distance, became standard everywhere.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+Its contribution is a way to judge a learned clause. The literal block distance is the number
+of distinct decision levels appearing in the clause, and a low value marks a clause worth
+keeping. That single measure drives two things at once: aggressive clause-database reduction,
+which throws the rest away and keeps propagation fast, and an adaptive restart policy that
+restarts when recent conflicts look unproductive instead of on a fixed schedule.
+
+Both ideas are now in essentially every competitive CDCL solver, which is the reason the name
+is worth knowing. As a solver to actually run it has been overtaken by its own descendants; a
+parallel variant exists, and for a hard instance today Kissat or CaDiCaL is the sharper
+tool.
+
 ### Go goroutines
 **Short:** Go's built-in lightweight threads: 2-8 KB growable stacks multiplexed onto OS threads by an M:N runtime scheduler.
 **Kind:** api
@@ -966,6 +1021,25 @@ That is precisely how SQLAlchemy's async support works: its ORM internals are wr
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, apis-frameworks/design-patterns-and-principles @2, runtime-systems/collections-and-algorithms @3
+
+### Gurobi
+**Short:** Commercial mathematical-programming solver for LP, MIP, QP and MIQP, consistently at or near the top of independent benchmarks.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+It solves the continuous relaxation with simplex or a barrier method, then branches and cuts,
+running presolve, cutting-plane separation, heuristics and node processing across threads
+until the gap between the incumbent and the best proven bound closes to your tolerance. That
+gap is the point: you can stop at any time with a solution and a statement of how far from
+optimal it might be. APIs cover Python, C++, Java, C# and the modelling layers built above
+them.
+
+Reach for it when a model is large enough that solver performance decides whether the problem
+is tractable at all, and a licence is affordable — it is commercial, with free academic
+licences and a size-limited evaluation. HiGHS and SCIP are the open-source alternatives for
+models that fit them, and a constraint-programming engine is usually the better model for pure
+scheduling, rostering and sequencing.
 
 ### hand-written META-INF/services
 **Short:** Manually authored ServiceLoader registration file listing implementations of a service interface on the classpath.
@@ -1511,6 +1585,24 @@ This is how you answer questions the source cannot: what a lambda compiled to, w
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/concurrency-and-async @2
 
+### Kissat
+**Short:** Heavily engineered sequential CDCL SAT solver, a C rewrite of CaDiCaL's ideas that has topped recent SAT competitions.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+It is a from-scratch reimplementation in C of the design behind CaDiCaL, tuned for the things
+that decide real runtimes: compact clause and watch-list representations, cache-friendly unit
+propagation, and an inprocessing schedule that interleaves subsumption, vivification, bounded
+variable elimination and probing with the search itself. It is single-threaded by design, and
+that single thread is what keeps winning the main track.
+
+Reach for it when you have a hard CNF instance and want the strongest sequential solver: a
+file in, a satisfying assignment or `UNSAT` out, with DRAT proof logging available for the
+unsatisfiable answer. If instead you need to call a solver repeatedly from inside an
+application, adding and retracting assumptions between calls, CaDiCaL's incremental interface
+is the better-trodden path.
+
 ### LAPACK
 **Short:** Fortran linear-algebra library (solvers, factorizations, eigenproblems) sitting under NumPy and SciPy.
 **Kind:** tech
@@ -1733,15 +1825,23 @@ Represent each document as a set of shingles, meaning overlapping n-grams. Apply
 
 What makes it work at scale is banding: split the signature into bands of several rows, hash each band, and treat any pair colliding in a band as a candidate. That is locality-sensitive hashing, and it turns an all-pairs comparison into a lookup, which is how pretraining corpora are deduplicated. The costs: it is blind to word order and paraphrase, and the band and row choice implicitly sets a similarity threshold.
 
-### MiniSat, Glucose, CryptoMiniSat, Kissat
-**Short:** The standard CDCL SAT solvers: take a CNF formula and find a satisfying assignment or prove there is none.
+### MiniSat
+**Short:** The minimal reference CDCL SAT solver whose small, readable C++ source is the template most modern solvers descend from.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** runtime-systems/collections-and-algorithms @1
 
-All four are conflict-driven clause-learning solvers. They assign a variable, propagate forced consequences using watched literals, and when a clause is falsified they analyse the implication graph to derive a new clause explaining the conflict, add it, and backjump non-chronologically. Activity-based branching, restarts and clause-database reduction let this scale to millions of clauses. Kissat is a heavily engineered modern solver leading recent competitions.
+It implements conflict-driven clause learning in a couple of thousand lines: assign a
+variable, propagate forced consequences using two watched literals per clause, and on a
+falsified clause analyse the implication graph, learn a clause that explains the conflict, add
+it and backjump non-chronologically rather than undoing one level. Activity-based branching,
+periodic restarts and clause-database reduction are all present in the form later solvers
+refined.
 
-Reach for one when a problem is naturally a set of Boolean constraints, such as hardware equivalence checking, dependency resolution or bounded model checking, with the caveat that encoding it into conjunctive normal form is usually the hard part and decides whether it solves in a second or never. Runtimes are unpredictable, and the answer is a satisfying assignment rather than an optimum, so optimization belongs to MaxSAT, CP-SAT or an SMT solver.
+Its importance today is pedagogical and architectural rather than competitive: it is the code
+people read to understand CDCL, and its interface is one many tools still expose. For a hard
+instance reach for a modern descendant such as CaDiCaL or Kissat; MiniSat's value is that you
+can read the whole thing in an afternoon.
 
 ### mlock
 **Short:** Syscall pinning pages in physical RAM so they are never swapped; needs root or CAP_IPC_LOCK.
@@ -2073,15 +2173,24 @@ Reach for it when a client reports a TLS failure and you need the server's real 
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
 
-### OR-Tools CP-SAT, Gurobi, CPLEX
-**Short:** Constraint-programming and integer-programming solvers for scheduling, routing, packing and coloring at scale.
+### OR-Tools CP-SAT
+**Short:** Google OR-Tools' constraint-programming solver: it encodes the model to SAT and runs clause learning beside global propagators.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
 
-You declare variables with domains, constraints relating them, and an objective, and the solver searches for a feasible or optimal assignment while proving bounds. Gurobi and CPLEX solve the linear relaxation, then branch and cut with cutting planes and heuristics, reporting the gap between the best solution and the best bound. CP-SAT instead encodes the model into a satisfiability problem and runs clause learning alongside propagators for constraints such as all-different and no-overlap.
+You declare integer variables over finite domains, constraints relating them — linear
+constraints, reification, and global ones such as `AllDifferent`, `NoOverlap` and `Cumulative`
+— and an objective. The model is then encoded into a satisfiability problem and solved by
+clause learning running alongside dedicated propagators for the global constraints, with a
+portfolio of differently configured workers searching in parallel. It reports a status, the
+objective value and a bound, so the remaining gap is always visible.
 
-Reach for one when the problem is genuinely combinatorial optimization under hard constraints, such as crew rostering, routing or bin packing, rather than something a greedy heuristic handles. The costs: modelling is the real work and the encoding decides whether an instance solves in seconds or never, runtimes are unpredictable, and licensing differs sharply. Set a time limit and accept the incumbent with its reported gap.
+Reach for it for scheduling, rostering, packing and assignment, where constraints are
+combinatorial rather than smoothly linear; it is Apache-licensed and has Python, Java, C++ and
+C# APIs. Two caveats decide whether it works: modelling is the real effort, since how a
+constraint is expressed determines whether an instance solves in seconds or never, and
+variables are integer only, so continuous quantities must be scaled.
 
 ### OutputStreamWriter
 **Short:** JDK bridge presenting a byte OutputStream as a character Writer using a charset; the canonical adapter example.

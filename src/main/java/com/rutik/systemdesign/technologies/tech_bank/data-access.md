@@ -271,21 +271,13 @@ Migrations are ordered SQL files applied once each in version order and recorded
 
 Wire it into application startup or the deploy pipeline so schema and code ship together. Note that it orders migrations but does not make them safe: a zero-downtime rename is still your job to split into expand-and-contract steps.
 
+The paid Teams and Enterprise tiers licence the same engine and add operational rather than syntactic features -- `U__` undo scripts, a dry-run mode that writes out the SQL a migration would execute so a DBA can review it first, drift detection against a live schema, and wider database-engine coverage. Weigh them against the discipline they replace: an undo script never rehearsed against production data is a hypothesis, and expand-and-contract leaves nothing that needs rolling back.
+
 ### flyway migrate
 **Short:** Flyway command that applies pending versioned SQL migrations in order, via CLI or the Maven/Gradle plugin.
 **Kind:** api
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1
-
-### Flyway Teams/Enterprise
-**Short:** Paid Flyway tiers adding undo migrations, schema drift detection and dry-run scripting to DB migrations.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-access/schema-and-migration @1
-
-These are commercially licensed tiers on the same engine, and the additions are operational rather than syntactic: `U__` undo scripts paired with a versioned migration, a dry-run mode that writes out the SQL a migration would execute so a DBA can review it first, drift detection comparing a live schema against the changelog, wider database-engine coverage, and richer CI integration.
-
-Weigh them against the discipline they replace. An undo script that has never been rehearsed against production data is a hypothesis, and expand-and-contract migrations — add, deploy, backfill, remove later — leave nothing that needs rolling back. Buy the tiers for dry-run review and engine coverage; do not buy them as a substitute for a forward-only migration habit.
 
 ### gh-ost
 **Short:** GitHub's triggerless online schema-change tool for MySQL: ALTER large tables without blocking writes.
@@ -847,15 +839,42 @@ The specification defines a small set of reactive interfaces — `ConnectionFact
 
 Reach for it only when the whole request path is reactive, typically WebFlux with Spring Data R2DBC above it. The API is deliberately thin — no pooling, no row mapper, no dialect handling in the spec itself — and the ecosystem is far smaller than JDBC's. On a servlet stack with virtual threads, plain JDBC gives most of the scalability with none of the complexity, and there is no reactive JPA.
 
-### r2dbc-postgresql, r2dbc-mysql
-**Short:** The R2DBC driver implementations for PostgreSQL and MySQL, giving WebFlux non-blocking SQL access.
+### r2dbc-mysql
+**Short:** The R2DBC driver for MySQL and MariaDB, implementing the client protocol on Netty for non-blocking SQL on the JVM.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, runtime-systems/concurrency-and-async @3
 
-These are the concrete drivers behind the specification. The PostgreSQL one implements the frontend protocol on Netty and exposes what the wire natively supports — bulk copy, `LISTEN`/`NOTIFY` delivered as a stream, arrays, JSON — and the MySQL driver does the same for MySQL and MariaDB. Both are configured through a `ConnectionFactoryOptions` URL and are normally wrapped in `r2dbc-pool`, since the specification defines no pool of its own.
+It speaks the MySQL client/server protocol directly on Netty and exposes it through the R2DBC
+interfaces, so a query is a `Publisher` of rows that honours backpressure and no thread is
+parked waiting on the socket. MariaDB is served by the same driver, configuration goes through
+a `ConnectionFactoryOptions` URL or the driver's own builder, and pooling comes from
+`r2dbc-pool` because the specification defines none.
 
-Expect a thinner experience than the JDBC equivalents: fewer knobs, less battle-tested handling of type and timeout edge cases, and failures that surface as reactive signals rather than familiar exceptions. Choose them when the application is genuinely reactive end to end — one blocking call in the middle of that pipeline undoes the benefit, and is the most common way a reactive stack disappoints.
+The artifact coordinate is the thing to get right first: the driver moved from the original
+`dev.miku` group to `io.asyncer`, and MariaDB additionally publishes an R2DBC driver of its
+own, so three plausible dependencies exist for the same job. As with every R2DBC driver,
+choose it only for an end-to-end reactive stack — one blocking call in the middle undoes the
+benefit, and on a servlet stack with virtual threads plain JDBC gives most of the scalability
+with none of the complexity.
+
+### r2dbc-postgresql
+**Short:** The R2DBC driver for PostgreSQL: a Netty implementation of the frontend protocol giving WebFlux non-blocking SQL access.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-access/drivers-and-connection-pooling @1, runtime-systems/concurrency-and-async @3
+
+It implements the PostgreSQL frontend/backend protocol on Netty rather than wrapping JDBC, so
+rows arrive as a `Publisher` honouring backpressure and the connection is never blocked on the
+network. Speaking the wire protocol directly is also what lets it expose what the protocol
+natively supports: `COPY` for bulk load, `LISTEN`/`NOTIFY` delivered as a stream instead of
+polled, arrays, `json` and `jsonb`, and enum types. Configuration is a
+`ConnectionFactoryOptions` URL and pooling comes from `r2dbc-pool`.
+
+Reach for it only when the whole request path is reactive, typically WebFlux with Spring Data
+R2DBC above it. Expect a thinner experience than pgJDBC: fewer knobs, less battle-tested
+handling of type and timeout edge cases, and failures arriving as reactive error signals
+rather than the exceptions the JDBC ecosystem is written around.
 
 ### Raft
 **Short:** Leader-based consensus algorithm for replicating a log across a quorum; the basis of etcd, Consul and KRaft.

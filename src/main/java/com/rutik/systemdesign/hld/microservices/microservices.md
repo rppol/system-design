@@ -1142,8 +1142,8 @@ Notice that the latency number and the saturation number come from the same mult
 | Circuit Breaker | Resilience4j (current JVM standard), Polly (.NET), pybreaker (Python) | Resilience4j is lightweight and uses semaphore-based isolation by default, not thread pools — tune accordingly |
 | Service Mesh | Istio, Linkerd, Cilium Service Mesh, Consul service mesh; on AWS, Amazon ECS Service Connect (ECS) and VPC Lattice (EKS) | Istio is the most feature-rich but operationally heaviest; Linkerd is simpler to run; Cilium does it in eBPF with no per-pod sidecar |
 | Distributed Tracing | Jaeger, Zipkin, OpenTelemetry (instrumentation standard), AWS X-Ray, Datadog APM | OpenTelemetry is the vendor-neutral instrumentation layer; Jaeger/Zipkin/X-Ray/Datadog are backends it can export to |
-| Container Orchestration | Kubernetes, Amazon ECS/Fargate, Docker Swarm, Nomad | Kubernetes is the de-facto standard; ECS/Fargate is simpler if fully AWS-committed |
-| Messaging / Event Bus | Apache Kafka, RabbitMQ, AWS SNS/SQS, Google Pub/Sub | Kafka for high-throughput event streams with replay; SQS/RabbitMQ for simpler point-to-point queues |
+| Container Orchestration | Kubernetes, AWS ECS, AWS Fargate, Docker Swarm, Nomad | Kubernetes is the de-facto standard; ECS/Fargate is simpler if fully AWS-committed |
+| Messaging / Event Bus | Apache Kafka, RabbitMQ, AWS SNS, AWS SQS, Google Pub/Sub | Kafka for high-throughput event streams with replay; SQS/RabbitMQ for simpler point-to-point queues |
 | Saga Orchestration | Temporal, Camunda, AWS Step Functions, Conductor OSS (maintained by Orkes) | Temporal/Camunda are general workflow engines often repurposed for sagas; Step Functions if AWS-native |
 | Configuration & Secrets | Spring Cloud Config, Consul KV, AWS Parameter Store / Secrets Manager, HashiCorp Vault | Vault adds dynamic secrets and auto-rotation, useful with the Vault Agent sidecar from §6.5 |
 

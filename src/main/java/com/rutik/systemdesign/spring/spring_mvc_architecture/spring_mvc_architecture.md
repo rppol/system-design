@@ -443,7 +443,7 @@ server.tomcat.max-swallow-size=-1
 | `@EnableWebMvc` | Enables Spring MVC in non-Boot apps |
 | `WebMvcConfigurer` | Customize MVC config without replacing defaults |
 | `WebMvcTest` | Test slice for MVC layer only |
-| Tomcat/Jetty | Embedded servlet containers (Spring Boot 4 requires a Servlet 6.1 baseline, which dropped Undertow) |
+| Tomcat / Jetty | Embedded servlet containers (Spring Boot 4 requires a Servlet 6.1 baseline, which dropped Undertow) |
 
 ---
 

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: devtools -->
 
-The 297 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 299 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Build & test tooling** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -120,6 +120,24 @@ Reach for it when the language is yours — a DSL, a query or filter syntax, an 
 Everything follows from convention over configuration: a `pom.xml` declares coordinates, dependencies and plugins, and the fixed lifecycle (`validate`, `compile`, `test`, `package`, `verify`, `install`, `deploy`) binds plugin goals to phases so `mvn verify` means the same thing in any project. Dependency resolution is transitive with nearest-wins conflict mediation, and `dependencyManagement` or an imported BOM pins versions across a multi-module reactor.
 
 The rigidity is the point — a new engineer can build an unfamiliar Maven project without reading the build file. It is also the limit: anything outside the lifecycle means writing or configuring a plugin, and Maven has no incremental task graph or build cache, so Gradle or Bazel wins on a large repository where build time is the constraint.
+
+### Apache Velocity
+**Short:** Java template engine whose VTL templates merge a context of objects into text; long used for code and document generation.
+**Kind:** tech
+**Lang:** java
+**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/text-encoding-and-regex @3
+
+A template is plain text carrying `$references` to objects placed in a `VelocityContext`, plus
+directives — `#set`, `#if`, `#foreach`, `#macro`, `#parse` — so loops and conditionals live in
+the template rather than in the caller. References resolve through JavaBean getters and may
+call methods on the objects passed in, which is what makes it flexible and also what lets
+presentation logic accumulate in the place hardest to test.
+
+It is why a generation of scaffolding tools and annotation processors could emit source at
+all, and it is still a reasonable choice when the output is mostly fixed text with holes: a
+configuration file, an email body, a report. For emitting Java or Kotlin, JavaPoet and
+KotlinPoet model the language instead, so imports, generics and escaping are handled rather
+than hand-written.
 
 ### ApplicationContextRunner
 **Short:** Spring Boot test harness that boots a throwaway context to assert auto-configuration outcomes.
@@ -250,6 +268,24 @@ The price is that everything must be declared. Undeclared dependencies a Makefil
 You write a grammar of tokens and production rules with semantic actions attached, and it generates a table-driven LALR(1) parser that reduces bottom-up as input arrives; the lexer normally comes from flex. It targets C, C++ or Java, and offers a GLR mode for grammars that are genuinely ambiguous at any fixed lookahead.
 
 Reading its diagnostics is the actual skill. A shift/reduce or reduce/reduce conflict means the grammar is ambiguous at one token of lookahead, and the fix is precedence declarations or restructuring the rules - never suppressing the warning, because the generator resolves it silently and the parser then accepts the wrong tree. Most modern production compilers hand-write recursive-descent parsers instead, for better error messages and recovery, but a generator is still the fastest route to a correct parser for a grammar specification you control.
+
+### Bitbucket
+**Short:** Atlassian's hosted Git platform: pull requests, branch permissions, Pipelines CI and first-class Jira issue linking.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/version-control-and-workbench @1, platform-delivery/ci-cd-and-release @2
+
+The review layer is a pull request with required approvals and merge checks, sitting behind
+branch permissions that decide who may push, merge or delete a branch. CI is Bitbucket
+Pipelines, configured from a `bitbucket-pipelines.yml` in the repository, and a container
+registry and deployment environments come with it.
+
+What distinguishes it is the rest of Atlassian: a branch or commit naming a Jira issue key
+links the two automatically and can transition the issue, and the same identity and
+permissions span Jira and Confluence. Choose it when the organisation already runs those and
+one vendor is the point. Against GitHub and GitLab the CI feature set, package registries and
+third-party marketplace are smaller, and it is Git-only — Mercurial support was removed
+years ago.
 
 ### Bruno
 **Short:** Open-source API client that stores collections as plain files in your repo, a git-friendly Postman alternative.
@@ -654,15 +690,41 @@ It is the standard answer to a repository choked by binaries — model weights, 
 **Lang:** *
 **Roles:** devtools/version-control-and-workbench @1
 
-### GitHub/GitLab/Bitbucket
-**Short:** Hosted Git platforms providing pull requests, protected branches, CODEOWNERS review rules and CI.
+### GitHub
+**Short:** The dominant hosted Git platform: pull requests, protected branches, CODEOWNERS, Actions CI and OIDC tokens for keyless deploys.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/version-control-and-workbench @1, platform-delivery/ci-cd-and-release @2
 
-What these add on top of git is the review and policy layer: a merge request as a first-class object with discussion threads and required approvals, branch protection that forbids force pushes and direct commits to the default branch, CODEOWNERS mapping paths to the reviewers who must sign off, and required status checks that block a merge until CI is green. Each also runs the CI itself, hosts packages and container images, and issues short-lived tokens so a pipeline can authenticate without a stored secret.
+What it adds on top of git is policy the server enforces rather than the team agreeing to: a
+pull request as a first-class object with review threads and required approvals, branch
+protection and rulesets that forbid force pushes and direct commits to the default branch, a
+`CODEOWNERS` file mapping paths to the reviewers who must sign off, and required status checks
+that block a merge until CI is green. Around that sit Actions for CI, the package and
+container registries, Dependabot and code scanning, and a short-lived OIDC token so a workflow
+can authenticate to a cloud account with no long-lived secret stored anywhere.
 
-That combination is what makes trunk-based development and GitOps workable, since the branch rules are enforced by the server rather than by agreement. The cost is lock-in: issues, pipelines and permissions are platform-specific in a way the git history itself never is.
+That combination is what makes trunk-based development and GitOps workable at all. The cost is
+lock-in in everything except the git history itself: issues, workflow syntax, permissions and
+the Actions ecosystem do not port to another platform.
+
+### GitLab
+**Short:** Hosted and fully self-manageable Git platform: merge requests, protected branches, GitLab CI/CD and a built-in registry.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/version-control-and-workbench @1, platform-delivery/ci-cd-and-release @2
+
+The review object is a merge request with approval rules and CODEOWNERS, guarded by protected
+branches that decide who may push or merge. CI is defined in `.gitlab-ci.yml` and executed by
+GitLab-hosted or self-registered runners, with stages, `needs` for a job DAG, `rules` for
+conditional jobs, child pipelines and reusable includes. Container and package registries,
+environments and review apps are parts of the same product rather than add-ons.
+
+Its distinguishing property is that all of that is self-hostable, CI and registries and
+security scanning included, which is why it turns up wherever source and builds must stay
+inside a network boundary. That is also the cost: a self-managed instance plus its runners is
+real infrastructure with its own upgrade cadence, and the largest features sit in the paid
+tiers.
 
 ### Google AutoService
 **Short:** Annotation processor that generates META-INF/services entries so a class is discoverable by ServiceLoader.
@@ -972,16 +1034,6 @@ The IDE builds a resolved index of the project, so navigation, find-usages, and 
 
 Its debugger is the part worth learning deliberately: conditional and field-watch breakpoints, expression evaluation in a paused frame, and the stream trace view, which shows the elements entering and leaving each stage of a Stream pipeline — the fastest way to find which `filter` or `flatMap` dropped what you expected. Community Edition covers Java and Kotlin; Ultimate adds the Spring, JPA, HTTP client and database tooling.
 
-### IntelliJ IDEA inspections and refactorings
-**Short:** IDE static analysis with one-click fixes such as replace inheritance with delegation and duplicate detection.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/static-analysis-and-linting @1, devtools/version-control-and-workbench @2
-
-Inspections run continuously against the IDE's resolved type model, so they see more than a text-based linter: a nullability contract violated across a call, a stream chain that can be simplified, a `String` comparison with `==`, an inheritance hierarchy that would be clearer as delegation. Most carry a quick fix that performs the change as a refactoring, and the same engine runs headlessly over a whole project for a CI report.
-
-The refactorings are safe because they operate on the type graph rather than on text — rename, extract method or interface, change signature, inline, move — updating references, imports and even string usages where it can prove them. Two habits pay off: run structural search and replace for a pattern no shipped inspection covers, and check in a shared inspection profile so the whole team sees the same warnings.
-
 ### IntelliJ Stream Trace Debugger
 **Short:** IntelliJ debugger view that shows the elements entering and leaving each stage of a Java Stream pipeline.
 **Kind:** tech
@@ -1236,15 +1288,24 @@ Its scope is deliberately narrow. A `.jmod` is a link-time artifact only — you
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, data-access/orm-and-data-mapping @2
 
-### jQAssistant or Structure101
-**Short:** Architecture analysis tools that graph package dependencies, detect cycles and flag drift from the design.
+### jQAssistant
+**Short:** Java architecture-analysis tool that scans an artifact into a graph database so design rules can be asserted as Cypher queries.
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, apis-frameworks/design-patterns-and-principles @3
 
-Both tools read your compiled code and build metadata and turn it into a dependency graph you can interrogate, rather than reading imports by hand. jQAssistant scans the artifact into a graph database and lets you write rules as queries — no package under `domain` may reference `infrastructure`, no cycles between modules — and fail the build when a rule matches. Structure101 is a commercial visual tool for the same material: you see the tangles and cycles, model the architecture you intended, and measure drift from it.
+A scan reads the compiled classes and the build metadata and writes them into an embedded
+Neo4j database as nodes and relationships: types, methods, fields, packages, artifacts and the
+dependencies between them. Rules are then Cypher queries kept in a rule file — no type under
+`domain` may depend on `infrastructure`, no cycles between modules, every entity must declare
+`equals` — where a concept defines vocabulary and a constraint fails the build when its query
+returns rows.
 
-Use them at architecture review cadence rather than per commit. The findings are structural and slow-moving, and the value is in noticing that a layering rule everyone believes in stopped being true three releases ago.
+Use it at architecture-review cadence, and in the build only for the handful of rules you
+genuinely intend to enforce. The strength is that anything expressible over the graph is
+expressible as a rule, including questions no packaged linter asks. The costs are that you
+write Cypher, and that scanning a large multi-module build is slow enough to belong in a
+nightly job rather than on every commit.
 
 ### jqwik
 **Short:** QuickCheck-style property-based testing engine for JUnit 5: generators, shrinking and statistics.
@@ -2424,6 +2485,43 @@ It exposes hundreds of named stressors, each hammering one part of the system: `
 
 It has two distinct uses. As a chaos tool it manufactures the resource starvation that reveals whether your timeouts, health checks and autoscaling behave — a node under memory pressure is a far more common incident than a node that vanished. As a benchmark its `bogo-ops` figures are only comparable between runs of the same version on the same hardware, never as an absolute score.
 
+### StringTemplate
+**Short:** Template engine enforcing strict model-view separation; ANTLR uses it to emit generated parsers in a dozen target languages.
+**Kind:** tech
+**Lang:** java
+**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/text-encoding-and-regex @3
+
+The design is a deliberate restriction. A template may reference attributes, iterate over
+them, apply another template to each, and test only for presence — there are no side effects,
+no arbitrary expressions and no method calls back into the model. Anything the output needs
+must therefore be computed before rendering and handed in, which is what makes a template
+group swappable.
+
+That restriction is exactly why ANTLR generates parsers for many target languages from one set
+of template groups: changing the group changes the language. Reach for it when the same model
+must render several ways and you want a guarantee that a template cannot quietly acquire
+logic. Reach for Velocity instead when you want the freedom StringTemplate forbids, and for
+JavaPoet or KotlinPoet when the output is JVM source and imports and generics should be
+modelled rather than typed.
+
+### Structure101
+**Short:** Commercial architecture-visualization tool: it maps package and module dependencies, models the intended structure and measures drift.
+**Kind:** tech
+**Lang:** java
+**Roles:** devtools/static-analysis-and-linting @1, apis-frameworks/design-patterns-and-principles @3
+
+It reads compiled code and renders the dependency structure as a navigable map, so cycles,
+tangles and over-large packages become something you look at rather than something you infer
+from a list of violations. You then express the architecture you intended as layers and cells
+and the tool reports how far the code has drifted from it, with the option to fail a build
+when a defined rule breaks.
+
+Its value is the picture: a tangle everyone half-knew about turns into a specific set of edges
+to cut, and a refactoring can be planned and tracked against it. The costs are that it is
+commercially licensed, that it analyses a snapshot rather than running naturally on every
+commit, and that the intended-architecture model has to be maintained or it quietly stops
+describing anything.
+
 ### Surefire plugin
 **Short:** The Maven plugin that discovers and runs unit tests during the test phase and writes the reports the build gate reads.
 **Kind:** tech
@@ -2485,16 +2583,6 @@ Against a real broker you actually exercise consumer group rebalancing, offset c
 `terraform validate` only checks that the configuration is syntactically valid and internally consistent; it will happily accept an instance type that does not exist, an AMI from the wrong region, or an IAM policy document with an invalid shape. TFLint adds provider-aware rules for AWS, Azure and Google that catch those before `plan` reaches the API, plus generic rules for unused declarations, missing variable types, deprecated syntax, and naming conventions you configure.
 
 Run it in pre-commit and CI, with the relevant provider plugin enabled in `.tflint.hcl` — without a plugin you get only the generic rules. It is a linter, not a security scanner and not a policy engine: `tfsec` or Trivy covers misconfiguration, and OPA or Sentinel covers organisational policy on the plan.
-
-### TLA+, Coq
-**Short:** Formal methods tools: TLA+ model-checks a concurrent specification, Coq proves theorems interactively.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/static-analysis-and-linting @1, runtime-systems/collections-and-algorithms @3
-
-They attack correctness from opposite ends. TLA+ describes a system as a state machine over variables, and the TLC model checker exhaustively explores every reachable state of a bounded instance, reporting a concrete counterexample trace when a safety invariant or liveness property fails — which is why it finds the six-step interleaving no reviewer imagined. Coq is an interactive proof assistant: you state a theorem in a dependently typed logic and build a proof term with tactics, and the kernel checks it, so the result holds for all inputs rather than for a bounded model.
-
-Use TLA+ for concurrent and distributed protocols, where the bugs are interleavings; use Coq or Lean where an algorithm or a compiler pass must be proved. Both specify a model, so neither guarantees the implementation matches it.
 
 ### tools.jackson:jackson-bom
 **Short:** Jackson's bill of materials: import it as a platform so every Jackson module resolves to one aligned version.
@@ -2591,16 +2679,6 @@ The appeal is fidelity you did not have to write by hand — a real API's exact 
 Vegeta drives a constant request rate rather than a fixed number of concurrent users — `vegeta attack -rate=500/s -duration=30s` opens as many connections as it takes to sustain that rate — which is the correct model for a service whose input is arrivals per second, and it avoids coordinated omission, where a thread-per-user tool slows its own request rate when the server slows and hides the latency it caused. Targets come from a plain text list on stdin, results are a binary stream, and `vegeta report` or `plot` turns them into percentiles or an HTML chart.
 
 It is a single Go binary and also importable as a library, so it drops into a pipeline trivially. It is HTTP-only and deliberately scriptless — no user journeys, no conditional logic — so anything stateful belongs in k6 or Gatling.
-
-### Velocity/StringTemplate
-**Short:** Java template engines used to emit generated source files from annotation processors and codegen tools.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/text-encoding-and-regex @3
-
-Both fill a template with values to produce text, and the difference in philosophy matters for code generation. Velocity's VTL allows conditionals, loops and method calls on the objects you pass, which is flexible and lets presentation logic accumulate in the template. StringTemplate deliberately enforces strict model-view separation — no side effects, no arbitrary expressions, only attribute references, conditionals on presence and iteration — which is why ANTLR uses it to emit parsers in a dozen target languages from one set of templates.
-
-Use a template engine when the generated output is mostly fixed text with holes, such as a configuration file or a boilerplate class. For generating Java or Kotlin, JavaPoet and KotlinPoet model the language instead, so imports, generics and escaping are handled rather than hand-written.
 
 ### versions-maven-plugin
 **Short:** Maven plugin that reports and bulk-updates dependency and plugin versions across a multi-module project.

@@ -332,7 +332,7 @@ Purging history alone loops right back to `Compromised` — the secret is still 
 | pre-commit / Husky | Local hook framework (lint, scan, format) |
 | gitleaks / detect-secrets | Secret scanning in CI and hooks |
 | Conventional Commits + semantic-release | Automated versioning/changelogs |
-| GitHub/GitLab/Bitbucket | Hosting, PRs, protected branches, CODEOWNERS |
+| GitHub / GitLab / Bitbucket | Hosting, PRs, protected branches, CODEOWNERS |
 | Bazel / Nx / Turborepo | Monorepo affected-target builds |
 | `git-lfs` | Large binary file storage |
 

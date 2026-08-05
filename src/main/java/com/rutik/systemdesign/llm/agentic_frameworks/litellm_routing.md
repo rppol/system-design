@@ -401,9 +401,9 @@ cache_params:
 | Redis | Cache + budget state |
 | PostgreSQL | Spend tracking, audit log |
 | Prometheus + Grafana | Metrics |
-| Datadog/New Relic | APM |
-| Langfuse/Helicone | LLM tracing |
-| Slack/PagerDuty | Alerts |
+| Datadog / New Relic | APM |
+| Langfuse / Helicone | LLM tracing |
+| Slack / PagerDuty | Alerts |
 
 ---
 

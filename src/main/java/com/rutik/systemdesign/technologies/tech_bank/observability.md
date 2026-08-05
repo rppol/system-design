@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 263 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 258 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -361,16 +361,6 @@ The same host agent that ships metrics and traces collects logs, pipelines parse
 
 The tie to traces is the point, since a line carrying a trace id links to the trace that produced it and to the host metrics of that moment. The cost model rewards discipline: ingestion is billed separately from indexed events, so exclusion filters, sampling and short retention on debug logs keep it affordable. A self-hosted Elastic or Loki stack is cheaper per gigabyte and far more work.
 
-### Datadog/New Relic
-**Short:** Commercial SaaS APM platforms combining distributed traces, metrics, logs, dashboards and alerting.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2, observability/alerting-and-incident-response @3
-
-They occupy the same slot: an agent per host or pod auto-instruments the mainstream runtimes, ships traces, metrics, logs and profiles to a hosted backend, and correlates them through shared tags so a slow endpoint links to its trace, its log lines and the host underneath. Both also ingest OpenTelemetry, so the instrumentation itself need not be vendor-specific even when the backend is.
-
-Reach for one when buying the whole stack beats operating Prometheus, a trace store and a log store, which for a small team it usually does. What decides between them is the pricing shape — per host plus indexed spans and custom metrics against per ingested gigabyte plus users — and agent quality for your particular language. Both create lock-in through dashboards, monitors and query languages that do not port.
-
 ### datasource-proxy
 **Short:** Java DataSource wrapper that logs each SQL statement with bound parameters, timings and query counts.
 **Kind:** tech
@@ -430,16 +420,6 @@ That index is also the bill. Storing logs in Elasticsearch costs several times w
 **Kind:** api
 **Lang:** *
 **Roles:** observability/profiling-and-performance @1, data-stores/relational @2, data-access/orm-and-data-mapping @3
-
-### EXPLAIN ANALYZE in DBeaver/DataGrip
-**Short:** Database IDE feature rendering an EXPLAIN ANALYZE plan as a visual tree with per-node cost and row estimates.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/profiling-and-performance @1, devtools/version-control-and-workbench @3
-
-Both IDEs run the statement with plan collection enabled and render the result as an expandable tree showing per-node cost, estimated and actual rows, loop counts and timing, usually highlighting the heaviest nodes. It is the same plan the server would print, and the value is entirely in the presentation, because a deeply nested text plan hides which sibling actually consumed the time.
-
-Reach for it while you are already iterating on the query in the editor, since the loop of edit, re-plan and compare costs a keystroke. Two cautions: `ANALYZE` executes the statement, so running it against an `UPDATE` or `DELETE` changes data unless wrapped in a transaction you roll back, and the IDE's session settings may differ from the application's. For sharing or archiving a plan, depesz or pev2 render it better.
 
 ### faulthandler
 **Short:** CPython stdlib module that dumps the Python traceback of every thread on a fatal error such as a segfault or a stack overflow.
@@ -934,16 +914,6 @@ Right-sizing comes from comparing requested CPU and memory against real usage, a
 Instrument an application -- through its SDKs, an OpenTelemetry exporter, or a drop-in wrapper around an OpenAI-compatible client -- and every call becomes a trace of nested observations carrying the exact prompt, the completion, token counts, latency and computed cost. On top of that sit the pieces a team actually needs: prompt management with versions and labels the app fetches at runtime, datasets and dataset runs for evaluation, LLM-as-judge and custom scores, and human annotation queues for cases a judge cannot settle.
 
 Because the core is open source and self-hostable, it is the default choice when traces contain data that cannot leave your infrastructure. Reach for it once you need to answer two questions a metrics dashboard cannot: why did this particular answer happen, and what did last week cost per feature.
-
-### Langfuse/Helicone
-**Short:** LLM observability platforms capturing prompt/response traces, cost and latency, with evaluation on top.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/tracing-apm-and-llm-observability @1, ml-lifecycle/evaluation-and-benchmarks @3, llm-apps/llm-gateway-and-routing @3
-
-Both wrap model calls and record what happened, but they arrive there differently: Helicone is normally a proxy, so changing a client's base URL captures every request with no code change and enables caching and rate limiting in the path, while Langfuse is normally an SDK or OpenTelemetry exporter, so nothing sits between you and the provider and traces carry your own nesting. Both compute token cost, latency and per-user attribution.
-
-Reach for either when a dashboard of request counts cannot answer why one answer was wrong or what a feature costs. The tradeoff is the integration point, since a proxy is fastest to adopt and becomes an availability dependency, while an SDK is more work and stays out of the request path. Both are open source and self-hostable, which is usually what decides it when prompts contain regulated data.
 
 ### LangSmith
 **Short:** LangChain's hosted tracing and evaluation platform for LLM/agent runs: traces, datasets, prompts, annotation.
@@ -1572,16 +1542,6 @@ The argument for writing the review inside the paging tool is that the raw mater
 
 None of that supplies the part that decides whether a review was worth holding: a blameless framing, and someone accountable for finishing the actions. What the tooling buys is a cheap write-up, which is what stops teams skipping it after the third incident of the month.
 
-### PagerDuty/Opsgenie
-**Short:** On-call and incident-response platforms: alert routing, escalation policies, schedules and incident timelines.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-Both do the same three things: hold the schedule answering who is on call for this service right now, run an escalation policy that keeps notifying and then escalates when nobody acknowledges, and deduplicate a stream of alerts into incidents so a flapping check yields one page instead of a hundred. Monitoring systems integrate by posting events with a routing key and a deduplication key they choose.
-
-Reach for one as soon as an alert must wake a specific human with a guarantee, which chat cannot provide. The design work is not in the tool: every page must be actionable and tied to a symptom, every alert needs a runbook link, and page volume itself deserves tracking, because a rotation that has learned to ignore the phone is the failure mode both products enable. Grafana OnCall is the self-hosted option.
-
 ### Per-layer profiling
 **Short:** Reading per-operator execution timings from an inference runtime, e.g. OpenVINO's InferRequest.get_profiling_info().
 **Kind:** concept
@@ -2017,16 +1977,6 @@ It also does performance tracing and profiling, but grouping and release trackin
 In an operations context it plays two roles: the destination alerting systems route non-urgent notifications to, and the place an incident is coordinated. The practice that makes the second useful is a dedicated channel per incident, which keeps the discussion out of the general channels and leaves a timestamped record to build the postmortem from, with bots posting alert context, deploy events and runbook links into the same channel.
 
 What it is not is an alerting system. Grouping, deduplication, escalation and the guarantee that someone acknowledged the page belong in Alertmanager and a paging tool; a message in a channel can be muted, missed or scrolled past, so treat chat alone as insufficient for anything that must wake a human.
-
-### Slack/PagerDuty
-**Short:** Chat and on-call paging destinations for alerts: notification routing, escalation and incident acknowledgement.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/alerting-and-incident-response @1
-
-They cover two different halves of notification and are routinely confused. A paging tool holds schedules, escalates when nobody acknowledges, and can prove a human took the alert, while chat is a broadcast surface with no acknowledgement, no escalation and no guarantee anyone is looking. Alertmanager routes by label to both, sending the urgent route to the pager and the informational route to a channel.
-
-The pattern that works is exactly that split, plus a dedicated channel per incident where the pager's incident, deploy events, dashboards and the discussion collect into one timestamped record for the retrospective. The failure mode is routing everything to chat, after which the channel becomes unreadable, people mute it, and the one alert that mattered scrolls past. Anything that must wake somebody belongs in the paging tool.
 
 ### SLF4J
 **Short:** Java logging facade: code against slf4j-api and bind whichever backend (Logback, Log4j2) is on the classpath.
