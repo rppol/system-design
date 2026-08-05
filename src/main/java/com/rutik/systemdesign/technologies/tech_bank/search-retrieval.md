@@ -2,12 +2,22 @@
 
 <!-- tech-bank tier: search-retrieval -->
 
-The 96 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 116 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Search & retrieval** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
 
 Record format and the full rules: [tech_bank.md](tech_bank.md).
+
+### _analyze
+**Short:** Elasticsearch/OpenSearch endpoint returning the exact token stream an analyzer produces for a piece of text.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/profiling-and-performance @3
+
+Post text to it with either a named analyzer, a field name, or an inline chain of character filters, tokenizer and token filters, and it returns the terms that would actually be indexed or searched, with their offsets and positions. Those terms are the ground truth the inverted index is built from, so it settles the commonest zero-results argument in one call: the query is fine, and the analyzer folded, split or stemmed the term into something the index does not contain.
+
+Reach for it before touching the query whenever a search returns nothing or matches far too much, and run it twice — once against the index analyzer and once against the search analyzer — because a mismatch between those two is invisible everywhere else.
 
 ### _cat/indices
 **Short:** Elasticsearch/OpenSearch cat API returning per-index health, doc counts and store size as readable rows.
@@ -20,6 +30,96 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** api
 **Lang:** *
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, data-access/replication-ha-and-backup @2, observability/metrics-and-monitoring @3
+
+### _cat/thread_pool
+**Short:** Elasticsearch/OpenSearch cat API listing every node's thread pools with their active, queued and rejected counts.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/metrics-and-monitoring @2
+
+Each pool — search, write, get, management and the rest — has a fixed size and a bounded queue, and once that queue is full the node rejects work rather than growing its heap without limit. The rejected column is cumulative since node start, so a non-zero value is history and a rising value is an incident in progress.
+
+Reach for it when clients are seeing 429s: it names which pool is saturated and on which node, which is the difference between "the cluster is slow" and "one hot node is refusing writes". Do not answer a rejection by enlarging the queue, because that converts a fast, visible failure into unbounded latency and heap pressure.
+
+### _cluster/allocation/explain
+**Short:** Elasticsearch/OpenSearch endpoint that names the allocation decider refusing to place a specific shard.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, data-access/replication-ha-and-backup @2, observability/alerting-and-incident-response @3
+
+Called with no body it picks an arbitrary unassigned shard; called with an index, a shard number and the primary flag it explains exactly the one you asked about. The response walks every node in turn and reports each decider's verdict, so instead of guessing you get a specific reason: a disk watermark exceeded, an awareness attribute that cannot be satisfied, a shard-filtering rule that excludes every eligible node, or simply too many retries after a failed allocation.
+
+Reach for it the moment a cluster goes yellow or red, before restarting anything. Its most underused property is that it also explains a shard that IS assigned, which is how you find out why the balancer refuses to drain a node you are trying to decommission.
+
+### _cluster/pending_tasks
+**Short:** Elasticsearch/OpenSearch endpoint listing cluster-state updates queued at the elected master, with priority and time waiting.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/metrics-and-monitoring @2
+
+Every mapping change, index creation, setting update and shard-routing change is a cluster-state update serialized through the elected master and published to every node. This endpoint shows the ones still waiting, each with a priority and how long it has sat there, so a queue that is long or old is direct evidence that the master, not the data path, is the bottleneck.
+
+Reach for it when index creation hangs, mappings appear late, or the cluster feels slow while data-node CPU is idle. The usual cause is cluster-state size rather than master hardware — a mapping explosion or tens of thousands of shards makes every publication expensive, and no amount of master CPU fixes that.
+
+### _disk_usage
+**Short:** Elasticsearch/OpenSearch analysis endpoint reporting how many bytes on disk each field costs, broken down by structure.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/metrics-and-monitoring @3
+
+It reads the shard's Lucene files field by field and attributes bytes separately to the inverted index, doc values, stored fields, points and norms, which is the only view that says whether a field is expensive because it is searchable, because it is aggregatable, or because it is simply large. It is gated behind `run_expensive_tasks=true` precisely because it walks real data instead of reading a counter.
+
+Reach for it before deciding what to stop indexing. It routinely shows one or two fields carrying most of an index, and because it separates the structures it also separates the fixes: disabling `index` and disabling `doc_values` reclaim different bytes.
+
+### _field_caps
+**Short:** Elasticsearch/OpenSearch endpoint listing which fields exist across a set of indices and what type each one is mapped to.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1
+
+It answers a question no single mapping can: across a wildcard, alias or data stream spanning many indices, which fields are present, whether each is searchable and aggregatable, and where the same name is mapped to two different types. Conflicts come back explicitly, naming the indices on each side. Kibana calls it to build a data view, which is why an unexpected type conflict tends to surface there first.
+
+Reach for it when querying across a rolling set of daily or monthly indices, and immediately after any mapping change, because a field that became a `keyword` in this month's index while staying `text` in last month's breaks only the queries that touch both.
+
+### _index_template/_simulate_index
+**Short:** Elasticsearch/OpenSearch endpoint resolving which templates a hypothetical index name matches, and returning the merged result.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, data-access/schema-and-migration @2
+
+Composable index templates match by pattern and priority and pull in component templates, so the settings, mappings and aliases a new index actually receives are several documents merged in a defined order. This endpoint performs that merge for a name you supply and returns both the outcome and the templates that contributed to it, without creating anything.
+
+Reach for it before the first index of a new data stream or rollover series exists, because the mapping an index is born with is largely unchangeable afterwards. The failure it catches is a template whose priority silently shadows another, and seeing that here costs nothing compared with finding it after a month of data has been written.
+
+### _nodes/hot_threads
+**Short:** Elasticsearch/OpenSearch endpoint that samples the busiest threads on each node and prints their stack traces.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/profiling-and-performance @2
+
+It samples every thread's CPU time repeatedly over a short interval, ranks them, and returns the top few per node with a percentage and the stack each was executing. That turns "a node is pinned at 100% CPU" into a named activity — merging, a script score, global-ordinal construction, a wildcard rewrite, garbage collection — without attaching a profiler to a production JVM.
+
+Reach for it as the first step on any CPU complaint, and call it two or three times in a row: a stack that shows up in every sample is the real consumer, while one that shows up once is only what that node happened to be doing.
+
+### _nodes/stats
+**Short:** Elasticsearch/OpenSearch endpoint exposing per-node counters for circuit breakers, thread pools, JVM heap, caches and search contexts.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/metrics-and-monitoring @2
+
+Everything a node counts is here, which makes it most useful narrowed to one group: `breaker` gives each circuit breaker's current estimate, its limit and how many times it has tripped; `indices` carries search, indexing, merge, refresh and open-search-context counters; `jvm` carries heap usage and garbage-collection totals. Almost every value is cumulative since the node started, so one reading is close to meaningless and two readings a minute apart are the actual measurement.
+
+Reach for it to turn a vague symptom into a number, and always pair it with `filter_path` — the unfiltered response is hundreds of kilobytes per node, which is a real cost when a dashboard polls it.
+
+### _validate/query
+**Short:** Elasticsearch/OpenSearch endpoint that checks a query without running it and, with explain, shows the Lucene query it rewrites into.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/profiling-and-performance @3
+
+Without `explain` it answers only valid or not valid, which is enough to reject a malformed query before it reaches production. With `explain=true` it returns, per index, the rewritten Lucene query as a string — analysis already applied, boosts folded in, a `match` already expanded into its term clauses — which is what the engine will actually execute rather than what you wrote.
+
+Reach for it when a query returns the wrong documents and the JSON looks right. The rewritten form shows the analyzer's output embedded in the query, so a term that was lowercased on one side of the pipeline and not the other becomes obvious in one call.
 
 ### all-MiniLM-L6-v2
 **Short:** Sentence-Transformers' small 384-dimension embedding model: six layers, CPU-fast, the usual default for local retrieval.
@@ -277,6 +377,16 @@ You pick a region and a deployment template and get a cluster with data tiers, d
 
 Reach for it when you want Elastic's own stack rather than the fork, and want upgrades, snapshots and monitoring to be someone else's job. The cost is the usual managed premium plus data transfer, and cluster internals remain entirely your problem, because a badly sharded index is exactly as slow on managed hardware. Amazon OpenSearch Service is the equivalent for the forked lineage, and self-hosting is cheaper if you have the operational capacity.
 
+### Elastic Cloud Serverless
+**Short:** Elastic's serverless offering: object-storage-backed Elasticsearch with no nodes, shards or cluster sizing to manage.
+**Kind:** tech
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, platform-delivery/cloud-platform-and-cost @2, observability/logging @3
+
+Instead of a cluster you size, you create a project and get an endpoint. Data lives in object storage and the indexing and search paths scale against it independently, so the decisions that dominate a self-managed deployment — primary shard count, data-tier layout, node roles, heap — are not exposed at all, and neither are the operations built on them, such as force-merging or hand-driven tier migration.
+
+Reach for it when the workload is genuinely spiky and the team has no appetite for cluster operations. The cost is control and portability: you cannot tune what is not exposed, some settings and APIs available on a self-managed cluster are simply absent, and billing follows usage rather than a fixed instance bill, which is cheaper for bursty traffic and not for steady saturated load.
+
 ### Elasticsearch
 **Short:** Distributed inverted-index search engine for full-text/BM25, hybrid dense+sparse retrieval, and log analytics.
 **Kind:** tech
@@ -286,6 +396,46 @@ Reach for it when you want Elastic's own stack rather than the fork, and want up
 Elasticsearch wraps Lucene in a distributed layer: documents are analyzed into an inverted index, indices are split into shards spread across nodes and replicated, and a query scatters to the shards and gathers the merged top results, so both corpus size and query throughput grow by adding nodes. Relevance defaults to BM25 and is tunable per field through analyzers, boosts and function scoring, and the same engine also serves aggregations, dense-vector nearest-neighbour search and learned sparse retrieval — which is why one cluster can back both log analytics and hybrid retrieval with rank fusion.
 
 Reach for it when you need real relevance ranking, filters and facets over text, rather than a wildcard `LIKE` scan in your relational database. Do not treat it as a system of record: there are no transactions across documents, refresh is near-real-time rather than immediate, and the primary shard count is fixed when the index is created, so capacity planning happens up front.
+
+### Elasticsearch Query DSL
+**Short:** Elasticsearch's JSON query language: leaf and compound clauses, filter versus query context, and the surface everything else compiles toward.
+**Kind:** spec
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, apis-frameworks/data-formats-and-api-contracts @3
+
+A query is a tree of clauses. Leaf clauses such as `match`, `term` and `range` name a field and a condition; compound clauses such as `bool` combine them, and the four `bool` slots are most of the model — `must` and `should` contribute to the relevance score, `filter` and `must_not` do not. That distinction is the single largest lever in the language, because a non-scoring clause is cacheable and a scoring one is not.
+
+Reach for the DSL directly whenever relevance matters, since it is the only surface exposing per-clause boosts and analyzers, rescoring, named queries and the full aggregation tree. Its weakness is composition: building it by string concatenation in application code is how injection bugs and unbounded `terms` clauses reach production, so assemble it with a client's builder or a typed request object instead.
+
+### elasticsearch-curator
+**Short:** Legacy Python CLI that selects Elasticsearch indices by age, name or size and applies delete, forcemerge or snapshot actions.
+**Kind:** tech
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, data-access/replication-ha-and-backup @3
+
+A YAML action file lists actions in order, and each action carries a filter chain — by index pattern, by age parsed from the index name or from creation date, by disk space, by count — narrowing the full index list down to the set that action runs against. A cron entry then invokes it, which is what made it the standard retention mechanism before the cluster could manage lifecycle itself.
+
+Its replacement is index lifecycle management, or data-stream lifecycle for time-series data, both of which run inside the cluster and survive the scheduler host disappearing. Recognise it in an inherited deployment and plan the migration; the specific trap is leaving both pointed at the same indices, where Curator deletes what the lifecycle policy still believes it owns. Note that the bare word Curator also names an unrelated Apache project of ZooKeeper recipes.
+
+### ELSER
+**Short:** Elastic's learned sparse retrieval model: it expands text into weighted term-value pairs indexed as a sparse_vector field.
+**Kind:** model
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, applied-ml/nlp-and-text @3
+
+Instead of a dense embedding, ELSER emits a set of vocabulary terms with learned weights, including terms that never appeared in the source text, so a document about a laptop can carry weight on "notebook" and "portable". Those pairs live in a `sparse_vector` field and are queried through the same inverted-index machinery as ordinary text, which is why filters, aggregations and BM25 clauses still compose with them.
+
+Reach for it when you want semantic recall without standing up a vector database or choosing and evaluating an embedding model, and when explainability matters, since the matched terms are readable. The cost lands at query time: a single ELSER query is a weighted OR over roughly a hundred terms, so latency and CPU scale with that expansion, and capping it is the first move when a hybrid query gets slow.
+
+### ES|QL
+**Short:** Elastic's piped query language: a source command followed by a chain of processing commands, run by its own compute engine.
+**Kind:** spec
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/logging @2, data-stores/warehouse-and-olap @3
+
+A query reads left to right — a source command such as `FROM` selects indices, then each `|` stage filters, computes, aggregates, sorts or limits, and the result's shape is whatever the last stage produced. That is a different execution model from the Query DSL rather than a syntax layered over it, which is why multi-stage aggregation and enrichment come out as one readable statement instead of nested aggregation objects.
+
+Reach for it for investigation and analytics over logs, metrics and security data, where the pipe model matches how the question is actually asked. It does not replace the DSL in a relevance-critical search path, and it is Elasticsearch-only: the fork's equivalent is PPL, with different syntax and a separate implementation.
 
 ### explain API
 **Short:** Elasticsearch/OpenSearch endpoint returning the scoring breakdown for one document against one query.
@@ -689,6 +839,16 @@ The integration provides `OpenSearchDocumentStore` and three retrievers over it,
 
 Reach for it when the deployment already runs OpenSearch, or when the corpus is large enough to need real sharding, replication and durability behind the pipeline. The price is operating a cluster, including mappings, `knn` index settings, shard sizing and enough memory for the HNSW graphs. For a prototype the in-memory or Chroma store is far less work, and the pipeline code does not change when you switch.
 
+### Painless
+**Short:** Elasticsearch's sandboxed, Java-like scripting language for script fields, script scores, ingest processors and updates.
+**Kind:** spec
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, runtime-systems/runtime-internals-and-types @3
+
+Scripts compile to JVM bytecode and run against a whitelist: only approved classes and methods are reachable, there is no file or network access, and loops are bounded, so a script cannot take a node down the way an arbitrary plugin could. Compiled scripts are cached by source text, which is why values belong in `params` rather than interpolated into the script body — the latter produces a fresh compilation per distinct value and walks straight into the compilation-rate limit.
+
+Reach for it for small per-document computations that cannot be precomputed: a derived field in the response, a custom score component, a conditional transform in an ingest pipeline. Treat it as a last resort inside the scoring path, since a script score runs per matching document per shard and is the standard explanation for a query that is fast on a small index and unusable on a large one.
+
 ### pdfplumber
 **Short:** Python PDF parser giving character-level positions, making it the precise option for extracting tables and layout.
 **Kind:** tech
@@ -698,6 +858,16 @@ Reach for it when the deployment already runs OpenSearch, or when the corpus is 
 It is built on `pdfminer.six` and exposes the page as geometry: every character with its font, size and bounding box, plus the lines and rectangles drawn on it. Table extraction follows from that primitive, since the default strategy infers a grid from ruling lines and a borderless table needs the text strategy or explicit column positions instead. Cropping a page to a region before extracting is how you reliably pull one repeated block out of a standard-format document.
 
 Reach for it when the answer depends on layout, such as financial statements, invoices and forms where a number only means something in relation to its column heading. It reads the text layer only, so scanned documents need OCR first, and it is slow, being pure Python over character-level objects and easily an order of magnitude behind `PyMuPDF`, which is the better choice when you simply want the text of a large corpus quickly.
+
+### PPL
+**Short:** OpenSearch's Piped Processing Language: a source command then a chain of pipes, the fork's answer to ES|QL and not compatible with it.
+**Kind:** spec
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/logging @2
+
+A query starts with `source=` naming an index and then pipes through commands such as `where`, `fields`, `stats` and `sort`, with the left-to-right reading model a log-analysis language usually has. It is served by its own plugin endpoint and surfaced through the Query Workbench in OpenSearch Dashboards, alongside the SQL interface that shares the same plugin lineage.
+
+It matters most as a portability fact. The two engines forked before either piped language existed, so a dashboard, saved query or runbook written in one does not run on the other, and no compatibility layer changes that. If a migration between Elasticsearch and OpenSearch is on the table, the piped queries are the part that gets rewritten by hand.
 
 ### PyMuPDF
 **Short:** Fast Python PDF library extracting text, layout and embedded images; the usual parser feeding a RAG corpus.
@@ -745,6 +915,16 @@ The stack is a sequence of decisions and each one is a place quality leaks away:
 
 Reach for retrieval rather than fine-tuning when the knowledge changes, when provenance is required, or when access control must follow the user. The costs are an ingestion pipeline to keep in sync with the source, an index to operate, and an evaluation set you have to build yourself. For a small stable corpus that fits in a long context window, putting the documents in the prompt is simpler and often better.
 
+### Rally
+**Short:** Elastic's official macrobenchmark harness for Elasticsearch, driving published tracks of real corpora and operations.
+**Kind:** tech
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, devtools/testing-and-mocking @2, observability/profiling-and-performance @3
+
+A track bundles a document corpus, an index mapping and a sequence of challenges — bulk indexing, then query mixes at declared throughputs — and Rally drives them from a separate load-driver host, reports service time and latency as distinct numbers, and can persist every run in a results store so two runs can be compared rather than remembered. The published tracks exist so that two people's numbers mean the same thing, and Elastic uses them for its own nightly benchmarks.
+
+Reach for it before a sizing or configuration argument turns into a decision, and run it against your own corpus rather than only the shipped tracks, because synthetic documents do not reproduce your analysis chain, field count or merge behaviour. The classic mistake is running the load driver on a cluster node, which measures the two systems competing for the same CPU.
+
 ### rank_bm25
 **Short:** Small pure-Python BM25 implementation for in-memory sparse keyword retrieval over a document collection.
 **Kind:** tech
@@ -771,6 +951,16 @@ It is in core since Redis 8 rather than a module, which removed the old question
 **Lang:** java
 **Roles:** search-retrieval/rag-and-document-processing @1
 
+### rrf retriever
+**Short:** Elasticsearch retriever that fuses several ranked result lists by reciprocal rank, combining lexical and vector hits in one request.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/reranking @2
+
+Retrievers nest, so an `rrf` retriever takes a list of child retrievers — typically a standard BM25 query and a `knn` vector search — runs each of them, and scores every document by summing one over the rank constant plus its rank in each list it appears in. Because it consumes ranks rather than scores, it sidesteps the fact that a BM25 score and a cosine similarity are not on the same scale and cannot be added or weighted without calibration.
+
+Reach for it as the default first attempt at hybrid search: it needs no tuning beyond the rank constant and the per-retriever window, and it is one request instead of an application-side merge. Its limitation is the flip side of its strength — discarding the scores also discards confidence, so a document ranked first by a barely-matching lexical query counts for as much as a strong dense hit.
+
 ### ScaNN
 **Short:** Google's approximate nearest-neighbour library, tuned for the best recall-per-QPS at billion-vector scale.
 **Kind:** tech
@@ -788,6 +978,16 @@ ScaNN's distinguishing idea is anisotropic vector quantization: it learns a quan
 The repository holds the training and inference code plus the fine-tuned models from the Self-RAG paper. The idea is to teach a model to emit special reflection tokens during generation: whether retrieval is needed for this segment at all, whether a retrieved passage is relevant, whether the sentence just generated is actually supported by it, and how useful the overall response is. Critique therefore becomes part of decoding rather than a separate judging call, and the decoder can weigh candidate continuations by those token probabilities.
 
 It is worth studying for the mechanism rather than the checkpoints: adaptive retrieval that skips the retriever for questions not needing it, and discards passages that do not help. Running it as published means adopting a fine-tuned base model, which is why most production systems reproduce the behaviour with prompted grader steps in a graph-structured pipeline instead of with specialised tokens.
+
+### semantic_text
+**Short:** Elasticsearch field type that performs chunking, embedding inference and retrieval for you behind a single mapping declaration.
+**Kind:** api
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/rag-and-document-processing @2
+
+Mapping a field as `semantic_text` and pointing it at an inference endpoint moves the whole pipeline inside the cluster: on index, the text is chunked and each chunk embedded by the referenced model; on query, the query string is embedded the same way and matched against those chunks, with the matching chunk available in the response. There is no ingest pipeline to write and no client-side embedding step to keep in step with the index.
+
+Reach for it when you want semantic search without owning an embedding pipeline, and accept that the defaults — chunking strategy and chunk size in particular — now live in the mapping rather than in your code. Changing the model or the chunking means reindexing, which is the standing cost of letting the store own the transform.
 
 ### sentence-transformers
 **Short:** Library for sentence/document embeddings and cross-encoder rerankers, with pooling, training and evaluation built in.

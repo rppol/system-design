@@ -831,6 +831,13 @@ TECH_LABELS = {
     "browser-use": "browser-use",
     "byte buddy": "Byte Buddy",
     "cdk": "AWS CDK",
+    # PINNED, not cosmetic. "Lucene" and "Apache Lucene" are the same key, and the display
+    # name is VOTED over surface forms with shortest-wins-ties -- so the tie that used to
+    # resolve to "Lucene" flipped the moment database/elasticsearch_internals added a third
+    # "Apache Lucene" citation. A flipped display name stops matching the `### Lucene`
+    # heading in search-retrieval.md, and the record silently becomes an orphan while the
+    # tool is still taught. Pin every name whose bank record could lose this vote.
+    "lucene": "Lucene",
     "claude": "Claude",
     "cloudformation": "AWS CloudFormation",
     "cloudwatch": "AWS CloudWatch",

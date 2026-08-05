@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 286 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 288 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -424,6 +424,16 @@ Reach for it when a plan runs to more than a handful of nodes and you want the e
 **Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
 
 You feed it an `.hprof` heap dump -- from `jmap`, `jcmd GC.heap_dump`, or `-XX:+HeapDumpOnOutOfMemoryError` -- and it builds the object graph offline, so the analysis costs your machine rather than the sick JVM. The dominator tree is the reason to reach for it: it attributes retained heap, everything that would be freed if an object went away, up to the single object keeping a subtree alive, which turns "the heap is full of byte arrays" into "this one cache field retains 1.4 GB". Leak Suspects produces that report automatically, and OQL lets you query the dump in SQL-like syntax once you know what to look for. Use it for a leak or an OOM post-mortem; for allocation-rate problems a sampling profiler such as async-profiler is the right tool, because a dump is one instant and not a trend.
+
+### Elastic Agent
+**Short:** Single Elastic-managed binary that ships logs, metrics and traces, with per-integration collection pushed to it from Fleet.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/logging @1, observability/metrics-and-monitoring @2, observability/tracing-apm-and-llm-observability @3
+
+One agent replaces the per-signal Beats: you install it once per host, then add integrations centrally, and the agent supervises the underlying collectors and the APM inputs as sub-processes rather than requiring a separate daemon for each signal. Its policy — which integrations run, with what settings — lives in Fleet inside Kibana and is pulled by the agent, so onboarding a new data source is a change in the UI rather than a configuration file rolled out by hand.
+
+Reach for it when you run the Elastic stack and want central control of what every host collects, especially across a fleet large enough that editing per-host YAML is the actual bottleneck. Standalone mode exists and keeps the single-binary benefit without Fleet, at the cost of going back to managing that configuration yourself.
 
 ### ELK Stack
 **Short:** Elasticsearch plus Logstash and Kibana: ships, indexes, searches and dashboards centralized application logs.
@@ -1208,6 +1218,16 @@ Seeing into C and C++ extensions is what distinguishes it, since memory held by 
 It goes beyond a single-command loop: a configurable read-to-write ratio, a key pattern that can be sequential or random or Gaussian over a declared range, several threads each with many connections, a data size distribution, pipeline depth, and cluster and TLS support. That combination is what makes a result resemble an application rather than a microbenchmark.
 
 Reach for it when sizing an instance or comparing engines, where the shape of the load decides the answer. The key pattern is the setting that matters most and is most often left alone: hammering one key measures a CPU cache, not a database, and a uniform pattern over a huge range measures memory bandwidth rather than a realistic hit rate.
+
+### Metricbeat
+**Short:** Lightweight Elastic shipper that polls system and service metrics on a schedule and forwards them to Elasticsearch.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1, observability/logging @3
+
+Modules are per-target collectors — system, Docker, Kubernetes, nginx, PostgreSQL, Redis and dozens more — and each module's metricsets are polled at a configured period, enriched with host and cloud metadata, and shipped to Elasticsearch or Logstash. Many modules bring dashboards and index templates with them, so enabling one yields working visualisations rather than raw fields.
+
+It is the pull-based counterpart to Filebeat's tail, and both are being folded into Elastic Agent, which runs the same collection under central management. Reach for Metricbeat directly when you want one small binary with one job and no Fleet dependency; choose Elastic Agent when a fleet of hosts needs its collection managed centrally.
 
 ### Micrometer
 **Short:** Vendor-neutral JVM metrics facade; one instrumentation API exporting to Prometheus, Datadog, CloudWatch and others.

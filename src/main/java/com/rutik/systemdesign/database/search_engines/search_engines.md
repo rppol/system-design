@@ -210,9 +210,12 @@ Shard sizing:
   Warning triggered: > 1000 shards per node
 
 Routing:
-  shard = hash(document_id) % number_of_primary_shards
-  → Primary shards fixed at index creation (cannot change without reindex)
-  → Change shard count: create new index + reindex API
+  routing_factor = index.number_of_routing_shards / index.number_of_shards
+  shard = (Murmur3(_routing) % number_of_routing_shards) / routing_factor
+  → collapses to hash(_id) % shards when routing_shards == shards
+  → _split (multiples) and _shrink (factors) change the primary count with no
+    reindex, bounded by number_of_routing_shards, which is creation-only
+  → Only a mapping type change genuinely needs create-new-index + reindex
 ```
 
 **Stated plainly.** "Shard count is not a performance dial you tune later — it is a
@@ -221,7 +224,10 @@ Lucene is happiest."
 
 The routing line is the reason it is permanent. `hash(id) % shards` sends a document to a
 shard determined by the shard *count*; change the count and every existing document's hash
-now points somewhere else, so the only way forward is a full reindex.
+now points somewhere else — so the only ways forward are a `_split` or `_shrink` within the
+routing-shard budget fixed at creation, or a full reindex. See
+[Elasticsearch Internals](../elasticsearch_internals/elasticsearch_internals.md) for the
+routing-factor arithmetic.
 
 | Symbol | What it is |
 |--------|------------|
@@ -293,7 +299,7 @@ Warm tier: SSDs, searchable but no new writes
 
 Cold tier: cheaper storage, searchable but slower
   Allocate replicas=0 (lower overhead, less critical)
-  Freeze: unload index from heap, load segments on demand
+  Mount as a full-copy searchable snapshot; the snapshot in object storage is the redundancy
 
 Frozen tier: object storage (S3, GCS)
   Index cached in local cache on access, unloaded after
@@ -370,7 +376,7 @@ Always put non-relevance predicates (date ranges, term filters, status) in `filt
 Aggregation types:
 - `terms`: bucket documents by field value (equivalent to GROUP BY)
 - `date_histogram`: time-based bucketing
-- `cardinality`: HyperLogLog-based distinct count (~3-5% error at precision_threshold=40000)
+- `cardinality`: HyperLogLog++ distinct count — `precision_threshold` defaults to 3000 (1-2% error at 100k distinct); the maximum 40000 gives ~0.4% error at 1M distinct, costing ~320 KB per shard per aggregation
 - `percentiles`: p50, p95, p99 percentile computation
 - `nested`/`reverse_nested`: aggregations on nested objects
 
@@ -455,11 +461,18 @@ POST /my-index/_forcemerge?max_num_segments=1
 → Merges ALL segments into ONE large segment
 → Maximum search performance (one segment = one sequential scan)
 → Expensive I/O during merge; should only run on warm/cold tiers
-→ NOT suitable for indexes receiving writes (cancels merge benefits immediately)
+→ NEVER on an index still receiving writes, and the damage is permanent, not
+  temporary: a merged segment above index.merge.policy.max_merged_segment
+  (default 5gb) is excluded from every future merge, so its deleted documents
+  are never reclaimed and its disk stays occupied for the life of the index
 
 Segment count monitoring:
 GET /_cat/indices?v&h=index,segments.count,store.size
 ```
+
+See [Elasticsearch Internals](../elasticsearch_internals/elasticsearch_internals.md) for
+`TieredMergePolicy`, the 5 GB ceiling, and why a force-merged live index can never reclaim
+its deletes.
 
 ### The Deep Pagination Problem
 
@@ -609,7 +622,7 @@ The application only ever queries the `products` alias; a single `_aliases` call
 
 | Feature | Elasticsearch | PostgreSQL Full-Text | Solr |
 |---------|--------------|---------------------|------|
-| Relevance ranking | Excellent (BM25, scripted) | Good (tsvector + rank_cd) | Excellent (BM25, BM42) |
+| Relevance ranking | Excellent (BM25, LTR, ELSER, RRF) | Good (tsvector + rank_cd) | Excellent (BM25, function queries, LTR) |
 | Scale | Excellent (horizontal) | Limited (vertical) | Excellent (horizontal) |
 | Real-time indexing | NRT (1s refresh) | Immediate | NRT (~1s) |
 | Complex aggregations | Excellent | Limited | Excellent |

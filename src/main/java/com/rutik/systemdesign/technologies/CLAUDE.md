@@ -25,8 +25,19 @@ duplicating it here. Examples: Kafka is owned by
 [`ml/mlflow_deep_dive`](../ml/mlflow_deep_dive/mlflow_deep_dive.md) — do not add
 `technologies/mlflow`; FAISS is owned by
 [`llm/faiss_deep_dive`](../llm/faiss_deep_dive/faiss_deep_dive.md) — do not add
-`technologies/faiss`. This section is for technologies that don't already have a
-canonical home — an orchestrator like Airflow or an inference server like Triton has
+`technologies/faiss`; Redis is owned by
+[`database/redis_internals`](../database/redis_internals/redis_internals.md) — do not add
+`technologies/redis`; RabbitMQ is owned by
+[`backend/rabbitmq_deep_dive`](../backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md) — do not
+add `technologies/rabbitmq`; Elasticsearch is owned by
+[`database/elasticsearch_internals`](../database/elasticsearch_internals/elasticsearch_internals.md)
+— do not add `technologies/elasticsearch`; PyTorch is owned by
+[`ml/pytorch_deep_dive`](../ml/pytorch_deep_dive/pytorch_deep_dive.md) — do not add
+`technologies/pytorch`; OpenTelemetry is owned by
+[`devops/observability_tracing_and_otel/opentelemetry_deep_dive.md`](../devops/observability_tracing_and_otel/opentelemetry_deep_dive.md)
+— a deep-dive SUB-FILE, not a module, because the parent module is already named for it —
+so do not add `technologies/opentelemetry`. This section is for technologies that don't
+already have a canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 
 **Naming convention:** `<vendor>_<product>`, lowercase snake_case. Disambiguate

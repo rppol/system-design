@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 30 Modules (7 Phases)
+## Module List — 31 Modules (7 Phases)
 
 ### Phase 1 — Foundations
 
@@ -35,6 +35,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the eight eviction policies + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, Redis 8 vs Valkey 9 |
 | `wide_column_databases/` | Advanced | 13 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
 | `search_engines/` | Advanced | 13 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
+| `elasticsearch_internals/` | Expert | 38 | Lucene segments and file extensions, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 norms, per-shard IDF, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ — the PRODUCT internals; the category lives in `search_engines/` |
 | `graph_databases/` | Intermediate | 11 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
 | `time_series_databases/` | Intermediate | 12 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 
@@ -76,7 +77,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 30 modules — the 7-phase order in
+`README.md` documents the **Full Path** (all 31 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
 **Senior** (20 modules) and **Principal** (13). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
@@ -141,7 +142,7 @@ and a 6-week Study Plan (prose; no path impact).
 | Redis | 8.10 (2026) |
 | Valkey | 9.1 (2026) |
 | Cassandra | 5.0 (2024) |
-| Elasticsearch | 9.x (2025+) |
+| Elasticsearch | 9.5 (2026), Lucene 10.5 — OpenSearch 3.7, forked at 7.10.2 |
 | ClickHouse | 26.x (2026) |
 
 ---

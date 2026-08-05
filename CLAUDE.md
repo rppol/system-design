@@ -9,14 +9,14 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **LLD** | Design patterns (GoF), SOLID, anti-patterns | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
 | **Backend** | Networking, API design, performance, resilience, security, microservices — 34 modules, 5 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
-| **Database** | Relational, NoSQL, distributed DB, production ops — 30 modules, 6 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
+| **Database** | Relational, NoSQL, distributed DB, production ops — 31 modules, 6 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
 | **Java** | Pure Java senior-engineer guide — 33 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
 | **Spring** | Spring Framework guide — 39 modules, 9 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
 | **Python** | Pure Python senior-engineer guide — 21 modules, 0 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
 | **FastAPI** | FastAPI + ASGI production guide — 19 modules, 6 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
-| **ML** | Machine Learning guide — 46 modules, 24 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
+| **ML** | Machine Learning guide — 47 modules, 24 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
 | **LLM** | LLM engineering guide — 54 modules, 29 case studies, 85 deep-dive sub-files (75 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
-| **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
+| **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies, 1 deep-dive sub-file | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium) — 7 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
