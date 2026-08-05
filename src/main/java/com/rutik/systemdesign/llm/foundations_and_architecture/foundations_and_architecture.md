@@ -1,10 +1,5 @@
 # Foundations & Architecture
 
-<!-- study-paths
-senior: foundations_and_architecture.md, attention_mechanisms.md, positional_encoding.md, state_space_models_and_linear_attention.md
-principal: foundations_and_architecture.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

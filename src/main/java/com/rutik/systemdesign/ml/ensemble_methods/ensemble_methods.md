@@ -1,9 +1,5 @@
 # Ensemble Methods
 
-<!-- study-paths
-senior: ensemble_methods.md, random_forests.md, gradient_boosting.md, xgboost_lightgbm.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Sub-Files
 
 | File | Topic |

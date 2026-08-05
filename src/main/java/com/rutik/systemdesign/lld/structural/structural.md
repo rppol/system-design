@@ -1,10 +1,5 @@
 # Structural Patterns
 
-<!-- study-paths
-senior: structural.md, adapter/adapter.md, decorator/decorator.md, proxy/proxy.md, facade/facade.md, composite/composite.md
-principal: structural.md, bridge/bridge.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 Structural patterns deal with object composition — how classes and objects are combined to form larger, more capable structures. They answer the question: "How do these pieces fit together?"
 
 ---

@@ -1,9 +1,5 @@
 # Containers & Docker
 
-<!-- study-paths
-senior: containers_and_docker.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
 Containers package an application with its dependencies into a portable, immutable image that runs identically on a laptop, in CI, and in production. Docker popularized the workflow, but the value is in understanding what an image *is* (layered, content-addressed), how builds cache, and how to produce small, secure, reproducible images — the artifacts every Kubernetes pod ultimately runs.

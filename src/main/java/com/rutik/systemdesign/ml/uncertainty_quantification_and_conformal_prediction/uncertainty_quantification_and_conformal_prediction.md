@@ -1,9 +1,5 @@
 # Uncertainty Quantification and Conformal Prediction
 
-<!-- study-paths
-principal: uncertainty_quantification_and_conformal_prediction.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 7 (Advanced Topics). This module covers how to make a model say "I don't know":
 > aleatoric vs epistemic uncertainty, MC dropout, deep ensembles, and conformal prediction
 > (distribution-free prediction sets/intervals with coverage guarantees). It extends the

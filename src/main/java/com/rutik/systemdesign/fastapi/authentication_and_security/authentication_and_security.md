@@ -1,10 +1,5 @@
 # Authentication and Security
 
-<!-- study-paths
-senior: authentication_and_security.md
-principal: authentication_and_security.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Authentication and security in FastAPI covers the full stack of mechanisms for verifying identity and authorizing requests: OAuth2 password flow, JWT issuance and validation, password hashing, refresh token rotation, scope-based authorization, API key schemes, OIDC integration, CSRF protection, and token blacklisting.

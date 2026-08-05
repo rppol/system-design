@@ -1,10 +1,5 @@
 # Production Deployment and Scaling
 
-<!-- study-paths
-senior: production_deployment_and_scaling.md
-principal: production_deployment_and_scaling.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

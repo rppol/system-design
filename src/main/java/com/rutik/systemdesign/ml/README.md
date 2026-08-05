@@ -293,6 +293,172 @@ For interview preparation specifically, the curated subset in the next section i
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+linear_algebra_and_calculus
+  linear_algebra_and_calculus.md  -
+probability_and_statistics
+  probability_and_statistics.md  senior
+optimization_theory
+  optimization_theory.md  senior
+information_theory
+  information_theory.md  senior
+supervised_learning
+  supervised_learning.md      senior
+  linear_models.md            senior
+  decision_trees.md           senior
+  bayesian_methods.md         -
+  support_vector_machines.md  -
+ensemble_methods
+  ensemble_methods.md       senior
+  random_forests.md         senior
+  gradient_boosting.md      senior
+  xgboost_lightgbm.md       senior
+  stacking_and_blending.md  -
+unsupervised_learning
+  unsupervised_learning.md     senior
+  gaussian_mixtures_and_em.md  -
+feature_engineering
+  feature_engineering.md  senior
+model_evaluation_and_selection
+  model_evaluation_and_selection.md  senior
+  automl_and_nas.md                  -
+imbalanced_data_and_leakage_traps
+  imbalanced_data_and_leakage_traps.md  senior, principal
+neural_network_fundamentals
+  neural_network_fundamentals.md  senior
+convolutional_neural_networks
+  convolutional_neural_networks.md  senior
+recurrent_neural_networks
+  recurrent_neural_networks.md  -
+training_deep_networks
+  training_deep_networks.md  senior
+pytorch_deep_dive
+  pytorch_deep_dive.md  senior, principal
+generative_models
+  generative_models.md  -
+computer_vision
+  computer_vision.md         -
+  image_segmentation.md      -
+  object_detection.md        -
+  self_supervised_vision.md  -
+  vision_transformers.md     -
+natural_language_processing
+  natural_language_processing.md        senior
+  text_classification.md                senior
+  bert_and_pretrained_models.md         senior
+  attention_and_seq2seq.md              -
+  language_modeling.md                  -
+  nlp_evaluation_and_metrics.md         -
+  sequence_labeling_and_crf.md          -
+  syntactic_parsing.md                  -
+  text_representation_and_retrieval.md  -
+  tokenization_deep_dive.md             -
+  topic_modeling.md                     -
+  word_embeddings.md                    -
+recommender_systems
+  recommender_systems.md          senior, principal
+  collaborative_filtering.md      senior
+  retrieval_and_ranking.md        senior, principal
+  deep_learning_recommenders.md   senior
+  online_learning_and_bandits.md  principal
+  content_and_hybrid.md           -
+information_retrieval_and_search
+  information_retrieval_and_search.md  senior
+speech_and_audio_ml
+  speech_and_audio_ml.md  -
+multi_task_and_multi_objective_learning
+  multi_task_and_multi_objective_learning.md  principal
+time_series_forecasting
+  time_series_forecasting.md  -
+anomaly_detection
+  anomaly_detection.md  -
+reinforcement_learning
+  reinforcement_learning.md  -
+ml_system_design
+  ml_system_design.md                     senior, principal
+  design_framework.md                     senior, principal
+  feature_store_design.md                 senior, principal
+  training_pipeline_design.md             senior
+  ab_testing_for_ml.md                    senior, principal
+  latency_and_throughput_optimization.md  senior
+  classical_ml_vs_llm.md                  principal
+data_pipelines_and_processing
+  data_pipelines_and_processing.md  senior
+distributed_training
+  distributed_training.md  senior
+experiment_tracking_and_versioning
+  experiment_tracking_and_versioning.md  senior
+mlflow_deep_dive
+  mlflow_deep_dive.md  senior
+gpu_and_hardware_optimization
+  gpu_and_hardware_optimization.md  -
+active_learning_and_weak_supervision
+  active_learning_and_weak_supervision.md  principal
+  semi_supervised_learning.md              -
+model_serving_and_inference
+  model_serving_and_inference.md  senior
+model_compression_and_efficiency
+  model_compression_and_efficiency.md  senior
+monitoring_and_drift_detection
+  monitoring_and_drift_detection.md  senior, principal
+mlops_and_ci_cd
+  mlops_and_ci_cd.md  senior, principal
+graph_neural_networks
+  graph_neural_networks.md  -
+self_supervised_and_contrastive_learning
+  self_supervised_and_contrastive_learning.md  -
+meta_learning_and_few_shot
+  meta_learning_and_few_shot.md  -
+causal_inference_and_ml
+  causal_inference_and_ml.md  principal
+adversarial_ml_and_robustness
+  adversarial_ml_and_robustness.md  principal
+privacy_preserving_ml
+  privacy_preserving_ml.md  principal
+interpretability_and_explainability
+  interpretability_and_explainability.md  senior, principal
+fairness_and_responsible_ai
+  fairness_and_responsible_ai.md  principal
+uncertainty_quantification_and_conformal_prediction
+  uncertainty_quantification_and_conformal_prediction.md  principal
+ml_interview_patterns
+  ml_interview_patterns.md  senior, principal
+model_selection_and_algorithm_choice
+  model_selection_and_algorithm_choice.md  principal
+case_studies
+  design_churn_prediction.md               senior
+  design_image_classification_pipeline.md  senior
+  design_search_ranking.md                 senior
+  design_recommendation_engine.md          senior
+  design_real_time_personalization.md      senior
+  design_ads_click_prediction.md           senior
+  design_eta_prediction.md                 senior
+  design_demand_forecasting.md             senior
+  design_fraud_detection.md                senior
+  design_nlp_classification_pipeline.md    senior
+  design_semantic_search_engine.md         senior
+  design_ml_platform.md                    senior, principal
+  design_credit_risk_scoring.md            principal
+  design_customer_ltv_prediction.md        principal
+  design_content_feed_ranking.md           principal
+  design_video_recommendation.md           principal
+  design_marketplace_matching.md           principal
+  design_harmful_content_detection.md      principal
+  design_autonomous_driving_perception.md  principal
+  design_multi_touch_attribution.md        principal
+  design_dynamic_pricing.md                principal
+  design_anomaly_detection.md              -
+  design_ner_pipeline.md                   -
+  design_question_answering_system.md      -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 47 modules from the math spine to production ML and the research frontier. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

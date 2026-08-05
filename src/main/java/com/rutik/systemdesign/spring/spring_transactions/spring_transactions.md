@@ -1,10 +1,5 @@
 # Spring Transactions — Deep Dive
 
-<!-- study-paths
-senior: spring_transactions.md
-principal: spring_transactions.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

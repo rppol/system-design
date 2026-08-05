@@ -1,9 +1,5 @@
 # Streams, Events & Concurrency
 
-<!-- study-paths
-senior: streams_events_and_concurrency.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A CUDA **stream** is an ordered queue of GPU operations — kernel launches, memory copies,

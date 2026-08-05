@@ -1,9 +1,5 @@
 # FastAPI Fundamentals & ASGI
 
-<!-- study-paths
-senior: fastapi_fundamentals_asgi.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

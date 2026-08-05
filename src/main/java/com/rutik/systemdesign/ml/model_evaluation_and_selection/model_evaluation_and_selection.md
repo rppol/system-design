@@ -1,9 +1,5 @@
 # Model Evaluation and Selection
 
-<!-- study-paths
-senior: model_evaluation_and_selection.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Model evaluation measures how well a trained model generalizes to unseen data. Model selection chooses among competing algorithms and hyperparameter configurations. Together they answer: "is this model good enough to deploy, and which version should we ship?"

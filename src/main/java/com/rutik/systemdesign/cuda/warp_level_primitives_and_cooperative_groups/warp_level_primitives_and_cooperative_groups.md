@@ -1,9 +1,5 @@
 # Warp-Level Primitives & Cooperative Groups
 
-<!-- study-paths
-senior: warp_level_primitives_and_cooperative_groups.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Every optimization technique studied so far in Phase 3 — coalescing, shared-memory tiling,

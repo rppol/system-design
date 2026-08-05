@@ -1,9 +1,5 @@
 # Parallel Patterns: Reduction, Scan, Histogram
 
-<!-- study-paths
-senior: parallel_patterns_reduction_scan_histogram.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Reduction, scan (prefix sum), and histogram are the three **canonical data-parallel

@@ -1,9 +1,5 @@
 # gRPC and Protocol Buffers in Java
 
-<!-- study-paths
-principal: grpc_protobuf.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > How gRPC actually works on the wire and in the generated Java stubs: the protobuf
 > binary format and its schema-evolution rules, the four RPC modes, interceptors,
 > deadlines/cancellation, the `Status` error model, and the HTTP/2 transport that

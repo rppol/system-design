@@ -1,10 +1,5 @@
 # Microservices Architecture — High-Level Design
 
-<!-- study-paths
-senior: microservices.md
-principal: microservices.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

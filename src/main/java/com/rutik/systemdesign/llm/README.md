@@ -338,6 +338,229 @@ decoding) adjacently, both contrasted against the dense-autoregressive default.
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+foundations_and_architecture
+  foundations_and_architecture.md             senior, principal
+  attention_mechanisms.md                     senior
+  positional_encoding.md                      senior
+  state_space_models_and_linear_attention.md  senior
+  training_dynamics.md                        -
+tokenization_and_embeddings
+  tokenization_and_embeddings.md    senior
+  byte_level_and_tokenizer_free.md  -
+embeddings_and_similarity_search
+  embeddings_and_similarity_search.md  senior
+faiss_deep_dive
+  faiss_deep_dive.md  senior
+pre_training
+  pre_training.md  senior
+training_infrastructure
+  training_infrastructure.md  -
+synthetic_data_generation
+  synthetic_data_generation.md  -
+fine_tuning
+  fine_tuning.md         senior, principal
+  lora.md                senior, principal
+  qlora.md               senior
+  peft_methods.md        senior
+  instruction_tuning.md  senior
+  domain_adaptation.md   principal
+alignment_and_rlhf
+  alignment_and_rlhf.md  senior, principal
+  grpo_and_rlvr.md       senior
+constitutional_ai
+  constitutional_ai.md  -
+prompt_engineering
+  prompt_engineering.md  senior
+rag_fundamentals
+  rag_fundamentals.md     senior, principal
+  chunking_strategies.md  senior
+  embedding_models.md     senior, principal
+  retrieval_methods.md    senior, principal
+  reranking.md            senior, principal
+advanced_rag
+  advanced_rag.md          senior, principal
+  agentic_rag.md           senior, principal
+  graph_rag.md             senior, principal
+  multimodal_rag.md        senior
+  query_transformation.md  senior
+  corrective_rag.md        -
+  self_rag.md              -
+context_engineering
+  context_engineering.md  senior, principal
+reasoning_models
+  reasoning_models.md  senior, principal
+code_generation
+  code_generation.md  -
+agents_and_tool_use
+  agents_and_tool_use.md                senior, principal
+  function_calling_and_tool_design.md   senior
+  react_and_reasoning_patterns.md       senior
+  plan_and_execute.md                   senior
+  agent_memory.md                       senior
+  agent_reliability.md                  senior
+  agent_evaluation_and_benchmarking.md  senior, principal
+  tool_selection_at_scale.md            senior, principal
+  sandboxed_code_execution.md           senior, principal
+  subagents_and_delegation.md           senior, principal
+  durable_long_running_agents.md        senior, principal
+  agent_cost_and_token_budget.md        principal
+  agent_ux_patterns.md                  -
+  computer_use_and_browser_agents.md    -
+  reflexion_and_self_correction.md      -
+  tree_of_thoughts_for_agents.md        -
+agentic_workflow_patterns
+  agentic_workflow_patterns.md  senior, principal
+agentic_frameworks
+  agentic_frameworks.md                 principal
+  autogen.md                            -
+  claude_agent_sdk.md                   -
+  crewai.md                             -
+  dspy.md                               -
+  framework_observability.md            -
+  google_adk.md                         -
+  haystack.md                           -
+  langchain_and_lcel.md                 -
+  langgraph.md                          -
+  litellm_routing.md                    -
+  llamaindex.md                         -
+  mastra_typescript.md                  -
+  openai_agents_sdk.md                  -
+  pydantic_ai.md                        -
+  semantic_kernel.md                    -
+  smolagents.md                         -
+  strands_aws.md                        -
+  structured_outputs_and_instructor.md  -
+multi_agent_systems
+  multi_agent_systems.md              senior, principal
+  orchestrator_worker_pattern.md      senior, principal
+  multi_agent_security.md             senior, principal
+  agent_to_agent_protocols.md         principal
+  agent_debate_and_consensus.md       -
+  agentic_commerce_and_payments.md    -
+  chatdev_and_software_simulation.md  -
+  magentic_one_and_autogen_v04.md     -
+  openai_swarm_and_handoffs.md        -
+mcp_model_context_protocol
+  mcp_model_context_protocol.md    senior, principal
+  mcp_server_building.md           senior
+  mcp_transports_and_jsonrpc.md    senior
+  mcp_security.md                  senior, principal
+  mcp_registries_and_ecosystem.md  principal
+  mcp_client_patterns.md           -
+coding_agents
+  coding_agents.md  -
+voice_agents
+  voice_agents.md  -
+browser_agents_deep_dive
+  browser_agents_deep_dive.md  -
+inference_and_decoding
+  inference_and_decoding.md                       senior, principal
+  kv_cache_optimization.md                        senior, principal
+  speculative_decoding.md                         senior
+  sampling_and_decoding_strategies.md             senior
+  constrained_decoding_and_structured_outputs.md  senior
+context_windows_and_long_context
+  context_windows_and_long_context.md  senior
+inference_engines
+  inference_engines.md  senior, principal
+vllm_deep_dive
+  vllm_deep_dive.md  senior
+optimization_and_quantization
+  optimization_and_quantization.md  senior, principal
+  gpu_architecture_and_roofline.md  senior, principal
+knowledge_distillation_and_model_merging
+  knowledge_distillation_and_model_merging.md  principal
+deployment_and_mlops
+  deployment_and_mlops.md  senior, principal
+llm_caching
+  llm_caching.md  senior, principal
+llm_observability_and_monitoring
+  llm_observability_and_monitoring.md  senior, principal
+llm_ops_platforms
+  llm_ops_platforms.md  -
+token_economics_and_cost_optimization
+  token_economics_and_cost_optimization.md  senior, principal
+llm_routing_and_model_selection
+  llm_routing_and_model_selection.md  principal
+prompt_management_and_promptops
+  prompt_management_and_promptops.md  principal
+evaluation_and_benchmarks
+  evaluation_and_benchmarks.md  senior, principal
+error_analysis_and_eval_design
+  error_analysis_and_eval_design.md  senior, principal
+llm_testing_strategies
+  llm_testing_strategies.md  senior
+guardrails_and_content_safety
+  guardrails_and_content_safety.md        senior, principal
+  guardrail_evaluation_and_operations.md  senior, principal
+safety_and_alignment
+  safety_and_alignment.md            senior, principal
+  automated_jailbreak_algorithms.md  -
+mechanistic_interpretability
+  mechanistic_interpretability.md  -
+llm_security
+  llm_security.md                 senior, principal
+  privacy_and_data_governance.md  senior, principal
+ai_regulations_and_compliance
+  ai_regulations_and_compliance.md  principal
+multimodal_models
+  multimodal_models.md  -
+vision_language_models
+  vision_language_models.md  -
+vla_and_robotics_foundation_models
+  vla_and_robotics_foundation_models.md  -
+small_language_models_and_edge_ai
+  small_language_models_and_edge_ai.md  -
+mixture_of_experts
+  mixture_of_experts.md  senior
+diffusion_language_models
+  diffusion_language_models.md  -
+ai_applications
+  ai_applications.md  -
+llm_ecosystem_and_landscape
+  llm_ecosystem_and_landscape.md  principal
+data_flywheels_and_continuous_learning
+  data_flywheels_and_continuous_learning.md  principal
+case_studies
+  design_chatgpt.md                     senior
+  design_rag_pipeline.md                senior
+  design_copilot.md                     senior
+  design_ai_search_engine.md            senior
+  design_notion_ai.md                   senior
+  design_customer_support_bot.md        senior
+  design_real_time_translation.md       senior
+  design_ai_content_moderation.md       senior, principal
+  design_ai_code_review.md              senior
+  design_ai_coding_assistant.md         senior
+  design_ai_data_analyst.md             senior
+  design_autonomous_swe_agent.md        senior, principal
+  design_browser_research_agent.md      senior
+  design_sales_ai_agent.md              senior
+  design_ai_meeting_assistant.md        senior
+  design_llm_gateway.md                 principal
+  design_gpu_inference_platform.md      principal
+  design_llm_fine_tuning_platform.md    principal
+  design_llm_eval_platform.md           principal
+  design_synthetic_data_platform.md     principal
+  design_legal_ai_platform.md           principal
+  design_medical_ai_scribe.md           principal
+  design_financial_research_agent.md    principal
+  design_ai_companion_platform.md       principal
+  design_avatar_video_platform.md       -
+  design_computer_use_agent.md          -
+  design_image_generation_platform.md   -
+  design_video_generation_platform.md   -
+  design_voice_cloning_tts_platform.md  -
+-->
 ## Learning Paths
 
 This section is deliberately exhaustive — 54 modules covering the full LLM lifecycle. That is the right

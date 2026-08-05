@@ -1,10 +1,5 @@
 # Performance & Tuning
 
-<!-- study-paths
-senior: performance_and_tuning.md, jmx_and_management.md
-principal: performance_and_tuning.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Java performance tuning is the discipline of identifying and eliminating bottlenecks in JVM-based applications. Unlike C/C++, Java engineers delegate memory management to the GC and compilation to the JIT — but this means understanding the JVM's behavior is essential to diagnose why a system is slow.

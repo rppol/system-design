@@ -1,10 +1,5 @@
 # LLM Security
 
-<!-- study-paths
-senior: llm_security.md, privacy_and_data_governance.md
-principal: llm_security.md, privacy_and_data_governance.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic |

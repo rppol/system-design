@@ -147,8 +147,7 @@ plus two curated tiers: **Senior** (8 modules) and **Principal** (8). They are d
 cuts, not nested depths — senior is the craft (write the pattern, spot the misuse),
 principal is the judgment (which decomposition at what cost, what you tell a team *not*
 to do), so equal module counts here hide genuinely different *file* lists. Membership is
-declared ONCE per module, in a `<!-- study-paths -->` block in that module's own page
-(`<module>.md`) naming the files each tier takes — and in `lld` that file list is the whole point: a
+ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — and in `lld` that file list is the whole point: a
 category module holds dozens of nested pattern pages, each named for its own folder
 (`singleton/singleton.md`, `factory_method/factory_method.md`, …), and before the markers existed a tiered category dragged
 in **every** one of them, so 7 modules shipped 62 sub-files, 90% of the section, in a path
@@ -195,3 +194,28 @@ chart, or curve/sketch). Generate and validate them with the
 (ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
 and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
 Diagrams".
+
+---
+
+## HARD RULE — structure lives in `README.md`, content files hold only content
+
+**The section `README.md` is the single source of truth for this section's file inventory
+and study-tier membership.** Its `<!-- study-paths -->` block lists EVERY module, EVERY
+file that module owns (the module page AND every deep-dive sub-file), and EVERY case
+study, each tagged with the tiers it belongs to — `-` means Full path only. Reading that
+one block tells you every file in the section and which paths it is on.
+
+**A content file carries NO structural metadata.** A module page or a deep-dive sub-file
+holds the content of its topic and nothing else — no `<!-- study-paths -->` block, no tier
+declaration, no path membership. That metadata used to live in each module page; it was
+moved here so there is one place to look and one place to change.
+
+**Adding a file? Add its line to the section README's block in the same commit.** A file on
+disk that is missing from the block — or listed there and absent from disk — FAILS
+`python3 game/extract.py --strict` and takes the Pages deploy red. That check exists
+because the old failure was silent: a new sub-file was invisible to the curated paths, or
+silently dragged into every tier its parent was in, with a green build either way.
+
+Order is never declared in the block: it comes from `STUDY_ORDER` in `game/app.js`. The
+tier TABLES further down the README are GENERATED from the block by
+`python3 game/extract.py --write-paths` — never hand-edit them.

@@ -1,9 +1,5 @@
 # Polyglot Persistence Patterns
 
-<!-- study-paths
-principal: polyglot_persistence_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Polyglot persistence is the architectural pattern of using multiple purpose-built databases within the same system, choosing the optimal storage engine for each data type and access pattern. The term was coined by Martin Fowler: "application databases should be chosen for the type of data they store and the access patterns." A social feed, a product catalog, a search index, and a session store each have different access patterns — no single database optimally serves all four.

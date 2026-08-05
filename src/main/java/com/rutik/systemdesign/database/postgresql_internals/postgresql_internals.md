@@ -1,9 +1,5 @@
 # PostgreSQL Internals
 
-<!-- study-paths
-senior: postgresql_internals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 PostgreSQL is a fully ACID-compliant, multi-process relational database with an extensible architecture. Understanding its internals — process model, VACUUM mechanics, query planner, replication, partitioning, and extensions — is essential for building high-throughput production systems and diagnosing performance issues.

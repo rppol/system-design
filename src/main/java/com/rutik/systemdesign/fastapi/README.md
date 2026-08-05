@@ -94,6 +94,63 @@ flowchart TD
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+fastapi_fundamentals_asgi
+  fastapi_fundamentals_asgi.md  senior
+pydantic_v2_deep_dive
+  pydantic_v2_deep_dive.md          senior
+  pydantic_core_and_performance.md  senior
+routing_and_request_handling
+  routing_and_request_handling.md  -
+dependency_injection_in_fastapi
+  dependency_injection_in_fastapi.md  senior
+  yield_dependencies_and_scopes.md    senior
+middleware_and_lifecycle
+  middleware_and_lifecycle.md  senior
+configuration_and_settings_management
+  configuration_and_settings_management.md  -
+async_database_sqlalchemy
+  async_database_sqlalchemy.md  senior, principal
+authentication_and_security
+  authentication_and_security.md  senior, principal
+error_handling_and_validation
+  error_handling_and_validation.md  senior, principal
+websockets_sse_and_streaming
+  websockets_sse_and_streaming.md  -
+background_jobs_and_task_queues
+  background_jobs_and_task_queues.md  senior, principal
+testing_fastapi
+  testing_fastapi.md  senior
+http_clients_and_external_apis
+  http_clients_and_external_apis.md  senior
+message_queues_and_event_driven
+  message_queues_and_event_driven.md  -
+production_deployment_and_scaling
+  production_deployment_and_scaling.md  senior, principal
+observability_and_monitoring
+  observability_and_monitoring.md  senior, principal
+caching_and_performance
+  caching_and_performance.md  senior
+api_design_and_versioning
+  api_design_and_versioning.md  principal
+security_hardening_and_owasp
+  security_hardening_and_owasp.md  principal
+case_studies
+  design_rate_limited_api_fastapi.md  senior
+  design_realtime_chat_fastapi.md     senior
+  design_async_task_queue.md          senior, principal
+  design_async_web_scraper.md         senior
+  design_ml_inference_api_fastapi.md  senior
+  design_multi_tenant_saas_api.md     principal
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 19 modules spanning the full FastAPI request lifecycle, from ASGI internals through production hardening. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

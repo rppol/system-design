@@ -1,9 +1,5 @@
 # Distributed System Operational Patterns
 
-<!-- study-paths
-principal: distributed_system_operational_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Operational patterns are proven architectural solutions for managing the operational challenges of distributed systems: isolating failures through resource partitioning (bulkhead), attaching reusable infrastructure capabilities alongside services (sidecar, ambassador), preventing legacy systems from polluting clean domain models (anti-corruption layer), incrementally migrating monoliths (strangler fig), correlating requests across services for debugging (correlation ID), centralizing runtime configuration (distributed configuration), and controlling feature exposure (feature flags).

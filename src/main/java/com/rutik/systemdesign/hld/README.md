@@ -166,6 +166,76 @@ See [case_studies/case_studies.md](case_studies/case_studies.md) for the full le
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+scalability
+  scalability.md  senior, principal
+load_balancing
+  load_balancing.md  senior
+caching
+  caching.md  senior
+database_design
+  database_design.md  senior
+cap_theorem
+  cap_theorem.md  senior, principal
+api_design
+  api_design.md  senior, principal
+message_queues
+  message_queues.md  senior
+rate_limiting
+  rate_limiting.md  senior
+cdn
+  cdn.md  senior
+consistent_hashing
+  consistent_hashing.md  senior
+database_sharding
+  database_sharding.md  senior, principal
+microservices
+  microservices.md  senior, principal
+distributed_transactions
+  distributed_transactions.md  senior, principal
+observability
+  observability.md  principal
+security_and_auth
+  security_and_auth.md  principal
+resilience_patterns
+  resilience_patterns.md  senior, principal
+consensus_algorithms
+  consensus_algorithms.md  principal
+event_sourcing_cqrs
+  event_sourcing_cqrs.md  principal
+case_studies
+  design_url_shortener.md              senior
+  design_twitter.md                    senior
+  design_whatsapp.md                   senior
+  design_notification_system.md        senior
+  design_uber.md                       senior
+  design_search_autocomplete.md        senior
+  design_leaderboard.md                senior
+  design_google_docs.md                senior
+  design_google_drive.md               senior
+  design_web_crawler.md                senior
+  design_key_value_store.md            senior
+  design_distributed_unique_id.md      senior
+  design_distributed_message_queue.md  senior
+  design_hotel_reservation.md          senior
+  design_netflix.md                    principal
+  design_google_maps.md                principal
+  design_payment_system.md             principal
+  design_stock_exchange.md             principal
+  design_object_storage_s3.md          principal
+  design_ad_click_aggregation.md       principal
+  design_metrics_monitoring.md         principal
+  design_digital_wallet.md             -
+  design_proximity_service.md          -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 18 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms and event sourcing. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

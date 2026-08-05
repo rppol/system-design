@@ -1,9 +1,5 @@
 # Occupancy & Launch Configuration
 
-<!-- study-paths
-senior: occupancy_and_launch_configuration.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 **Occupancy** is the ratio of *active warps resident on a Streaming Multiprocessor (SM)* to

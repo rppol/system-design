@@ -1,9 +1,5 @@
 # Fairness and Responsible AI
 
-<!-- study-paths
-principal: fairness_and_responsible_ai.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 7 (Advanced Topics). This module is the standalone deep dive on fairness
 > **definitions and mechanics**: the formal metrics, the impossibility result that
 > makes "just be fair" incoherent as stated, the taxonomy of where bias enters a

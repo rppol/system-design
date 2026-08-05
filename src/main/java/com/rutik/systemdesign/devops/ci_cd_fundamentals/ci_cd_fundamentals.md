@@ -1,9 +1,5 @@
 # CI/CD Fundamentals
 
-<!-- study-paths
-senior: ci_cd_fundamentals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 3 — CI/CD & GitOps · Difficulty: Intermediate
 
 CI/CD is the automated path from a code commit to running software. **Continuous Integration** merges and verifies every change frequently (build + test on each commit); **Continuous Delivery/Deployment** automates the release of verified changes to production. Done well, it turns deployment from a risky quarterly event into a boring, many-times-a-day non-event — the single biggest lever on engineering velocity and reliability.

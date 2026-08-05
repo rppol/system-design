@@ -1,9 +1,5 @@
 # Convolutional Neural Networks
 
-<!-- study-paths
-senior: convolutional_neural_networks.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A Convolutional Neural Network (CNN) is a neural network architecture that exploits three structural biases of spatial data: local connectivity (neurons connect to a small spatial region, not all inputs), weight sharing (the same filter is applied across all spatial locations), and translation equivariance (a feature detector learns to fire for a pattern regardless of where in the image it appears). These biases dramatically reduce the parameter count relative to fully connected layers and embed domain knowledge about the structure of images directly into the architecture.

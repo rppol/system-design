@@ -1,9 +1,5 @@
 # Number Systems & Bit Manipulation
 
-<!-- study-paths
-senior: number_systems_and_bit_manipulation.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

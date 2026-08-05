@@ -1,9 +1,5 @@
 # Iterators & Generators
 
-<!-- study-paths
-senior: iterators_and_generators.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

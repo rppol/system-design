@@ -1,9 +1,5 @@
 # Middleware and Lifecycle
 
-<!-- study-paths
-senior: middleware_and_lifecycle.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

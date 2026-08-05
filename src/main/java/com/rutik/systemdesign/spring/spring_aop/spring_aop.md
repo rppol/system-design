@@ -1,9 +1,5 @@
 # Spring AOP
 
-<!-- study-paths
-senior: spring_aop.md, pointcut_designators.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

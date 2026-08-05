@@ -1,10 +1,5 @@
 # Fault Tolerance Patterns
 
-<!-- study-paths
-senior: fault_tolerance_patterns.md
-principal: fault_tolerance_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Fault tolerance patterns are design strategies that allow a distributed system to continue operating correctly — or degrade gracefully — when one or more of its dependencies fail. In microservices and distributed architectures, partial failure is the norm, not the exception. Any service that makes a network call will eventually encounter timeouts, errors, and cascading failures. Without explicit fault tolerance, a single slow downstream dependency can exhaust all threads in a thread pool, bring down the entire service, and cascade that failure upstream.

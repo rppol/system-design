@@ -1,9 +1,5 @@
 # LLM Testing Strategies
 
-<!-- study-paths
-senior: llm_testing_strategies.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

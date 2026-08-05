@@ -1,9 +1,5 @@
 # Prompt Management and PromptOps
 
-<!-- study-paths
-principal: prompt_management_and_promptops.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Prompt management encompasses the engineering practices for creating, versioning, testing, storing,

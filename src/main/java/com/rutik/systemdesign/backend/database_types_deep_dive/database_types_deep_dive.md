@@ -1,9 +1,5 @@
 # Database Types — Deep Dive
 
-<!-- study-paths
-principal: database_types_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Modern backend systems use multiple database types, each optimized for different access patterns, data models, and consistency requirements. Relational databases excel at complex queries with strong consistency. Document stores handle flexible schemas and hierarchical data. Key-value stores provide sub-millisecond lookups. Wide-column stores scale writes horizontally. Time-series databases compress and query temporal data. Search engines support full-text and faceted search. Graph databases traverse relationships in O(1) per hop. NewSQL provides relational semantics with horizontal scalability. Understanding the internal mechanics of each type is essential for choosing correctly and debugging performance problems.

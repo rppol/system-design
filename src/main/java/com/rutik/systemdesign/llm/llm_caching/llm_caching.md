@@ -1,10 +1,5 @@
 # LLM Caching
 
-<!-- study-paths
-senior: llm_caching.md
-principal: llm_caching.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 LLM caching is the practice of storing and reusing model inputs or outputs to reduce latency and

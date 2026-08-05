@@ -133,6 +133,100 @@ flowchart TD
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+complexity_analysis_and_big_o
+  complexity_analysis_and_big_o.md  senior
+discrete_math_for_engineers
+  discrete_math_for_engineers.md  -
+number_systems_and_bit_manipulation
+  number_systems_and_bit_manipulation.md  senior
+character_encoding_deep_dive
+  character_encoding_deep_dive.md  -
+recursion_and_problem_solving_patterns
+  recursion_and_problem_solving_patterns.md  senior
+arrays_strings_and_hashing
+  arrays_strings_and_hashing.md  senior
+linked_lists_stacks_and_queues
+  linked_lists_stacks_and_queues.md  senior
+trees_and_binary_search_trees
+  trees_and_binary_search_trees.md  senior
+heaps_and_priority_queues
+  heaps_and_priority_queues.md  senior
+graphs_tries_and_advanced_structures
+  graphs_tries_and_advanced_structures.md  senior
+sorting_and_searching
+  sorting_and_searching.md  senior
+dynamic_programming
+  dynamic_programming.md  senior
+greedy_and_divide_and_conquer
+  greedy_and_divide_and_conquer.md  senior
+graph_and_string_algorithms
+  graph_and_string_algorithms.md  senior
+dsa_patterns
+  dsa_patterns.md                   senior
+  backtracking.md                   senior
+  bit_manipulation.md               senior
+  cyclic_sort.md                    senior
+  dynamic_programming.md            senior
+  fast_and_slow_pointers.md         senior
+  graph_traversal.md                senior
+  greedy.md                         senior
+  hashing_patterns.md               senior
+  in_place_linked_list_reversal.md  senior
+  interview_execution_playbook.md   senior
+  k_way_merge.md                    senior
+  matrix_traversal.md               senior
+  merge_intervals.md                senior
+  modified_binary_search.md         senior
+  monotonic_stack.md                senior
+  prefix_sum.md                     senior
+  shortest_path.md                  senior
+  sliding_window.md                 senior
+  study_plans.md                    senior
+  top_k_elements.md                 senior
+  topological_sort.md               senior
+  tree_bfs.md                       senior
+  tree_dfs.md                       senior
+  trie_patterns.md                  senior
+  two_heaps.md                      senior
+  two_pointers.md                   senior
+  union_find.md                     senior
+processes_threads_and_context_switching
+  processes_threads_and_context_switching.md  senior
+cpu_scheduling_algorithms
+  cpu_scheduling_algorithms.md  senior
+memory_management_and_virtual_memory
+  memory_management_and_virtual_memory.md  senior
+deadlocks_and_synchronization
+  deadlocks_and_synchronization.md  senior
+computer_architecture_and_memory_hierarchy
+  computer_architecture_and_memory_hierarchy.md  -
+networking_fundamentals
+  networking_fundamentals.md  -
+database_and_storage_fundamentals
+  database_and_storage_fundamentals.md  -
+cryptography_fundamentals
+  cryptography_fundamentals.md  -
+theory_of_computation
+  theory_of_computation.md  -
+how_code_runs_compilers_and_interpreters
+  how_code_runs_compilers_and_interpreters.md  -
+case_studies
+  autocomplete_and_string_search.md     -
+  design_lru_cache.md                   -
+  dynamic_programming_patterns.md       -
+  graph_traversal_and_shortest_path.md  -
+  interval_and_scheduling_problems.md   -
+  top_k_and_streaming_problems.md       -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

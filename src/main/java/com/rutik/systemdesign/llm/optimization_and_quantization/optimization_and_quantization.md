@@ -1,10 +1,5 @@
 # Optimization & Quantization
 
-<!-- study-paths
-senior: optimization_and_quantization.md, gpu_architecture_and_roofline.md
-principal: optimization_and_quantization.md, gpu_architecture_and_roofline.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic |

@@ -1,9 +1,5 @@
 # Distributed Tracing & OpenTelemetry
 
-<!-- study-paths
-senior: observability_tracing_and_otel.md, opentelemetry_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
 Distributed tracing follows a **single request as it fans out across many services**, stitching the per-service work into one causally-linked tree (a *trace* of *spans*). It answers the question metrics and logs can't: "for *this specific slow request*, where did the 800ms go?" **OpenTelemetry (OTel)** is the vendor-neutral CNCF standard for generating, collecting, and exporting traces (and metrics and logs) — its SDKs instrument code and its **Collector** receives, processes, samples, and exports to backends like Jaeger or Tempo. This module owns the *platform* side: Collector pipelines, sampling strategy, context propagation, and backends; **application instrumentation** (SDK setup, manual spans) lives in [../../backend/observability_and_monitoring](../../backend/observability_and_monitoring/observability_and_monitoring.md).

@@ -1,9 +1,5 @@
 # Spring Events and Scheduling
 
-<!-- study-paths
-senior: spring_events_and_scheduling.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Spring provides two complementary mechanisms for decoupling application logic:

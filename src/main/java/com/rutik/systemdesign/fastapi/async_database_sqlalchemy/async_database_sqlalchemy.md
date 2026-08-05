@@ -1,10 +1,5 @@
 # Async Database with SQLAlchemy 2.0
 
-<!-- study-paths
-senior: async_database_sqlalchemy.md
-principal: async_database_sqlalchemy.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > See `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` for `yield`-based session dependencies and `use_cache=False` scoping.
 > See `../pydantic_v2_deep_dive/pydantic_v2_deep_dive.md` for Pydantic model integration with SQLModel.
 

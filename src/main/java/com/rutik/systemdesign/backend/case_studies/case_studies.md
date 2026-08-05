@@ -1,11 +1,5 @@
 # Backend Engineering — Case Studies
 
-<!-- study-paths
-senior: design_booking_system/design_booking_system.md, design_feed_service/design_feed_service.md, design_payment_processor/design_payment_processor.md
-principal: design_payment_processor/design_payment_processor.md, design_event_driven_order_system/design_event_driven_order_system.md, design_microservices_migration/design_microservices_migration.md
-case studies in each curated path; the Level filter reads this
--->
-
 Five end-to-end backend design case studies, each covering a real-world scenario with production-grade architecture, implementation tradeoffs, and interview discussion points.
 
 ---

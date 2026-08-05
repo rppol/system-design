@@ -1,9 +1,5 @@
 # API Design and Versioning
 
-<!-- study-paths
-principal: api_design_and_versioning.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

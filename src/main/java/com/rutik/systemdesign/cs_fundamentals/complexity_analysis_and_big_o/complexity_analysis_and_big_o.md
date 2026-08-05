@@ -1,9 +1,5 @@
 # Complexity Analysis & Big-O Notation
 
-<!-- study-paths
-senior: complexity_analysis_and_big_o.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

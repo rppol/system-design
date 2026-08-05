@@ -1,10 +1,5 @@
 # Observability and Monitoring
 
-<!-- study-paths
-senior: observability_and_monitoring.md
-principal: observability_and_monitoring.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

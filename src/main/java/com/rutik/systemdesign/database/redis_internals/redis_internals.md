@@ -1,9 +1,5 @@
 # Redis Internals
 
-<!-- study-paths
-senior: redis_internals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 > **Version anchor (2026-08-04).** **Redis Open Source 8.10.0** (29 Jul 2026) is current; the

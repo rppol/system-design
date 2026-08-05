@@ -1,9 +1,5 @@
 # Deadlocks and Synchronization
 
-<!-- study-paths
-senior: deadlocks_and_synchronization.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > A deadlock is two threads at a crossroads, each waiting for the other to move first — forever.
 
 ---

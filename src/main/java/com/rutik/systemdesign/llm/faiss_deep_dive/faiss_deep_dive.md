@@ -1,10 +1,5 @@
 # FAISS Deep Dive
 
-<!-- study-paths
-senior: faiss_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
-
 > **Version anchor (2026-08-04).** FAISS **1.15.0** — changelog dated 2026-07-31, wheels
 > published 2026-08-03. **MIT licensed**, authored by Meta's Fundamental AI Research group
 > (FAIR). Two papers define it: *Billion-scale similarity search with GPUs*

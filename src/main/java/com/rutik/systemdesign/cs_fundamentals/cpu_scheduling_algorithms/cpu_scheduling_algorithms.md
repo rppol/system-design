@@ -1,9 +1,5 @@
 # CPU Scheduling Algorithms
 
-<!-- study-paths
-senior: cpu_scheduling_algorithms.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > The OS scheduler is a traffic controller deciding which process gets the runway next — optimising for throughput, fairness, and responsiveness simultaneously.
 
 ---

@@ -1,11 +1,5 @@
 # Database Engineering — Case Studies
 
-<!-- study-paths
-senior: design_banking_ledger/design_banking_ledger.md, design_ecommerce_catalog/design_ecommerce_catalog.md, design_social_media_feed_storage/design_social_media_feed_storage.md
-principal: design_realtime_analytics_platform/design_realtime_analytics_platform.md, design_multitenant_saas_database/design_multitenant_saas_database.md, design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md
-case studies in each curated path; the Level filter reads this
--->
-
 Six end-to-end database design case studies, each covering a real-world scenario with production-grade architecture decisions, schema design, implementation details, tradeoffs, and interview discussion points.
 
 ---

@@ -1,10 +1,5 @@
 # RAG Fundamentals
 
-<!-- study-paths
-senior: rag_fundamentals.md, chunking_strategies.md, embedding_models.md, retrieval_methods.md, reranking.md
-principal: rag_fundamentals.md, embedding_models.md, retrieval_methods.md, reranking.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 RAG (Retrieval-Augmented Generation) solves a fundamental problem with LLMs: they have a fixed knowledge cutoff and can't access private or up-to-date information. RAG extends LLMs with a retrieval component that fetches relevant documents at query time, injecting them into the prompt as context before generation.

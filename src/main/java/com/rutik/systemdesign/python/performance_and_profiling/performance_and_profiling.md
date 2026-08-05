@@ -1,10 +1,5 @@
 # Performance & Profiling
 
-<!-- study-paths
-senior: performance_and_profiling.md
-principal: performance_and_profiling.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

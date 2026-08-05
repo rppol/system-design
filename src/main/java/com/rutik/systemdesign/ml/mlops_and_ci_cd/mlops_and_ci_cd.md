@@ -1,10 +1,5 @@
 # MLOps and CI/CD for Machine Learning
 
-<!-- study-paths
-senior: mlops_and_ci_cd.md
-principal: mlops_and_ci_cd.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

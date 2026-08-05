@@ -1,10 +1,5 @@
 # Alignment & RLHF
 
-<!-- study-paths
-senior: alignment_and_rlhf.md, grpo_and_rlvr.md
-principal: alignment_and_rlhf.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic |

@@ -1,10 +1,5 @@
 # Schema Design and Normalization
 
-<!-- study-paths
-senior: schema_design_and_normalization.md, surrogate_vs_natural_keys.md
-principal: schema_design_and_normalization.md, surrogate_vs_natural_keys.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

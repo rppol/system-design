@@ -1,10 +1,5 @@
 # Safety & Alignment
 
-<!-- study-paths
-senior: safety_and_alignment.md
-principal: safety_and_alignment.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

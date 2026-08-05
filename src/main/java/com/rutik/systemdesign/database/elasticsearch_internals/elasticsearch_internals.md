@@ -1,10 +1,5 @@
 # Elasticsearch Internals
 
-<!-- study-paths
-senior: elasticsearch_internals.md
-principal: elasticsearch_internals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 > **Version anchor (2026-08-05).** **Elasticsearch 9.5.0** (4 Aug 2026) is current and ships

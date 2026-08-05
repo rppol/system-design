@@ -1,9 +1,5 @@
 # Training Deep Networks
 
-<!-- study-paths
-senior: training_deep_networks.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Training a deep neural network is an iterative optimization process: compute a forward pass to get predictions, calculate the loss, backpropagate gradients, and update parameters with an optimizer. The surface of the loss landscape for modern deep networks is non-convex with many local minima, saddle points, and sharp cliffs — yet stochastic gradient descent (SGD) and its variants reliably find solutions that generalize well. The difference between a model that converges and one that explodes, underfit, or overfits often comes down to the mechanics of the training loop: learning rate schedule, regularization, gradient management, and numerical precision.

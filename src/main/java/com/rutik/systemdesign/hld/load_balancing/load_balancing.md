@@ -1,9 +1,5 @@
 # Load Balancing
 
-<!-- study-paths
-senior: load_balancing.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Table of Contents
 1. [Concept Overview](#concept-overview)
 2. [Core Principles](#core-principles)

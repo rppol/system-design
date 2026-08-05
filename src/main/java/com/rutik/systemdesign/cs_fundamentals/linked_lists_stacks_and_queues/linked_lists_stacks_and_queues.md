@@ -1,9 +1,5 @@
 # Linked Lists, Stacks & Queues
 
-<!-- study-paths
-senior: linked_lists_stacks_and_queues.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

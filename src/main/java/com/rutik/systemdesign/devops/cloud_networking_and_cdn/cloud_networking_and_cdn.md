@@ -1,9 +1,5 @@
 # Cloud Networking & CDN
 
-<!-- study-paths
-senior: cloud_networking_and_cdn.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
 Once you have more than one VPC, account, or Region, the central problem becomes connecting them securely and cheaply, and serving content to users worldwide with low latency. This module covers **VPC peering**, **Transit Gateway** (hub-and-spoke), **PrivateLink** (private service access), **CDNs** (CloudFront, Cloudflare), **global load balancing**, and **DNS strategies** (latency/geo/failover routing). The recurring theme: keep traffic private, avoid the public internet where possible, push static and cacheable content to the edge, and route users to the nearest healthy endpoint — all while controlling the data-transfer costs that quietly dominate cloud bills.

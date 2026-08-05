@@ -114,6 +114,94 @@ Advanced topics for senior engineers building services that talk to other servic
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+core_language
+  core_language.md  senior
+strings_and_text
+  strings_and_text.md        senior
+  regex_engine_and_redos.md  senior
+generics_and_type_system
+  generics_and_type_system.md   senior
+  type_inference_and_bounds.md  senior
+exceptions_and_io
+  exceptions_and_io.md  senior
+json_processing_jackson
+  json_processing_jackson.md  senior
+java8_features
+  java8_features.md  senior
+java_time_datetime
+  java_time_datetime.md  -
+java_streams
+  java_streams.md  senior
+functional_programming
+  functional_programming.md  -
+java9_to_21_features
+  java9_to_21_features.md  senior, principal
+java_platform_module_system
+  java_platform_module_system.md  principal
+jvm_internals
+  jvm_internals.md  senior, principal
+bytecode_and_classfile
+  bytecode_and_classfile.md  -
+reference_types_and_cleaners
+  reference_types_and_cleaners.md  senior
+graalvm_native_image
+  graalvm_native_image.md  principal
+concurrency
+  concurrency.md  senior
+collections_internals
+  collections_internals.md  senior
+design_patterns_in_java
+  design_patterns_in_java.md  senior, principal
+performance_and_tuning
+  performance_and_tuning.md  senior, principal
+  jmx_and_management.md      senior
+java_memory_model
+  java_memory_model.md  senior
+java_interview_patterns
+  java_interview_patterns.md  senior
+testing_junit_mockito
+  testing_junit_mockito.md  senior, principal
+logging
+  logging.md  principal
+annotation_processing
+  annotation_processing.md  principal
+build_tools_maven_gradle
+  build_tools_maven_gradle.md  principal
+structured_concurrency_and_loom
+  structured_concurrency_and_loom.md  senior, principal
+foreign_function_and_memory_api
+  foreign_function_and_memory_api.md  -
+reactive_programming
+  reactive_programming.md  principal
+networking_and_http_client
+  networking_and_http_client.md  -
+jdbc_and_database
+  jdbc_and_database.md  senior
+security_and_cryptography
+  security_and_cryptography.md  principal
+grpc_protobuf
+  grpc_protobuf.md  principal
+microservices_patterns
+  microservices_patterns.md  principal
+case_studies
+  design_connection_pool.md              senior
+  design_thread_pool_java.md             senior
+  design_rate_limiter_java.md            senior
+  design_snowflake_id_generator_java.md  senior
+  design_lru_cache_java.md               senior
+  design_di_container_java.md            principal
+  design_event_bus.md                    principal
+  design_circuit_breaker_java.md         principal
+-->
 ## Learning Paths
 
 33 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

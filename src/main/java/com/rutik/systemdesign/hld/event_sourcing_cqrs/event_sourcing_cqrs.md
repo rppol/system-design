@@ -1,9 +1,5 @@
 # Event Sourcing and CQRS
 
-<!-- study-paths
-principal: event_sourcing_cqrs.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Architectural overview. For framework-level implementation (Axon annotations, Spring projections, Eventuate sagas), see the backend companion: [Event Sourcing & CQRS](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md).
 
 ---

@@ -1,9 +1,5 @@
 # Memory Management and Virtual Memory
 
-<!-- study-paths
-senior: memory_management_and_virtual_memory.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Virtual memory is the OS's greatest magic trick: every process believes it has the entire address space to itself, while the OS quietly manages the illusion.
 
 ---

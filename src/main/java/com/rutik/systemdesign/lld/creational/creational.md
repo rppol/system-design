@@ -1,10 +1,5 @@
 # Creational Patterns — Master Index
 
-<!-- study-paths
-senior: creational.md, singleton/singleton.md, factory_method/factory_method.md, abstract_factory/abstract_factory.md, builder/builder.md
-principal: creational.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

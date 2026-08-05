@@ -1,10 +1,5 @@
 # Error Handling and Validation
 
-<!-- study-paths
-senior: error_handling_and_validation.md
-principal: error_handling_and_validation.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

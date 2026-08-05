@@ -1,9 +1,5 @@
 # Metrics & Prometheus
 
-<!-- study-paths
-senior: observability_metrics_prometheus.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
 Prometheus is a **pull-based, time-series monitoring system** built around a multi-dimensional data model (metric name + key/value labels), a local TSDB, and a query language (PromQL) for slicing and aggregating that data. It scrapes HTTP `/metrics` endpoints on a fixed `scrape_interval` (the built-in default is 1m; almost every real deployment sets 15s or 30s), stores samples locally in 2-hour blocks, evaluates recording and alerting rules, and pushes firing alerts to Alertmanager. It is the de-facto standard for metrics in the cloud-native ecosystem and the metrics backend behind nearly every Kubernetes deployment.

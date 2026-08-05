@@ -1,9 +1,5 @@
 # Debugging, Correctness & Numerics
 
-<!-- study-paths
-senior: debugging_correctness_and_numerics.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A CUDA kernel that compiles cleanly and "runs" is not the same thing as a kernel that is correct. Because a kernel launch is asynchronous and every thread operates on its own slice of memory with no implicit bounds checking, the two most common CUDA bugs — an out-of-bounds write and a missing synchronization — routinely produce **no crash at all**: the kernel returns, the host program exits with status 0, and the corruption shows up three allocations later, or only on a different GPU, or only 1 time in 50 runs. This module is the field guide to closing that gap: the disciplined error-checking habit that turns a silent failure into a loud one at the call site, the four `compute-sanitizer` tools that instrument a running kernel to catch out-of-bounds accesses, data races, illegal synchronization, and uninitialized reads that no amount of code review will find, `cuda-gdb` for stepping through device code exactly like a CPU debugger, in-kernel `printf`/`assert` for the fastest possible feedback loop, and a concise tour of why a numerically "correct" GPU kernel can still disagree with a CPU reference in the last few bits.

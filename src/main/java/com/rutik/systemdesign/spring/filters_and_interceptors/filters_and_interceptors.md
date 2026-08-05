@@ -1,9 +1,5 @@
 # Filters and Interceptors in Spring
 
-<!-- study-paths
-senior: filters_and_interceptors.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

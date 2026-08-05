@@ -1,11 +1,5 @@
 # LLM Case Studies — Learning Path
 
-<!-- study-paths
-senior: design_chatgpt.md, design_rag_pipeline.md, design_copilot.md, design_ai_search_engine.md, design_notion_ai.md, design_customer_support_bot.md, design_real_time_translation.md, design_ai_content_moderation.md, design_ai_code_review.md, design_ai_coding_assistant.md, design_ai_data_analyst.md, design_autonomous_swe_agent.md, design_browser_research_agent.md, design_sales_ai_agent.md, design_ai_meeting_assistant.md
-principal: design_llm_gateway.md, design_ai_content_moderation.md, design_autonomous_swe_agent.md, design_gpu_inference_platform.md, design_llm_fine_tuning_platform.md, design_llm_eval_platform.md, design_synthetic_data_platform.md, design_legal_ai_platform.md, design_medical_ai_scribe.md, design_financial_research_agent.md, design_ai_companion_platform.md
-case studies in each curated path; the Level filter reads this
--->
-
 29 case studies + 9 cross-cutting infrastructure deep-dives.
 
 Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII and Mermaid), executable Python code, production war stories, and 10+ design-rationale interview Q&As. Each cross-cutting file is 600–800 lines covering one infrastructure primitive that recurs across many products.

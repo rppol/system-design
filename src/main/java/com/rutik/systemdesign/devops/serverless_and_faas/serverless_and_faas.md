@@ -1,9 +1,5 @@
 # Serverless & FaaS
 
-<!-- study-paths
-senior: serverless_and_faas.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
 Serverless lets you run code without provisioning or managing servers — the platform handles scaling (including to zero), patching, and capacity, and you pay only for actual execution. **Function-as-a-Service (FaaS)** — AWS Lambda, Google Cloud Run functions, Azure Functions, and the Kubernetes-native **Knative** — is the purest form. This module covers the FaaS execution model, the **cold-start** problem, **event-driven** architectures, **API Gateway** as the HTTP front door, and **Step Functions** for orchestrating multi-step workflows, with concrete limits (Lambda's 15-minute max timeout, ~100ms-1s cold starts, 10 GB memory ceiling) that shape real designs.

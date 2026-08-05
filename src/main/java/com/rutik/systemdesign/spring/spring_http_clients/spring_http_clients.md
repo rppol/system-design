@@ -1,10 +1,5 @@
 # Spring HTTP Clients — RestTemplate, WebClient, RestClient, and @HttpExchange
 
-<!-- study-paths
-senior: spring_http_clients.md
-principal: spring_http_clients.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

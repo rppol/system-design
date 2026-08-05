@@ -1,9 +1,5 @@
 # Metaclasses & Metaprogramming
 
-<!-- study-paths
-senior: metaclasses_and_metaprogramming.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Metaprogramming is the practice of writing code that reads, generates, or modifies other code at runtime or at class-creation time. In Python, the central vehicle for metaprogramming is the **metaclass** — the class of a class. Just as ordinary objects are instances of classes, classes are instances of metaclasses. The default metaclass for every user-defined class is `type`.

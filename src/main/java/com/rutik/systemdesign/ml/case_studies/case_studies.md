@@ -1,11 +1,5 @@
 # ML Case Studies — Learning Path
 
-<!-- study-paths
-senior: design_churn_prediction.md, design_image_classification_pipeline.md, design_search_ranking.md, design_recommendation_engine.md, design_real_time_personalization.md, design_ads_click_prediction.md, design_eta_prediction.md, design_demand_forecasting.md, design_fraud_detection.md, design_nlp_classification_pipeline.md, design_semantic_search_engine.md, design_ml_platform.md
-principal: design_credit_risk_scoring.md, design_customer_ltv_prediction.md, design_content_feed_ranking.md, design_video_recommendation.md, design_marketplace_matching.md, design_harmful_content_detection.md, design_autonomous_driving_perception.md, design_multi_touch_attribution.md, design_dynamic_pricing.md, design_ml_platform.md
-case studies in each curated path; the Level filter reads this
--->
-
 Twenty-four end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Fourteen use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
 
 ---

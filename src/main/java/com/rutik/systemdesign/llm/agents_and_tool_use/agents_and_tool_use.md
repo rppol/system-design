@@ -1,10 +1,5 @@
 # Agents & Tool Use
 
-<!-- study-paths
-senior: agents_and_tool_use.md, function_calling_and_tool_design.md, react_and_reasoning_patterns.md, plan_and_execute.md, agent_memory.md, agent_reliability.md, agent_evaluation_and_benchmarking.md, tool_selection_at_scale.md, sandboxed_code_execution.md, subagents_and_delegation.md, durable_long_running_agents.md
-principal: agents_and_tool_use.md, agent_evaluation_and_benchmarking.md, tool_selection_at_scale.md, sandboxed_code_execution.md, subagents_and_delegation.md, agent_cost_and_token_budget.md, durable_long_running_agents.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Sub-Files — Deep Dives (15 total)
 
 | File | Topic | Q&As |

@@ -1,10 +1,5 @@
 # Async Patterns & Pitfalls
 
-<!-- study-paths
-senior: async_patterns_and_pitfalls.md
-principal: async_patterns_and_pitfalls.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Advanced companion to `../asyncio_and_event_loop/asyncio_and_event_loop.md`. Covers production patterns
 > that go beyond the event loop fundamentals: detecting and fixing blocking-in-async (the #1
 > FastAPI production bug), executor integration, async generators, rate limiting with

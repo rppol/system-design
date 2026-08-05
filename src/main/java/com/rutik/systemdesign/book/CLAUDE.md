@@ -179,3 +179,28 @@ python3 .claude/skills/visual-intuition-diagrams/diagram_tools.py check \
 ASCII only; fenced block with no language tag; spaces not tabs; no trailing whitespace; no
 emojis; widest line ≤ 100 cols; caption each diagram with 1–2 sentences tying it to the
 insight.
+
+---
+
+## HARD RULE — structure lives in `README.md`, content files hold only content
+
+**The section `README.md` is the single source of truth for this section's file inventory
+and study-tier membership.** Its `<!-- study-paths -->` block lists EVERY module, EVERY
+file that module owns (the module page AND every deep-dive sub-file), and EVERY case
+study, each tagged with the tiers it belongs to — `-` means Full path only. Reading that
+one block tells you every file in the section and which paths it is on.
+
+**A content file carries NO structural metadata.** A module page or a deep-dive sub-file
+holds the content of its topic and nothing else — no `<!-- study-paths -->` block, no tier
+declaration, no path membership. That metadata used to live in each module page; it was
+moved here so there is one place to look and one place to change.
+
+**Adding a file? Add its line to the section README's block in the same commit.** A file on
+disk that is missing from the block — or listed there and absent from disk — FAILS
+`python3 game/extract.py --strict` and takes the Pages deploy red. That check exists
+because the old failure was silent: a new sub-file was invisible to the curated paths, or
+silently dragged into every tier its parent was in, with a green build either way.
+
+Order is never declared in the block: it comes from `STUDY_ORDER` in `game/app.js`. The
+tier TABLES further down the README are GENERATED from the block by
+`python3 game/extract.py --write-paths` — never hand-edit them.

@@ -1,10 +1,5 @@
 # Resilience Patterns
 
-<!-- study-paths
-senior: resilience_patterns.md
-principal: resilience_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 **Resilience** is the property that lets a system continue operating — possibly in a degraded mode — when one or more of its dependencies are slow, erroring, or completely unavailable. A payment service that depends on a third-party fraud-check API doesn't get to choose whether that API has a bad day; it only gets to choose **how it behaves when it does**.

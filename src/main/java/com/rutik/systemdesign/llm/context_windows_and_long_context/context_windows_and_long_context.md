@@ -1,9 +1,5 @@
 # Context Windows & Long Context
 
-<!-- study-paths
-senior: context_windows_and_long_context.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 The context window is the maximum number of tokens an LLM can process in a single forward pass — including both input and output. Early LLMs had 2K-4K context (GPT-3: 2,048); modern models support 128K (GPT-4o, Llama 3.1 — note plain Llama 3 was 8K), 200K (Claude Haiku 4.5), and 1M (Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line). This expansion has fundamentally changed what LLM systems can do: process entire codebases, hour-long conversations, entire books, or multiple lengthy documents simultaneously.

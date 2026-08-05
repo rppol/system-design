@@ -57,7 +57,7 @@ cuts, not nested depths — senior is the craft (write it, profile it, debug the
 deadlock), principal is the judgment (which runtime at what cost, migration, what you
 tell a team *not* to do), so principal is usually the smaller list and much of it is
 material senior never sees. Membership is declared ONCE per module, in a
-`<!-- study-paths -->` block in that module's own page (`<module>.md`) naming the files each tier takes
+`<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file takes
 — which is also the only way to curate **deep-dive sub-files**, since they have no
 `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out,
 and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from
@@ -176,10 +176,11 @@ When covering a feature, always include the version it was introduced and LTS st
    module's topic and its Q&As merge into that module's bank — but if a tier should
    carry it, add its filename to that tier's line in the parent's `<!-- study-paths -->`
    block, which is the only place a sub-file is addressable.)
-9. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) naming the tiers it
-   belongs to (or none, for Full-path-only). Every tier line must list `<module_name>.md`
-   itself — the module page is never optional and omitting it is fatal under `--strict`, then run
-   `python3 game/extract.py --write-paths` to regenerate `README.md`'s tier tables.
+9. Add the module and EVERY file it owns to the `<!-- study-paths -->` block in
+   this section's `README.md`, tagging each file with the tiers it belongs to (`-` for
+   Full path only; the module page must carry every tier the module is in). **Do NOT put
+   a block in the module page — content files hold only content.** Then run
+   `python3 game/extract.py --write-paths` to regenerate the README's tier tables
 10. **Re-run `python3 game/extract.py`** to regenerate the question bank.
 
 ---
@@ -211,3 +212,28 @@ maps. Validate those with the `/visual-intuition-diagrams` skill's
 `diagram_tools.py check` (ASCII only, no tabs/emojis, widest line ≤ 100 cols,
 caption every diagram). Full policy in root `CLAUDE.md` → "Mermaid Diagrams" and
 "Visual Intuition Diagrams".
+
+---
+
+## HARD RULE — structure lives in `README.md`, content files hold only content
+
+**The section `README.md` is the single source of truth for this section's file inventory
+and study-tier membership.** Its `<!-- study-paths -->` block lists EVERY module, EVERY
+file that module owns (the module page AND every deep-dive sub-file), and EVERY case
+study, each tagged with the tiers it belongs to — `-` means Full path only. Reading that
+one block tells you every file in the section and which paths it is on.
+
+**A content file carries NO structural metadata.** A module page or a deep-dive sub-file
+holds the content of its topic and nothing else — no `<!-- study-paths -->` block, no tier
+declaration, no path membership. That metadata used to live in each module page; it was
+moved here so there is one place to look and one place to change.
+
+**Adding a file? Add its line to the section README's block in the same commit.** A file on
+disk that is missing from the block — or listed there and absent from disk — FAILS
+`python3 game/extract.py --strict` and takes the Pages deploy red. That check exists
+because the old failure was silent: a new sub-file was invisible to the curated paths, or
+silently dragged into every tier its parent was in, with a green build either way.
+
+Order is never declared in the block: it comes from `STUDY_ORDER` in `game/app.js`. The
+tier TABLES further down the README are GENERATED from the block by
+`python3 game/extract.py --write-paths` — never hand-edit them.

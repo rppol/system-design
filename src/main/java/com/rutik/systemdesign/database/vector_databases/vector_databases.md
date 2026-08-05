@@ -1,9 +1,5 @@
 # Vector Databases
 
-<!-- study-paths
-senior: vector_databases.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Vector databases store and query high-dimensional vector embeddings — dense numerical representations of text, images, audio, and other data produced by machine learning models. They enable semantic similarity search: finding items that are conceptually similar even when they share no keywords. This is the core technology behind RAG (Retrieval-Augmented Generation), semantic search, recommendation systems, and image search.

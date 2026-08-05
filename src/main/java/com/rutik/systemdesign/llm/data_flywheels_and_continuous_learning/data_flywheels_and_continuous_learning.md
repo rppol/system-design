@@ -1,9 +1,5 @@
 # Data Flywheels and Continuous Learning
 
-<!-- study-paths
-principal: data_flywheels_and_continuous_learning.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

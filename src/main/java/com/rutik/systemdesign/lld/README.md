@@ -256,6 +256,106 @@ Put it all together with end-to-end LLD exercises.
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+design_principles
+  design_principles.md             principal
+  DRY.md                           principal
+  KISS.md                          principal
+  YAGNI.md                         principal
+  Composition_over_Inheritance.md  principal
+  ProgramToInterface.md            principal
+  LawOfDemeter.md                  principal
+solid_principles
+  solid_principles.md      senior, principal
+  SingleResponsibility.md  senior
+  OpenClosed.md            senior, principal
+  LiskovSubstitution.md    senior, principal
+  InterfaceSegregation.md  senior
+  DependencyInversion.md   senior, principal
+creational
+  creational.md                         senior, principal
+  singleton/singleton.md                senior
+  factory_method/factory_method.md      senior
+  abstract_factory/abstract_factory.md  senior
+  builder/builder.md                    senior
+  prototype/prototype.md                -
+structural
+  structural.md           senior, principal
+  adapter/adapter.md      senior
+  decorator/decorator.md  senior
+  proxy/proxy.md          senior
+  facade/facade.md        senior
+  composite/composite.md  senior
+  bridge/bridge.md        principal
+  flyweight/flyweight.md  -
+behavioral
+  behavioral.md                                       senior, principal
+  strategy/strategy.md                                senior
+  observer/observer.md                                senior, principal
+  state/state.md                                      senior
+  command/command.md                                  senior
+  template_method/template_method.md                  senior
+  chain_of_responsibility/chain_of_responsibility.md  senior
+  iterator/iterator.md                                senior
+  interpreter/interpreter.md                          -
+  mediator/mediator.md                                -
+  memento/memento.md                                  -
+  visitor/visitor.md                                  -
+pattern_comparisons
+  pattern_comparisons.md                    senior, principal
+  Strategy_vs_State.md                      senior, principal
+  Decorator_vs_Proxy.md                     senior
+  Factory_vs_AbstractFactory_vs_Builder.md  senior
+  Observer_vs_Mediator.md                   senior, principal
+  Adapter_vs_Bridge_vs_Facade.md            senior, principal
+  DecisionFlowchart.md                      senior, principal
+  InterviewQuestions.md                     senior, principal
+  Template_vs_Strategy.md                   principal
+  PatternCombinations.md                    principal
+  ChainOfResponsibility_vs_Command.md       -
+  Command_vs_Strategy.md                    -
+  Composite_vs_Decorator.md                 -
+anti_patterns
+  anti_patterns.md           senior, principal
+  GodObject.md               senior
+  Singleton_Abuse.md         senior
+  Golden_Hammer.md           principal
+  Premature_Optimization.md  principal
+  ServiceLocator.md          principal
+  Anemic_Domain_Model.md     principal
+  Circular_Dependencies.md   principal
+  Lava_Flow.md               principal
+  Copy_Paste_Programming.md  -
+  Spaghetti_Code.md          -
+concurrency_patterns
+  concurrency_patterns.md  senior
+  ThreadSafeSingleton.md   senior
+  ProducerConsumer.md      senior
+  ReadWriteLock.md         senior
+  ThreadPool.md            senior
+system_design_problems
+  system_design_problems.md  senior, principal
+  ParkingLot.md              senior
+  ElevatorSystem.md          senior
+  VendingMachine.md          senior
+  LRUCache.md                senior
+  RateLimiter.md             senior
+  OnlineBookingSystem.md     senior
+  ATM.md                     -
+  ChessGame.md               -
+  LibraryManagement.md       -
+  RideSharing.md             -
+  Splitwise.md               -
+  TicTacToe.md               -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 9 modules spanning design vocabulary, all

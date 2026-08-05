@@ -1,9 +1,5 @@
 # JDBC & Database Access
 
-<!-- study-paths
-senior: jdbc_and_database.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 JDBC (Java Database Connectivity) is Java's standard API for relational database access. It provides a vendor-neutral interface — the same Java code works with PostgreSQL, MySQL, Oracle, and H2 by swapping the JDBC driver. Understanding JDBC deeply means knowing why `PreparedStatement` beats `Statement` (SQL injection + query plan caching), how transaction isolation levels prevent concurrency anomalies, and how connection pools like HikariCP make production JDBC viable.

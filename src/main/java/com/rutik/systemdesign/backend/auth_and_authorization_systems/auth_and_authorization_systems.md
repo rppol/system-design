@@ -1,10 +1,5 @@
 # Authentication and Authorization Systems
 
-<!-- study-paths
-senior: auth_and_authorization_systems.md
-principal: auth_and_authorization_systems.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

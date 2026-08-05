@@ -1,10 +1,5 @@
 # Imbalanced Data & Data-Leakage Traps
 
-<!-- study-paths
-senior: imbalanced_data_and_leakage_traps.md
-principal: imbalanced_data_and_leakage_traps.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Imbalanced data and data leakage are the two most common ways an offline ML

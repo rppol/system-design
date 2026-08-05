@@ -1,9 +1,5 @@
 # TCP/IP Deep Dive
 
-<!-- study-paths
-senior: tcp_ip_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 TCP (Transmission Control Protocol) is the foundation of reliable communication on the internet. It provides ordered, error-checked delivery of a stream of bytes between applications running on hosts in an IP network. Every HTTP request, database query, and gRPC call rides on TCP. Understanding TCP internals — handshakes, flow control, congestion control, connection state management — is essential for diagnosing latency problems, tuning servers under high connection rates, and understanding why services misbehave under load.

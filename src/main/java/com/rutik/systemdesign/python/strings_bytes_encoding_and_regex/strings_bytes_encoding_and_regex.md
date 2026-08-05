@@ -1,9 +1,5 @@
 # Strings, Bytes, Encoding & Regex
 
-<!-- study-paths
-senior: strings_bytes_encoding_and_regex.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Python 3 draws a hard line between text and binary data. `str` represents a sequence of Unicode

@@ -1,9 +1,5 @@
 # Synchronization & Atomics
 
-<!-- study-paths
-senior: synchronization_and_atomics.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A CUDA kernel launches thousands of threads that all read and write the same

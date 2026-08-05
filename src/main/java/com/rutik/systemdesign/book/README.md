@@ -1,5 +1,153 @@
 # Book Summaries — Read the Section, Skip the Book
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+designing_data_intensive_applications/00_preface_and_book_map
+  00_preface_and_book_map.md  -
+designing_data_intensive_applications/01_reliable_scalable_maintainable
+  01_reliable_scalable_maintainable.md  -
+designing_data_intensive_applications/02_data_models_and_query_languages
+  02_data_models_and_query_languages.md  -
+designing_data_intensive_applications/03_storage_and_retrieval
+  03_storage_and_retrieval.md  -
+designing_data_intensive_applications/04_encoding_and_evolution
+  04_encoding_and_evolution.md  -
+designing_data_intensive_applications/05_replication
+  05_replication.md  -
+designing_data_intensive_applications/06_partitioning
+  06_partitioning.md  -
+designing_data_intensive_applications/07_transactions
+  07_transactions.md  -
+designing_data_intensive_applications/08_trouble_with_distributed_systems
+  08_trouble_with_distributed_systems.md  -
+designing_data_intensive_applications/09_consistency_and_consensus
+  09_consistency_and_consensus.md  -
+designing_data_intensive_applications/10_batch_processing
+  10_batch_processing.md  -
+designing_data_intensive_applications/11_stream_processing
+  11_stream_processing.md  -
+designing_data_intensive_applications/12_future_of_data_systems
+  12_future_of_data_systems.md  -
+system_design_interview_vol_1/01_scale_from_zero_to_millions_of_users
+  01_scale_from_zero_to_millions_of_users.md  -
+system_design_interview_vol_1/02_back_of_the_envelope_estimation
+  02_back_of_the_envelope_estimation.md  -
+system_design_interview_vol_1/03_a_framework_for_system_design_interviews
+  03_a_framework_for_system_design_interviews.md  -
+system_design_interview_vol_1/04_design_a_rate_limiter
+  04_design_a_rate_limiter.md  -
+system_design_interview_vol_1/05_design_consistent_hashing
+  05_design_consistent_hashing.md  -
+system_design_interview_vol_1/06_design_a_key_value_store
+  06_design_a_key_value_store.md  -
+system_design_interview_vol_1/07_design_a_unique_id_generator
+  07_design_a_unique_id_generator.md  -
+system_design_interview_vol_1/08_design_a_url_shortener
+  08_design_a_url_shortener.md  -
+system_design_interview_vol_1/09_design_a_web_crawler
+  09_design_a_web_crawler.md  -
+system_design_interview_vol_1/10_design_a_notification_system
+  10_design_a_notification_system.md  -
+system_design_interview_vol_1/11_design_a_news_feed_system
+  11_design_a_news_feed_system.md  -
+system_design_interview_vol_1/12_design_a_chat_system
+  12_design_a_chat_system.md  -
+system_design_interview_vol_1/13_design_a_search_autocomplete_system
+  13_design_a_search_autocomplete_system.md  -
+system_design_interview_vol_1/14_design_youtube
+  14_design_youtube.md  -
+system_design_interview_vol_1/15_design_google_drive
+  15_design_google_drive.md  -
+system_design_interview_vol_1/16_the_learning_continues
+  16_the_learning_continues.md  -
+system_design_interview_vol_2/01_proximity_service
+  01_proximity_service.md  -
+system_design_interview_vol_2/02_nearby_friends
+  02_nearby_friends.md  -
+system_design_interview_vol_2/03_google_maps
+  03_google_maps.md  -
+system_design_interview_vol_2/04_distributed_message_queue
+  04_distributed_message_queue.md  -
+system_design_interview_vol_2/05_metrics_monitoring_and_alerting
+  05_metrics_monitoring_and_alerting.md  -
+system_design_interview_vol_2/06_ad_click_event_aggregation
+  06_ad_click_event_aggregation.md  -
+system_design_interview_vol_2/07_hotel_reservation_system
+  07_hotel_reservation_system.md  -
+system_design_interview_vol_2/08_distributed_email_service
+  08_distributed_email_service.md  -
+system_design_interview_vol_2/09_s3_like_object_storage
+  09_s3_like_object_storage.md  -
+system_design_interview_vol_2/10_real_time_gaming_leaderboard
+  10_real_time_gaming_leaderboard.md  -
+system_design_interview_vol_2/11_payment_system
+  11_payment_system.md  -
+system_design_interview_vol_2/12_digital_wallet
+  12_digital_wallet.md  -
+system_design_interview_vol_2/13_stock_exchange
+  13_stock_exchange.md  -
+designing_machine_learning_systems/01_overview_of_machine_learning_systems
+  01_overview_of_machine_learning_systems.md  -
+designing_machine_learning_systems/02_introduction_to_machine_learning_systems_design
+  02_introduction_to_machine_learning_systems_design.md  -
+designing_machine_learning_systems/03_data_engineering_fundamentals
+  03_data_engineering_fundamentals.md  -
+designing_machine_learning_systems/04_training_data
+  04_training_data.md  -
+designing_machine_learning_systems/05_feature_engineering
+  05_feature_engineering.md  -
+designing_machine_learning_systems/06_model_development_and_offline_evaluation
+  06_model_development_and_offline_evaluation.md  -
+designing_machine_learning_systems/07_model_deployment_and_prediction_service
+  07_model_deployment_and_prediction_service.md  -
+designing_machine_learning_systems/08_data_distribution_shifts_and_monitoring
+  08_data_distribution_shifts_and_monitoring.md  -
+designing_machine_learning_systems/09_continual_learning_and_test_in_production
+  09_continual_learning_and_test_in_production.md  -
+designing_machine_learning_systems/10_infrastructure_and_tooling_for_mlops
+  10_infrastructure_and_tooling_for_mlops.md  -
+designing_machine_learning_systems/11_the_human_side_of_machine_learning
+  11_the_human_side_of_machine_learning.md  -
+machine_learning_system_design_interview/01_introduction_and_overview
+  01_introduction_and_overview.md  -
+machine_learning_system_design_interview/02_visual_search_system
+  02_visual_search_system.md  -
+machine_learning_system_design_interview/03_google_street_view_blurring_system
+  03_google_street_view_blurring_system.md  -
+machine_learning_system_design_interview/04_youtube_video_search
+  04_youtube_video_search.md  -
+machine_learning_system_design_interview/05_harmful_content_detection
+  05_harmful_content_detection.md  -
+machine_learning_system_design_interview/06_video_recommendation_system
+  06_video_recommendation_system.md  -
+machine_learning_system_design_interview/07_event_recommendation_system
+  07_event_recommendation_system.md  -
+machine_learning_system_design_interview/08_ad_click_prediction_on_social_platforms
+  08_ad_click_prediction_on_social_platforms.md  -
+machine_learning_system_design_interview/09_similar_listings_on_vacation_rental_platforms
+  09_similar_listings_on_vacation_rental_platforms.md  -
+machine_learning_system_design_interview/10_personalized_news_feed
+  10_personalized_news_feed.md  -
+machine_learning_system_design_interview/11_people_you_may_know
+  11_people_you_may_know.md  -
+understanding_distributed_systems/01_communication
+  01_communication.md  -
+understanding_distributed_systems/02_coordination
+  02_coordination.md  -
+understanding_distributed_systems/03_scalability
+  03_scalability.md  -
+understanding_distributed_systems/04_resiliency
+  04_resiliency.md  -
+understanding_distributed_systems/05_maintainability
+  05_maintainability.md  -
+-->
 > In-depth, chapter-by-chapter summaries of foundational engineering books — written so
 > that reading the summary is as close as possible to reading the book itself, then mapped
 > back into the deep-dive modules elsewhere in this repository.

@@ -1,9 +1,5 @@
 # Key-Value Stores
 
-<!-- study-paths
-senior: key_value_stores.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > **Boundary.** This page teaches the **category** — what a key-value store is for, and the ideas
 > that survive swapping Redis for DynamoDB, etcd or Valkey: data-model choice, the HyperLogLog
 > error/memory trade, expiration versus eviction, the fixed-slot layer, Redlock and its critique.

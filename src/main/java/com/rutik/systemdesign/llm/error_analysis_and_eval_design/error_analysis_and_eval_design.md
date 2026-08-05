@@ -1,10 +1,5 @@
 # Error Analysis & Eval Design
 
-<!-- study-paths
-senior: error_analysis_and_eval_design.md
-principal: error_analysis_and_eval_design.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Most teams shipping an LLM product can measure. Very few can say **what they should be measuring**.

@@ -141,6 +141,30 @@ debezium_change_data_capture  (change data capture from the database log)
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+apache_airflow
+  apache_airflow.md  -
+temporal_durable_execution
+  temporal_durable_execution.md  -
+nvidia_triton_inference_server
+  nvidia_triton_inference_server.md  -
+intel_openvino
+  intel_openvino.md  -
+envoy_proxy
+  envoy_proxy.md  -
+hashicorp_vault
+  hashicorp_vault.md  -
+debezium_change_data_capture
+  debezium_change_data_capture.md  -
+-->
 ## Learning Paths
 
 This section is small by design — 7 modules, each already scoped to what a senior

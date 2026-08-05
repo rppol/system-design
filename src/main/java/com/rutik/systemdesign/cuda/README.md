@@ -191,6 +191,71 @@ flowchart TB
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+gpu_computing_foundations
+  gpu_computing_foundations.md  senior
+gpu_hardware_architecture
+  gpu_hardware_architecture.md  senior
+cuda_toolkit_and_compilation
+  cuda_toolkit_and_compilation.md  -
+cuda_programming_model_and_kernels
+  cuda_programming_model_and_kernels.md  senior
+warps_and_simt_execution
+  warps_and_simt_execution.md  senior
+cuda_memory_model_and_hierarchy
+  cuda_memory_model_and_hierarchy.md  senior
+memory_management_and_data_transfer
+  memory_management_and_data_transfer.md  senior
+memory_coalescing_and_access_patterns
+  memory_coalescing_and_access_patterns.md  senior
+shared_memory_and_bank_conflicts
+  shared_memory_and_bank_conflicts.md  senior
+occupancy_and_launch_configuration
+  occupancy_and_launch_configuration.md  senior
+synchronization_and_atomics
+  synchronization_and_atomics.md  senior
+parallel_patterns_reduction_scan_histogram
+  parallel_patterns_reduction_scan_histogram.md  senior
+warp_level_primitives_and_cooperative_groups
+  warp_level_primitives_and_cooperative_groups.md  senior
+streams_events_and_concurrency
+  streams_events_and_concurrency.md  senior
+cuda_graphs
+  cuda_graphs.md  -
+multi_gpu_programming_and_nccl
+  multi_gpu_programming_and_nccl.md  -
+dynamic_parallelism_and_advanced_kernels
+  dynamic_parallelism_and_advanced_kernels.md  -
+tensor_cores_and_mixed_precision
+  tensor_cores_and_mixed_precision.md  senior
+cuda_math_and_dnn_libraries
+  cuda_math_and_dnn_libraries.md  -
+python_gpu_ecosystem
+  python_gpu_ecosystem.md  -
+triton_and_kernel_dsls
+  triton_and_kernel_dsls.md  -
+profiling_and_performance_analysis
+  profiling_and_performance_analysis.md  senior
+debugging_correctness_and_numerics
+  debugging_correctness_and_numerics.md  senior
+gpu_portability_hip_sycl_and_beyond
+  gpu_portability_hip_sycl_and_beyond.md  -
+case_studies
+  accelerate_2d_convolution_and_stencil.md  -
+  build_a_flash_attention_kernel.md         -
+  implement_high_performance_reduction.md   -
+  optimize_llm_inference_kernels.md         -
+  optimize_matrix_multiplication_kernel.md  -
+  port_a_cpu_pipeline_to_gpu.md             -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 24 modules from the SIMT model and GPU hardware through the full performance-engineering discipline, advanced execution, the library/Tensor-Core ecosystem, and the profiling/portability toolchain. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

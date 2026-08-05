@@ -100,6 +100,61 @@ flowchart TD
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+data_model_and_objects
+  data_model_and_objects.md  senior
+core_language_idioms
+  core_language_idioms.md  senior
+iterators_and_generators
+  iterators_and_generators.md  senior
+decorators_and_closures
+  decorators_and_closures.md  senior
+context_managers_and_exceptions
+  context_managers_and_exceptions.md  senior
+collections_and_data_structures
+  collections_and_data_structures.md  senior
+strings_bytes_encoding_and_regex
+  strings_bytes_encoding_and_regex.md  senior
+file_io_and_serialization
+  file_io_and_serialization.md  -
+cpython_memory_model
+  cpython_memory_model.md  senior
+the_gil_and_free_threading
+  the_gil_and_free_threading.md  senior, principal
+metaclasses_and_metaprogramming
+  metaclasses_and_metaprogramming.md  senior
+the_type_system_and_typing
+  the_type_system_and_typing.md       senior, principal
+  protocols_and_structural_typing.md  senior
+performance_and_profiling
+  performance_and_profiling.md  senior, principal
+functional_programming
+  functional_programming.md  -
+threading_and_multiprocessing
+  threading_and_multiprocessing.md  senior
+asyncio_and_event_loop
+  asyncio_and_event_loop.md  senior
+  event_loop_internals.md    senior
+  structured_concurrency.md  senior
+async_patterns_and_pitfalls
+  async_patterns_and_pitfalls.md  senior, principal
+design_patterns_in_python
+  design_patterns_in_python.md  principal
+stdlib_datetime_and_logging
+  stdlib_datetime_and_logging.md  -
+testing_with_pytest
+  testing_with_pytest.md  senior, principal
+packaging_and_project_tooling
+  packaging_and_project_tooling.md  principal
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 21 modules spanning pure Python internals, concurrency, and the broader Python ecosystem. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

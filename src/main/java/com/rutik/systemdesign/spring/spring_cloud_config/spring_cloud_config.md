@@ -1,9 +1,5 @@
 # Spring Cloud Config
 
-<!-- study-paths
-principal: spring_cloud_config.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

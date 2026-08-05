@@ -56,7 +56,7 @@ anywhere below a section root.
 |------|----------|-----------|
 | `<section>/README.md` | exactly 16, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
-| `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Carries the `<!-- study-paths -->` block. |
+| `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
 | `<cat>/<pattern>/<pattern>.md` | nested pattern | Same rule one level deeper (`lld/behavioral/observer/observer.md`). |
 | `<section>/case_studies/case_studies.md` | one per section with case studies | The case-study INDEX (5-section learning path + tier markers). |
@@ -311,8 +311,9 @@ appears in the quiz as anything but the option.
 1. Create `<section>/<module_name>/<module_name>.md` — 14-section template. The page is
    named for its folder; a `README.md` here is invisible to `extract.py`
 2. Meet the Q&A minimum (see section CLAUDE.md for specifics)
-3. Write the `<!-- study-paths -->` block at the top of the new page (it must list
-   `<module_name>.md` on every tier line it declares)
+3. Add the module and ALL its files to the `<!-- study-paths -->` block in
+   `<section>/README.md` (the module page must carry every tier the module is in). Do NOT
+   put a block in the module page — content files hold only content
 4. Add the module dir to `STUDY_ORDER["<section>"]` in `game/app.js` at its learning-path position
 5. Update the section's master `README.md` module table
 6. Update root `README.md` table
@@ -553,7 +554,7 @@ silently dropped from the game or renders wrong. These rules are derived from
   so the question bank and the technology bank are separate programs sharing only
   `game/build_common.py`). It is authored DATA, the source of
   `game/tech_index.json`, not study content: no `STUDY_ORDER` entry, no
-  `<!-- study-paths -->` block, no questions, not in the reader's module tree. The
+  entry in any section README's `<!-- study-paths -->` block, no questions, not in the reader's module tree. The
   exclusion is load-bearing and silent — as a plain module dir it becomes a phantom
   module that `--strict` waves through, and one `## 11. Technologies & Tools` table
   inside it makes the index index the bank into itself (3809/613 → 3810/614, no error).
@@ -574,50 +575,58 @@ silently dropped from the game or renders wrong. These rules are derived from
   subset, or when a section's **Interview-Specific Path drifts between its two
   sources**. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
-- **Curated study paths are declared ONCE per module, in a `<!-- study-paths -->` block in
-  that module's own page (`<module>/<module>.md`) — never scattered through the content.**
-  Study files carry no metadata of their own; a deep-dive sub-file is study content and
-  stays study content.
-
-      # Creational Patterns — Master Index
-
-      <!-- study-paths
-      senior: creational.md, singleton/singleton.md, factory_method/factory_method.md, builder/builder.md
-      principal: creational.md
-      files this module contributes to each curated path; omit a tier to leave it out
-      -->
-
-  One line per tier, naming every file that tier takes — the module page plus whichever
-  sub-files that level actually needs. **Listing a tier puts the module in it; omitting the
-  tier leaves the module out.** The module page (`<module>.md`, resolved by
-  `_module_page()`) must always be listed — it is never optional — and every named file
-  must exist; both are FATAL under `--strict`. A nested pattern page is named for its own
-  folder (`singleton/singleton.md`); module ids stay 2 segments.
-
-  Case studies work the same way, declared once in the section's case-study index
-  `<section>/case_studies/case_studies.md`:
+- **STRUCTURE LIVES IN `<section>/README.md`; CONTENT FILES HOLD ONLY CONTENT.** The
+  section README's `<!-- study-paths -->` block is the single source of truth for that
+  section's FILE INVENTORY and its study-tier membership. It lists every module, every file
+  that module owns — the module page AND every deep-dive sub-file — and every case study,
+  each tagged with the tiers it belongs to. `-` means Full path only. Reading that one
+  block tells you every file in the section and which paths each is on.
 
       <!-- study-paths
-      senior: design_banking_ledger/design_banking_ledger.md, design_ecommerce_catalog/design_ecommerce_catalog.md
-      principal: design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md
+      supervised_learning
+        supervised_learning.md      senior
+        linear_models.md            senior
+        decision_trees.md           senior
+        bayesian_methods.md         -
+      pytorch_deep_dive
+        pytorch_deep_dive.md        senior, principal
+      case_studies
+        design_churn_prediction.md  senior
       -->
 
-  That block drives the **Level filter** on the Case Studies tab (All / Senior N / Principal
-  N), which persists in `sd_case_tier` independently of the module path.
+  A module line sits at column 0; each of its files is indented and followed by the tiers
+  that file belongs to. **A module page or a deep-dive sub-file carries NO structural
+  metadata whatsoever** — no block, no tier line, no path membership. It holds the content
+  of its topic and nothing else.
 
-  **The block says WHETHER, never WHERE.** Order still comes from `STUDY_ORDER` in
-  `game/app.js`, so a derived path is an ordered subset by construction and cannot drift
-  out of order. `extract.py` walks the tree, reads every marker, and emits
-  `game/questions/paths.json` — generated and gitignored exactly like the question banks,
-  regenerated by CI on every push. `app.js` fetches it at boot into `STUDY_PATHS`; there is
-  **no hand-maintained path array in `app.js` any more** (the old 31 KB literal is gone).
+  **Adding a file? Add its line to the section README's block IN THE SAME COMMIT.** A file
+  on disk that is missing from the block, or listed in it and absent from disk, is FATAL
+  under `--strict` and takes the Pages deploy red. So is a module in `STUDY_ORDER` that the
+  block omits, or a block entry that `STUDY_ORDER` does not know. The module page must carry
+  every tier the module is in — a sub-file cannot join a tier its own module page skips.
 
-  **Why this shape.** The sub-file layer had never been curated, because nothing could
-  express it: a sub-file has no `STUDY_ORDER` entry (it groups under its parent via
-  `splitModulePath()`), so adding a module silently pulled in every deep-dive beneath it.
-  Measured before the change: 171 modules dragged in 163 sub-files — `lld` advertised "2
-  modules fewer" while shipping 69 files at 90% of the section. Putting membership in the
-  file makes the sub-file addressable and puts the decision next to the content.
+  **The block says WHETHER, never WHERE.** Order comes from `STUDY_ORDER` in `game/app.js`,
+  so a derived path is an ordered subset by construction and cannot drift out of order.
+  Within a module, files appear in the order the block lists them, module page first. That
+  single order is shared by both tiers — a tier is a FILTER over it, not its own sequence.
+  `extract.py` reads the block and emits `game/questions/paths.json`, generated and
+  gitignored exactly like the question banks; `app.js` fetches it at boot into
+  `STUDY_PATHS`, and there is **no hand-maintained path array in `app.js`**.
+
+  **Why the README and not the file.** Two failure modes, one on each side. Metadata in the
+  content file meant no single place showed a section's shape: you had to open 47 pages to
+  learn which files existed and which tiers they were on. And before that, membership lived
+  in a hand-written README table PLUS an array in `app.js`, kept in step by hand — a true
+  dual source. The block is now both the inventory and the membership, and the README's
+  tier TABLES are GENERATED from it between `<!-- study-path-table <tier> -->` markers by
+  `python3 game/extract.py --write-paths`. **Never hand-edit those tables** — a stale one
+  fails `--strict`.
+
+  Sub-file curation is why the file list is per-file rather than per-module. A sub-file has
+  no `STUDY_ORDER` entry (it groups under its parent via `splitModulePath()`), so before it
+  was addressable, adding a module silently pulled in every deep-dive beneath it: 171
+  modules dragged in 163 sub-files, and `lld` advertised "2 modules fewer" while shipping
+  90% of the section.
 
   **The two tiers are DIFFERENT CUTS, not nested depths.** Senior is the craft — can you
   build it, debug it at 3am, say why it broke. Principal is the judgment — which approach
@@ -626,29 +635,6 @@ silently dropped from the game or renders wrong. These rules are derived from
   each principal list is material senior never sees. Do not "promote" a module to principal
   because it is advanced.
 
-  **Adding a module:** write the block at the top of its `<module>.md` page. **Adding a
-  deep-dive sub-file:** add
-  its filename to whichever tier lines in the PARENT module's block should carry it — and to
-  neither, if it is Full-path depth. That is the whole wiring step; there is no array to edit
-  and nothing to keep in sync. A sub-file that exists but appears in no tier line is simply
-  Full-path only, which is a legitimate and common choice.
-
-- **HISTORY, and the trap it leaves behind.** The curated subset used to be a
-  DUAL-SOURCE list: an `interview` array in `game/app.js` plus a hand-written
-  `### Interview-Specific Path (N modules)` table in `<section>/README.md`, kept in step by
-  hand. **Both are gone.** There is no `STUDY_PATHS.<section>.interview` — `app.js` has
-  `let STUDY_PATHS = {}` filled at boot from the generated `questions/paths.json` — and the
-  README tier tables are GENERATED between `<!-- study-path-table <tier> -->` markers by
-  `python3 game/extract.py --write-paths`. Membership is declared once per module, in the
-  `<!-- study-paths -->` block on that module's page.
-
-  This is recorded because the old instruction ("add it in both places, update the
-  `(N modules)` count") is still the intuitive move and is now actively harmful: a
-  hand-edited tier table fails `--strict` with a STALE error, and the obvious remedy —
-  re-running `--write-paths` — makes the build pass again while SILENTLY DROPPING the
-  module from every tier, because `_declared_paths()` looks for the marker on
-  `_module_page(mod)` and a page named otherwise is never read. Green build, module gone
-  from Senior and Principal, questions still in the bank so nothing looks wrong.
 - **A module id is always `<section>/<module>` — exactly two segments.** `book` is the
   single exception (`book/<book>/<chapter>`). A file living in a sub-directory of a module
   — `lld/creational/prototype/prototype.md` — folds into its parent module the same way a

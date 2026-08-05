@@ -1,9 +1,5 @@
 # Validation and Error Handling in Spring
 
-<!-- study-paths
-senior: validation_and_error_handling.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Spring's validation and error handling stack combines the **Jakarta Validation** specification (3.1, implemented by Hibernate Validator 9.x) with Spring MVC's exception resolution pipeline and the RFC 9457 `ProblemDetail` error model. Two naming points, because both show up in older material and in interview questions: the constraint annotations live in `jakarta.validation.constraints`, not `javax.validation.constraints`; and the specification is versioned as Jakarta Validation 3.1, not as a JSR number — "JSR-380" named Bean Validation 2.0, the last release before the move to Jakarta EE, and no Jakarta-era version has a JSR.

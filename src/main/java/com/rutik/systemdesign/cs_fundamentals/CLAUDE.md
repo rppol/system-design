@@ -172,7 +172,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 
 Path: `dsa_patterns/` (inside this section root).
 
-This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply? In the game it is wired as its own Study topic — a `STUDY_ORDER.cs_fundamentals` entry `cs_fundamentals/dsa_patterns`, placed after Phase 3, with its Senior-tier file list declared in the `<!-- study-paths -->` block at the top of `dsa_patterns/dsa_patterns.md`.
+This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply? In the game it is wired as its own Study topic — a `STUDY_ORDER.cs_fundamentals` entry `cs_fundamentals/dsa_patterns`, placed after Phase 3, with its Senior-tier file list declared under `dsa_patterns` in this section's `README.md` `<!-- study-paths -->` block.
 
 Files:
 - `dsa_patterns/dsa_patterns.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
@@ -226,13 +226,13 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 3. Add a row to the Pattern Index table in `dsa_patterns/dsa_patterns.md` §6
 4. Add a row to the DSA Pattern Playbooks manifest in `README.md` §7
 5. Add a bidirectional "See Also" entry in the relevant concept module(s) pointing to the new pattern file
-6. Add the filename to the `senior:` line of the `<!-- study-paths -->` block at the top of `dsa_patterns/dsa_patterns.md` — that block is the only place a sub-file is addressable; leaving it out keeps the file Full-path only. Then run `python3 game/extract.py --write-paths` (the generated table counts files per module).
+6. Add the filename under `dsa_patterns` in this section's `README.md` `<!-- study-paths -->` block, tagged `senior` — that block is the only place a sub-file is addressable; leaving it out keeps the file Full-path only. Then run `python3 game/extract.py --write-paths` (the generated table counts files per module).
 
 ---
 
 ## Learning Paths (Full + Senior)
 
-`README.md` documents the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (17 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that module's own page (`<module>.md`) naming the files each tier takes — which is how `dsa_patterns/` names its 25 playbook files plus the two guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
+`README.md` documents the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (17 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — which is how `dsa_patterns/` names its 25 playbook files plus the two guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -275,7 +275,7 @@ On finishing a module/chunk:
 2. Follow CS Fundamentals-specific content rules above (Python-first, concrete numbers, BROKEN→FIX)
 3. Update `README.md` module table AND flip the file's status in the §7 build manifest
 4. Add the module dir to `STUDY_ORDER.cs_fundamentals` in `game/app.js` at its phase position — a module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
-5. If it belongs in the Senior cut, write a `<!-- study-paths -->` block at the top of its page (`<module_name>.md`) with a `senior:` line that lists `<module_name>.md` itself plus any sub-files (the module page is never optional; no `principal:` line — this section has no Principal tier); then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table.
+5. Add the module and EVERY file it owns to this section's `README.md` `<!-- study-paths -->` block, tagging each `senior` or `-` (the module page must carry every tier the module is in; this section has no Principal tier). **Never put a block in the module page — content files hold only content**; then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table.
 6. Update root `README.md` CS Fundamentals phase table
 7. Update root `CLAUDE.md` CS Fundamentals module count
 
@@ -291,3 +291,28 @@ chart, or curve/sketch). Generate and validate them with the
 (ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
 and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
 Diagrams".
+
+---
+
+## HARD RULE — structure lives in `README.md`, content files hold only content
+
+**The section `README.md` is the single source of truth for this section's file inventory
+and study-tier membership.** Its `<!-- study-paths -->` block lists EVERY module, EVERY
+file that module owns (the module page AND every deep-dive sub-file), and EVERY case
+study, each tagged with the tiers it belongs to — `-` means Full path only. Reading that
+one block tells you every file in the section and which paths it is on.
+
+**A content file carries NO structural metadata.** A module page or a deep-dive sub-file
+holds the content of its topic and nothing else — no `<!-- study-paths -->` block, no tier
+declaration, no path membership. That metadata used to live in each module page; it was
+moved here so there is one place to look and one place to change.
+
+**Adding a file? Add its line to the section README's block in the same commit.** A file on
+disk that is missing from the block — or listed there and absent from disk — FAILS
+`python3 game/extract.py --strict` and takes the Pages deploy red. That check exists
+because the old failure was silent: a new sub-file was invisible to the curated paths, or
+silently dragged into every tier its parent was in, with a green build either way.
+
+Order is never declared in the block: it comes from `STUDY_ORDER` in `game/app.js`. The
+tier TABLES further down the README are GENERATED from the block by
+`python3 game/extract.py --write-paths` — never hand-edit them.

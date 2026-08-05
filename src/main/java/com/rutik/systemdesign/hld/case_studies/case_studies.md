@@ -1,11 +1,5 @@
 # HLD — Case Studies
 
-<!-- study-paths
-senior: design_url_shortener.md, design_twitter.md, design_whatsapp.md, design_notification_system.md, design_uber.md, design_search_autocomplete.md, design_leaderboard.md, design_google_docs.md, design_google_drive.md, design_web_crawler.md, design_key_value_store.md, design_distributed_unique_id.md, design_distributed_message_queue.md, design_hotel_reservation.md
-principal: design_netflix.md, design_google_maps.md, design_payment_system.md, design_stock_exchange.md, design_object_storage_s3.md, design_ad_click_aggregation.md, design_metrics_monitoring.md
-case studies in each curated path; the Level filter reads this
--->
-
 Twenty-three end-to-end system design case studies at the high-level architectural overview depth. These are interview-format studies — start with requirements, estimate scale, draw the architecture, then discuss tradeoffs.
 
 Each follows the 11-section principal template: Requirements Clarification, Scale Estimation, High-Level Architecture, Component Deep Dives, Design Decisions & Tradeoffs, Real-World Implementations, Technologies & Tools, Operational Playbook, Common Pitfalls & War Stories, Capacity Planning, and Interview Discussion Points.

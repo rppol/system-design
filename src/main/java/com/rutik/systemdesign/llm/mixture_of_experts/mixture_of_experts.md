@@ -1,9 +1,5 @@
 # Mixture of Experts (MoE)
 
-<!-- study-paths
-senior: mixture_of_experts.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

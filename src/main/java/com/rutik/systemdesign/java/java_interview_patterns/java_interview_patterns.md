@@ -1,9 +1,5 @@
 # Java Interview Patterns
 
-<!-- study-paths
-senior: java_interview_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 This module consolidates the most common Java patterns and gotchas that appear on senior Java interviews. Unlike the other modules which cover concepts deeply, this module is a consolidated reference of *recipes and gotchas* — the practical patterns you need to recognize and apply immediately in an interview setting.

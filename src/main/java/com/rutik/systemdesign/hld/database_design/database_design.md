@@ -1,9 +1,5 @@
 # Database Design
 
-<!-- study-paths
-senior: database_design.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Database design is the process of structuring how data is stored, organized, accessed, and maintained. Good database design directly determines a system's scalability, consistency, query performance, and maintainability. Poor design creates technical debt that compounds exponentially as data volume and traffic grow.

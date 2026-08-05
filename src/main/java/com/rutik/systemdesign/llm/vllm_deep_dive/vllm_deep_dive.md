@@ -1,9 +1,5 @@
 # vLLM Deep Dive
 
-<!-- study-paths
-senior: vllm_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Intuition
 
 > **One-line analogy**: vLLM is to LLM serving what a database's buffer pool manager is to query execution — it reimagines memory management from scratch to eliminate waste and maximize throughput.

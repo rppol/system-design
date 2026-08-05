@@ -1,10 +1,5 @@
 # Spring Security — JWT and OAuth2
 
-<!-- study-paths
-senior: spring_security_jwt_oauth.md
-principal: spring_security_jwt_oauth.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

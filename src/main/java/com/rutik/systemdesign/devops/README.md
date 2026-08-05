@@ -188,6 +188,113 @@ Phase 8 — Specialized Platforms & Performance (advanced electives)
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+linux_and_os_fundamentals
+  linux_and_os_fundamentals.md  senior
+shell_scripting_and_automation
+  shell_scripting_and_automation.md  -
+networking_for_devops
+  networking_for_devops.md  senior
+version_control_and_git_workflows
+  version_control_and_git_workflows.md  -
+containers_and_docker
+  containers_and_docker.md  senior
+container_runtimes_and_oci
+  container_runtimes_and_oci.md  -
+kubernetes_architecture
+  kubernetes_architecture.md  senior
+kubernetes_workloads_and_objects
+  kubernetes_workloads_and_objects.md  senior
+kubernetes_networking
+  kubernetes_networking.md  senior
+kubernetes_storage_and_state
+  kubernetes_storage_and_state.md  -
+kubernetes_scheduling_and_autoscaling
+  kubernetes_scheduling_and_autoscaling.md  senior
+kubernetes_security
+  kubernetes_security.md  senior
+helm_and_package_management
+  helm_and_package_management.md  -
+kubernetes_operators_and_crds
+  kubernetes_operators_and_crds.md  -
+ci_cd_fundamentals
+  ci_cd_fundamentals.md  senior
+ci_cd_platforms
+  ci_cd_platforms.md  senior
+deployment_strategies
+  deployment_strategies.md  senior
+gitops_argocd_flux
+  gitops_argocd_flux.md  senior
+artifact_and_registry_management
+  artifact_and_registry_management.md  -
+infrastructure_as_code_terraform
+  infrastructure_as_code_terraform.md  senior
+terraform_advanced_and_alternatives
+  terraform_advanced_and_alternatives.md  -
+configuration_management
+  configuration_management.md  -
+secrets_management
+  secrets_management.md  senior
+cloud_fundamentals_and_aws
+  cloud_fundamentals_and_aws.md  senior
+gcp_and_azure_essentials
+  gcp_and_azure_essentials.md  -
+serverless_and_faas
+  serverless_and_faas.md  senior
+cloud_networking_and_cdn
+  cloud_networking_and_cdn.md  senior
+cloud_cost_optimization_finops
+  cloud_cost_optimization_finops.md  -
+observability_metrics_prometheus
+  observability_metrics_prometheus.md  senior
+observability_logging
+  observability_logging.md  senior
+observability_tracing_and_otel
+  observability_tracing_and_otel.md  senior
+  opentelemetry_deep_dive.md         senior
+visualization_and_alerting
+  visualization_and_alerting.md  -
+sre_principles_and_slos
+  sre_principles_and_slos.md  senior
+incident_management_and_oncall
+  incident_management_and_oncall.md  senior
+devsecops_and_supply_chain_security
+  devsecops_and_supply_chain_security.md  -
+policy_as_code_and_compliance
+  policy_as_code_and_compliance.md  -
+disaster_recovery_and_resilience
+  disaster_recovery_and_resilience.md  -
+platform_engineering_and_idp
+  platform_engineering_and_idp.md  -
+ml_platform_and_gpu_infrastructure
+  ml_platform_and_gpu_infrastructure.md  -
+event_streaming_operations
+  event_streaming_operations.md  -
+performance_and_load_testing
+  performance_and_load_testing.md  -
+case_studies
+  design_autoscaling_platform.md           -
+  design_ci_cd_platform.md                 -
+  design_container_registry.md             -
+  design_gitops_delivery_pipeline.md       -
+  design_incident_response_system.md       -
+  design_internal_developer_platform.md    -
+  design_kubernetes_platform.md            -
+  design_log_aggregation_pipeline.md       -
+  design_ml_platform_infrastructure.md     -
+  design_multi_region_dr_architecture.md   -
+  design_observability_platform.md         -
+  design_secrets_management_platform.md    -
+  design_zero_downtime_infra_migration.md  -
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 41 modules from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD, IaC, cloud platforms, observability, SRE, DevSecOps, and specialized GPU/MLOps and event-streaming platforms. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

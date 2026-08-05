@@ -1,10 +1,5 @@
 # ML System Design
 
-<!-- study-paths
-senior: ml_system_design.md, design_framework.md, feature_store_design.md, training_pipeline_design.md, ab_testing_for_ml.md, latency_and_throughput_optimization.md
-principal: ml_system_design.md, design_framework.md, feature_store_design.md, ab_testing_for_ml.md, classical_ml_vs_llm.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

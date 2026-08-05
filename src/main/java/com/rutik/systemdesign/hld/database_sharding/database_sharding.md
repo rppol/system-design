@@ -1,10 +1,5 @@
 # Database Sharding
 
-<!-- study-paths
-senior: database_sharding.md
-principal: database_sharding.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Table of Contents
 1. [What is Sharding?](#what-is-sharding)
 2. [Why Shard?](#why-shard)

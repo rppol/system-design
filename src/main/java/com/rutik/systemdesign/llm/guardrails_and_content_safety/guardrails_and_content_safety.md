@@ -1,10 +1,5 @@
 # Guardrails & Content Safety
 
-<!-- study-paths
-senior: guardrails_and_content_safety.md, guardrail_evaluation_and_operations.md
-principal: guardrails_and_content_safety.md, guardrail_evaluation_and_operations.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

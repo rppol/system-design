@@ -170,6 +170,108 @@ Dependencies to note:
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+ioc_container
+  ioc_container.md  senior
+bean_lifecycle
+  bean_lifecycle.md  senior
+dependency_injection
+  dependency_injection.md  senior
+spring_configuration
+  spring_configuration.md  senior
+spring_proxies
+  spring_proxies.md  senior
+spring_aop
+  spring_aop.md            senior
+  pointcut_designators.md  senior
+spring_boot_autoconfiguration
+  spring_boot_autoconfiguration.md  senior, principal
+spring_boot_configuration
+  spring_boot_configuration.md  senior, principal
+spring_boot_actuator
+  spring_boot_actuator.md  senior, principal
+spring_modulith
+  spring_modulith.md  principal
+spring_mvc_architecture
+  spring_mvc_architecture.md  senior
+request_handling
+  request_handling.md       senior
+  i18n_and_localization.md  -
+filters_and_interceptors
+  filters_and_interceptors.md  senior
+spring_webflux
+  spring_webflux.md              senior
+  rsocket_reactive_messaging.md  -
+spring_graphql
+  spring_graphql.md  -
+spring_hateoas_rest_maturity
+  spring_hateoas_rest_maturity.md  principal
+spring_http_clients
+  spring_http_clients.md  senior, principal
+spring_grpc
+  spring_grpc.md  -
+validation_and_error_handling
+  validation_and_error_handling.md  senior
+spring_data_jpa
+  spring_data_jpa.md  senior
+spring_data_nosql
+  spring_data_nosql.md  -
+database_migrations
+  database_migrations.md  principal
+spring_transactions
+  spring_transactions.md  senior, principal
+spring_caching
+  spring_caching.md  senior
+spring_security_architecture
+  spring_security_architecture.md  senior, principal
+spring_security_jwt_oauth
+  spring_security_jwt_oauth.md  senior, principal
+spring_session
+  spring_session.md  principal
+spring_cloud_config
+  spring_cloud_config.md  principal
+spring_cloud_patterns
+  spring_cloud_patterns.md  senior, principal
+  gateway_server_webmvc.md  senior, principal
+spring_messaging
+  spring_messaging.md  senior, principal
+spring_websocket_stomp
+  spring_websocket_stomp.md  -
+spring_batch
+  spring_batch.md  -
+spring_events_and_scheduling
+  spring_events_and_scheduling.md  senior
+spring_ai
+  spring_ai.md  -
+spring_integration
+  spring_integration.md  -
+spring_testing
+  spring_testing.md  senior, principal
+spring_performance
+  spring_performance.md  senior, principal
+observability_and_tracing
+  observability_and_tracing.md  principal
+spring_native_graalvm
+  spring_native_graalvm.md  principal
+case_studies
+  design_api_gateway.md                      senior
+  design_distributed_caching.md              senior
+  design_distributed_rate_limiter_spring.md  senior
+  design_batch_pipeline.md                   senior
+  design_realtime_notification_service.md    senior
+  design_multitenant_api.md                  principal
+  design_oauth2_authorization_server.md      principal
+  design_event_driven_microservice.md        principal
+  design_idempotent_payment_api.md           principal
+-->
 ## Learning Paths
 
 39 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

@@ -1,9 +1,5 @@
 # Networking for DevOps
 
-<!-- study-paths
-senior: networking_for_devops.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 1 — Foundations · Difficulty: Intermediate
 
 Networking is where "it works locally" goes to die. DNS resolution, CIDR planning, NAT, firewall rules, load-balancer health checks, and TLS termination are the layers a DevOps engineer debugs daily. This module covers the operational networking knowledge that underpins VPCs, Kubernetes Services, ingress, and service mesh — focused on *what breaks and how to find it*.

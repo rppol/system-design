@@ -1,9 +1,5 @@
 # Arrays, Strings & Hashing
 
-<!-- study-paths
-senior: arrays_strings_and_hashing.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

@@ -1,9 +1,5 @@
 # CUDA Programming Model & Kernels
 
-<!-- study-paths
-senior: cuda_programming_model_and_kernels.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 CUDA (Compute Unified Device Architecture) exposes the GPU to the programmer as a

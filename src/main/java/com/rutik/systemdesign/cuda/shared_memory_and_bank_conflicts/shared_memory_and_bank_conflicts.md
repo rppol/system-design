@@ -1,9 +1,5 @@
 # Shared Memory & Bank Conflicts
 
-<!-- study-paths
-senior: shared_memory_and_bank_conflicts.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Shared memory is a small, fast, on-chip scratchpad that every thread block owns for the

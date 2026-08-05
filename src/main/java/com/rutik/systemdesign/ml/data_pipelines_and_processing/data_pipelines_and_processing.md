@@ -1,9 +1,5 @@
 # Data Pipelines and Processing for ML
 
-<!-- study-paths
-senior: data_pipelines_and_processing.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A data pipeline for ML is the automated system that moves raw data from source systems through transformation steps into a form suitable for model training and serving. Unlike traditional ETL (Extract, Transform, Load) pipelines built for reporting, ML pipelines must produce reproducible, versioned, and statistically validated datasets — because model quality is directly bounded by data quality.

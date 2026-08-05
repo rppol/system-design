@@ -1,9 +1,5 @@
 # Strings and Text in Java
 
-<!-- study-paths
-senior: strings_and_text.md, regex_engine_and_redos.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Java strings are immutable, interned objects backed by a `byte[]` array (Java 9+, Compact Strings). The `String` class participates in a JVM-level string table (the constant pool / string table), `invokedynamic`-based concatenation at the bytecode level, and a rich set of text-manipulation APIs added through Java 15 (text blocks). String templates were previewed in Java 21 and 22 and then withdrawn, so `String.format`/`formatted` and `StringBuilder` remain the interpolation story.

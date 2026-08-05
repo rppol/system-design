@@ -1,9 +1,5 @@
 # Tokenization & Embeddings
 
-<!-- study-paths
-senior: tokenization_and_embeddings.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Tokenization is the process of converting raw text into discrete units (tokens) that a model can process. These tokens are then mapped to dense vector representations (embeddings) — the actual numerical input to the neural network.

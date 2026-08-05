@@ -1,11 +1,5 @@
 # Java Case Studies — Learning Path Index
 
-<!-- study-paths
-senior: design_connection_pool.md, design_thread_pool_java.md, design_rate_limiter_java.md, design_snowflake_id_generator_java.md, design_lru_cache_java.md
-principal: design_di_container_java.md, design_event_bus.md, design_circuit_breaker_java.md
-case studies in each curated path; the Level filter reads this
--->
-
 Eight principal-grade case studies covering the core Java engineering patterns that appear most
 frequently in senior-engineer interviews and production system design discussions. Each study uses
 the 11-section principal template with executable Java code, concrete numbers, and production

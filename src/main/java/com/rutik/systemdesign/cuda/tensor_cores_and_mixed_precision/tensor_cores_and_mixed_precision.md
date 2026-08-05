@@ -1,9 +1,5 @@
 # Tensor Cores & Mixed Precision
 
-<!-- study-paths
-senior: tensor_cores_and_mixed_precision.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 A **Tensor Core** is a specialized execution unit, separate from the ordinary CUDA cores, that computes a small, fixed-shape **matrix-multiply-accumulate (MMA)** in hardware — for example `D = A × B + C` where `A` is 16×16, `B` is 16×16, and `D`/`C` are 16×16 — as a *single warp-level instruction* rather than as thousands of individual scalar fused-multiply-adds. Introduced in Volta (V100, 2017) and present in every NVIDIA data-center GPU since, Tensor Cores are the single largest source of the FLOP/s gap between a GPU's "CUDA core" peak and its advertised AI-training/inference peak: on an H100, ordinary FP64 CUDA-core throughput is roughly 34 TFLOP/s, FP64 routed through the Tensor Cores is roughly 67 TFLOP/s, and dense FP16 through the Tensor Cores is roughly 1000 TFLOP/s — nearly 30× the non-Tensor-Core FP64 rate, or about 15× the FP64 Tensor Core rate (§8 works both divisions, because quoting one without naming its baseline is how this figure ends up off by 2×).

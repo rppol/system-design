@@ -1,9 +1,5 @@
 # Document Databases
 
-<!-- study-paths
-senior: document_databases.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Document databases store data as semi-structured documents (typically JSON/BSON), allowing each document to have a different structure. The document model is natural for hierarchical data and objects that map directly to application code. MongoDB is the dominant document database, with WiredTiger as its storage engine since 3.2.

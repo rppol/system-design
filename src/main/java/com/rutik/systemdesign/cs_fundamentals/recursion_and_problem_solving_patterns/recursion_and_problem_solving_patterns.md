@@ -1,9 +1,5 @@
 # Recursion & Problem-Solving Patterns
 
-<!-- study-paths
-senior: recursion_and_problem_solving_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

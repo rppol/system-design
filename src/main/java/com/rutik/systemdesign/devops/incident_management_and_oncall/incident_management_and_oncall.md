@@ -1,9 +1,5 @@
 # Incident Management & On-Call
 
-<!-- study-paths
-senior: incident_management_and_oncall.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
 Incident management is the **structured, repeatable process for responding to and learning from outages** — so that under the stress of a production fire, the team has clear roles, defined severities, working communication, and a path to resolution instead of chaos. On-call is the **human readiness layer** that makes someone responsible for responding 24/7, sustainably. The two metrics that quantify how well you do this are **MTTD** (mean time to detect) and **MTTR** (mean time to resolve), and the cultural practice that keeps you improving is the **blameless postmortem**.

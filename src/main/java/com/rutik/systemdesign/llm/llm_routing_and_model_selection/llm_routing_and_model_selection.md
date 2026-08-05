@@ -1,9 +1,5 @@
 # LLM Routing and Model Selection
 
-<!-- study-paths
-principal: llm_routing_and_model_selection.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

@@ -1,10 +1,5 @@
 # Context Engineering
 
-<!-- study-paths
-senior: context_engineering.md
-principal: context_engineering.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Context engineering is the discipline of deciding *what information to place in the context window,

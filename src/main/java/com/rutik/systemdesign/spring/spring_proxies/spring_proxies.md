@@ -1,9 +1,5 @@
 # Spring Proxies
 
-<!-- study-paths
-senior: spring_proxies.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Spring relies heavily on dynamic proxies to implement cross-cutting concerns — `@Transactional`, `@Cacheable`, `@Async`, AOP advice, and Spring Security method security all work by wrapping your bean in a proxy. Understanding which proxy type Spring uses and when is essential for debugging self-invocation issues, understanding `@Transactional` gotchas, and working with `final` classes.

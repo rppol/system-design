@@ -1,9 +1,5 @@
 # Natural Language Processing (Classical + Pre-Transformer Deep Learning)
 
-<!-- study-paths
-senior: natural_language_processing.md, text_classification.md, bert_and_pretrained_models.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > This module covers classical and pre-transformer NLP. Transformer-based LLMs are covered in the LLM section (`llm/foundations_and_architecture/`).
 
 ---

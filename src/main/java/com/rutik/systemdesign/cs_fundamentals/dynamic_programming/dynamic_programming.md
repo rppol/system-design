@@ -1,9 +1,5 @@
 # Dynamic Programming
 
-<!-- study-paths
-senior: dynamic_programming.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Breaking a hard problem into overlapping sub-problems, solving each once, and remembering the answer.
 
 ---

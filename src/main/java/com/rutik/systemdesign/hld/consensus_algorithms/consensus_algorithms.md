@@ -1,9 +1,5 @@
 # Consensus Algorithms
 
-<!-- study-paths
-principal: consensus_algorithms.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Consensus algorithms enable a cluster of distributed nodes to agree on a single value despite node failures and network partitions. They are the foundation of every distributed system that requires coordination: leader election, distributed locks, replicated state machines, and configuration stores.

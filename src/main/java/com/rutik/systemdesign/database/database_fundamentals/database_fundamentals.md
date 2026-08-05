@@ -1,9 +1,5 @@
 # Database Fundamentals
 
-<!-- study-paths
-senior: database_fundamentals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Database fundamentals cover the core theoretical guarantees and models that govern how database systems behave under concurrent access, failures, and network partitions. These concepts — ACID, BASE, CAP, PACELC, and isolation levels — form the vocabulary for reasoning about database correctness in distributed systems.

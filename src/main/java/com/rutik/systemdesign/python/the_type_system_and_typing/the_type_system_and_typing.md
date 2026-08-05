@@ -1,10 +1,5 @@
 # The Type System & typing
 
-<!-- study-paths
-senior: the_type_system_and_typing.md, protocols_and_structural_typing.md
-principal: the_type_system_and_typing.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Python's type system is a **gradual, structural, and optional** annotation layer built on top of the

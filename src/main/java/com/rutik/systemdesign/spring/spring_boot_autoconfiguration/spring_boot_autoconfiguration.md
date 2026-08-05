@@ -1,10 +1,5 @@
 # Spring Boot Auto-Configuration
 
-<!-- study-paths
-senior: spring_boot_autoconfiguration.md
-principal: spring_boot_autoconfiguration.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Spring Boot auto-configuration is the mechanism that automatically configures Spring application components based on the JARs present on the classpath, beans already defined, and property values. When you add `spring-boot-starter-data-jpa` to your `pom.xml`, Spring Boot automatically configures `DataSource`, `EntityManagerFactory`, `TransactionManager`, and Spring Data repositories — without a single line of explicit configuration.

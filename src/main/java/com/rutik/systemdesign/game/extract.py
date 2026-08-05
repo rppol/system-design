@@ -503,25 +503,47 @@ TIER_MARK = re.compile(r"^<!--\s*study-paths\s*\n(.*?)^-->\s*$", re.M | re.S)
 TIER_LINE = re.compile(r"^\s*([a-z]+)\s*:\s*(.+?)\s*$", re.M)
 
 
-def _declared_paths(abs_path):
-    """{tier: [file, ...]} from a `<!-- study-paths ... -->` block, or {}.
+def _section_inventory(section):
+    """{module_key: {file: [tier, ...]}} from the ONE `<!-- study-paths -->` block in
+    `<section>/README.md`, plus the pseudo-module `case_studies`.
 
-    The block lives ONCE per module page (and once per section case-study index) and
-    names the files that module contributes to each tier. Deep-dive sub-files and
-    case-study files carry NO metadata of their own -- study content stays study content.
+    The section README is the single source of truth for BOTH the file inventory and tier
+    membership. Content files carry no structural metadata: a deep-dive sub-file holds its
+    topic and nothing else. Format is indentation-based --
+
+        supervised_learning
+          supervised_learning.md   senior
+          decision_trees.md        senior
+          bayesian_methods.md      -
+
+    -- so a module line sits at column 0 and each of its files is indented, followed by
+    the tiers that file belongs to or `-` for Full path only.
     """
+    path = os.path.join(BASE_DIR, section, "README.md")
     try:
-        head = open(abs_path, encoding="utf-8").read(6000)
+        text = open(path, encoding="utf-8").read()
     except OSError:
         return {}
-    m = TIER_MARK.search(head)
+    m = TIER_MARK.search(text)
     if not m:
         return {}
-    out = {}
-    for line in TIER_LINE.finditer(m.group(1)):
-        tier, rest = line.group(1), line.group(2)
-        if tier in TIERS:
-            out[tier] = [x.strip() for x in rest.split(",") if x.strip()]
+    out, cur = {}, None
+    for raw in m.group(1).split("\n"):
+        if not raw.strip():
+            continue
+        if raw[0].isspace():
+            if cur is None:                      # an indented line before any module: the
+                continue                         # header prose, which is documentation
+            parts = raw.strip().rsplit("  ", 1)
+            if len(parts) == 1:
+                fn, tiers = parts[0].strip(), ""
+            else:
+                fn, tiers = parts[0].strip(), parts[1].strip()
+            out[cur][fn] = [t.strip() for t in tiers.split(",")
+                            if t.strip() and t.strip() in TIERS]
+        else:
+            cur = raw.strip()
+            out.setdefault(cur, {})
     return out
 
 
@@ -535,39 +557,62 @@ def _module_page(module):
 
 
 def build_paths_from_markers(order):
-    """Derive {section: {senior, principal, seniorFiles, principalFiles, cases}} by walking
-    the tree and reading each file's marker. Ordering is imposed by STUDY_ORDER, so the
-    result is an ordered subset by construction and cannot drift out of order."""
+    """Derive {section: {senior, principal, seniorFiles, principalFiles, cases}} from each
+    section README's inventory block. Ordering is imposed by STUDY_ORDER, so the result is
+    an ordered subset by construction and cannot drift out of order."""
     out, problems = {}, []
     for sec, mods in order.items():
+        inv = _section_inventory(sec)
         cfg = {t: [] for t in TIERS}
         cfg.update({t + "Files": {} for t in TIERS})
         cfg["cases"] = {t: [] for t in TIERS}
-        for mod in mods:                                   # STUDY_ORDER order == path order
-            decl = _declared_paths(os.path.join(BASE_DIR, mod, _module_page(mod)))
-            if not decl:
+        seen_keys = set()
+        for mod in mods:
+            key = mod.split("/", 1)[1]
+            page = _module_page(mod)
+            real = _module_sourcefiles(mod)
+            if real is None:                       # module dir does not exist yet
                 continue
-            real = _module_sourcefiles(mod) or set()
-            for tier, keep in decl.items():
+            listed = inv.get(key)
+            if listed is None:
+                if real:
+                    problems.append(f"{sec}/README.md study-paths: module '{key}' is in "
+                                    f"STUDY_ORDER with {len(real)} file(s) on disk but is "
+                                    f"absent from the inventory block")
+                continue
+            seen_keys.add(key)
+            # the block IS the inventory, so both directions are errors
+            for fn in sorted(set(listed) - real):
+                problems.append(f"{sec}/README.md study-paths[{key}]: '{fn}' is listed but "
+                                f"no such file exists")
+            for fn in sorted(real - set(listed)):
+                problems.append(f"{sec}/README.md study-paths[{key}]: '{fn}' exists on disk "
+                                f"but is not listed -- every file a module owns must appear")
+            for tier in TIERS:
+                keep = [f for f in listed if tier in listed[f] and f in real]
+                if not keep:
+                    continue
                 cfg[tier].append(mod)
-                for fn in keep:
-                    if fn not in real:
-                        problems.append(f"{mod}/{_module_page(mod)} study-paths[{tier}]: '{fn}' is not a file in this module")
-                if _module_page(mod) not in keep:
-                    problems.append(f"{mod}/{_module_page(mod)} study-paths[{tier}]: must list "
-                                    f"'{_module_page(mod)}' -- the module page is never optional")
-                if len(real) > 1:                          # only record when there is a choice
-                    cfg[tier + "Files"][mod] = [f for f in keep if f in real]
-        csidx = os.path.join(BASE_DIR, sec, "case_studies", CS_INDEX_NAME)
-        for tier, names in _declared_paths(csidx).items():
-            for name in names:
-                rel = os.path.join(sec, "case_studies", name)
-                if any(p in CS_EXCLUDE_DIRS for p in rel.split(os.sep)):
-                    problems.append(f"{sec}/case_studies/{CS_INDEX_NAME} study-paths[{tier}]: '{name}' is under an excluded dir")
-                elif not os.path.isfile(os.path.join(BASE_DIR, rel)):
-                    problems.append(f"{sec}/case_studies/{CS_INDEX_NAME} study-paths[{tier}]: no such case study '{name}'")
-                else:
-                    cfg["cases"][tier].append(rel)
+                if page not in keep:
+                    problems.append(f"{sec}/README.md study-paths[{key}]: '{page}' must "
+                                    f"carry '{tier}' -- the module page is never optional "
+                                    f"when any of its files is in a tier")
+                if len(real) > 1:                  # only record when there is a choice
+                    cfg[tier + "Files"][mod] = keep
+        for key in sorted(set(inv) - seen_keys - {"case_studies"}):
+            problems.append(f"{sec}/README.md study-paths: '{key}' is in the inventory "
+                            f"block but not in STUDY_ORDER.{sec}")
+        for fn, tiers in inv.get("case_studies", {}).items():
+            rel = os.path.join(sec, "case_studies", fn)
+            if any(p in CS_EXCLUDE_DIRS for p in rel.split(os.sep)):
+                problems.append(f"{sec}/README.md study-paths[case_studies]: '{fn}' is under "
+                                f"an excluded dir")
+            elif not os.path.isfile(os.path.join(BASE_DIR, rel)):
+                problems.append(f"{sec}/README.md study-paths[case_studies]: no such case "
+                                f"study '{fn}'")
+            else:
+                for t in tiers:
+                    cfg["cases"][t].append(rel)
         if any(cfg[t] for t in TIERS):
             out[sec] = cfg
     return out, problems

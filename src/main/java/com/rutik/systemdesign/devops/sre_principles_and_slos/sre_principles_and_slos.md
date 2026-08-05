@@ -1,9 +1,5 @@
 # SRE Principles & SLOs
 
-<!-- study-paths
-senior: sre_principles_and_slos.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
 Site Reliability Engineering (SRE) is **what you get when you treat operations as a software problem** — Google's discipline for running reliable systems at scale by setting explicit reliability targets (SLOs), measuring them with SLIs, spending the resulting **error budget** to balance reliability against feature velocity, capping operational drudgery (**toil**), and automating relentlessly. The core insight: **100% reliability is the wrong target** — it's impossible, ruinously expensive, and unnecessary, because users can't tell the difference between 100% and 99.99%. This module covers SLI/SLO/SLA, error budgets and burn rate, toil, capacity planning, and the Google SRE practices that the industry standardized on.

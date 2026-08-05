@@ -1,10 +1,5 @@
 # Spring Cloud Patterns — Gateway, Resilience, Service Discovery, Observability
 
-<!-- study-paths
-senior: spring_cloud_patterns.md, gateway_server_webmvc.md
-principal: spring_cloud_patterns.md, gateway_server_webmvc.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

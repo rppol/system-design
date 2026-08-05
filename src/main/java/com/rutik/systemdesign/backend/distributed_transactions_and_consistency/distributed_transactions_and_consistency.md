@@ -1,10 +1,5 @@
 # Distributed Transactions and Consistency
 
-<!-- study-paths
-senior: distributed_transactions_and_consistency.md
-principal: distributed_transactions_and_consistency.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 **Cross-references:**
 - [Spring Transactions](../../spring/spring_transactions/spring_transactions.md)
 - [Kafka Deep Dive](../kafka_deep_dive/kafka_deep_dive.md)

@@ -1,9 +1,5 @@
 # Message Queues — High-Level Design
 
-<!-- study-paths
-senior: message_queues.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Table of Contents
 1. [Overview and Motivation](#overview-and-motivation)
 2. [Core Concepts](#core-concepts)

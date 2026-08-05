@@ -1,10 +1,5 @@
 # Testing with pytest
 
-<!-- study-paths
-senior: testing_with_pytest.md
-principal: testing_with_pytest.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 pytest is a mature, full-featured testing framework for Python that replaces the standard `unittest` module in most production codebases. It discovers tests automatically, supports parameterization, provides a rich fixture system for dependency injection, and integrates with the entire testing ecosystem — async runtimes, property-based testing, coverage reporting, mocking, and CI pipelines.

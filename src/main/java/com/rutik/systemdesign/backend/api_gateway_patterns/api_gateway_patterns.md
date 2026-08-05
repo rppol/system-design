@@ -1,9 +1,5 @@
 # API Gateway Patterns
 
-<!-- study-paths
-principal: api_gateway_patterns.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

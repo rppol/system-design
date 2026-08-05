@@ -1,9 +1,5 @@
 # Database Migrations in Spring — Flyway & Liquibase
 
-<!-- study-paths
-principal: database_migrations.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

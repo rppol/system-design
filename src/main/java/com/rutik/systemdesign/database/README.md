@@ -128,6 +128,86 @@ flowchart TD
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+database_fundamentals
+  database_fundamentals.md  senior
+storage_engines_internals
+  storage_engines_internals.md  senior, principal
+indexing_deep_dive
+  indexing_deep_dive.md  senior
+concurrency_control_and_locking
+  concurrency_control_and_locking.md  senior
+postgresql_internals
+  postgresql_internals.md  senior
+mysql_innodb_internals
+  mysql_innodb_internals.md  -
+sql_query_optimization
+  sql_query_optimization.md  senior
+schema_design_and_normalization
+  schema_design_and_normalization.md  senior, principal
+  surrogate_vs_natural_keys.md        senior, principal
+database_migrations_zero_downtime
+  database_migrations_zero_downtime.md  senior, principal
+document_databases
+  document_databases.md  senior
+key_value_stores
+  key_value_stores.md  senior
+redis_internals
+  redis_internals.md  senior
+wide_column_databases
+  wide_column_databases.md  senior, principal
+search_engines
+  search_engines.md  -
+elasticsearch_internals
+  elasticsearch_internals.md  senior, principal
+graph_databases
+  graph_databases.md  -
+time_series_databases
+  time_series_databases.md  -
+vector_databases
+  vector_databases.md  senior
+newsql_and_distributed_sql
+  newsql_and_distributed_sql.md  principal
+in_memory_databases
+  in_memory_databases.md  -
+replication_and_high_availability
+  replication_and_high_availability.md  senior, principal
+sharding_and_partitioning
+  sharding_and_partitioning.md  senior, principal
+distributed_transactions
+  distributed_transactions.md  senior, principal
+consistency_models_and_consensus
+  consistency_models_and_consensus.md  senior, principal
+database_caching_patterns
+  database_caching_patterns.md  -
+connection_pool_management
+  connection_pool_management.md  senior
+database_performance_tuning
+  database_performance_tuning.md  senior
+backup_recovery_and_disaster_recovery
+  backup_recovery_and_disaster_recovery.md  senior, principal
+database_security_and_compliance
+  database_security_and_compliance.md  principal
+database_selection_framework
+  database_selection_framework.md  principal
+polyglot_persistence_patterns
+  polyglot_persistence_patterns.md  principal
+case_studies
+  design_banking_ledger/design_banking_ledger.md                                  senior
+  design_ecommerce_catalog/design_ecommerce_catalog.md                            senior
+  design_social_media_feed_storage/design_social_media_feed_storage.md            senior
+  design_realtime_analytics_platform/design_realtime_analytics_platform.md        principal
+  design_multitenant_saas_database/design_multitenant_saas_database.md            principal
+  design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md  principal
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 31 modules spanning storage internals, relational and NoSQL engines, distributed-systems theory, and production operations. That is the right depth for a reference and the wrong shape for someone two weeks from a database-heavy interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).

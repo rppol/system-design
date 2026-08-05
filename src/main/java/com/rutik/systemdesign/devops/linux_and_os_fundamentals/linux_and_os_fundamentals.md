@@ -1,9 +1,5 @@
 # Linux & OS Fundamentals
 
-<!-- study-paths
-senior: linux_and_os_fundamentals.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 1 — Foundations · Difficulty: Intermediate
 
 The operating system is the substrate every container, pod, and cloud VM runs on. A senior DevOps engineer who understands processes, signals, file descriptors, cgroups, and namespaces can explain *why* a pod gets OOMKilled, *why* a graceful shutdown hangs, and *why* a "container" is just a process with a restricted view of the kernel — not a virtual machine.

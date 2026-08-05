@@ -1,9 +1,5 @@
 # SQL Query Optimization
 
-<!-- study-paths
-senior: sql_query_optimization.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 SQL query optimization is the practice of making database queries execute faster by choosing better execution plans, improving data access patterns, and restructuring queries to match what the query planner can efficiently handle. The goal: transform O(n) sequential scans into O(log n) index lookups, eliminate redundant I/O, and push work down to the database rather than the application.

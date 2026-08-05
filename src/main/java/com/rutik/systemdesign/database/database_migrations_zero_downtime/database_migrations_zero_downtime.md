@@ -1,10 +1,5 @@
 # Database Migrations — Zero Downtime
 
-<!-- study-paths
-senior: database_migrations_zero_downtime.md
-principal: database_migrations_zero_downtime.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Database migrations are changes to the database schema (adding columns, dropping tables, creating indexes, changing types) applied in a controlled, versioned manner. Zero-downtime migrations allow continuous application deployments without read or write outages. The core challenge: database and application code must be compatible during the deployment transition when both old and new code versions run simultaneously.

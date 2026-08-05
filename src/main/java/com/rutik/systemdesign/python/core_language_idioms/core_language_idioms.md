@@ -1,9 +1,5 @@
 # Core Language Idioms
 
-<!-- study-paths
-senior: core_language_idioms.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Python's core language idioms are the idiomatic patterns that distinguish fluent Python from code that merely runs. They cover identity versus equality, how Python evaluates truthiness, two competing philosophies for handling preconditions (EAFP and LBYL), comprehension expressions and their scoping rules, extended unpacking, the walrus assignment operator [3.8], and structural pattern matching [3.10].

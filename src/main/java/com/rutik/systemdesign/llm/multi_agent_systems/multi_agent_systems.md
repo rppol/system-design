@@ -1,10 +1,5 @@
 # Multi-Agent Systems
 
-<!-- study-paths
-senior: multi_agent_systems.md, orchestrator_worker_pattern.md, multi_agent_security.md
-principal: multi_agent_systems.md, orchestrator_worker_pattern.md, agent_to_agent_protocols.md, multi_agent_security.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Sub-Files — Deep Dives
 
 | File | Topic | Q&As |

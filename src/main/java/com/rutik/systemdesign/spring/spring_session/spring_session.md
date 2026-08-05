@@ -1,9 +1,5 @@
 # Spring Session
 
-<!-- study-paths
-principal: spring_session.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Spring Session decouples HTTP session storage from the servlet container. In a stock Spring Boot app, `HttpSession` is managed by Tomcat/Jetty/Undertow and its state lives in that one JVM's heap. Spring Session replaces this with a `Session` abstraction backed by a pluggable `SessionRepository` — Redis, JDBC, Hazelcast, or MongoDB — so session state becomes an external, shared resource that any application instance can read and write.

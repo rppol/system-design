@@ -1,9 +1,5 @@
 # Infrastructure as Code (Terraform)
 
-<!-- study-paths
-senior: infrastructure_as_code_terraform.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
 Terraform makes **infrastructure declarative, versioned, and reproducible**. Instead of clicking through the AWS console or running imperative scripts, you describe the desired end state in HCL (HashiCorp Configuration Language), and Terraform computes the diff between that desired state and a recorded **state file**, then calls cloud provider APIs to converge reality to the declaration. The state file is the keystone: it maps your config to real-world resource IDs, and almost every Terraform sharp edge — drift, locking, secrets leakage, blast radius — traces back to how state is stored and shared.

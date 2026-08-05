@@ -1,9 +1,5 @@
 # GraalVM Native Image & AOT Compilation
 
-<!-- study-paths
-principal: graalvm_native_image.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 `native-image` is a GraalVM tool that ahead-of-time (AOT) compiles a Java application — your classes plus every JDK class it transitively touches — into a single, standalone, platform-native executable. There is no JVM inside it: no bytecode interpreter, no classloader that can pull in a class it hasn't seen before, no JIT that compiles hot methods as they warm up. Instead, the executable links against **Substrate VM**, a minimal runtime substrate that GraalVM builds and bakes into the binary — it provides its own garbage collector, its own thread management (mapped directly onto OS threads), its own exception handling and signal handling, all without a HotSpot JVM underneath.

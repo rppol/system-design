@@ -1,10 +1,5 @@
 # Token Economics and Cost Optimization
 
-<!-- study-paths
-senior: token_economics_and_cost_optimization.md
-principal: token_economics_and_cost_optimization.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 LLM costs are primarily token-based, making token economics critical for production viability. Every

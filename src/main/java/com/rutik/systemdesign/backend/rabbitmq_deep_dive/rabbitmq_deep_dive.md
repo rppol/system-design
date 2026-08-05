@@ -1,9 +1,5 @@
 # RabbitMQ Deep Dive
 
-<!-- study-paths
-senior: rabbitmq_deep_dive.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ---
 
 ## 1. Concept Overview

@@ -1,10 +1,5 @@
 # MCP — Model Context Protocol
 
-<!-- study-paths
-senior: mcp_model_context_protocol.md, mcp_server_building.md, mcp_transports_and_jsonrpc.md, mcp_security.md
-principal: mcp_model_context_protocol.md, mcp_security.md, mcp_registries_and_ecosystem.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## Sub-Files — Deep Dives
 
 | File | Topic | Q&As |

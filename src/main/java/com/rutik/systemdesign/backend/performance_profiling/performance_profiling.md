@@ -1,9 +1,5 @@
 # Performance Profiling
 
-<!-- study-paths
-senior: performance_profiling.md
-files this module contributes to each curated path; omit a tier to leave it out
--->
 ## 1. Concept Overview
 
 Performance profiling is the process of measuring where a Java application spends its time and memory. Without profiling, performance optimization is guesswork — you risk optimizing hot code that is not the bottleneck, or missing a subtle memory leak that only manifests after days of operation. Production-safe profiling is the art of gathering performance data without significantly impacting the running system.

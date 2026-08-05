@@ -65,6 +65,92 @@ The three columns run independently top-to-bottom (Phase 1/4/7, Phase 2/5/8, Pha
 
 ---
 
+<!-- study-paths
+     THE source of truth for this section's file inventory and study-tier membership.
+     Every module, every file it owns (module page AND deep-dive sub-files), and every
+     case study is listed here with the tiers it belongs to; `-` means Full path only.
+     Content files carry NO structural metadata -- a deep dive holds its topic, nothing
+     else. Order is never declared here: it comes from STUDY_ORDER in game/app.js.
+     The tier TABLES lower in this file are generated from this block by
+     `python3 game/extract.py --write-paths`. A file on disk that is missing from this
+     block, or listed here and absent from disk, FAILS `extract.py --strict`.
+osi_model_and_networking
+  osi_model_and_networking.md  -
+tcp_ip_deep_dive
+  tcp_ip_deep_dive.md  senior
+udp_and_quic
+  udp_and_quic.md  -
+http_protocols
+  http_protocols.md  senior
+rest_api_design
+  rest_api_design.md  senior, principal
+grpc_and_protobuf
+  grpc_and_protobuf.md  senior
+graphql
+  graphql.md  -
+websockets_and_sse
+  websockets_and_sse.md  senior
+performance_profiling
+  performance_profiling.md  senior
+connection_pooling_deep_dive
+  connection_pooling_deep_dive.md  senior
+caching_strategies_deep_dive
+  caching_strategies_deep_dive.md  senior, principal
+async_and_concurrency_patterns
+  async_and_concurrency_patterns.md  senior
+database_internals_and_indexing
+  database_internals_and_indexing.md  senior
+query_optimization
+  query_optimization.md  senior
+database_migrations
+  database_migrations.md  senior, principal
+distributed_transactions_and_consistency
+  distributed_transactions_and_consistency.md  senior, principal
+database_types_deep_dive
+  database_types_deep_dive.md  principal
+fault_tolerance_patterns
+  fault_tolerance_patterns.md  senior, principal
+rate_limiting_in_depth
+  rate_limiting_in_depth.md  senior
+observability_and_monitoring
+  observability_and_monitoring.md  senior, principal
+backend_security_owasp
+  backend_security_owasp.md  senior, principal
+auth_and_authorization_systems
+  auth_and_authorization_systems.md  senior, principal
+backend_testing_strategies
+  backend_testing_strategies.md  principal
+load_and_performance_testing
+  load_and_performance_testing.md  senior
+chaos_engineering
+  chaos_engineering.md  principal
+event_driven_fundamentals
+  event_driven_fundamentals.md  principal
+kafka_deep_dive
+  kafka_deep_dive.md  senior
+rabbitmq_deep_dive
+  rabbitmq_deep_dive.md  senior
+event_sourcing_and_cqrs
+  event_sourcing_and_cqrs.md  principal
+messaging_patterns
+  messaging_patterns.md  principal
+microservices_fundamentals
+  microservices_fundamentals.md  principal
+api_gateway_patterns
+  api_gateway_patterns.md  principal
+service_mesh_and_service_discovery
+  service_mesh_and_service_discovery.md  principal
+distributed_system_operational_patterns
+  distributed_system_operational_patterns.md  principal
+container_and_deployment_patterns
+  container_and_deployment_patterns.md  senior
+case_studies
+  design_booking_system/design_booking_system.md                        senior
+  design_feed_service/design_feed_service.md                            senior
+  design_payment_processor/design_payment_processor.md                  senior, principal
+  design_event_driven_order_system/design_event_driven_order_system.md  principal
+  design_microservices_migration/design_microservices_migration.md      principal
+-->
 ## Learning Paths
 
 This section is exhaustive by design — 35 modules across 9 phases, from OSI-layer networking through microservices architecture and container orchestration. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
