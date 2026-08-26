@@ -1,6 +1,6 @@
 # GPU Scheduling and Inference Operations
 
-> **Version anchor (2026-08-26).** **vLLM v0.27.1** (2026-08-11) is current; its **v1 engine renamed the KV-cache metric to `vllm:kv_cache_usage_perc`** — `vllm:gpu_cache_usage_perc` was the v0 name and is the single most-copied stale metric in autoscaling configs. **Gateway API Inference Extension v1.6.0** (2026-08-10): `InferencePool` is **v1/stable**, and **`InferenceObjective` replaces the earlier `InferenceModel`** — do not present both as live. **Karpenter v1.14.1** supports EC2 Capacity Blocks (since v1.6) via `capacityReservationSelectorTerms` and `karpenter.sh/capacity-type: reserved`. **NVIDIA Dynamo 1.0 went GA 2026-03-16**; Triton is folded into it as Dynamo-Triton. **P6-B200** (8x B200, GA 2025-05-15) and **P6e-GB200 UltraServers** (up to 72 GB200 in one NVLink domain) are the current AWS training generation.
+> **Version anchor (2026-08-26).** **vLLM v0.27.1** (2026-08-11) is current; its **v1 engine renamed the KV-cache metric to `vllm:kv_cache_usage_perc`** — `vllm:gpu_cache_usage_perc` was the v0 name and is the single most-copied stale metric in autoscaling configs. **Gateway API Inference Extension v1.6.0** (2026-08-10): `InferencePool` is **v1/stable**, and the alpha `InferenceObjective`, `InferenceModelRewrite` and `EndpointPickerConfig` were **REMOVED from GAIE and migrated to `llm-d`** — a manifest naming any of them no longer applies. **Karpenter v1.14.1** supports EC2 Capacity Blocks (since v1.6) via `capacityReservationSelectorTerms` and `karpenter.sh/capacity-type: reserved`. **NVIDIA Dynamo 1.0 went GA 2026-03-16**; Triton is folded into it as Dynamo-Triton. **P6-B200** (8x B200, GA 2025-05-15) and **P6e-GB200 UltraServers** (up to 72 GB200 in one NVLink domain) are the current AWS training generation.
 
 > **Pricing anchor (checked 2026-08-26).** On-Demand, `us-east-1`, Linux, shared tenancy, taken from **AWS's own Price List Bulk API** (`pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.json`, publication timestamp 2026-08-25T21:32:33Z) rather than from any reseller or aggregator: **`p5.48xlarge` $55.0400/hr**, **`p6-b200.48xlarge` $113.9328/hr**, **`g6e.xlarge` $1.8610/hr**, **`g6e.12xlarge` $10.49264/hr**, **`inf2.48xlarge` $12.98127/hr**. Every dollar figure below derives from these five and nothing else. (Worth knowing: **`trn2.48xlarge` has no On-Demand SKU in `us-east-1` at all** — it exists only in `us-east-2`, and there only through Capacity Blocks.) If you update one, recompute the tables rather than editing them individually. Throughput figures used in the cost-per-token arithmetic are **stated assumptions from your own benchmark**, never vendor claims — §6 says so explicitly at the point of use.
 
@@ -93,7 +93,7 @@ An A100-80GB partitions as 7x `1g.10gb`, 3x `2g.20gb`, 2x `3g.40gb`, or 1x `7g.8
 
 ### How inference requests are routed
 
-Plain Gateway API treats backends as interchangeable. LLM replicas are not. The **Gateway API Inference Extension** (v1.6.0) adds `InferencePool` (v1/stable) and `InferenceObjective`, with an **Endpoint Picker (EPP)** — an Envoy `ext_proc` gRPC service — choosing a replica per request on live signals: **queue depth, KV-cache utilization, prefix-cache locality, and LoRA adapter affinity**. As of v1.6.0 the full-featured EPP, body-based routing and latency predictor moved to the separate `llm-d` project, leaving a lightweight reference EPP in-tree. Implementations include Envoy Gateway, GKE Inference Gateway, Istio and kgateway.
+Plain Gateway API treats backends as interchangeable. LLM replicas are not. The **Gateway API Inference Extension** (v1.6.0) adds `InferencePool` (v1/stable), with an **Endpoint Picker (EPP)** — an Envoy `ext_proc` gRPC service — choosing a replica per request on live signals: **queue depth, KV-cache utilization, prefix-cache locality, and LoRA adapter affinity**. As of v1.6.0 the full-featured EPP, body-based routing and latency predictor moved to the separate `llm-d` project, leaving a lightweight reference EPP in-tree. Implementations include Envoy Gateway, GKE Inference Gateway, Istio and kgateway.
 
 ---
 
@@ -324,12 +324,9 @@ spec:
   selector: {app: llama-serve}
   extensionRef: {name: llama-epp}     # the Endpoint Picker
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceObjective
-metadata: {name: llama-chat, namespace: serving}
-spec:
-  poolRef: {name: llama-pool}
-  priority: 10
+# NOTE: the alpha InferenceObjective CRD that used to carry per-request priority was
+# REMOVED in GAIE v1.6.0 and migrated to llm-d. Priority/criticality now lives in the
+# Endpoint Picker's own configuration, not in a GAIE CRD.
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -493,7 +490,7 @@ sum(vllm:num_requests_waiting{service="llama-serve"})
 | Kueue | Gang admission, quota | Suspends jobs until the whole gang plus topology fits | The default choice; TAS is beta and on since v0.14 |
 | Volcano 1.15 | Batch scheduler | Gang, queues, HPC bin-packing, DRA queue quota | Replaces the default scheduler for its Pods |
 | vLLM v0.27.1 | Inference engine | Continuous batching, paged KV cache, the metrics above | Engine internals belong to [llm/inference_engines](../../llm/inference_engines/inference_engines.md) |
-| Gateway API Inference Extension v1.6.0 | Routing | `InferencePool` (v1), `InferenceObjective`, Endpoint Picker | Full EPP now lives in the `llm-d` project |
+| Gateway API Inference Extension v1.6.0 | Routing | `InferencePool` (v1), Endpoint Picker | The alpha `InferenceObjective`/`InferenceModelRewrite`/`EndpointPickerConfig` CRDs and the full EPP both moved to `llm-d` |
 | KEDA | Autoscaling | Prometheus scaler on vLLM metrics; scale-to-zero | The bridge from engine metrics to replica count |
 | KServe | Serving control plane | `LLMInferenceService`, vLLM `ServingRuntime` | Pairs with KEDA for custom-metric autoscaling |
 | NVIDIA Dynamo 1.0 | Distributed serving | Disaggregated prefill/decode at scale | GA 2026-03-16; absorbs Triton as Dynamo-Triton |

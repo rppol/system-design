@@ -18,7 +18,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 
 | Module Directory | Phase | Key Concepts |
 |-----------------|-------|-------------|
-| `python_api_framework_landscape/` | 1 | FastAPI vs Django/DRF vs Flask vs Litestar vs Starlette; ASGI vs WSGI; how to justify a choice |
+| `python_api_framework_landscape/` | 1 | FastAPI vs Django/DRF vs Flask vs Litestar vs Starlette, ASGI vs WSGI, how to justify a framework choice |
 | `fastapi_fundamentals_asgi/` | 1 | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI |
 | `pydantic_v2_deep_dive/` | 1 | Validation, serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration |
 | `routing_and_request_handling/` | 1 | Path operations, `APIRouter`, response models, status codes, content negotiation |
@@ -30,7 +30,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 | `error_handling_and_validation/` | 2 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 9457 Problem Details |
 | `testing_fastapi/` | 2 | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, rollback |
 | `websockets_sse_and_streaming/` | 2 | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
-| `serving_llm_and_ai_workloads/` | Streaming completions, backpressure, cancellation, token budgets, MCP servers from FastAPI | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
+| `serving_llm_and_ai_workloads/` | 4 | Streaming completions over SSE, backpressure, cancellation propagation, per-tenant token budgets, MCP servers from FastAPI |
 | `background_jobs_and_task_queues/` | 2 | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, DLQ |
 | `http_clients_and_external_apis/` | 2 | `httpx`/`aiohttp`, connection pooling, retries/backoff, circuit breakers |
 | `message_queues_and_event_driven/` | 2 | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |

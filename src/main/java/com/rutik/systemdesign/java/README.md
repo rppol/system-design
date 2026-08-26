@@ -204,6 +204,8 @@ case_studies
   design_di_container_java.md            principal
   design_event_bus.md                    principal
   design_circuit_breaker_java.md         principal
+  design_structured_concurrency_aggregator.md  senior, principal
+  design_low_latency_market_data_handler.md  principal
 java22_to_26_features
   java22_to_26_features.md  senior, principal
 aot_startup_and_class_data_sharing

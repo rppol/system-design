@@ -123,7 +123,49 @@ The first jump is a bargain and the last is a disaster: full-batch GD buys the c
 
 **Second-order**: Newton's method uses Hessian. L-BFGS approximates inverse Hessian with limited memory. Good for small models and smooth convex objectives; infeasible for large neural networks.
 
-### 4.3 Learning Rate Schedules
+**Matrix-aware**: treat a weight *matrix* as a matrix rather than as a flat bag of scalars, and precondition the update with information about its spectrum. Adam and its relatives are elementwise — they scale each coordinate independently and are blind to the fact that a 4096x4096 weight is a linear map whose singular values are wildly unequal. Muon and Shampoo/SOAP are the practical members of this family and are covered below.
+
+### 4.3 Modern Optimizers Beyond AdamW
+
+AdamW is still the default and still the right first choice, but it is no longer the only optimizer in the standard library. These four are the ones a 2026 training run actually considers.
+
+**Muon** (MomentUm Orthogonalized by Newton-Schulz) — **`torch.optim.Muon`, native since PyTorch 2.9** and documented in the 2.13 API this module targets. It is SGD-with-Nesterov-momentum plus one post-processing step: before the update is applied, the momentum *matrix* is approximately orthogonalized by 5 Newton-Schulz iterations of the quintic `phi(x) = a*x + b*x^3 + c*x^5` applied to its singular values, with the tuned coefficients `(3.4445, -4.7750, 2.0315)`. Orthogonalizing equalizes the singular values, so the update moves every direction of the weight matrix by a comparable amount instead of letting the few dominant directions absorb the step.
+
+The constraint that trips people up: **Muon applies only to 2D parameters of hidden layers.** PyTorch's own docstring says "Muon only supports 2D parameters of neural network hidden layers. Other parameters, such as bias, and embedding, should be optimized by a standard method such as AdamW." Empirically the *input embedding and the final classifier head are excluded too*, even though both are 2D. So a Muon run is always a two-optimizer run — Muon on the transformer block matrices, AdamW on everything else — and getting that param-group split wrong is the most common way a Muon run underperforms its AdamW baseline.
+
+Reported results, with their scale attached: on the NanoGPT speedrun Muon improved training speed by 1.35x, and a 1.5B model reached GPT-2 XL level in 10 8xH100-hours against 13.3 hours for AdamW. The orthogonalization costs at most ~1% of training FLOPs. PyTorch defaults: `lr=1e-3`, `weight_decay=0.1`, `momentum=0.95`, `nesterov=True`, `ns_steps=5`, `eps=1e-7`, `adjust_lr_fn` either `"original"` (default) or `"match_rms_adamw"`.
+
+**Lion** (EvoLved Sign Momentum) — discovered by program search rather than derived. The update is the *sign* of an interpolation between the gradient and the momentum, so every parameter moves by exactly the same magnitude and the per-coordinate adaptive scale of Adam disappears. Two consequences follow directly and both matter in practice: Lion keeps only a momentum buffer where AdamW keeps two moments, and because the sign operation produces a larger-norm update, **Lion needs a smaller learning rate than Adam** — typically 3-10x smaller, with weight decay scaled up correspondingly. Porting an AdamW `lr` to Lion unchanged is the standard way to diverge on step one.
+
+**Shampoo / SOAP** — full-matrix preconditioning. Shampoo maintains preconditioners for each dimension of a weight tensor and applies their inverse roots, capturing curvature Adam cannot see, at the cost of storing and periodically inverting those matrices. SOAP (ShampoO with Adam in the Preconditioner's eigenbasis) makes the connection explicit: Shampoo is equivalent to running Adafactor in the eigenbasis of Shampoo's preconditioner, and SOAP runs Adam there instead, which removes hyperparameters and stabilizes it. SOAP's paper reports over 40% fewer iterations and over 35% less wall-clock time than AdamW at 360M and 660M scale **in the large-batch regime** — quote that qualifier, because the advantage of preconditioned methods is largest exactly where the gradient is least noisy.
+
+**8-bit Adam** (`bitsandbytes`) — the same Adam, with the two moment buffers stored as 8-bit block-wise quantized values instead of fp32. The tensor is split into blocks that are quantized independently, which keeps a single outlier from destroying the scale for the whole tensor, and a dynamic quantization map plus a stable embedding layer preserve 32-bit-level quality. This is pure memory arithmetic and it is worth doing in your head:
+
+```
+AdamW optimizer state = 2 buffers x 4 bytes/param  =  8 bytes/param
+8-bit Adam state      = 2 buffers x 1 byte/param   =  2 bytes/param
+
+7B-parameter model:  56 GB  ->  14 GB    (42 GB freed, before params/grads/activations)
+```
+
+That 42 GB is often the difference between a run fitting on one 80 GB GPU and needing optimizer sharding.
+
+**Choosing between them.** The honest default order: AdamW unless you have a reason; 8-bit Adam the moment optimizer state is what is blocking you (it changes memory, not dynamics); Muon for transformer pretraining where you control the param-group split and can validate against an AdamW baseline; Lion when you want AdamW-class results at half the optimizer state and will re-tune `lr`; SOAP/Shampoo at large batch where the extra preconditioner cost is amortized. None of these is a drop-in replacement — every one of them changes the optimal learning rate.
+
+### 4.4 Hyperparameter Transfer — muP
+
+The expensive part of a large training run is not the run, it is discovering that the learning rate was wrong 40% of the way through it. **muP (Maximal Update Parametrization)** attacks that directly: parametrize the network so that the *optimal* hyperparameters stop depending on width, tune them on a small proxy model, and transfer them zero-shot to the full-size one. The paper (Tensor Programs V) verified the recipe on Transformers and ResNets, and reports outperforming published BERT-large numbers by transferring from a 13M-parameter proxy, at a total tuning cost equivalent to pretraining BERT-large once.
+
+Mechanically, standard parametrization scales initialization and learning rates in a way that makes the size of a layer's *update* drift as width grows — too small and the layer barely learns, too large and it blows up. muP fixes the per-layer initialization variance and learning-rate scaling so that the change in each layer's output stays order-1 as width goes to infinity. What you actually do:
+
+1. Define a base model (a small width) and the target model, differing only in width.
+2. Apply muP's per-layer multipliers: input/embedding, hidden, and output layers each get a different width-dependent rule.
+3. Sweep `lr` (and the other transferable hyperparameters) on the base model.
+4. Use the winner unchanged on the target model.
+
+Two boundaries to state plainly, because they are the interview follow-up. **muP transfers across width, not across everything** — depth, batch size and training-token count are not covered by the same guarantee, and the width sweep is only meaningful if the proxy is muP-parametrized too. And **muP changes your model's initialization and per-layer learning rates**, so a muP run and a standard run are not comparable at the same nominal `lr`; you must re-derive the baseline, not reuse it.
+
+### 4.5 Learning Rate Schedules
 
 | Schedule | Formula | When to Use |
 |----------|---------|-------------|
@@ -825,13 +867,18 @@ optimizer.step()
 
 | Tool | Purpose |
 |------|---------|
-| PyTorch torch.optim | SGD, Adam, AdamW, L-BFGS; get_last_lr(), param_groups |
+| PyTorch torch.optim | SGD, Adam, AdamW, L-BFGS, Muon; get_last_lr(), param_groups |
+| torch.optim.Muon | Native since PyTorch 2.9. Orthogonalized-momentum optimizer for 2D hidden-layer weights only; pair with AdamW param groups for biases, norms, embeddings and the head |
 | PyTorch lr_scheduler | CosineAnnealingLR, OneCycleLR, LinearLR, SequentialLR |
 | Optax (JAX) | Composable optimizer library; chain transforms; gradient clipping |
 | transformers (HuggingFace) | get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup |
 | Apex (NVIDIA) | FusedAdam: faster Adam for GPU; mixed precision training |
 | Sophia | Second-order optimizer for LLMs; uses diagonal Hessian estimate |
 | Adan | Adaptive Nesterov momentum optimizer (Xie et al., 2022); reports faster convergence than Adam |
+| Lion (google/automl) | Sign-momentum optimizer; one buffer instead of Adam's two. Needs a 3-10x smaller lr and correspondingly larger weight decay |
+| bitsandbytes | 8-bit block-wise quantized Adam/AdamW states: 2 bytes/param instead of 8, at 32-bit quality |
+| SOAP / Distributed Shampoo | Full-matrix preconditioning; SOAP runs Adam in Shampoo's preconditioner eigenbasis. Wins in the large-batch regime |
+| mup (Microsoft) | Maximal Update Parametrization; tune lr on a small proxy model and transfer it zero-shot across width |
 
 ---
 
@@ -926,6 +973,26 @@ Start at a tiny lr such as 1e-7 and increase it geometrically each mini-batch wh
 **Short:** Gradient accumulation simulates a larger batch by summing gradients over micro-batches before each optimizer step.
 
 Gradient accumulation sums gradients over K micro-batches before a single optimizer step, so the effective batch size becomes micro_batch * K times the number of GPUs. It lets you simulate a large batch that would not fit in memory, at the cost of K forward/backward passes per update. The key gotcha is loss scaling — you must divide each micro-batch loss by K (or average the gradients), otherwise the accumulated gradient is K times too large and the effective learning rate is silently inflated. A second gotcha is that LR schedules must be defined in optimizer steps, not forward passes, or the warmup length is off by a factor of K.
+
+**Q: Why can Muon not be used on every parameter in a transformer, and what happens if you try?**
+**Short:** Muon orthogonalizes a momentum matrix, so it is defined only for 2D hidden weights; biases, norms, embeddings and the head must stay on AdamW.
+
+Muon's update works by applying Newton-Schulz iterations to the singular values of the momentum *matrix*, which is meaningful only for a 2D weight. PyTorch's docstring is explicit: "Muon only supports 2D parameters of neural network hidden layers. Other parameters, such as bias, and embedding, should be optimized by a standard method such as AdamW." The empirical rule goes further — the input embedding and the final classifier head are excluded as well even though both are 2D, because both behave more like lookup tables than like linear maps between hidden spaces. So every Muon run is a two-optimizer run with an explicit `param_groups` split. Getting the split wrong is the usual reason a Muon run fails to beat its AdamW baseline: sweep the whole model into Muon and the 1D parameters either error out or take a nonsensical update, and folding the embedding in silently costs quality rather than crashing. Always validate a Muon configuration against a tuned AdamW run on the same budget before trusting it.
+
+**Q: You swap AdamW for Lion and keep every hyperparameter the same. What happens and why?**
+**Short:** The run diverges, because Lion's sign-based update has a much larger norm than Adam's, so it needs a 3-10x smaller learning rate.
+
+Lion's update is the sign of an interpolation between the gradient and the momentum, so every parameter moves by exactly the same magnitude regardless of its gradient scale — the per-coordinate adaptive division that keeps Adam's step size bounded is simply not there. The resulting update vector has a much larger norm than Adam's for the same nominal `lr`, so an AdamW learning rate carried over unchanged typically blows the loss up within the first few hundred steps. The fix is to reduce `lr` by roughly 3-10x and raise `weight_decay` by about the same factor, since Lion's decoupled decay is applied against a differently-scaled update. The reason to bother at all is memory: Lion tracks only momentum where AdamW tracks two moments, halving optimizer state. This is the general lesson for every optimizer past AdamW — none of them is a drop-in replacement, because each one changes the optimal learning rate.
+
+**Q: Your 7B model runs out of memory in the optimizer step but trains fine in the forward pass. What is the cheapest fix?**
+**Short:** Switch to 8-bit block-wise quantized Adam, which cuts optimizer state from 8 bytes per parameter to 2 without changing the optimization dynamics.
+
+AdamW stores two fp32 moment buffers per parameter, so at 7B parameters the optimizer state alone is `2 x 4 bytes x 7e9 = 56 GB` — usually the single largest term after activations, and it is allocated at the first `step()`, which is exactly why the forward pass survives and the optimizer step does not. 8-bit Adam (`bitsandbytes`) stores those same two buffers as 8-bit block-wise quantized values, taking the state to `2 x 1 byte x 7e9 = 14 GB` and freeing 42 GB. It is the cheapest fix because it is a one-line optimizer swap that changes memory rather than dynamics — the block-wise scheme quantizes small blocks independently so a single outlier cannot destroy the scale for a whole tensor, and with the dynamic quantization map and a stable embedding layer it matches 32-bit quality. Compare that against the alternatives before reaching for them: gradient checkpointing trades compute for activation memory, not optimizer memory, and optimizer sharding (ZeRO-2) solves the same problem but requires a distributed setup.
+
+**Q: What does muP let you do that a normal learning-rate sweep does not, and where does the guarantee stop?**
+**Short:** muP makes the optimal learning rate independent of width, so you tune it on a small proxy model and transfer it zero-shot to the full-size one.
+
+Under standard parametrization the size of each layer's update drifts as width grows, so the best learning rate found at 100M parameters is simply wrong at 10B — and you usually discover that a third of the way into a run you cannot afford to repeat. muP fixes the per-layer initialization variance and learning-rate scaling so each layer's contribution to the output stays order-1 as width goes to infinity, which makes the optimal hyperparameters stable across width. The practical recipe is to parametrize both a small base model and the target in muP, sweep on the base, and use the winner unchanged; Tensor Programs V reports beating published BERT-large numbers by transferring from a 13M-parameter proxy at a total tuning cost of roughly one BERT-large pretraining. The guarantee stops at width — depth, batch size and token count are not covered by the same argument and still need their own treatment. Two traps: the proxy must itself be muP-parametrized or the sweep measures nothing transferable, and because muP changes initialization and per-layer learning rates, a muP run and a standard run are not comparable at the same nominal `lr`, so the baseline has to be re-derived rather than reused.
 
 ---
 

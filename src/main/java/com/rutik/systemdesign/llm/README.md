@@ -419,6 +419,7 @@ agents_and_tool_use
   reflexion_and_self_correction.md      -
   tree_of_thoughts_for_agents.md        -
   agent_skills_and_progressive_disclosure.md  senior, principal
+  reasoning_models_vs_scaffolds.md  senior, principal
 agentic_workflow_patterns
   agentic_workflow_patterns.md  senior, principal
 agentic_frameworks
@@ -513,6 +514,7 @@ mechanistic_interpretability
 llm_security
   llm_security.md                 senior, principal
   privacy_and_data_governance.md  senior, principal
+  agent_identity_and_authorization.md  senior, principal
 ai_regulations_and_compliance
   ai_regulations_and_compliance.md  principal
 multimodal_models
@@ -596,7 +598,7 @@ specialized agent type. Nothing is dropped.
 | 13 | [advanced_rag](advanced_rag/advanced_rag.md) | 5 files |
 | 14 | [context_engineering](context_engineering/context_engineering.md) | module page only |
 | 15 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
-| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 12 files |
+| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 13 files |
 | 18 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
 | 20 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 3 files |
 | 21 | [mcp_model_context_protocol](mcp_model_context_protocol/mcp_model_context_protocol.md) | 4 files |
@@ -614,7 +616,7 @@ specialized agent type. Nothing is dropped.
 | 40 | [llm_testing_strategies](llm_testing_strategies/llm_testing_strategies.md) | module page only |
 | 41 | [guardrails_and_content_safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | 2 files |
 | 42 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
-| 44 | [llm_security](llm_security/llm_security.md) | 2 files |
+| 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 50 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
 
 **Not in this path** (22 of 54, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
@@ -654,7 +656,7 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 | 13 | [advanced_rag](advanced_rag/advanced_rag.md) | 3 files |
 | 14 | [context_engineering](context_engineering/context_engineering.md) | module page only |
 | 15 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
-| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 8 files |
+| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 9 files |
 | 18 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
 | 19 | [agentic_frameworks](agentic_frameworks/agentic_frameworks.md) | module page only |
 | 20 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 4 files |
@@ -673,7 +675,7 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 | 39 | [error_analysis_and_eval_design](error_analysis_and_eval_design/error_analysis_and_eval_design.md) | module page only |
 | 41 | [guardrails_and_content_safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | 2 files |
 | 42 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
-| 44 | [llm_security](llm_security/llm_security.md) | 2 files |
+| 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 45 | [ai_regulations_and_compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | module page only |
 | 53 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
 | 54 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |

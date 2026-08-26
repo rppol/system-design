@@ -159,7 +159,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `trees_and_binary_search_trees/` | `../../database/indexing_deep_dive/` — B+Tree storage engine role; `../../java/collections_internals/` — TreeMap as red-black tree |
 | `heaps_and_priority_queues/` | `../../java/collections_internals/` — PriorityQueue as binary min-heap; `sorting_and_searching/` (module 9) |
 | `graphs_tries_and_advanced_structures/` | `../../hld/` — Bloom filters in caching; `graph_and_string_algorithms/` (module 12) |
-| `probabilistic_and_streaming_structures/` | Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, t-digest, reservoir sampling, consistent hashing |
+| `probabilistic_and_streaming_structures/` | `../database/database_indexing_strategies/`, `../hld/consistent_hashing/`, `../backend/caching_strategies_deep_dive/` |
 | `sorting_and_searching/` | `../../database/` — sort-merge join; `complexity_analysis_and_big_o/` (module 1) |
 | `dynamic_programming/` | `recursion_and_problem_solving_patterns/` (module 3) |
 | `greedy_and_divide_and_conquer/` | `complexity_analysis_and_big_o/` (module 1) |
@@ -168,12 +168,12 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `cpu_scheduling_algorithms/` | `../../devops/linux_and_os_fundamentals/` — CFS in practice |
 | `memory_management_and_virtual_memory/` | `../../java/jvm_internals/` — JVM heap regions, GC; `../../python/cpython_memory_model/` — refcounting, pymalloc |
 | `deadlocks_and_synchronization/` | `../../java/concurrency/` — AQS, ReentrantLock, semaphores deep dive; `../../database/concurrency_control_and_locking/` — deadlock in DB transactions; `../../lld/concurrency_patterns/` — ReadWriteLock, ThreadPool |
-| `memory_models_and_concurrency_theory/` | happens-before, DRF-SC, SC/TSO/weak, acquire-release, linearizability vs serializability, ABA |
+| `memory_models_and_concurrency_theory/` | `../java/java_memory_model/`, `../java/concurrency/`, `../cuda/synchronization_and_atomics/` |
 | `computer_architecture_and_memory_hierarchy/` | `../../java/concurrency/` — `@Contended`, false sharing, memory barriers |
 | `networking_fundamentals/` | `../../backend/osi_model_and_networking/` — OSI 7-layer deep dive; `../../backend/tcp_ip_deep_dive/` — TCP internals; `../../backend/udp_and_quic/`; `../../backend/http_protocols/` |
 | `database_and_storage_fundamentals/` | `../../database/database_fundamentals/` — ACID/BASE/MVCC deep dive; `../../database/indexing_deep_dive/`; `../../database/schema_design_and_normalization/` |
 | `cryptography_fundamentals/` | `../../backend/backend_security_owasp/` — applied crypto (BCrypt, A02); `../../backend/auth_and_authorization_systems/` — JWT/TLS applied; `../../devops/secrets_management/` — Vault, key rotation |
-| `information_theory_and_compression/` | Entropy, source and channel coding, KL/cross-entropy, Kolmogorov complexity, entropy/dictionary/lossy coding |
+| `information_theory_and_compression/` | `../ml/feature_engineering/`, `../database/database_compression/`, `../hld/cdn/` |
 | `character_encoding_deep_dive/` | `../../python/strings_bytes_encoding_and_regex/` — codec API, `str`/`bytes` split; `../../java/strings_and_text/` — Compact Strings, surrogate pairs in practice |
 
 ---

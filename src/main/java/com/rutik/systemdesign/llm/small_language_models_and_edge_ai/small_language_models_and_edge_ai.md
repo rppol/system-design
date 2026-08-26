@@ -80,6 +80,8 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 
 **MLC-LLM:** Machine Learning Compilation for LLMs. Compiles models via TVM to native code for iOS (Metal), Android (Vulkan/OpenCL), and WebGPU. Achieves near-native GPU throughput on mobile GPUs.
 
+**MLX (Apple):** Apple's own array framework for Apple silicon, and the reason a Mac is a serious edge-inference target rather than just a dev machine. Its defining property is the **unified memory model** — the docs put it plainly: "Arrays in MLX live in shared memory. Operations on MLX arrays can be performed on any of the supported device type without performing data copies." On an M-series chip the CPU and GPU address the same physical RAM, so there is no host-to-device transfer to hide, and a model larger than a discrete GPU's VRAM can still run if it fits in system memory. On top of that MLX is lazy (arrays materialize only when needed), exposes composable function transformations for autodiff, vectorization and graph optimization, and presents a NumPy-like Python API. The `mlx-lm` package is the practical entry point: it loads Hugging Face checkpoints, quantizes to 4- or 8-bit, serves generation, and runs LoRA fine-tuning locally. Where Core ML targets the Neural Engine for maximum energy efficiency on a fixed compiled graph, MLX targets the GPU with a flexible research-shaped API — so Core ML is the shipping-app runtime and MLX is the local-development, fine-tuning and Mac-desktop-app runtime.
+
 ### 4.3 Quantization Schemes
 
 | Quantization | Bits | Size Reduction | Quality Impact | Use Case |
@@ -124,7 +126,25 @@ The whole table is one division repeated. The reason the measured ratios land sl
 
 That last line is where "cutting file size to 32% of FP16" comes from. The gap between the 1.96 GB of pure weight data and the 2.4 GB file is the packaging — embedding tables often kept at higher precision, zero points, and the tensor metadata described in Section 6.3.
 
-### 4.4 On-Device Fine-Tuning
+**Every format in that table is post-training quantization (PTQ)** — you take a finished model and round its weights down. The Quality Impact column is the price of doing that to a model that never knew it was coming.
+
+### 4.4 PTQ vs. QAT — Who Pays for the Rounding Error
+
+**Quantization-aware training (QAT)** simulates the low-precision arithmetic *during* training, so the weights settle into a configuration that survives being rounded. The model learns around the quantization error instead of absorbing it at the end. The cost is a training run; the benefit is that the same nominal bit width delivers noticeably better quality.
+
+| | PTQ | QAT |
+|---|---|---|
+| When quantization happens | After training, as a conversion step | Simulated throughout training |
+| Cost to you | Minutes on a laptop | A training run, or nothing if the vendor ships QAT weights |
+| Who can do it | Anyone with the weights | Whoever has the training pipeline and data |
+| Quality at 4 bits | The 1-3% perplexity hit in the table above | Vendor-reported as better than the PTQ baseline at the same width |
+| Typical use | Any open-weights model you did not train | Vendor-published checkpoints; your own fine-tune before shipping |
+
+For most teams the practical answer is not "run QAT" — it is **"check whether the vendor already did."** Google publishes QAT checkpoints for the Gemma family, and its own framing for the Gemma 3 QAT release was that they preserve similar quality to half precision while using ~3x less memory. The Gemma 4 QAT release extends this to the E2B, E4B, 12B and 26B-MoE variants in both the standard `Q4_0` format and a mobile-specialized schema, with Google reporting the E2B footprint at 1 GB under the mobile format. Google states the QAT results are higher quality than standard PTQ baselines but publishes no numeric BF16 comparison alongside that claim — so treat it as a directional vendor claim and benchmark on your own task before committing. The checkpoints are consumable from llama.cpp, Ollama, LM Studio, MLX, vLLM, SGLang, LiteRT-LM and Unsloth.
+
+**The naming trap that costs people an afternoon.** A repository called `gemma-3-1b-it-qat-int4-unquantized` does *not* contain int4 weights. The model card is explicit: "The checkpoint in this repository is unquantized, please make sure to quantize with int4 with your favorite tool." What "QAT" buys you is that the bfloat16 weights in that repo were *trained* to quantize cleanly — you still run the conversion yourself, and running it at any width other than the one the QAT targeted throws the benefit away. Download a `-unquantized` QAT checkpoint expecting a 1 GB file and you will get a full-precision one; quantize it to Q3 when the QAT targeted int4 and you get PTQ-grade quality from a QAT model.
+
+### 4.5 On-Device Fine-Tuning
 
 Adapting models after deployment on edge devices enables personalization without sending user data to the cloud.
 
@@ -149,7 +169,7 @@ Practical constraints:
 
 Use cases: personalized autocomplete (adapting to user's writing style), domain vocabulary expansion (medical, legal terminology), and user preference alignment (tone, verbosity).
 
-### 4.5 NPU and Mobile Hardware Accelerators
+### 4.6 NPU and Mobile Hardware Accelerators
 
 On-device inference performance depends heavily on which hardware accelerator is available:
 
@@ -807,6 +827,7 @@ A developer builds an on-device writing assistant that continuously generates su
 | ExecuTorch | iOS/Android | .pte | Meta's new mobile runtime |
 | TensorRT-LLM | Jetson/edge GPU | TensorRT | NVIDIA edge hardware |
 | llama.cpp Android | Android | GGUF via JNI | Community JNI wrapper |
+| MLX / `mlx-lm` | macOS (Apple silicon) | MLX safetensors | Apple's array framework. Unified memory means no host-to-device copy; also does 4/8-bit quantization and local LoRA fine-tuning |
 
 ### Quantization Tools
 
@@ -818,6 +839,8 @@ A developer builds an on-device writing assistant that continuously generates su
 | BitsAndBytes | PyTorch | NF4/INT8 | Training-time quantization, QLoRA |
 | Optimum | Hugging Face | ONNX/ONNX-INT8 | Production ONNX quantization |
 | coremltools | PyTorch/ONNX | Core ML | Apple ecosystem conversion |
+| `mlx_lm.convert` | Hugging Face | MLX safetensors | `-q --q-bits 4\|8` quantizes during conversion for Apple silicon |
+| Vendor QAT checkpoints | — | Q4_0 / int4 | Not a tool: check whether the model vendor already shipped quantization-aware-trained weights (§4.4) before running PTQ yourself |
 
 ### Fine-tuning Frameworks for SLMs
 
@@ -900,6 +923,21 @@ Mobile NPUs vary significantly in raw throughput (10-45 TOPS INT8), supported op
 **Q: Why does a 35-45 TOPS phone NPU deliver only 50-100 tokens/second on a 3B model when the TOPS math suggests thousands?**
 **Short:** Decode is memory-bandwidth-bound, not compute-bound, so a phone's memory bus streaming model weights caps tokens/second far below what raw TOPS would suggest.
 Because token generation (decode) is memory-bandwidth-bound, not compute-bound — the TOPS rating measures peak INT8 matrix throughput, but producing each token requires streaming all ~1.9 GB of INT4 weights through the memory system. The compute math says a 3B model at ~6 GFLOPs/token on a 35 TOPS NPU needs only ~0.17 ms/token (~6,000 tokens/second), yet a phone's LPDDR5X bus delivers roughly 50-77 GB/s, putting the weight-streaming ceiling at bandwidth ÷ model bytes ≈ 25-40 tokens/second for a 1.9 GB model — three orders of magnitude below the compute figure, and scheduling overhead sits on top of that. TOPS matters mostly for prefill (prompt processing), which reuses each weight across all prompt tokens and is genuinely compute-bound — that is where the NPU's 5-10x advantage over CPU shows up. Practical guidance: estimate decode speed from memory bandwidth divided by model size, use TOPS only for prefill estimates, and benchmark the two phases separately on target hardware.
+
+**Q: You download a checkpoint named `-qat-int4-unquantized` expecting a 1 GB file and get a full-precision one. What happened?**
+**Short:** A QAT checkpoint ships full-precision weights that were trained to quantize cleanly, and you still have to run the quantization step yourself.
+
+QAT names what the weights were *trained for*, not what format they are stored in. Google's own model card is explicit: "The checkpoint in this repository is unquantized, please make sure to quantize with int4 with your favorite tool." Quantization-aware training simulates the low-precision arithmetic during training so the weights settle somewhere that survives rounding, but the published artifact is still bfloat16 — the conversion to int4 or Q4_0 is yours to run with llama.cpp, MLX, or whatever your runtime expects. The second half of the trap is subtler and costs quality rather than disk space: the QAT run targeted one specific bit width, so quantizing that checkpoint to Q3 or Q2 instead throws the benefit away and leaves you with ordinary PTQ-grade quality from a model you chose specifically to avoid that. Match your conversion width to the width the vendor trained for, and re-benchmark rather than trusting the label.
+
+**Q: When should you run quantization-aware training instead of post-training quantization?**
+**Short:** Almost never run it yourself — check whether the model vendor already published QAT checkpoints, and only run your own after fine-tuning a model you will ship at 4 bits or below.
+
+PTQ takes a finished model and rounds its weights down, so the model absorbs the full rounding error it never trained for — that is the 1-3% perplexity cost of Q4_K_M. QAT simulates the low-precision arithmetic during training so the weights adapt around that error, and the same nominal bit width comes out better. The reason you rarely run it is cost asymmetry: PTQ is minutes on a laptop, QAT is a training run plus the data and pipeline to do it. So the practical decision order is (1) check whether the vendor shipped QAT weights — Google publishes them across the Gemma family, framing the Gemma 3 release as preserving similar quality to half precision at roughly 3x less memory, and extending the Gemma 4 release to Q4_0 plus a mobile-specialized schema; (2) if not, run PTQ and measure on your own task; (3) run QAT yourself only when you are already fine-tuning a model you will ship at 4 bits or below and the measured PTQ degradation is unacceptable. Treat vendor QAT quality claims as directional — Google states its QAT results beat standard PTQ baselines but publishes no numeric BF16 comparison beside that claim, so benchmark on your task before committing.
+
+**Q: Why does Apple silicon change the RAM ceiling for on-device inference, and where does MLX fit against Core ML?**
+**Short:** Unified memory means the GPU addresses system RAM directly, so the model has no separate VRAM budget and no host-to-device copy.
+
+On a discrete-GPU machine the model must fit in VRAM and every tensor crosses a PCIe boundary. Apple silicon has one physical pool: MLX's own docs state that "arrays in MLX live in shared memory" and that operations "can be performed on any of the supported device type without performing data copies." The practical consequence is that the ceiling is system RAM rather than a separate and much smaller VRAM figure, and the transfer cost that normally shapes edge-inference design simply is not there. Beyond memory, MLX is lazy — arrays materialize only when needed — and offers composable transformations for autodiff, vectorization and graph optimization behind a NumPy-like API, with `mlx-lm` wrapping model loading, 4/8-bit quantization, serving and local LoRA fine-tuning. Against Core ML the split is by job, not by quality: Core ML compiles a fixed graph for the Neural Engine and wins decisively on energy efficiency, which is what a shipping iOS app needs on battery. MLX targets the GPU with a flexible, research-shaped API, which is what local development, fine-tuning and Mac desktop apps need. Choosing MLX for a battery-powered iPhone feature is the mistake in this pair.
 
 ---
 

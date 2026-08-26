@@ -186,6 +186,7 @@ gpu_computing_foundations
   gpu_computing_foundations.md  senior
 gpu_hardware_architecture
   gpu_hardware_architecture.md  senior
+  blackwell_and_rubin_architecture.md  -
 cuda_toolkit_and_compilation
   cuda_toolkit_and_compilation.md  -
 cuda_programming_model_and_kernels
@@ -213,6 +214,7 @@ streams_events_and_concurrency
   green_contexts_and_sm_partitioning.md  senior
 cuda_graphs
   cuda_graphs.md  -
+  conditional_nodes_and_device_graph_launch.md  -
 multi_gpu_programming_and_nccl
   multi_gpu_programming_and_nccl.md  senior
   device_initiated_communication.md  senior

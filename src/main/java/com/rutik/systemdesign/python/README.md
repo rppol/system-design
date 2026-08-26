@@ -130,6 +130,7 @@ cpython_memory_model
   cpython_memory_model.md  senior
 the_gil_and_free_threading
   the_gil_and_free_threading.md  senior, principal
+  subinterpreters_and_interpreter_pools.md  senior, principal
 metaclasses_and_metaprogramming
   metaclasses_and_metaprogramming.md  senior
 the_type_system_and_typing
@@ -156,6 +157,7 @@ testing_with_pytest
   testing_with_pytest.md  senior, principal
 packaging_and_project_tooling
   packaging_and_project_tooling.md  principal
+  supply_chain_and_publishing.md  principal
 the_import_system
   the_import_system.md  senior
 dataclasses_enums_and_data_modeling
@@ -168,6 +170,7 @@ case_studies
   design_a_plugin_system.md                     principal
   design_a_streaming_etl.md                     senior
   design_a_validation_library.md                principal
+  design_a_memory_efficient_cache.md  senior, principal
 
 -->
 ## Learning Paths
@@ -193,7 +196,7 @@ The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-
 | 8 | [dataclasses_enums_and_data_modeling](dataclasses_enums_and_data_modeling/dataclasses_enums_and_data_modeling.md) | module page only |
 | 9 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) | module page only |
 | 11 | [cpython_memory_model](cpython_memory_model/cpython_memory_model.md) | module page only |
-| 12 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | module page only |
+| 12 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | 2 files |
 | 13 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md) | module page only |
 | 14 | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) | 2 files |
 | 15 | [performance_and_profiling](performance_and_profiling/performance_and_profiling.md) | 2 files |
@@ -218,13 +221,13 @@ A ruthless cut to what a **senior Python interview** actually probes, anchored o
 
 | # | Module | Files |
 |---|--------|-------|
-| 12 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | module page only |
+| 12 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | 2 files |
 | 14 | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) | module page only |
 | 15 | [performance_and_profiling](performance_and_profiling/performance_and_profiling.md) | module page only |
 | 20 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) | module page only |
 | 21 | [design_patterns_in_python](design_patterns_in_python/design_patterns_in_python.md) | module page only |
 | 23 | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) | module page only |
-| 24 | [packaging_and_project_tooling](packaging_and_project_tooling/packaging_and_project_tooling.md) | module page only |
+| 24 | [packaging_and_project_tooling](packaging_and_project_tooling/packaging_and_project_tooling.md) | 2 files |
 
 **Not in this path** (17 of 24, Full Path only): `data_model_and_objects`, `core_language_idioms`, `the_import_system`, `iterators_and_generators`, `decorators_and_closures`, `context_managers_and_exceptions`, `collections_and_data_structures`, `dataclasses_enums_and_data_modeling`, `strings_bytes_encoding_and_regex`, `file_io_and_serialization`, `cpython_memory_model`, `metaclasses_and_metaprogramming`, `c_extensions_and_native_interop`, `functional_programming`, `threading_and_multiprocessing`, `asyncio_and_event_loop`, `stdlib_datetime_and_logging`
 <!-- /study-path-table -->

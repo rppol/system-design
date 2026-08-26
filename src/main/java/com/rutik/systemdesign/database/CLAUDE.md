@@ -38,7 +38,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `elasticsearch_internals/` | Expert | 38 | Lucene segments and file extensions, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 norms, per-shard IDF, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ — the PRODUCT internals; the category lives in `search_engines/` |
 | `graph_databases/` | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher 25, GQL (ISO/IEC 39075:2024), PostgreSQL 19 SQL/PGQ, fraud detection |
 | `time_series_databases/` | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
-| `analytical_databases_and_olap/` | Columnar storage, vectorized execution, MergeTree parts, sort keys vs indexes, ClickHouse/Druid/Pinot/DuckDB | 18 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
+| `analytical_databases_and_olap/` | Advanced | 18 | Columnar storage, vectorized execution, late materialization, MergeTree parts and the part-count cliff, sparse index granules, sort key vs index, ClickHouse/Druid/Pinot vs warehouses vs DuckDB, HTAP and zero-ETL |
 
 ### Phase 4 — Emerging Databases
 
@@ -47,7 +47,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `vector_databases/` | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | `newsql_and_distributed_sql/` | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
 | `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
-| `lakehouse_and_table_formats/` | ACID on object storage, snapshot isolation, time travel, Iceberg vs Delta vs Hudi, CoW vs MoR, compaction | 18 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| `lakehouse_and_table_formats/` | Expert | 16 | Metadata-pointer CAS commit, snapshot isolation, time travel and retention cost, column-ID schema evolution, hidden partitioning, CoW vs MoR, deletion vectors, small-file economics, Iceberg vs Delta vs Hudi, the catalog tier |
 
 ### Phase 5 — Distributed Database Concepts
 

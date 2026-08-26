@@ -209,13 +209,15 @@ version_control_and_git_workflows
 containers_and_docker
   containers_and_docker.md  senior
 container_runtimes_and_oci
-  container_runtimes_and_oci.md  -
+  container_runtimes_and_oci.md  senior
+  oci_image_formats_and_lazy_pulling.md  senior
 kubernetes_architecture
   kubernetes_architecture.md  senior
 kubernetes_workloads_and_objects
   kubernetes_workloads_and_objects.md  senior
 kubernetes_networking
   kubernetes_networking.md  senior
+  cilium_and_ebpf_dataplane.md  senior
 kubernetes_storage_and_state
   kubernetes_storage_and_state.md  -
 kubernetes_scheduling_and_autoscaling
@@ -223,6 +225,7 @@ kubernetes_scheduling_and_autoscaling
   device_scheduling_and_dra.md  senior
 kubernetes_security
   kubernetes_security.md  senior
+  workload_identity_and_federation.md  senior
 helm_and_package_management
   helm_and_package_management.md  -
 kubernetes_operators_and_crds
@@ -235,6 +238,7 @@ deployment_strategies
   deployment_strategies.md  senior
 gitops_argocd_flux
   gitops_argocd_flux.md  senior
+  environment_promotion.md  senior
 artifact_and_registry_management
   artifact_and_registry_management.md  -
 infrastructure_as_code_terraform
@@ -300,6 +304,8 @@ case_studies
   design_observability_platform.md         -
   design_secrets_management_platform.md    -
   design_zero_downtime_infra_migration.md  -
+  design_gpu_training_and_inference_cluster.md  senior, principal
+  design_multi_tenant_platform.md  -
 -->
 ## Learning Paths
 
@@ -310,22 +316,23 @@ This section is exhaustive by design — 41 modules from Linux/OS internals and 
 The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-phase-learning-path). Use it for genuine mastery: Linux/OS and Git foundations, the full Kubernetes stack (storage, Helm, Operators/CRDs), every CI/CD and IaC alternative, GCP/Azure alongside AWS, FinOps, the complete DevSecOps & Reliability phase, and the Specialized Platforms electives (GPU/MLOps, event streaming, performance testing). Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (26 modules)
+### Senior Path (27 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md) | module page only |
 | 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | module page only |
 | 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | module page only |
+| 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 files |
 | 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | module page only |
 | 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | module page only |
-| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | module page only |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 files |
 | 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 files |
-| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | module page only |
+| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 files |
 | 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | module page only |
 | 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | module page only |
 | 17 | [deployment_strategies](deployment_strategies/deployment_strategies.md) | module page only |
-| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | module page only |
+| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | 2 files |
 | 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) | module page only |
 | 23 | [secrets_management](secrets_management/secrets_management.md) | module page only |
 | 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) | module page only |
@@ -341,7 +348,7 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 | 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 2 files |
 | 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 2 files |
 
-**Not in this path** (15 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `visualization_and_alerting`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `event_streaming_operations`, `performance_and_load_testing`
+**Not in this path** (14 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `visualization_and_alerting`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `event_streaming_operations`, `performance_and_load_testing`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview** actually probes, anchored on the phases this section already flags as highest-yield (the Kubernetes core, CI/CD & GitOps, and Observability & SRE). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.

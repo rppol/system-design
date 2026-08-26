@@ -1031,7 +1031,7 @@ The practical effect on the §8.8 decision: XTable makes the format choice **les
 | Debezium | Log-based CDC connector family feeding Kafka topics for CDC-to-Iceberg pipelines. |
 | Apache Kafka | The durable log carrying CDC events between Debezium and the Iceberg sink. |
 | Iceberg Kafka Connect Sink | First-party sink connector writing Kafka topics into Iceberg tables. |
-| Apache Flink CDC | Embeds source connectors directly in a Flink job writing to Iceberg. |
+| Flink CDC | Embeds source connectors directly in a Flink job writing to Iceberg. |
 
 ### 11.4 Client libraries and tooling
 

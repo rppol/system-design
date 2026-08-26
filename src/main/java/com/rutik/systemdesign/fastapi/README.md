@@ -152,6 +152,7 @@ case_studies
   design_ml_inference_api_fastapi.md  senior
   design_multi_tenant_saas_api.md     principal
   design_llm_gateway_fastapi.md       senior, principal
+  design_file_upload_and_media_api.md  senior, principal
 python_api_framework_landscape
   python_api_framework_landscape.md  senior
 serving_llm_and_ai_workloads

@@ -323,6 +323,8 @@ pattern_comparisons
   ChainOfResponsibility_vs_Command.md       -
   Command_vs_Strategy.md                    -
   Composite_vs_Decorator.md                 -
+  Singleton_vs_DI_Container.md  -
+  Visitor_vs_PatternMatching.md  -
 anti_patterns
   anti_patterns.md           senior, principal
   GodObject.md               senior
@@ -335,6 +337,7 @@ anti_patterns
   Lava_Flow.md               principal
   Copy_Paste_Programming.md  -
   Spaghetti_Code.md          -
+  Magic_Numbers.md  -
 concurrency_patterns
   concurrency_patterns.md  senior
   ThreadSafeSingleton.md   senior
@@ -359,12 +362,17 @@ system_design_problems
   LoggingFramework.md  senior
   NotificationService.md  senior
   TaskScheduler.md  senior
+  SnakeAndLadder.md  -
+  FoodDelivery.md  -
+  OrderMatchingEngine.md  -
 oop_and_uml_foundations
   oop_and_uml_foundations.md  senior
 dependency_injection_and_testability
   dependency_injection_and_testability.md  senior
 refactoring
   refactoring.md  senior
+architecture_patterns
+  architecture_patterns.md  senior, principal
 -->
 ## Learning Paths
 
@@ -380,23 +388,24 @@ a **Full / Interview** toggle (Full is the default).
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 15 System Design Problems. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (11 modules)
+### Senior Path (12 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 1 | [oop_and_uml_foundations](oop_and_uml_foundations/oop_and_uml_foundations.md) | module page only |
 | 3 | [solid_principles](solid_principles/solid_principles.md) | 6 files |
-| 4 | [dependency_injection_and_testability](dependency_injection_and_testability/dependency_injection_and_testability.md) | module page only |
-| 5 | [creational](creational/creational.md) | 5 files |
-| 6 | [structural](structural/structural.md) | 6 files |
-| 7 | [behavioral](behavioral/behavioral.md) | 8 files |
-| 8 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
-| 9 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
-| 10 | [refactoring](refactoring/refactoring.md) | module page only |
-| 11 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 6 files |
-| 12 | [system_design_problems](system_design_problems/system_design_problems.md) | 10 files |
+| 4 | [architecture_patterns](architecture_patterns/architecture_patterns.md) | module page only |
+| 5 | [dependency_injection_and_testability](dependency_injection_and_testability/dependency_injection_and_testability.md) | module page only |
+| 6 | [creational](creational/creational.md) | 5 files |
+| 7 | [structural](structural/structural.md) | 6 files |
+| 8 | [behavioral](behavioral/behavioral.md) | 8 files |
+| 9 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 10 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
+| 11 | [refactoring](refactoring/refactoring.md) | module page only |
+| 12 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 6 files |
+| 13 | [system_design_problems](system_design_problems/system_design_problems.md) | 10 files |
 
-**Not in this path** (1 of 12, Full Path only): `design_principles`
+**Not in this path** (1 of 13, Full Path only): `design_principles`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocabulary plus the "design a parking lot / rate limiter" round every LLD interview runs on. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -412,20 +421,21 @@ A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocab
 | Apply: System Design Problems | The actual 30-45 minute round — Parking Lot, Rate Limiter, LRU Cache — where every principle above gets combined under time pressure |
 
 <!-- study-path-table principal -->
-### Principal Path (8 modules)
+### Principal Path (9 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 2 | [design_principles](design_principles/design_principles.md) | 7 files |
 | 3 | [solid_principles](solid_principles/solid_principles.md) | 4 files |
-| 5 | [creational](creational/creational.md) | module page only |
-| 6 | [structural](structural/structural.md) | 2 files |
-| 7 | [behavioral](behavioral/behavioral.md) | 2 files |
-| 8 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
-| 9 | [anti_patterns](anti_patterns/anti_patterns.md) | 7 files |
-| 12 | [system_design_problems](system_design_problems/system_design_problems.md) | module page only |
+| 4 | [architecture_patterns](architecture_patterns/architecture_patterns.md) | module page only |
+| 6 | [creational](creational/creational.md) | module page only |
+| 7 | [structural](structural/structural.md) | 2 files |
+| 8 | [behavioral](behavioral/behavioral.md) | 2 files |
+| 9 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 10 | [anti_patterns](anti_patterns/anti_patterns.md) | 7 files |
+| 13 | [system_design_problems](system_design_problems/system_design_problems.md) | module page only |
 
-**Not in this path** (4 of 12, Full Path only): `oop_and_uml_foundations`, `dependency_injection_and_testability`, `refactoring`, `concurrency_patterns`
+**Not in this path** (4 of 13, Full Path only): `oop_and_uml_foundations`, `dependency_injection_and_testability`, `refactoring`, `concurrency_patterns`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes pattern judgment over pattern recall: when a pattern is the wrong answer, what it costs to unwind one, and how a design survives being handed to a team. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.

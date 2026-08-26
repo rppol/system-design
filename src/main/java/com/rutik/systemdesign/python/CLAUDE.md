@@ -12,12 +12,12 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 |-----------------|-------|-------------|
 | `data_model_and_objects/` | 1 | Dunder methods, `__slots__`, MRO/C3 linearization, operator overloading, hashing/equality contract |
 | `core_language_idioms/` | 1 | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=` (3.8), `match`/`case` (3.10) |
-| `the_import_system/` | Finders, loaders, `sys.path`, namespace packages, circular imports, import-time side effects | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=` (3.8), `match`/`case` (3.10) |
+| `the_import_system/` | 1 | Finders and loaders, `sys.path` and `sys.modules`, regular vs namespace packages, circular imports, import-time side effects, `importlib` |
 | `iterators_and_generators/` | 1 | Iterator protocol, `yield`/`yield from`, lazy pipelines, `itertools`, generator coroutines |
 | `decorators_and_closures/` | 1 | Closures, free variables, function/class/parametrized decorators, `functools.wraps/lru_cache/cached_property` |
 | `context_managers_and_exceptions/` | 1 | `contextlib`, `ExitStack`, async CMs, `ExceptionGroup`/`except*` (3.11) |
 | `collections_and_data_structures/` | 1 | `list`/`dict`/`set` internals + Big-O, `collections`, `heapq`, `bisect` |
-| `dataclasses_enums_and_data_modeling/` | `dataclass` fields, `slots`, frozen instances, `Enum`/`StrEnum`, and when to reach for Pydantic | `list`/`dict`/`set` internals + Big-O, `collections`, `heapq`, `bisect` |
+| `dataclasses_enums_and_data_modeling/` | 1 | `dataclass` fields and defaults, `slots=True`, frozen instances, `Enum`/`StrEnum`/`IntFlag`, `__post_init__`, and when to reach for Pydantic |
 | `strings_bytes_encoding_and_regex/` | 1 | `str` vs `bytes`, Unicode, `re` engine, catastrophic backtracking |
 | `file_io_and_serialization/` | 1 | `pathlib`, text/binary I/O, `json`/`csv`, `pickle` security |
 | `cpython_memory_model/` | 2 | Reference counting, generational GC, `PyObject` header, arenas/pools/blocks |
@@ -25,7 +25,7 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 | `metaclasses_and_metaprogramming/` | 2 | `type()`, metaclasses, `__init_subclass__`, `__set_name__`, descriptors, the import system and `MetaPathFinder` |
 | `the_type_system_and_typing/` | 2 | Type hints, generics, `Protocol`, `TypeVar`/`ParamSpec`, variance, PEP 695, mypy/pyright/pyrefly/ty |
 | `performance_and_profiling/` | 2 | `cProfile`/`dis`/`sys.monitoring`, CPython 3.11+ speedups, the JIT and tail-call interpreter, Cython/mypyc/PyO3 |
-| `c_extensions_and_native_interop/` | CPython C API, `ctypes`/`cffi`, Cython, PyO3, the GIL boundary, packaging native wheels | `cProfile`/`dis`/`sys.monitoring`, CPython 3.11+ speedups, the JIT and tail-call interpreter, Cython/mypyc/PyO3 |
+| `c_extensions_and_native_interop/` | 2 | CPython C API, `ctypes`/`cffi`, Cython, PyO3, the GIL boundary, packaging native wheels |
 | `functional_programming/` | 2 | `map`/`filter`/`reduce`, `functools`, immutability, currying, comprehension vs generator perf |
 | `threading_and_multiprocessing/` | 3 | `threading`, GIL impact, `multiprocessing`, `concurrent.futures`, shared memory |
 | `asyncio_and_event_loop/` | 3 | Coroutines, event-loop internals, `gather`/`wait`, `TaskGroup` (3.11), `anyio` |

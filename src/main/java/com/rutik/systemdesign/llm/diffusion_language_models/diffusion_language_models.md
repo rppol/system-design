@@ -316,6 +316,67 @@ context resolved around them.
   dominate in practice; uniform transitions (replace with random token) require the model to also
   detect *which* tokens are corrupted, an extra task.
 
+### 4.3 Post-Training — SFT, Preference Optimization, and RL
+
+A base diffusion LM is as unaligned as a base AR model, and it needs the same three-stage
+treatment. Two of the three transfer almost unchanged; the middle one does not, and the reason
+it does not is the ELBO gap this module has already established (§3.3, §10.3).
+
+**SFT transfers directly.** Instruction tuning a masked diffusion LM is the same masked
+cross-entropy objective as pretraining, with the prompt left unmasked and the loss taken only over
+response positions. There is no new machinery, which is why an instruct variant such as
+LLaDA-8B-Instruct exists at all and why the SFT stage is never the interesting part of a
+diffusion-LM post-training pipeline.
+
+**Preference optimization is where it breaks.** DPO's loss is a function of four log-likelihoods —
+chosen and rejected, each under the policy and under the frozen reference:
+
+```
+L_DPO = -log sigmoid( beta * [ (log pi(y_w|x) - log pi_ref(y_w|x))
+                             - (log pi(y_l|x) - log pi_ref(y_l|x)) ] )
+```
+
+An AR model hands you every one of those four terms exactly, in one forward pass, from the chain
+rule. **A masked diffusion model has no exact likelihood at all — only an ELBO, and only as a Monte
+Carlo estimate** obtained by sampling timesteps and mask patterns. So each of the four terms is a
+noisy random variable, and LLaDA 1.5 formally analyzes the variance of those ELBO estimators and
+**derives bounds on both the bias and the variance of the preference-optimization gradients** in
+terms of it — the estimator's noise is not a nuisance around the right answer, it bounds how wrong
+the answer can be. Drop the
+standard DPO loss on a diffusion LM with a naive estimator and you do not get a slightly worse
+result; you get a gradient dominated by sampling noise.
+
+**VRPO** (Variance-Reduced Preference Optimization) is the fix that shipped, and both of its
+techniques are unbiased — they reduce variance without moving the estimate:
+
+| Technique | What it does | Why it works |
+|---|---|---|
+| Optimal Monte Carlo budget allocation | Given a fixed number of forward passes, spend them on **more diffusion timesteps** rather than more masked versions per timestep | Timestep is the higher-variance axis of the ELBO estimator, so sampling it more finely buys more variance reduction per unit of compute |
+| Antithetic sampling | Share the **same timesteps and the same masked data** between the policy's ELBO estimate and the reference model's | The DPO objective consumes a *difference* of log-ratios, so noise common to both terms cancels in the subtraction instead of accumulating |
+
+Antithetic sampling is the elegant half: the estimator noise is not eliminated, it is made *shared*,
+and the loss function's own algebra then removes it. Applying VRPO to LLaDA-8B-Instruct produced
+LLaDA 1.5, which improves over its SFT-only predecessor on GSM8K (+4.7), HumanEval (+3.0), MBPP
+(+1.8), IFEval (+4.0) and Arena-Hard (+4.3).
+
+**RL from verifiable rewards has the same root problem and a different workaround.** GRPO needs a
+per-token log-probability to form its importance ratio, which a diffusion LM again cannot supply
+exactly. The **d1** framework (masked SFT followed by **diffu-GRPO**) was the first policy-gradient
+method applied to masked diffusion LMs: it is critic-free, uses an efficient one-step per-token
+log-probability estimator, and adds random prompt masking as a regularizer that lets several
+gradient updates be taken per batch of generations — which matters because generation is the
+expensive part. d1-LLaDA beats the base LLaDA-8B-Instruct on all four of GSM8K, MATH500, Countdown
+and Sudoku.
+
+**Budget the compute before you plan the run.** Every ELBO evaluation is `N` forward passes rather
+than one, and DPO needs four of them per preference pair. A diffusion-LM alignment step therefore
+costs a multiple of the AR equivalent that is set by your Monte Carlo budget, and that multiple —
+not the size of the preference dataset — is usually what decides whether the run is affordable.
+Alignment mechanics for AR models are in [Alignment & RLHF](../alignment_and_rlhf/alignment_and_rlhf.md)
+and [GRPO and RLVR](../alignment_and_rlhf/grpo_and_rlvr.md); everything there about preference-data
+quality, reference-model drift and reward hacking applies here unchanged. What does **not** carry
+over is the assumption that a log-probability is free.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -1003,6 +1064,8 @@ not derived from the step-count ratio alone. Always benchmark, never extrapolate
 | **HuggingFace `diffusers`** | Primarily an image/audio diffusion library, but increasingly used as a reference for discrete-diffusion samplers ported to text |
 | **PyTorch / `transformers`** | Standard backbone for implementing the bidirectional transformer used by LLaDA/SEDD-style models — same architecture class as BERT, but with the masked-diffusion training loop (§6.2) instead of static 15% MLM |
 | **SEDD reference implementation (research)** | Reference for the score-entropy loss and discrete score function, useful for understanding the theoretical foundation |
+| **LLaDA 1.5 / VRPO** | The reference preference-optimization recipe for masked diffusion LMs: unbiased ELBO variance reduction via Monte Carlo budget allocation and antithetic sampling (§4.3) |
+| **d1 / diffu-GRPO** | Reference implementation of policy-gradient RL on a masked diffusion LM — critic-free, one-step log-probability estimator, random prompt masking (§4.3) |
 
 ---
 
@@ -1092,6 +1155,21 @@ The reversal curse in standard AR models is a direct consequence of training on 
 **Short:** AR's per-step overhead dominates short completions while diffusion offers little edge there, but for long sequences diffusion's near-constant step count beats AR until quadratic attention cost catches up.
 
 For very short completions, AR's per-step overhead (kernel launches, KV-cache bookkeeping) is a large fraction of total latency relative to the tiny amount of "real" compute — diffusion's `T` steps (even `T=8`) may not beat AR's 8 steps by much, since `L ≈ T` here and diffusion's per-step `O(L^2)` cost has no advantage over AR's per-step `O(L)`. For long completions, AR's `L=2000` sequential steps accumulate latency linearly, while diffusion's `T` (still `8-64`, roughly constant or slowly growing) stays far below `L` — but each diffusion step's `O(L^2)` attention cost grows quadratically, so without block diffusion (§5.4), very long sequences eventually make diffusion's per-step cost the bottleneck instead. The "sweet spot" for pure (non-block) diffusion is short-to-medium `L` (roughly 64-512 tokens) — which is exactly the regime Mercury targets.
+
+**Q: You port your DPO alignment pipeline from an AR model to a masked diffusion LM and the loss barely moves. What is wrong?**
+**Short:** DPO needs exact log-likelihoods, but a diffusion model only has a high-variance Monte Carlo ELBO estimate, so the gradient is dominated by sampling noise.
+
+The DPO loss is a function of four log-likelihoods — chosen and rejected, each under the policy and the frozen reference. An AR model produces all four exactly, in one forward pass, from the chain rule. A masked diffusion model has no exact likelihood at all; each term must be estimated by a Monte Carlo ELBO that samples timesteps and mask patterns, so each term is a noisy random variable. LLaDA 1.5 formally analyzes the variance of those ELBO estimators and derives bounds on both the bias and the variance of the preference-optimization gradients in terms of it, which is why the naive port produces a gradient signal buried in sampling noise rather than an obviously broken run. The fix is VRPO's two unbiased variance-reduction techniques: allocate a fixed Monte Carlo budget toward more diffusion timesteps rather than more masked versions per timestep, and use antithetic sampling so the policy and reference ELBOs share the same timesteps and masked data. Note also what this costs — every ELBO evaluation is N forward passes instead of one, so budget the alignment run by that multiple, not by the size of the preference dataset.
+
+**Q: Why does antithetic sampling help preference optimization on a diffusion LM specifically?**
+**Short:** DPO consumes a difference of log-ratios, so forcing the policy and reference estimates to share the same sampling noise makes that noise cancel in the subtraction.
+
+Antithetic sampling means the ELBO estimate for the current policy and the estimate for the frozen reference model are computed over the *same* sampled timesteps and the *same* masked versions of the data, rather than over independent draws. Because the DPO objective consumes a difference — `log pi(y|x) - log pi_ref(y|x)` — any estimator noise common to both terms subtracts away instead of accumulating. The technique does not make either individual estimate more accurate, and it is fully unbiased; it just arranges for the loss function's own algebra to remove the shared component. This is a general trick for any objective built on a difference of two noisy estimates of similar quantities, and it is unusually effective here because the policy starts as a copy of the reference, so the two ELBOs are strongly correlated by construction.
+
+**Q: How do you run RL from verifiable rewards on a masked diffusion LM when GRPO needs per-token log-probabilities?**
+**Short:** Use diffu-GRPO, which pairs a critic-free one-step log-probability estimator with random prompt masking so several updates can be taken per batch of generations.
+
+GRPO forms an importance ratio from per-token log-probabilities, and a diffusion LM cannot supply them exactly for the same ELBO reason that breaks DPO. The d1 framework — masked SFT followed by diffu-GRPO — was the first policy-gradient method applied to masked diffusion LMs. It stays critic-free, substitutes an efficient one-step estimator for the per-token log-probability, and adds random prompt masking as a regularizer, which is the piece that makes it practical: because each masked view of the prompt is a different sample, several gradient updates can be taken per batch of generations, and generation is by far the expensive part of any RLVR loop on a diffusion model. d1-LLaDA improves over the base LLaDA-8B-Instruct on GSM8K, MATH500, Countdown and Sudoku. Everything else about RLVR carries over unchanged — reward hacking, verifier gaming, and reference drift are not diffusion-specific problems.
 
 **Q18: A colleague says "diffusion LMs will replace autoregressive LMs within a few years." How would you push back or refine that claim in an interview setting?**
 **Short:** Diffusion LMs suit short, structured, latency-critical generation like code autocomplete, but lag AR on long-form generation, chain-of-thought parity, and serving maturity.

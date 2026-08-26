@@ -338,6 +338,7 @@ convolutional_neural_networks
   convolutional_neural_networks.md  senior
 recurrent_neural_networks
   recurrent_neural_networks.md  -
+  state_space_models.md  -
 training_deep_networks
   training_deep_networks.md  senior
 pytorch_deep_dive
@@ -350,6 +351,7 @@ computer_vision
   object_detection.md        -
   self_supervised_vision.md  -
   vision_transformers.md     -
+  open_vocabulary_and_vision_foundation.md  -
 natural_language_processing
   natural_language_processing.md        senior
   text_classification.md                senior
@@ -384,6 +386,7 @@ anomaly_detection
   anomaly_detection.md  -
 reinforcement_learning
   reinforcement_learning.md  -
+  offline_rl.md  -
 ml_system_design
   ml_system_design.md                     senior, principal
   design_framework.md                     senior, principal
@@ -461,6 +464,8 @@ case_studies
   design_ner_pipeline.md                   -
   design_question_answering_system.md      -
   design_llm_hybrid_support_triage.md  principal
+  design_experimentation_platform.md  principal
+  design_document_ai_extraction.md  senior, principal
 -->
 ## Learning Paths
 

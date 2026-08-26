@@ -204,10 +204,12 @@ distributed_transactions
   distributed_transactions.md  senior, principal
 observability
   observability.md  principal
+  continuous_profiling.md  -
 security_and_auth
   security_and_auth.md  principal
 resilience_patterns
   resilience_patterns.md  senior, principal
+  backpressure_and_load_shedding.md  -
 consensus_algorithms
   consensus_algorithms.md  principal
 event_sourcing_cqrs
@@ -239,6 +241,10 @@ case_studies
   design_youtube_upload_pipeline.md  senior
   design_distributed_job_scheduler.md  senior
   design_flash_sale_ticketing.md  senior
+  design_live_streaming.md  senior, principal
+  design_top_k_heavy_hitters.md  senior, principal
+  design_email_service.md  senior, principal
+  design_nearby_friends.md  senior
 capacity_estimation
   capacity_estimation.md  senior, principal
 realtime_updates

@@ -153,8 +153,10 @@ debezium_change_data_capture  (change data capture from the database log)
      block, or listed here and absent from disk, FAILS `extract.py --strict`.
 apache_airflow
   apache_airflow.md  -
+  assets_partitions_and_the_state_store.md  -
 temporal_durable_execution
   temporal_durable_execution.md  -
+  versioning_and_safe_deploys.md  -
 nvidia_triton_inference_server
   nvidia_triton_inference_server.md  -
   dynamo_and_the_nvidia_serving_stack.md  -
@@ -162,12 +164,21 @@ intel_openvino
   intel_openvino.md  -
 envoy_proxy
   envoy_proxy.md  -
+  gateway_api_and_inference_extension.md  -
 hashicorp_vault
   hashicorp_vault.md  -
+  workload_identity_and_the_end_of_stored_secrets.md  -
 debezium_change_data_capture
   debezium_change_data_capture.md  -
+  cdc_across_failover_and_into_the_lakehouse.md  -
 apache_iceberg
   apache_iceberg.md  -
+cilium
+  cilium.md  -
+apache_flink
+  apache_flink.md  -
+trino
+  trino.md  -
 -->
 ## Learning Paths
 

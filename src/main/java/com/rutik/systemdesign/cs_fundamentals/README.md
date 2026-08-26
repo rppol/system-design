@@ -201,6 +201,7 @@ dsa_patterns
   two_pointers.md                   senior
   union_find.md                     senior
   ai_assisted_round_playbook.md  senior
+  sweep_line.md  senior
 processes_threads_and_context_switching
   processes_threads_and_context_switching.md  senior
   async_io_and_event_loops.md  senior
@@ -220,8 +221,11 @@ cryptography_fundamentals
   cryptography_fundamentals.md  -
 theory_of_computation
   theory_of_computation.md  -
+  quantum_and_randomized_complexity.md  -
 how_code_runs_compilers_and_interpreters
   how_code_runs_compilers_and_interpreters.md  -
+  wasm_and_portable_bytecode.md  -
+  abis_linking_and_wasm.md  -
 case_studies
   autocomplete_and_string_search.md     -
   design_lru_cache.md                   -
@@ -262,7 +266,7 @@ The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-
 | 13 | [dynamic_programming](dynamic_programming/dynamic_programming.md) | module page only |
 | 14 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | module page only |
 | 15 | [graph_and_string_algorithms](graph_and_string_algorithms/graph_and_string_algorithms.md) | module page only |
-| 16 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 29 files |
+| 16 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 30 files |
 | 17 | [processes_threads_and_context_switching](processes_threads_and_context_switching/processes_threads_and_context_switching.md) | 2 files |
 | 18 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | module page only |
 | 19 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | module page only |
