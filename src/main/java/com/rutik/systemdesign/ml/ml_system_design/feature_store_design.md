@@ -64,7 +64,7 @@ Why it matters: feature stores solve three painful production problems: (1) trai
 | FBLearner Feature Store | Meta | Tao (graph DB) | Hive | No |
 | Zipline / Chronon | Airbnb | Key-value store | Hive | Yes — open-sourced as Chronon (Apache 2.0, April 2024) |
 | Feast | Community | Redis / DynamoDB | BigQuery / Parquet | Yes |
-| Tecton | Startup | Redis / DynamoDB | S3 + Parquet | No (managed) |
+| Tecton | Databricks | Redis / DynamoDB | S3 + Parquet | No (managed) |
 | Agent Platform Feature Store (ex-Vertex AI Feature Store) | Google | Bigtable | BigQuery | No (managed) |
 | SageMaker Feature Store | AWS | DynamoDB | S3 | No (managed) |
 
@@ -727,7 +727,7 @@ Two cells people over-read. **Redis Cluster is not strongly consistent as a syst
 | Category | Tool | Notes |
 |----------|------|-------|
 | Open-Source Feature Store | Feast | Most mature OSS option; Python SDK; multiple backend support |
-| Managed Feature Store | Tecton | Managed platform from the team that originally built Feast, but its own SDK (Rift compute engine, Stream Ingest API) — not a Feast-compatible API |
+| Managed Feature Store | Tecton | Databricks' managed real-time feature platform (acquired September 2025), built by the team behind Uber's Michelangelo and the primary maintainer of Feast, with its own SDK (Rift compute engine, Stream Ingest API) — not a Feast-compatible API |
 | Cloud Feature Store | Agent Platform Feature Store (GCP, formerly Vertex AI Feature Store) | BigQuery as the data source; Bigtable online serving, with scheduled or continuous sync per feature view. Embeddings are served by Vector Search, not the feature store. Two things are on a published sunset clock, and they are not the whole product: **Feature Store (Legacy)** and **Optimized online serving** both feature-froze on 17 May 2026 and shut off entirely on 17 Feb 2027, so a legacy `featurestores` deployment or an optimized-serving endpoint has a hard migration deadline to the current Bigtable-backed store (or Vector Search for embeddings) |
 | Cloud Feature Store | SageMaker Feature Store (AWS) | DynamoDB online; S3 offline; tight SageMaker integration |
 | Online Store | Redis | De facto standard for <5ms P99; requires cluster for >100GB |

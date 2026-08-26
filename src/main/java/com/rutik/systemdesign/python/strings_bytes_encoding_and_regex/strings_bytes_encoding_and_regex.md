@@ -162,7 +162,13 @@ each kind (Section 6.1) — one stray emoji widens every character in the string
 | `%` formatting | All | 1x (baseline) | No | No |
 | `.format()` | 2.6+ / 3.0+ | ~0.8x (slower) | Yes | No |
 | f-strings | 3.6+ | ~3x faster | Yes | `=` specifier [3.8] |
-| `Template` strings | 2.4+ | slowest | No | No |
+| t-strings | 3.14 | n/a — yields a `Template`, not a `str` | Yes | Yes, keeps the source expression |
+| `string.Template` | 2.4+ | slowest | No | No |
+
+Note that the last two are different things despite the similar names. `string.Template` is
+the old `$name` substitution class; a **t-string** is the `t"..."` literal added by PEP 750
+in 3.14, which produces a `string.templatelib.Template`. The next subsection covers it —
+it is the one entry in this table that is not merely another way to build a string.
 
 ---
 
@@ -425,6 +431,110 @@ precision = 3
 print(f"{3.14159265:{width}.{precision}f}")  # "     3.142" — nested format spec
 ```
 
+### 6.5b t-strings — Interpolation You Can Inspect Before It Becomes Text [3.14]
+
+An f-string interpolates eagerly: by the time any function sees the value, it is a finished
+`str` and the seam between the literal parts and the substituted parts is gone forever. That
+is precisely why `f"SELECT * FROM users WHERE name = '{name}'"` is an injection hole — the
+function receiving it cannot tell which characters came from you and which came from the user.
+
+A **t-string** (PEP 750) uses the `t` prefix and evaluates to a
+`string.templatelib.Template` instead of a `str`. The parts stay separate.
+
+```python
+from string.templatelib import Template, Interpolation
+
+name = "Robert'); DROP TABLE students;--"
+tmpl: Template = t"SELECT * FROM users WHERE name = {name}"
+
+tmpl.strings          # ("SELECT * FROM users WHERE name = ", "") -- the static parts
+tmpl.interpolations   # (Interpolation(value=..., expression='name', ...),)
+```
+
+Each `Interpolation` carries `.value` (the evaluated object), `.expression` (the literal
+source text `"name"`, which is what makes debugging output self-documenting), plus
+`.conversion` and `.format_spec`. Iterating a `Template` yields its static strings and its
+interpolations in order, so a library can process each one according to its own rules:
+
+```python
+def sql(template: Template) -> tuple[str, list[object]]:
+    """Turn a t-string into a parameterised query -- values never touch the SQL text."""
+    query, params = [], []
+    for part in template:
+        if isinstance(part, Interpolation):
+            query.append("?")
+            params.append(part.value)
+        else:
+            query.append(part)
+    return "".join(query), params
+
+sql(t"SELECT * FROM users WHERE name = {name}")
+# ('SELECT * FROM users WHERE name = ?', ["Robert'); DROP TABLE students;--"])
+```
+
+**The safety property is structural, not conventional.** A `Template` is *not* a `str` and
+does not subclass one, so an API that accepts only `Template` cannot be handed a
+pre-interpolated f-string by mistake — the type check catches at the boundary what a code
+review has to catch by eye. This is the same idea as `typing.LiteralString` [3.11], but
+enforced at runtime rather than by a type checker, and it composes with user data instead of
+forbidding it. Use t-strings when you are *writing* the library that consumes them (SQL, HTML,
+shell, logging); use f-strings for everything that is genuinely just text.
+
+### 6.5c Unicode Normalization — Why Two Identical-Looking Strings Compare Unequal
+
+`"café" == "café"` can be `False`. Both render identically, but one spells `é` as the single
+code point U+00E9 (LATIN SMALL LETTER E WITH ACUTE) and the other as `e` followed by U+0301
+(COMBINING ACUTE ACCENT). Python compares code points, so a one-character difference in
+length is a real difference.
+
+```python
+import unicodedata
+
+composed  = "café"        # é as one code point
+decomposed = "café"      # e + combining acute
+
+composed == decomposed                    # False
+len(composed), len(decomposed)            # (4, 5)
+
+unicodedata.normalize("NFC", decomposed) == composed   # True
+```
+
+There are four normalization forms, along two independent axes:
+
+| Form | Composition | Compatibility folding | Use it for |
+|------|-------------|----------------------|-----------|
+| NFC | Composed (fewest code points) | No | The default for storage, comparison, and network interchange |
+| NFD | Decomposed | No | Accent-insensitive work — strip combining marks after decomposing |
+| NFKC | Composed | Yes | Search and identifier matching, where `ﬁ` should equal `fi` |
+| NFKD | Decomposed | Yes | Aggressive normalization before indexing |
+
+The **K** forms apply *compatibility* folding, which is lossy and not reversible: `NFKC` turns
+the ligature `ﬁ` (U+FB01) into `fi`, the superscript `²` into `2`, and a full-width `Ａ` into
+`A`. That is exactly what you want for a search index and exactly what you do not want for a
+password or a cryptographic input, where the bytes must survive unchanged.
+
+```python
+unicodedata.normalize("NFKC", "ﬁ²")   # 'fi2' -- lossy, cannot be undone
+```
+
+**Where this bites in production.** macOS's filesystem hands you NFD filenames while Linux
+hands you NFC, so the same file compares unequal across a sync. A username uniqueness check
+that does not normalize lets an attacker register a visually identical account. And a
+`SELECT ... WHERE email = ?` silently misses a row when the database stored NFC and the
+application sent NFD. **Normalize to NFC once at the trust boundary** — when input arrives —
+rather than sprinkling `normalize()` through the comparison sites.
+
+Related and much simpler: use `str.removeprefix()` and `str.removesuffix()` [3.9] rather than
+the old slice-after-`startswith` dance, which silently truncates when the prefix is absent.
+
+```python
+"unittest.py".removesuffix(".py")     # 'unittest'
+"unittest.py".removesuffix(".pyc")    # 'unittest.py' -- unchanged, not truncated
+
+# The trap the methods exist to replace:
+"unittest.py".rstrip(".py")           # 'unittes' -- rstrip takes a CHARACTER SET, not a suffix
+```
+
 ### 6.6 The `re` Module in Depth
 
 ```python
@@ -628,7 +738,14 @@ print(parse_content_type("application/json"))            # ('application/json', 
 | `%` | Low | No (key errors at runtime) | No | Baseline |
 | `.format()` | Medium | No (key errors at runtime) | Yes | ~80% of baseline |
 | f-strings | High | Compile-time (syntax errors caught) | Yes | ~300% of baseline |
-| `Template` | Medium | Safe (no arbitrary expressions) | No | Slowest |
+| t-strings | High | Structural — values stay separable from the literal text | Yes | Defers the work to the consumer |
+| `string.Template` | Medium | Safe (no arbitrary expressions) | No | Slowest |
+
+The decision is not really about speed. Use an f-string when the result is text a human will
+read. Use a **t-string** when the result is text some *other* system will parse — SQL, HTML,
+a shell command — because only a `Template` lets the consuming library escape each
+interpolated value according to that system's rules. Use `string.Template` when the format
+itself comes from untrusted input, since it cannot evaluate arbitrary expressions at all.
 
 ---
 
@@ -688,8 +805,16 @@ def read_config(path: str) -> str:
         return f.read()
 ```
 
-For Python 3.10+, set `PYTHONUTF8=1` environment variable as a belt-and-suspenders measure, but
-always set encoding explicitly in `open()` — never rely on the environment alone.
+Two environment-level backstops, neither of which replaces the explicit argument. Setting
+`PYTHONUTF8=1` turns on UTF-8 mode, which makes UTF-8 the default regardless of locale. And
+`PYTHONWARNDEFAULTENCODING=1` [3.10] emits an `EncodingWarning` at every `open()` that relies
+on the locale, which is how you find these call sites in an existing codebase rather than
+grepping for them.
+
+PEP 686 makes **UTF-8 mode the default in Python 3.15** [3.15], which removes the cp1252
+default on Windows for good; `PYTHONUTF8=0` opts back out. Until your minimum supported
+version is 3.15, and honestly after it too, still pass `encoding="utf-8"` explicitly — it is
+the only form that reads correctly to someone who does not know which interpreter you ship on.
 
 ---
 
@@ -842,12 +967,18 @@ and always log or alert when replacements occur.
 | `pyparsing` | third-party pip | N/A (PEG parser) | Via Python | Slower | Grammar-based parsing, DSLs |
 | `lark` | third-party pip | N/A (Earley/LALR) | Via Python | Fast on compiled | Complex grammars, language parsing |
 | `hypothesis` | third-party pip | N/A | N/A | N/A | Property-based testing of regex |
+| `unicodedata` | stdlib | N/A | Full character database | Fast | NFC/NFKC normalization, category lookup |
+| `string.templatelib` | stdlib | N/A (structural) | N/A | N/A | Consuming t-strings in a SQL or HTML library |
+| `idna` | third-party pip | N/A | Full | Fast | Internationalized domain names, homograph defence |
 
 **Python version notes:**
 - `re.fullmatch()` added in Python 3.4.
 - `re.Pattern` and `re.Match` as proper generic types for annotations: Python 3.8+.
+- `str.removeprefix()` / `str.removesuffix()`: Python 3.9.
 - `re.compile()` cache size: 512 entries (CPython 3.11+, up from 100 in earlier versions).
 - f-strings: Python 3.6; `f"{x = }"` self-doc: Python 3.8; multi-line f-string with backslash in expression: Python 3.12 (PEP 701).
+- t-strings (`t"..."` yielding a `string.templatelib.Template`): Python 3.14, PEP 750.
+- UTF-8 mode on by default: Python 3.15, PEP 686. Opt out with `PYTHONUTF8=0`.
 
 ---
 
@@ -980,6 +1111,21 @@ changes. The `!r` conversion flag calls `repr()` on the value before formatting 
 prints `'café'` with quotes — while `!a` calls `ascii()`, which additionally escapes any
 non-ASCII characters, printing `'caf\xe9'` instead. Use `!r` for readable debug output and `!a`
 only when the destination cannot safely display non-ASCII bytes.
+
+**Q: What does a t-string give you that an f-string cannot, and when would you use one?**
+**Short:** A t-string evaluates to a Template that keeps the literal text and the interpolated values separate, so a library can escape each value itself.
+
+A t-string (`t"..."`, PEP 750, added in 3.14) evaluates to a `string.templatelib.Template` rather than a `str`, so the seam between the literal parts and the substituted values survives — which is exactly the information an f-string destroys. `Template.strings` holds the static fragments and `Template.interpolations` holds `Interpolation` objects carrying `.value`, the source text in `.expression`, plus `.conversion` and `.format_spec`. That lets a SQL library turn every interpolation into a `?` placeholder with the value bound separately, or an HTML library escape each value by its context, instead of trusting the caller to have done it. The safety is structural rather than conventional: a `Template` is not a `str` and does not subclass one, so a function annotated to take only a `Template` cannot be handed a pre-interpolated f-string by accident — the boundary catches what code review otherwise has to catch by eye. Use t-strings when you are writing the library that *consumes* the template (SQL, HTML, shell, structured logging); keep f-strings for text a human will read.
+
+**Q: Why can two strings that look identical compare unequal, and how do you fix it?**
+**Short:** They use different Unicode code point sequences for the same glyph, so normalize both to NFC with unicodedata.normalize before comparing.
+
+Because Python compares code points, not rendered glyphs, and Unicode offers more than one encoding of the same character. `é` is either the single code point U+00E9 or the two-code-point sequence `e` + U+0301 (combining acute); the two render identically, compare unequal, and even report different `len()`. The fix is `unicodedata.normalize(form, s)` on both sides. There are four forms along two axes: NFC and NFD differ in whether characters are composed or decomposed, while the K forms (NFKC, NFKD) additionally apply *compatibility* folding, which is lossy — NFKC turns the ligature U+FB01 into `fi` and superscript `²` into `2`. Use **NFC** as the default for storage, comparison and interchange; use NFKC for search and identifier matching where `ﬁ` should match `fi`; never apply a K form to a password or any cryptographic input, whose bytes must survive unchanged. This is not academic: macOS hands you NFD filenames while Linux hands you NFC, so the same file mismatches across a sync, and a username uniqueness check that skips normalization lets an attacker register a visually identical account. Normalize once at the trust boundary where input arrives, rather than at every comparison site.
+
+**Q: Why use `removesuffix()` instead of `rstrip()` to drop a file extension?**
+**Short:** rstrip takes a set of characters to strip repeatedly, not a suffix, so it eats far more than intended.
+
+Because `rstrip` takes a **character set**, not a suffix: `"unittest.py".rstrip(".py")` strips any trailing `.`, `p` or `y` repeatedly and returns `'unittes'`, silently corrupting the name. `str.removesuffix(".py")` [3.9] removes the exact suffix once and returns the string unchanged if it is not present, so `"unittest.py".removesuffix(".pyc")` correctly gives back `'unittest.py'`. Its sibling `removeprefix()` behaves the same way at the front. Both also replace the older `s[len(p):] if s.startswith(p) else s` idiom, whose bug is that a careless version drops the conditional and truncates every string by the prefix length whether the prefix was there or not. Reach for these methods any time you mean "drop this exact affix"; reserve `strip`/`lstrip`/`rstrip` for what they are actually for, which is trimming whitespace or a genuine set of padding characters.
 
 ---
 

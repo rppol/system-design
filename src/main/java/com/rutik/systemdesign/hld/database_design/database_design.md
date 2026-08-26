@@ -12,7 +12,7 @@ Understanding when to use each, how to model data effectively, and how to scale 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Choosing between SQL and NoSQL is like choosing between a filing cabinet with labeled folders (SQL — organized, queryable) and a storage unit where you can put anything anywhere (NoSQL — flexible, scalable).
 
@@ -24,7 +24,7 @@ Understanding when to use each, how to model data effectively, and how to scale 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Data Integrity**: Enforcing rules (constraints, foreign keys, types) to prevent corrupt or inconsistent data.
 - **Normalization vs. Denormalization**: Eliminating redundancy (normalize for writes, denormalize for reads).
@@ -36,7 +36,9 @@ Understanding when to use each, how to model data effectively, and how to scale 
 
 ---
 
-## 3. SQL vs. NoSQL
+## 4. Types / Architectures / Strategies
+
+### SQL vs. NoSQL
 
 ```mermaid
 flowchart TD
@@ -56,9 +58,12 @@ flowchart TD
     Q2 -->|write-heavy time series| WIDE(Wide-Column<br/>Cassandra, HBase)
     Q2 -->|graph traversal| GRAPH(Graph<br/>Neo4j, Neptune)
     Q2 -->|full-text search| SEARCH(Search<br/>Elasticsearch, Solr)
+    Q2 -->|semantic similarity| Q3{Vectors alongside<br/>relational rows?}
+    Q3 -->|yes| PGV(pgvector<br/>inside Postgres)
+    Q3 -->|no, billions of vectors| VEC(Vector store<br/>Pinecone, Milvus, Qdrant)
 
-    class Q1,Q2 mathOp
-    class SQL,KV,DOC,WIDE,GRAPH,SEARCH base
+    class Q1,Q2,Q3 mathOp
+    class SQL,KV,DOC,WIDE,GRAPH,SEARCH,PGV,VEC base
 ```
 *The whole SQL-vs-NoSQL choice collapses to two questions: do you need flexible ad-hoc queries, and if not, which access pattern dominates — each NoSQL family below is optimized for exactly one answer to that second question.*
 
@@ -112,9 +117,17 @@ flowchart TD
 - Inverted indexes for full-text search.
 - Best for: log analytics, product search, document retrieval.
 
+#### Vector Stores
+**Examples:** pgvector (a Postgres extension), Pinecone, Milvus, Qdrant, Weaviate; vector indexes inside Elasticsearch/OpenSearch, MongoDB Atlas, and Valkey
+
+- Stores high-dimensional embeddings and answers **approximate nearest-neighbour** (ANN) queries — "which rows mean something similar to this" rather than "which rows match these terms". The index (HNSW, IVF) trades recall for latency, so the query has an accuracy knob that no other database family has.
+- Best for: retrieval-augmented generation, semantic search, recommendations, deduplication, image and audio similarity.
+- **The decision is usually pgvector versus a dedicated store, and the default is pgvector.** If the vectors sit alongside relational rows you already query, keeping them in Postgres means one datastore, real transactions, and filtered ANN as a plain `WHERE` clause — no dual-write, no consistency gap between the row and its embedding. Move to a dedicated store when the corpus reaches the hundreds of millions of vectors, when index build and query load would compete with your OLTP traffic, or when you need to scale the vector tier independently. See [Vector Databases](../../database/vector_databases/vector_databases.md).
+- The trap: a vector store is not a system of record. Embeddings are derived data, regenerated whenever the model changes — keep the source text in a real database and treat the index as rebuildable.
+
 ---
 
-## 4. ACID vs. BASE
+### ACID vs. BASE
 
 ### ACID (SQL / Relational)
 
@@ -141,7 +154,7 @@ flowchart TD
 
 ---
 
-## 5. Normalization
+### Normalization and Denormalization
 
 Organizing tables to reduce redundancy and improve data integrity.
 
@@ -205,175 +218,7 @@ reconciliation job that finds violations after the fact.
 
 ---
 
-## 6. Indexing
-
-Indexes are data structures that trade storage and write overhead for faster read queries.
-
-### B-Tree Index (Default)
-- Balanced tree; O(log n) lookups, range queries.
-- Excellent for equality and range predicates on ordered data.
-- Used by: PostgreSQL, MySQL, SQL Server.
-
-```
-f = page / entry
-
-  depth    = ceil(log_f(N))
-  capacity = f ^ depth
-```
-
-**What it means.** "`O(log n)` understates how good this is in practice — a B-tree node is a whole disk page holding hundreds of keys, not two, so the tree is astonishingly shallow and a lookup in a hundred-million-row table costs about three page reads."
-
-The reason the base of the logarithm matters so much here is that it is set by hardware, not by the algorithm: the page size divided by the entry size *is* the branching factor. That is why B-trees, not binary search trees, are what databases actually use on disk.
-
-| Symbol | What it is |
-|--------|------------|
-| `N` | Number of rows (index entries) |
-| `page` | Disk/buffer-pool page size — `8192` bytes in PostgreSQL, 16KB in InnoDB |
-| `entry` | Bytes per index entry: key plus child pointer. `16` bytes for an 8-byte key plus 8-byte pointer |
-| `f` | Fanout (branching factor): `page / entry` — how many children one node can point at |
-| `depth` | Levels traversed: `ceil(log_f(N))`. Each level is one page read |
-| `capacity` | Rows a tree of a given depth can address: `f ^ depth` |
-
-**Walk one example.** An 8KB page with 16-byte entries, indexing the case study's 100M listings:
-
-```
-  fanout   f = 8192 / 16                    = 512 entries per node
-
-  capacity by depth:
-    depth 1 :  512^1                        =         512 rows
-    depth 2 :  512^2                        =     262,144 rows
-    depth 3 :  512^3                        = 134,217,728 rows
-    depth 4 :  512^4                        = about 68.7 billion rows
-
-  100,000,000 rows  ->  fits inside depth 3 (134M capacity)
-  lookup cost       ->  3 page reads, and the top 2 levels are
-                        almost always already in the buffer pool
-                        so the real cost is ~1 disk read
-```
-
-Two consequences fall straight out of this. First, going from 100M to 1B rows adds exactly one level — index lookups barely degrade with scale, which is why "add an index" is such a reliable fix. Second, the index is not free storage: every one of those 512-entry nodes is a page that must be updated on write, which is the concrete cost behind "each index slows writes" in the pitfalls below.
-
-### Hash Index
-- O(1) exact lookups. No range queries.
-- Used by: Redis, some memory-optimized tables.
-
-### Composite Index
-- Index on (col_a, col_b). Usable for queries on col_a alone OR (col_a, col_b). NOT col_b alone (leftmost prefix rule).
-
-### Covering Index
-- Index contains all columns needed for a query — no table row lookup needed. Very fast.
-
-### Partial Index
-- Index only rows matching a condition: `CREATE INDEX ON orders(user_id) WHERE status = 'active'`.
-
-### Full-Text Index
-- Inverted index for text search. PostgreSQL `tsvector`, MySQL FULLTEXT, Elasticsearch.
-
-### Index Pitfalls
-- Over-indexing: Each index slows writes and uses storage.
-- Index on low-cardinality columns (boolean, status with 3 values) — often ignored by the query planner.
-- Not using `EXPLAIN ANALYZE` to verify index usage.
-
----
-
-## 7. Replication
-
-Replication copies data from one node (primary) to others (replicas).
-
-### Primary-Replica (Master-Slave)
-
-```mermaid
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    W([Writes]) --> P(Primary)
-    P -->|WAL / binlog| R1(Replica 1)
-    P -->|WAL / binlog| R2(Replica 2)
-    P -->|WAL / binlog| R3(Replica 3<br/>read traffic)
-
-    class W req
-    class P base
-    class R1,R2,R3 frozen
-```
-*Writes land on the primary and stream via WAL/binlog to every replica; whether the primary waits for a replica to confirm (below) determines the durability/latency tradeoff.*
-
-- **Synchronous replication**: Primary waits for at least one replica to confirm before acknowledging write. Stronger durability, higher write latency.
-- **Asynchronous replication**: Primary acknowledges immediately; replicas catch up. Lower latency, risk of data loss on failover.
-- **Semi-synchronous**: At least one replica must acknowledge.
-
-### Read Replicas
-- Direct read traffic to replicas, writes to primary.
-- Replicas may lag (replication lag) — stale reads possible.
-- Scale reads horizontally without scaling writes.
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant P as Primary
-    participant R as Replica
-
-    App->>P: write balance = 900
-    P-->>App: write ack
-    P->>R: async replication in flight
-    App->>R: read balance
-    Note over R: replication lag window<br/>update not yet applied
-    R-->>App: balance = 1000, stale
-    Note over P,R: replica catches up moments later
-```
-*Because replication is asynchronous, a read sent to the replica immediately after a write to the primary can still return the pre-write value — the read-your-own-writes gap called out in Common Pitfall #7.*
-
-### Multi-Primary (Multi-Master)
-- Multiple nodes accept writes. Conflict resolution required.
-- Examples: MySQL Group Replication, CockroachDB, Cassandra (leaderless).
-
-### Leaderless Replication (Dynamo-style)
-- Any node accepts writes. Uses quorum writes/reads (W + R > N for consistency).
-- `N` = replication factor, `W` = write quorum, `R` = read quorum.
-- Examples: Cassandra, DynamoDB, Riak.
-
-**The idea behind it.** "If the set of nodes you wrote to and the set you read from are big enough that they cannot possibly be disjoint, then every read is guaranteed to touch at least one node holding the newest write — and a timestamp comparison picks it out."
-
-It is the pigeonhole principle applied to replicas. There is no coordination, no leader, and no consensus round involved; the guarantee comes purely from set sizes being forced to overlap. What you tune is *where* you pay for that overlap — on the write side, the read side, or split between them.
-
-| Symbol | What it is |
-|--------|------------|
-| `N` | Replication factor — how many nodes hold a copy of each key |
-| `W` | Write quorum — nodes that must acknowledge before a write is reported successful |
-| `R` | Read quorum — nodes that must respond before a read is answered |
-| `W + R > N` | The overlap condition. Guarantees at least `W + R - N` nodes are common to both sets |
-| `N - W` | Node failures a write can survive and still succeed |
-| `N - R` | Node failures a read can survive and still succeed |
-
-**Walk one example.** The N=3 configuration in the Cassandra Quorum diagram below, compared with a fast-but-unsafe alternative:
-
-```
-  N = 3, W = 2, R = 2   (the diagram's setting)
-    W + R = 2 + 2 = 4  >  3          -> overlap = 4 - 3 = 1 node
-    guaranteed : every read sees >= 1 node with the latest write
-    tolerates  : N - W = 1 node down on write
-                 N - R = 1 node down on read
-
-  N = 3, W = 1, R = 1   (lowest latency)
-    W + R = 1 + 1 = 2  is NOT > 3    -> overlap = -1, i.e. none guaranteed
-    a read can hit the two nodes that never received the write
-    -> stale value returned, silently
-
-  N = 3, W = 3, R = 1   (read-optimized, still safe)
-    W + R = 3 + 1 = 4  >  3          -> overlap = 1
-    reads are single-node fast, but ANY node down blocks all writes
-```
-
-Read the three together and the tuning knob is obvious: the sum is what buys correctness, and how you split it between `W` and `R` decides whether writes or reads carry the availability risk. Cassandra and DynamoDB expose exactly this as a per-query setting, which is why the same cluster can serve a strongly-consistent balance read and an eventually-consistent view counter.
-
----
-
-## 8. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Primary-Replica Setup
 ```mermaid
@@ -446,7 +291,147 @@ flowchart LR
 
 ---
 
-## 9. Real-World Examples
+## 6. How It Works — Detailed Mechanics
+
+### Indexing
+
+Indexes are data structures that trade storage and write overhead for faster read queries.
+
+### B-Tree Index (Default)
+- Balanced tree; O(log n) lookups, range queries.
+- Excellent for equality and range predicates on ordered data.
+- Used by: PostgreSQL, MySQL, SQL Server.
+
+```
+f = page / entry
+
+  depth    = ceil(log_f(N))
+  capacity = f ^ depth
+```
+
+**What it means.** "`O(log n)` understates how good this is in practice — a B-tree node is a whole disk page holding hundreds of keys, not two, so the tree is astonishingly shallow and a lookup in a hundred-million-row table costs about three page reads."
+
+The reason the base of the logarithm matters so much here is that it is set by hardware, not by the algorithm: the page size divided by the entry size *is* the branching factor. That is why B-trees, not binary search trees, are what databases actually use on disk.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of rows (index entries) |
+| `page` | Disk/buffer-pool page size — `8192` bytes in PostgreSQL, 16KB in InnoDB |
+| `entry` | Bytes per index entry: key plus child pointer. `16` bytes for an 8-byte key plus 8-byte pointer |
+| `f` | Fanout (branching factor): `page / entry` — how many children one node can point at |
+| `depth` | Levels traversed: `ceil(log_f(N))`. Each level is one page read |
+| `capacity` | Rows a tree of a given depth can address: `f ^ depth` |
+
+**Walk one example.** An 8KB page with 16-byte entries, indexing the case study's 100M listings:
+
+```
+  fanout   f = 8192 / 16                    = 512 entries per node
+
+  capacity by depth:
+    depth 1 :  512^1                        =         512 rows
+    depth 2 :  512^2                        =     262,144 rows
+    depth 3 :  512^3                        = 134,217,728 rows
+    depth 4 :  512^4                        = about 68.7 billion rows
+
+  100,000,000 rows  ->  fits inside depth 3 (134M capacity)
+  lookup cost       ->  3 page reads, and the top 2 levels are
+                        almost always already in the buffer pool
+                        so the real cost is ~1 disk read
+```
+
+Two consequences fall straight out of this. First, going from 100M to 1B rows adds exactly one level — index lookups barely degrade with scale, which is why "add an index" is such a reliable fix. Second, the index is not free storage: every one of those 512-entry nodes is a page that must be updated on write, which is the concrete cost behind "each index slows writes" in the pitfalls below.
+
+### Hash Index
+- O(1) exact lookups. No range queries.
+- Used by: Redis, some memory-optimized tables.
+
+### Composite Index
+- Index on (col_a, col_b). Usable for queries on col_a alone OR (col_a, col_b). NOT col_b alone (leftmost prefix rule).
+
+### Covering Index
+- Index contains all columns needed for a query — no table row lookup needed. Very fast.
+
+### Partial Index
+- Index only rows matching a condition: `CREATE INDEX ON orders(user_id) WHERE status = 'active'`.
+
+### Full-Text Index
+- Inverted index for text search. PostgreSQL `tsvector`, MySQL FULLTEXT, Elasticsearch.
+
+### Index Pitfalls
+- Over-indexing: Each index slows writes and uses storage.
+- Index on low-cardinality columns (boolean, status with 3 values) — often ignored by the query planner.
+- Not using `EXPLAIN ANALYZE` to verify index usage.
+
+---
+
+### Replication
+
+Replication copies data from one node (primary) to others (replicas).
+
+### Primary-Replica (Master-Slave)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W([Writes]) --> P(Primary)
+    P -->|WAL / binlog| R1(Replica 1)
+    P -->|WAL / binlog| R2(Replica 2)
+    P -->|WAL / binlog| R3(Replica 3<br/>read traffic)
+
+    class W req
+    class P base
+    class R1,R2,R3 frozen
+```
+*Writes land on the primary and stream via WAL/binlog to every replica; whether the primary waits for a replica to confirm (below) determines the durability/latency tradeoff.*
+
+- **Synchronous replication**: Primary waits for at least one replica to confirm before acknowledging write. Stronger durability, higher write latency.
+- **Asynchronous replication**: Primary acknowledges immediately; replicas catch up. Lower latency, risk of data loss on failover.
+- **Semi-synchronous**: At least one replica must acknowledge.
+
+### Read Replicas
+- Direct read traffic to replicas, writes to primary.
+- Replicas may lag (replication lag) — stale reads possible.
+- Scale reads horizontally without scaling writes.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant P as Primary
+    participant R as Replica
+
+    App->>P: write balance = 900
+    P-->>App: write ack
+    P->>R: async replication in flight
+    App->>R: read balance
+    Note over R: replication lag window<br/>update not yet applied
+    R-->>App: balance = 1000, stale
+    Note over P,R: replica catches up moments later
+```
+*Because replication is asynchronous, a read sent to the replica immediately after a write to the primary can still return the pre-write value — the read-your-own-writes gap called out in Common Pitfall #7.*
+
+### Multi-Primary (Multi-Master)
+- Multiple nodes accept writes. Conflict resolution required.
+- Examples: MySQL Group Replication, CockroachDB, Cassandra (leaderless).
+
+### Leaderless Replication (Dynamo-style)
+- Any node accepts writes. Uses quorum writes/reads (W + R > N for consistency).
+- `N` = replication factor, `W` = write quorum, `R` = read quorum.
+- Examples: Cassandra, DynamoDB, Riak.
+
+**Why the overlap condition works.** It is the pigeonhole principle applied to replicas: if the write set and the read set are large enough that they cannot be disjoint, every read touches at least one node holding the newest write, and a timestamp comparison picks it out. No leader, no consensus round — the guarantee comes purely from set sizes being forced to overlap. `N = 3, W = 2, R = 2` is the canonical safe setting (overlap of 1 node, tolerates one node down on either side); `W = 1, R = 1` is the fast setting that silently returns stale reads. What you tune is *where* you pay for the overlap — on the write side, the read side, or split.
+
+The full derivation, including the three-configuration comparison and what each one costs in availability, lives in [CAP Theorem](../cap_theorem/cap_theorem.md) §6, where it is load-bearing for the CP-versus-AP argument. Cassandra and DynamoDB expose the setting per query, which is why one cluster can serve a strongly-consistent balance read and an eventually-consistent view counter.
+
+---
+
+## 7. Real-World Examples
 
 ### Amazon
 - **DynamoDB**: Key-value/document store for shopping cart, sessions, product catalog.
@@ -476,7 +461,7 @@ flowchart LR
 
 ---
 
-## 10. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | SQL | NoSQL |
 |-----------|-----|-------|
@@ -490,7 +475,7 @@ flowchart LR
 
 ---
 
-## 11. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### SQL — Use When:
 - Data has complex relationships requiring joins.
@@ -516,7 +501,7 @@ flowchart LR
 
 ---
 
-## 12. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Missing indexes on foreign keys**: Every join condition should have an index. Unmissed FK indexes cause full table scans.
 2. **N+1 query problem**: Fetching a list, then querying each item individually. Use JOINs or batch fetches.
@@ -565,7 +550,7 @@ Note that the cost is linear in `N` while the fix is constant, so this defect ge
 
 ---
 
-## 13. Technologies & Tools
+## 11. Technologies & Tools
 
 | Technology | Type | Notes |
 |------------|------|-------|
@@ -584,7 +569,7 @@ Note that the cost is linear in `N` while the fix is constant, so this defect ge
 
 ---
 
-## 14. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q1: When would you choose NoSQL over SQL?**
 **Short:** NoSQL suits known, simple access patterns where horizontal write scalability outweighs query flexibility.
@@ -673,7 +658,7 @@ A: Because the database is the one component every writer has to pass through, a
 
 ---
 
-## 15. Best Practices
+## 13. Best Practices
 
 1. **Design for access patterns**: In NoSQL, design your schema around the queries you'll run, not the entity relationships.
 2. **Use connection pooling**: PgBouncer (PostgreSQL), ProxySQL (MySQL) — never create raw connections per request.
@@ -688,7 +673,7 @@ A: Because the database is the one component every writer has to pass through, a
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement Database Design**
 
@@ -703,7 +688,9 @@ A: Because the database is the one component every writer has to pass through, a
 
 ---
 
-## 16. Case Study: Designing a Database for an E-Commerce Platform
+## 14. Case Study
+
+### Case Study 1: Designing a Database for an E-Commerce Platform
 
 **Requirements:** 10M products, 50M users, 100M orders/year. Reads: 100K/sec. Writes: 5K/sec. Latency: <50ms for product page, <200ms for order placement.
 
@@ -729,7 +716,7 @@ A: Because the database is the one component every writer has to pass through, a
 
 ---
 
-## Case Study: Monolithic MySQL to Vitess Migration (Listings Marketplace)
+### Case Study 2: Monolithic MySQL to Vitess Migration (Listings Marketplace)
 
 > **How to read this case study**: this is an **illustrative composite** modelled on a
 > short-term-rental marketplace, not a post-mortem of any named company. Vitess itself and

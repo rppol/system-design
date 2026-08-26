@@ -47,7 +47,7 @@ category-level Q&As. Start with the category index before diving into individual
 | Behavioral Patterns | [behavioral/behavioral.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
 | Concurrency Patterns | [concurrency_patterns/concurrency_patterns.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
 | System Design Problems | [system_design_problems/system_design_problems.md](system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
-| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
+| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 15 problems |
 
 ---
 
@@ -145,7 +145,7 @@ category-level Q&As. Start with the category index before diving into individual
 | [Decision Flowchart](pattern_comparisons/DecisionFlowchart.md) | Pattern selection guide | Intermediate |
 | [Pattern Combinations](pattern_comparisons/PatternCombinations.md) | Patterns working together | Advanced |
 | [Interview Questions](pattern_comparisons/InterviewQuestions.md) | Common LLD interview questions | Intermediate |
-| [Refactoring to Patterns](Refactoring_to_Patterns.md) | Step-by-step pattern application | Advanced |
+| [Refactoring](refactoring/refactoring.md) | Code smells, the refactoring catalogue, step-by-step pattern application | Advanced |
 
 ### System Design Problems (LLD)
 
@@ -220,7 +220,7 @@ Understand when to use which pattern and how they combine.
 1. [Pattern Comparisons](pattern_comparisons/pattern_comparisons.md)
 2. [Decision Flowchart](pattern_comparisons/DecisionFlowchart.md)
 3. [Pattern Combinations](pattern_comparisons/PatternCombinations.md)
-4. [Refactoring to Patterns](Refactoring_to_Patterns.md)
+4. [Refactoring](refactoring/refactoring.md)
 5. [Interview Questions](pattern_comparisons/InterviewQuestions.md)
 
 ### Phase 6 — Anti-Patterns
@@ -341,6 +341,7 @@ concurrency_patterns
   ProducerConsumer.md      senior
   ReadWriteLock.md         senior
   ThreadPool.md            senior
+  modern_java_concurrency.md  senior
 system_design_problems
   system_design_problems.md  senior, principal
   ParkingLot.md              senior
@@ -355,6 +356,15 @@ system_design_problems
   RideSharing.md             -
   Splitwise.md               -
   TicTacToe.md               -
+  LoggingFramework.md  senior
+  NotificationService.md  senior
+  TaskScheduler.md  senior
+oop_and_uml_foundations
+  oop_and_uml_foundations.md  senior
+dependency_injection_and_testability
+  dependency_injection_and_testability.md  senior
+refactoring
+  refactoring.md  senior
 -->
 ## Learning Paths
 
@@ -367,23 +377,26 @@ a **Full / Interview** toggle (Full is the default).
 
 ### Full Path (9 modules)
 
-The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 12 System Design Problems. Nothing is dropped.
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 15 System Design Problems. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (8 modules)
+### Senior Path (11 modules)
 
 | # | Module | Files |
 |---|--------|-------|
-| 2 | [solid_principles](solid_principles/solid_principles.md) | 6 files |
-| 3 | [creational](creational/creational.md) | 5 files |
-| 4 | [structural](structural/structural.md) | 6 files |
-| 5 | [behavioral](behavioral/behavioral.md) | 8 files |
-| 6 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
-| 7 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
-| 8 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 5 files |
-| 9 | [system_design_problems](system_design_problems/system_design_problems.md) | 7 files |
+| 1 | [oop_and_uml_foundations](oop_and_uml_foundations/oop_and_uml_foundations.md) | module page only |
+| 3 | [solid_principles](solid_principles/solid_principles.md) | 6 files |
+| 4 | [dependency_injection_and_testability](dependency_injection_and_testability/dependency_injection_and_testability.md) | module page only |
+| 5 | [creational](creational/creational.md) | 5 files |
+| 6 | [structural](structural/structural.md) | 6 files |
+| 7 | [behavioral](behavioral/behavioral.md) | 8 files |
+| 8 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 9 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
+| 10 | [refactoring](refactoring/refactoring.md) | module page only |
+| 11 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 6 files |
+| 12 | [system_design_problems](system_design_problems/system_design_problems.md) | 10 files |
 
-**Not in this path** (1 of 9, Full Path only): `design_principles`
+**Not in this path** (1 of 12, Full Path only): `design_principles`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocabulary plus the "design a parking lot / rate limiter" round every LLD interview runs on. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -403,16 +416,16 @@ A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocab
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [design_principles](design_principles/design_principles.md) | 7 files |
-| 2 | [solid_principles](solid_principles/solid_principles.md) | 4 files |
-| 3 | [creational](creational/creational.md) | module page only |
-| 4 | [structural](structural/structural.md) | 2 files |
-| 5 | [behavioral](behavioral/behavioral.md) | 2 files |
-| 6 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
-| 7 | [anti_patterns](anti_patterns/anti_patterns.md) | 7 files |
-| 9 | [system_design_problems](system_design_problems/system_design_problems.md) | module page only |
+| 2 | [design_principles](design_principles/design_principles.md) | 7 files |
+| 3 | [solid_principles](solid_principles/solid_principles.md) | 4 files |
+| 5 | [creational](creational/creational.md) | module page only |
+| 6 | [structural](structural/structural.md) | 2 files |
+| 7 | [behavioral](behavioral/behavioral.md) | 2 files |
+| 8 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 9 | [anti_patterns](anti_patterns/anti_patterns.md) | 7 files |
+| 12 | [system_design_problems](system_design_problems/system_design_problems.md) | module page only |
 
-**Not in this path** (1 of 9, Full Path only): `concurrency_patterns`
+**Not in this path** (4 of 12, Full Path only): `oop_and_uml_foundations`, `dependency_injection_and_testability`, `refactoring`, `concurrency_patterns`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes pattern judgment over pattern recall: when a pattern is the wrong answer, what it costs to unwind one, and how a design survives being handed to a team. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -450,7 +463,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 15 problems.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|
@@ -493,8 +506,9 @@ LLD questions are typically asked separately from HLD but complement each other.
 2. **"Design a Rate Limiter"** (LLD angle) — data structures, algorithm; see [RateLimiter](system_design_problems/RateLimiter.md)
 3. **"Apply [specific pattern] to this problem"** — pattern knowledge
 4. **"How would you refactor this code?"** — anti-pattern recognition
+5. **The machine-coding round** — 90–120 minutes alone with an IDE producing a working, demonstrable console application, then a code review where the interviewer asks you to add a requirement live. This is a different exam from the four above and is graded on working code, clean decomposition, extensibility and input validation, not on the diagram. See [§3b of system_design_problems](system_design_problems/system_design_problems.md)
 
-**Framework for LLD interviews:**
+**Framework for LLD interviews** (the design-discussion formats 1–4; the machine-coding round has its own clock in §3b):
 1. Clarify requirements (functional scope, constraints)
 2. Identify entities (nouns → classes)
 3. Identify behaviors (verbs → methods)

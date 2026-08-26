@@ -6,6 +6,8 @@
 
 **Key insight**: The hardest part isn't the data model — it's **debt simplification**, the greedy heuristic that collapses a tangle of pairwise debts (A owes B $10, B owes C $10, C owes A $5) into far fewer settling transactions (e.g., A pays C $5 directly). It is implemented with a max-heap of net creditors and a max-heap of net debtors, repeatedly matching the largest creditor against the largest debtor. **Say the word "heuristic", not "minimum"**: greedy matching guarantees only an upper bound of N-1 transactions for N users, not the true optimum. Computing the actual minimum — the debts-clearing / "optimal account balancing" problem (LeetCode 465) — is NP-hard **in the strong sense**: it is equivalent to carving the balances into as many disjoint zero-sum subsets as possible, a zero-sum set-packing problem that 3-Partition reduces to. Interviewers love this problem because it combines OOP modeling with a greedy-algorithm component, and naming that greedy-vs-optimal gap is what separates a good answer from a great one.
 
+**Full runnable implementation:** [`Splitwise.java`](Splitwise.java) — 611 lines, one file, `main()` at the bottom. It demonstrates three `SplitStrategy` implementations behind `SplitStrategyFactory`, `BalanceSheet` netting pairwise debts, and `DebtSimplifier`'s max-heap greedy loop — with `BigDecimal` money throughout, which is the point.
+
 ---
 
 ## Problem Statement
@@ -382,3 +384,82 @@ Updated net balances after settlement:
 5. **Group-level vs. friend-level expenses** — support expenses between two users outside any group (a global "friends" ledger per user pair), unifying group and non-group balances into one `BalanceSheet` keyed by user pair regardless of group.
 
 6. **Audit log / expense edit history** — store an immutable list of `ExpenseRevision`s whenever an `Expense` is edited or deleted, and reverse the original `BalanceSheet` updates before applying the new ones — critical for trust in a shared-money app.
+
+---
+
+## Interview Questions with Answers
+
+**Q: Why is "heuristic" the right word for `DebtSimplifier`, and why does calling it "minimum" cost points in an interview?**
+**Short:** greedy guarantees at most N-1 transactions, but the true minimum requires solving an NP-hard packing problem.
+
+`DebtSimplifier` greedily matches the largest creditor against the largest debtor each round, which guarantees an upper bound of N-1 settling transactions for N users and runs in O(N log N) — but it is not guaranteed to find the *provably fewest* transactions possible, because it never looks for disjoint zero-sum subsets that could settle internally and save a transaction. Calling this "the minimum" claims a stronger property than the algorithm actually has; the honest description is a fast, practical heuristic that frequently hits the optimum on small friend groups but isn't guaranteed to. Naming this distinction unprompted is exactly what the page says "separates a good answer from a great one."
+
+**Q: Walk the example where greedy produces 4 transactions but the true optimum is 3 — what does greedy fail to see?**
+**Short:** greedy pairs by size each round; it never looks for a disjoint zero-sum subset like `{+4, -4}` that settles internally.
+
+With nets `[+4, +3, +2, -4, -5]`, greedy matches largest-vs-largest each round (`+4` vs `-5`, then `+3` vs `-4`, then `+2` vs `-1`, then `+1` vs `-1`) for a total of 4 transactions. The optimal answer instead carves the balances into disjoint zero-sum subsets first — `{+4, -4}` settles in 1 transaction and `{+3, +2, -5}` settles in 2 — for a total of 3. The lever greedy never pulls is recognizing that `+4` and `-4` net to exactly zero on their own and could be settled as an isolated pair, because greedy's rule is "match the two largest magnitudes," not "look for subsets that sum to zero."
+
+**Q: Why is the debts-clearing minimum-transactions problem NP-hard, and specifically what is it a reduction from?**
+**Short:** it's strongly NP-hard via reduction from 3-Partition, not from subset-sum, which is only weakly NP-hard.
+
+Finding the true minimum number of transactions is equivalent to partitioning the set of net balances into the *maximum number* of disjoint zero-sum subsets — maximizing that count is what makes the problem hard. The hardness comes specifically from 3-Partition, which is strongly NP-hard; subset-sum (finding just *one* zero-sum subset) is only weakly NP-hard and has a pseudo-polynomial DP solution, so subset-sum alone cannot establish the strong hardness this problem actually has. Getting that distinction precise — 3-Partition, not subset-sum — is the specific detail this page calls out as mattering, citing Verhoeff's 2004 paper on the problem by name.
+
+**Q: Why `BigDecimal` instead of `double` for every money field in this design?**
+**Short:** `double` accumulates binary floating-point error across hundreds of expenses; `BigDecimal` gives exact cent-level arithmetic.
+
+Splitting $100.00 three ways as `33.333333...` and repeatedly adding and subtracting that value across hundreds of expenses drifts by cents under `double`'s binary floating-point representation, which cannot exactly represent most decimal fractions. `BigDecimal` with `RoundingMode.HALF_UP` and a fixed scale of 2 gives exact, auditable, cent-precise arithmetic instead — required for anything involving money, and the same fix `ATM.java`, `VendingMachine.java`, and `OnlineBookingSystem.java` all need for the identical shortcut they deliberately keep for demo brevity. `Splitwise.java` is the one file in this section that actually uses `BigDecimal` throughout, which the page states is "the point."
+
+**Q: How does `EqualSplitStrategy` guarantee splits sum exactly to the total, given that division can leave a remainder?**
+**Short:** it rounds down to cents, then distributes leftover cents one-each to the first *k* participants in order.
+
+`totalAmount / N` rounded down to cents will almost never divide evenly — splitting $100.00 four ways gives $25.00 exactly, but $100.00 three ways gives $33.33 with one cent left over. `EqualSplitStrategy` computes the rounded-down per-person amount, then distributes the leftover cents one at a time to the first *k* participants in iteration order (where *k* is however many cents remain), so the sum of all splits equals the original total to the cent — never more, never less. This is exactly the non-functional requirement stated up front: "split amounts must sum exactly to the total — no off-by-a-cent errors."
+
+**Q: Why is the rounding remainder allocated to the first N participants in iteration order rather than to the payer?**
+**Short:** deterministic, documented tie-breaking matters more than which specific rule is chosen — same inputs must give same outputs.
+
+Allocating leftover cents to the payer, or randomly, would both technically satisfy "sums to the total," but a nondeterministic or drifting rule makes testing unreliable and makes it impossible for users comparing repeated runs of the same expense to get consistent results. First-N-in-iteration-order is simple to implement and, critically, always produces the same split for the same inputs — the Design Decisions table is explicit that "any fixed, documented tie-break rule works; what must not happen is a nondeterministic or drifting one," which is the actual principle being tested here, not the specific rule chosen.
+
+**Q: Why is Observer deliberately omitted from this design, unlike `RideSharing` and `ParkingLot`?**
+**Short:** this repo already demonstrates Observer in depth elsewhere; forcing it here would add ceremony without new teaching value.
+
+A `BalanceChangeObserver` notified on every balance update (to push "Bob added an expense" to mobile clients) is a natural extension, but `RideSharing.md` and `ParkingLot.md` already cover Observer thoroughly in this same section — repeating the identical pattern here for every `Split` and every balance update would add ceremony without teaching anything new about *this* problem's specific challenge, which is debt simplification. The Follow-Up Extensions describe exactly where the hook would go if a production system needed it: `BalanceSheet.updateBalance()` is the single choke point every balance change already passes through, making it the natural, minimal-surface-area place to add a notification call later.
+
+**Q: Walk the debt-netting step — why does user B never appear in the final settlement despite being party to two of the three original debts?**
+**Short:** B's net balance is exactly zero after netting, since B's $10 owed and $10 owing cancel before the greedy loop even starts.
+
+Given A owes B $10, B owes C $10, and C owes A $5, netting each user's total (owed minus owing) gives `net(A) = -10 + 5 = -5`, `net(B) = +10 - 10 = 0`, `net(C) = +10 - 5 = +5`. Because B's net is exactly zero, B never enters either the creditor heap or the debtor heap at all — there's nothing for the greedy loop to settle on B's behalf, even though B was a party to two of the three original pairwise debts. This shows why the netting pass matters as much as the heap itself: it removes every user whose books already balance *before* the greedy matching ever runs, which is why the 3-debt tangle collapses to a single `A pays C $5` transaction instead of anything involving B.
+
+**Q: Why does `DebtSimplifier` use two max-heaps instead of sorting the net balances once?**
+**Short:** a heap gives O(log N) access to the current largest after each round's amounts change; a one-time sort would go stale.
+
+Each round of the greedy loop pops the current largest creditor and debtor, settles the smaller of the two amounts, and pushes back whatever remainder is left on the side that wasn't fully settled — meaning the "largest" value on each side can change after every single round, since a partially-settled creditor's remaining amount might no longer be the largest. A one-time sort would only be valid for the very first round; after that, the ordering could be wrong and would need re-sorting on every iteration, which is O(N log N) per round instead of O(log N). A max-heap maintains the "give me the current largest" property incrementally across all N-1 rounds at O(log N) per pop/push, which is what gets the whole algorithm to O(N log N) total rather than O(N² log N).
+
+**Q: Why is `BalanceSheet` keyed by `String` user IDs rather than `User` object references?**
+**Short:** avoids needing correct `equals()`/`hashCode()` on a mutable `User`, and IDs serialize and compare cleanly.
+
+Using mutable `User` objects directly as `Map` keys requires those objects to have correct, stable `equals()`/`hashCode()` implementations — and if any field used in that comparison ever changes after the object is used as a key, the map's internal bucket placement can silently become wrong, corrupting lookups. String IDs sidestep this entirely: they're immutable, naturally comparable, and stable for the lifetime of the user, and they serialize cleanly if the balance sheet is ever persisted to a database or sent over the wire — a `User` object graph reference wouldn't survive that serialization boundary nearly as cleanly.
+
+**Q: What's the one-sentence proof behind the N-1 upper bound on greedy settling transactions?**
+**Short:** every round fully retires at least one participant, so after N-1 rounds the last person must already be at zero.
+
+The greedy rule `settle = min(creditAmt, debtAmt)` always fully pays off whichever of the two matched parties has the smaller magnitude, meaning at least one of the two — the creditor or the debtor — leaves the table completely settled every single round. Since net balances always sum to exactly zero (money is only ever moved between users, never created or destroyed), once N-1 of N participants have been fully retired, the one remaining participant's balance must already be zero too, requiring no further transaction — which is exactly why the bound is N-1, not N.
+
+**Q: Why is debt simplification run as a per-group operation rather than attempted globally across all users on the platform?**
+**Short:** the O(N log N) bound assumes N is small (tens of users in a friend group), not millions across the whole system.
+
+The Non-Functional Requirements state explicitly that debt simplification must run on a bounded number of users — tens, not millions — because it's scoped to one group's balance sheet, not the entire platform's user base. Attempting to simplify debts globally across every user pair on the system would both misrepresent the problem (most users have no financial relationship with most other users, so a "global" simplification is a meaningless operation) and blow past the algorithm's intended scale, since even O(N log N) becomes expensive at platform-wide N. This is also why the HLD Connections section describes `simplifyDebts()` becoming a periodic batch job at scale — per-group, on-demand, not a single continuously-recomputed global structure.
+
+**Q: How would partial settlements change `simplifyDebts()`?**
+**Short:** `recordSettlement()` for less than the full amount reduces but doesn't zero the balance, so simplification must run against the remainder.
+
+Allowing `recordSettlement()` to accept an amount less than the full owed balance means a pairwise debt can be partially paid down rather than fully cleared in one transaction — the `BalanceSheet` entry reduces but doesn't reach zero, so that user pair still has a nonzero balance the next time `simplifyDebts()` runs. The algorithm itself doesn't need to change — it already operates on whatever the current net balances are — but the caller needs to understand that `simplifyDebts()` always reflects balances *as of now*, so a partial settlement made between two simplification runs changes what the next run's suggested transactions will look like.
+
+**Q: How does `BalanceSheet`'s pairwise balance ledger map to a production double-entry ledger at HLD scale?**
+**Short:** every expense posts a credit to the payer and a matching debit to each participant — the same shape as double-entry bookkeeping.
+
+`BalanceSheet`'s `Map<userId, Map<otherId, BigDecimal>>` is a simplified double-entry ledger in miniature: each expense credits the payer's side and debits every participant's side by the corresponding split amount, which is exactly the credit/debit pairing a real accounting ledger enforces. At production scale, this becomes an append-only ledger table (every entry immutable, never updated in place) with optimistic-locking on balance reads/updates to handle concurrent expense postings safely, rather than a mutable in-memory map — the full pattern is covered in this repo's `design_digital_wallet` case study for exactly this reason.
+
+**Q: Stripe's integer minor units vs PayPal's decimal string — what do both approaches have in common, and how do they relate to this design's `BigDecimal` choice?**
+**Short:** neither ever sends a binary float on the wire — both are fixed-precision encodings of the same "never use double for money" rule.
+
+Stripe represents an amount as a positive integer in the smallest currency unit (`$30.00` is the integer `3000`), while PayPal's Orders API instead sends a decimal string (`"value": "30.00"`) with currency-driven precision — two different wire formats, but neither is ever a binary floating-point number. This design's fixed-scale `BigDecimal` is the in-process equivalent of Stripe's approach: an exact, non-floating representation just expressed as a decimal type instead of a scaled integer, while a decimal string like PayPal's is essentially `BigDecimal.toString()`'s literal serialization. The universal rule underneath both is the same one `BigDecimal` enforces here — money is never represented as a type that can silently lose precision.

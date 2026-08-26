@@ -1,5 +1,12 @@
 # Document Databases
 
+> **Version anchor — August 2026.** **MongoDB 8.3** (released 7 May 2026) is the current
+> release and this page's baseline. The 8.x line ships quarterly **Rapid Releases** —
+> 8.1 (June 2025), 8.2 (September 2025), 8.3 (May 2026) — which were Atlas-only until
+> 8.2 and are now downloadable for self-managed Community and Enterprise as well, so
+> "MongoDB 8" alone no longer pins a feature set the way a major version used to.
+> Behaviour that depends on a version is tagged inline like `[8.3]`.
+
 ## 1. Concept Overview
 
 Document databases store data as semi-structured documents (typically JSON/BSON), allowing each document to have a different structure. The document model is natural for hierarchical data and objects that map directly to application code. MongoDB is the dominant document database, with WiredTiger as its storage engine since 3.2.

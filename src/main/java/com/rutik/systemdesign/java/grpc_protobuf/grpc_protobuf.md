@@ -17,7 +17,10 @@ and calls travel as **Protocol Buffers** (a compact binary serialization) over
 
 - **Protocol Buffers** — the *serialization format and IDL*. It defines how a
   message is described (`.proto`) and how it is encoded into bytes (tag-length-value
-  with varints). Protobuf is usable entirely without gRPC.
+  with varints). Protobuf is usable entirely without gRPC — it is, in fact, one of
+  the concrete "cross-platform structured-data representations" [Effective Java
+  Item 85: "Prefer alternatives to Java serialization"] tells you to reach for
+  instead of `java.io.Serializable`.
 - **gRPC** — the *RPC layer*. It defines how a method call maps onto HTTP/2 streams,
   how metadata (headers) travel, how errors are reported (`Status`), and how
   streaming, deadlines, and cancellation behave.
@@ -78,7 +81,9 @@ control, cancellation — is HTTP/2's stream machinery exposed through a typed A
    one budget. Cancellation flows from client to server automatically.
 
 6. **Errors are a `Status` code + message + optional details**, not exceptions on
-   the wire. The 17-code `Status` enum is the universal vocabulary.
+   the wire. The 17-code `Status` enum is the universal vocabulary — a typed enum
+   rather than raw integers, following [Effective Java Item 34: "Use enums instead
+   of int constants"].
 
 ---
 
@@ -394,7 +399,12 @@ message User {
 ```
 
 `reserved` is the guardrail: it makes the compiler reject any future attempt to
-reuse a retired number or name.
+reuse a retired number or name. This whole table is the protobuf-specific instance
+of [Effective Java Item 21: "Design interfaces for posterity"] — Bloch's warning
+that a published interface is nearly impossible to change safely applies just as
+hard to a published `.proto` contract, and `reserved` is the mechanism that makes
+a *removal* — the change most likely to silently corrupt a caller — fail loudly
+at compile time instead.
 
 ---
 

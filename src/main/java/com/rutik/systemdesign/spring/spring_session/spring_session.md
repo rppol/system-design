@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Spring Session decouples HTTP session storage from the servlet container. In a stock Spring Boot app, `HttpSession` is managed by Tomcat/Jetty/Undertow and its state lives in that one JVM's heap. Spring Session replaces this with a `Session` abstraction backed by a pluggable `SessionRepository` — Redis, JDBC, Hazelcast, or MongoDB — so session state becomes an external, shared resource that any application instance can read and write.
+Spring Session decouples HTTP session storage from the servlet container. In a stock Spring Boot app, `HttpSession` is managed by Tomcat/Jetty/Undertow and its state lives in that one JVM's heap. Spring Session replaces this with a `Session` abstraction backed by a pluggable `SessionRepository` — Redis or JDBC under Spring Boot, with Hazelcast and MongoDB variants maintained outside Boot by their own teams — so session state becomes an external, shared resource that any application instance can read and write.
 
 The mechanism is deliberately transparent. A single servlet filter, `SessionRepositoryFilter`, wraps every incoming `HttpServletRequest` and overrides `getSession()` / `getSession(boolean)` so that your controllers, Spring MVC, and Spring Security keep calling the ordinary Servlet API but silently talk to the repository instead of the container. No application code changes; the container's own session machinery is bypassed entirely.
 
@@ -14,7 +14,7 @@ The core architectural pillars are:
 - **`HttpSessionIdResolver`** — decides where the session id travels: `CookieHttpSessionIdResolver` (cookie `SESSION`) or `HeaderHttpSessionIdResolver` (header `X-Auth-Token`)
 - **`FindByIndexNameSessionRepository`** — optional index for "all sessions for principal X", enabling concurrent-session control and logout-everywhere
 
-Spring Session 3.x aligns with Spring Boot 3.x / Spring Framework 6.x: `jakarta.*` namespace, JDK 17 baseline. Spring Session 2.x is the last `javax.*` line (Boot 2.7). Spring Session 3.0 also changed the Redis default from the older `RedisIndexedSessionRepository` to the simpler `RedisSessionRepository`.
+Spring Session 4.1 ships with Spring Boot 4.1 / Spring Framework 7.0 on the Jakarta EE 11 baseline. Boot auto-configures exactly two stores now: Redis and JDBC. Spring Boot 4.0 removed its direct support for Spring Session Hazelcast and MongoDB, and those modules are led by their respective teams outside the Boot release train — plan a store migration before upgrading if you run either. The Redis default is `RedisSessionRepository` (one key per session, pure TTL); `RedisIndexedSessionRepository` is the opt-in for principal indexing.
 
 ---
 
@@ -49,14 +49,14 @@ Spring Session 3.x aligns with Spring Boot 3.x / Spring Framework 6.x: `jakarta.
 |---|---|---|---|
 | Redis | `spring-session-data-redis` | Most web apps; low-latency shared store | Sub-ms reads; native TTL expiry; the default choice |
 | JDBC | `spring-session-jdbc` | Teams already running a relational DB; no new infra | `SPRING_SESSION` + `SPRING_SESSION_ATTRIBUTES` tables; scheduled cleanup job |
-| Hazelcast | `spring-session-hazelcast` | Embedded in-grid caching, no external service | `MapSession` in a distributed `IMap`; entry listeners for expiry |
-| MongoDB | `spring-session-data-mongodb` | Mongo-centric stacks | Document per session; TTL index for expiry |
+| Hazelcast | `spring-session-hazelcast` | Teams already running a Hazelcast grid | Hazelcast-team-led, outside Spring Boot's auto-configuration since Boot 4.0 — wire the repository bean yourself |
+| MongoDB | `spring-session-data-mongodb` | Mongo-centric stacks | Community-led, outside Spring Boot's auto-configuration since Boot 4.0; document per session, TTL index for expiry |
 
 ### Redis Repository Types
 
 | Repository | Enable | Principal Index | Expired-Session Events | Cost |
 |---|---|---|---|---|
-| `RedisSessionRepository` (Spring Session 3.0 default) | `spring.session.redis.repository-type=default` | No | No | One key per session; pure TTL |
+| `RedisSessionRepository` (Boot's Redis default) | `spring.session.redis.repository-type=default` | No | No | One key per session; pure TTL |
 | `RedisIndexedSessionRepository` | `@EnableRedisIndexedHttpSession` or `repository-type=indexed` | Yes (`findByPrincipalName`) | Yes (needs keyspace notifications) | Extra index keys + a background cleanup task |
 
 Pick `indexed` only when you need concurrent-session control, logout-everywhere, or `SessionExpiredEvent`. Otherwise `default` is cheaper.
@@ -73,7 +73,7 @@ Pick `indexed` only when you need concurrent-session control, logout-everywhere,
 | Serializer | Format | Tradeoff |
 |---|---|---|
 | `JdkSerializationRedisSerializer` (default) | Java binary | Zero config; but attribute classes must implement `Serializable`, and a `serialVersionUID` mismatch on deploy throws `InvalidClassException` |
-| `GenericJackson2JsonRedisSerializer` | JSON | Human-readable, language-neutral, resilient to field changes; but needs type info / mixins and rejects non-JSON-friendly attributes |
+| `GenericJacksonJsonRedisSerializer` | JSON | Human-readable, language-neutral, resilient to field changes; but needs type info / mixins and rejects non-JSON-friendly attributes |
 
 ---
 
@@ -203,7 +203,7 @@ public class SessionConfig {
     // LettuceConnectionFactory is auto-configured from spring.data.redis.* properties.
     // No other beans are required — @EnableRedisHttpSession registers:
     //   - springSessionRepositoryFilter (a SessionRepositoryFilter)
-    //   - a RedisSessionRepository (Spring Session 3.0 default)
+    //   - a RedisSessionRepository (Boot's Redis default)
 }
 ```
 
@@ -289,7 +289,7 @@ Without this, sessions still expire (TTL removes the data) but your `@EventListe
 SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
     http
         .sessionManagement(session -> session
-            // Spring Security 6 default; rotates the id on authentication
+            // Spring Security default; rotates the id on authentication
             .sessionFixation(fixation -> fixation.changeSessionId())
         );
     return http.build();
@@ -470,7 +470,8 @@ The 44 MB/s figure is the one people miss. A 2 KB bearer token is not free — i
 | Latency | Sub-ms | DB round-trip (~1–5ms) | In-grid, sub-ms |
 | Expiry | Native TTL | Scheduled cleanup query | Entry TTL + listeners |
 | New infra | Yes | No (reuse existing DB) | Embedded or cluster |
-| Best when | You want speed and native TTL | You must not add infra | You already run a data grid |
+| Boot 4 auto-configuration | Yes | Yes | No — dropped in Boot 4.0, hand-wire it |
+| Best when | You want speed and native TTL | You must not add infra | You already run a data grid and accept owning the wiring |
 
 ### RedisSessionRepository vs RedisIndexedSessionRepository
 
@@ -580,7 +581,7 @@ public class CartV2 implements Serializable { private List<Long> items; private 
 // auto-generate serialVersionUID.
 @Bean
 public RedisSerializer<Object> springSessionDefaultRedisSerializer() {
-    return new GenericJackson2JsonRedisSerializer();   // field-additive, language-neutral
+    return new GenericJacksonJsonRedisSerializer();   // field-additive, language-neutral
 }
 // If you keep JDK serialization, pin serialVersionUID and only make backward-compatible changes.
 ```
@@ -613,15 +614,15 @@ Putting large collections, entire entity graphs, or file blobs into session attr
 | `spring-session-core` | Core `Session` / `SessionRepository` / filter abstractions | Store-agnostic |
 | `spring-session-data-redis` | Redis-backed sessions | The default production choice; sub-ms reads |
 | `spring-session-jdbc` | Relational store | `SPRING_SESSION` tables + scheduled cleanup; no new infra |
-| `spring-session-hazelcast` | Data-grid store | `MapSession` in a distributed `IMap` |
-| `spring-session-data-mongodb` | Document store | TTL index for expiry |
+| `spring-session-hazelcast` | Data-grid store | `MapSession` in a distributed `IMap`; Hazelcast-team-led, no Boot auto-configuration |
+| `spring-session-data-mongodb` | Document store | TTL index for expiry; community-led, no Boot auto-configuration |
 | Redis (Lettuce) | Backing store + native TTL | `spring.data.redis.*`; enable `notify-keyspace-events` for indexed events |
 | `@EnableRedisHttpSession` / `@EnableRedisIndexedHttpSession` | Servlet config entry points | Register `springSessionRepositoryFilter` |
 | `@EnableRedisWebSession` | WebFlux entry point | Reactive `WebSession` support |
 | `FindByIndexNameSessionRepository` | Principal index | Powers max-sessions and logout-everywhere |
 | `SpringSessionBackedSessionRegistry` | Cluster-wide `SessionRegistry` | Replaces per-JVM `SessionRegistryImpl` |
-| `GenericJackson2JsonRedisSerializer` | JSON serialization | Safer cross-deploy than JDK serialization |
-| Spring Security 6.x | Auth integration | Reads `SecurityContext` from the shared session |
+| `GenericJacksonJsonRedisSerializer` | JSON serialization | Safer cross-deploy than JDK serialization |
+| Spring Security 7.1 | Auth integration | Reads `SecurityContext` from the shared session |
 
 ---
 
@@ -649,7 +650,7 @@ Because `RedisIndexedSessionRepository` publishes expiration events from Redis k
 
 **Q: What is the difference between `RedisSessionRepository` and `RedisIndexedSessionRepository`?**
 **Short:** RedisSessionRepository relies on plain TTL; RedisIndexedSessionRepository adds indexing and expiration events.
-`RedisSessionRepository` (the Spring Session 3.0 default) stores one key per session and relies purely on Redis TTL — it is cheapest but offers no principal index, no expiration events, and no concurrent-session control. `RedisIndexedSessionRepository` stores extra index keys and runs a cleanup task, enabling `findByPrincipalName`, `SessionExpiredEvent`, max-sessions, and logout-everywhere, at the cost of more Redis writes and required keyspace notifications. Choose indexed only when you need those cluster-wide features.
+`RedisSessionRepository` (Boot's Redis default) stores one key per session and relies purely on Redis TTL — it is cheapest but offers no principal index, no expiration events, and no concurrent-session control. `RedisIndexedSessionRepository` stores extra index keys and runs a cleanup task, enabling `findByPrincipalName`, `SessionExpiredEvent`, max-sessions, and logout-everywhere, at the cost of more Redis writes and required keyspace notifications. Choose indexed only when you need those cluster-wide features.
 
 **Q: How does Spring Session protect against session fixation, and does `changeSessionId` work with an external store?**
 **Short:** changeSessionId() rotates the id in the external store, copying attributes and deleting the old key.
@@ -677,7 +678,7 @@ Register `HeaderHttpSessionIdResolver.xAuthToken()`, which transports the sessio
 
 **Q: How is Java serialization a deploy-time risk with Spring Session, and how do you avoid it?**
 **Short:** Default JDK serialization can raise InvalidClassException when a deployed class shape changes mid-rollout.
-With the default `JdkSerializationRedisSerializer`, session attributes are stored as Java binary, so a class change between deploys can raise `InvalidClassException`. It happens when old sessions in Redis are deserialized into the new class shape (serialVersionUID mismatch), 500-ing already-logged-in users. Avoid it by using `GenericJackson2JsonRedisSerializer` (tolerant of additive field changes and language-neutral) or, if you keep JDK serialization, pinning `serialVersionUID` and making only backward-compatible changes. Never store non-`Serializable` attributes under JDK serialization.
+With the default `JdkSerializationRedisSerializer`, session attributes are stored as Java binary, so a class change between deploys can raise `InvalidClassException`. It happens when old sessions in Redis are deserialized into the new class shape (serialVersionUID mismatch), 500-ing already-logged-in users. Avoid it by using `GenericJacksonJsonRedisSerializer` (tolerant of additive field changes and language-neutral) or, if you keep JDK serialization, pinning `serialVersionUID` and making only backward-compatible changes. Never store non-`Serializable` attributes under JDK serialization.
 
 **Q: Where is the CSRF token stored with Spring Session, and does it survive node failover?**
 **Short:** HttpSessionCsrfTokenRepository stores the CSRF token inside the shared session, so it survives failover.
@@ -711,7 +712,7 @@ Yes — apps pointing at the same Redis with the same namespace (default `spring
 
 4. **Enable Redis keyspace notifications when you use the indexed repository.** Set `notify-keyspace-events Egx` (persist it in `redis.conf`) or `SessionExpiredEvent` / `SessionDeletedEvent` will silently never fire.
 
-5. **Prefer JSON serialization for session attributes.** `GenericJackson2JsonRedisSerializer` tolerates additive field changes across deploys; JDK serialization can `InvalidClassException` existing users on a class change.
+5. **Prefer JSON serialization for session attributes.** `GenericJacksonJsonRedisSerializer` tolerates additive field changes across deploys; JDK serialization can `InvalidClassException` existing users on a class change.
 
 6. **Keep sessions small.** Store ids and flags, not entity graphs or blobs — every attribute is serialized to Redis on save and read back on load.
 
@@ -725,7 +726,7 @@ Yes — apps pointing at the same Redis with the same namespace (default `spring
 
 11. **Tune `flush-mode` deliberately.** Keep `ON_SAVE` for efficiency; move to `IMMEDIATE` only when a mid-request attribute write must not be lost on a crash.
 
-12. **Pin Spring Session to your Boot line.** Use Spring Session 3.x with Boot 3.x (`jakarta.*`, JDK 17); Spring Session 2.x is the last `javax.*` line for Boot 2.7.
+12. **Pin Spring Session to your Boot line and check your store is still auto-configured.** Spring Session 4.1 ships with Boot 4.1; Boot 4.0 dropped its Hazelcast and MongoDB session support, so a Boot 3.x app on either store must migrate to Redis or JDBC (or hand-wire the repository) as part of the upgrade.
 
 ---
 
@@ -820,7 +821,7 @@ public class SessionConfig {
     // does not InvalidClassException already-logged-in shoppers.
     @Bean
     public RedisSerializer<Object> springSessionDefaultRedisSerializer() {
-        return new GenericJackson2JsonRedisSerializer();
+        return new GenericJacksonJsonRedisSerializer();
     }
 
     // Cluster-wide session limit + logout-everywhere via the principal index.

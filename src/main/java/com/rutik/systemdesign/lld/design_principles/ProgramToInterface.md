@@ -314,6 +314,70 @@ Without programming to interfaces, none of these patterns achieve their flexibil
 
 ---
 
+## Interview Questions and Answers
+
+**Q: What is the real, consequential violation of "program to an interface," beyond the trivial `ArrayList` versus `List` example?**
+**Short:** A service class directly instantiating its own dependencies with `new`, like `new EmailNotificationService()`.
+Declaring `ArrayList<String>` instead of `List<String>` is a minor concern that costs you a swap of collection implementation. The consequential violation is `OrderService` writing `private EmailNotificationService notificationService = new EmailNotificationService();` inside itself — this hardcodes the dependency's concrete construction and makes the class impossible to test in isolation or extend with a new implementation. The module is explicit that this bigger case, not the collection-type case, is what actually breaks systems.
+
+**Q: What does programming to interfaces cost you when you have exactly one implementation and no plans for a second?**
+**Short:** An extra interface file and one layer of indirection, in exchange for testability via mocks even with a single real implementation.
+Even with only `EmailNotificationService` in existence, declaring the dependency as `NotificationService` still lets `OrderService` be unit-tested with `mock(NotificationService.class)` instead of a real email connection. The cost is a small amount of indirection — a reader must open the interface to see the contract — paid regardless of whether a second implementation ever arrives. This is the practical middle ground: the payoff (testability, decoupling from construction details) starts on day one, not only once a second implementation exists.
+
+**Q: Why can't `OrderService` be unit-tested in isolation in the violation example, specifically?**
+**Short:** Because it constructs `EmailNotificationService` and `MySQLOrderRepository` directly with `new`, so every test triggers real connections.
+Since `OrderService` hardcodes `new EmailNotificationService()` and `new MySQLOrderRepository("jdbc:mysql://localhost/orders")` as field initializers, there is no seam at which a test can substitute a fake collaborator. Any test that exercises `placeOrder()` will attempt a real database connection and attempt to send a real email, which is both slow and unreliable as a unit test. The compliant fix injects both dependencies through the constructor as interface types, so a test passes `mock(NotificationService.class)` and `mock(OrderRepository.class)` instead.
+
+**Q: How does constructor injection combined with interfaces let you add a new notification channel without touching OrderService at all?**
+**Short:** `OrderService` depends only on the `NotificationService` interface, so any new implementing class plugs in without any change to it.
+Because `OrderService` never names `EmailNotificationService` directly — only the `NotificationService` interface — adding `SlackNotificationService` or a `CompositeNotificationService` that fans out to multiple channels requires writing only the new class. Whoever wires up the application (the composition root) chooses which implementation to inject; `OrderService`'s own source code is unchanged. This is the module's concrete demonstration of the Open/Closed Principle riding on top of programming to interfaces.
+
+**Q: What is the module's decision rule for choosing an interface versus an abstract class?**
+**Short:** Default to interfaces; reach for an abstract class only when you have shared implementation to offer.
+Interfaces suit purely behavioral contracts with no shared state, cases where a class needs multiple unrelated contracts, and capabilities that cut across an existing hierarchy. Abstract classes suit cases with a genuine IS-A relationship in a closed hierarchy, shared state or initialization logic, or when you're enforcing an algorithm skeleton via Template Method. The module states the practical default explicitly: default to interfaces, and only step up to an abstract class when you actually have implementation, not just contract, to share.
+
+**Q: What is the mechanism by which Dependency Injection frameworks like Spring rely on "program to interface"?**
+**Short:** Application code declares dependencies as interface types, and Spring injects whichever concrete implementation is registered.
+`OrderService`'s constructor takes `NotificationService` and `OrderRepository` as parameter types, never naming the concrete classes, which is exactly what lets `@Autowired` supply whatever bean is registered for that interface at runtime. Without programming to interfaces, there would be nothing for the framework to inject against — the dependency would already be hardwired inside the class. This is also explicitly why `Mockito.mock(UserRepository.class)` works in tests: the mock implements the interface, satisfying every place that interface type is expected.
+
+**Q: How does the Strategy pattern depend on "program to interface" to achieve its interchangeability?**
+**Short:** The client holds a reference to the Strategy interface type, so any concrete strategy can be swapped in without client changes.
+If the client held a reference to a concrete strategy class instead of the `Strategy` interface, swapping payment methods or sorting algorithms would require changing the client's field type and its instantiation code. Because the client only knows the interface, any class implementing it — a new payment method, a new sorting algorithm — can be substituted at the composition point with zero change to the client's logic. The module lists this as one of several patterns whose flexibility collapses entirely without this principle underneath it.
+
+**Q: Why does the module say "the interface IS the seam that makes patterns work," and what does that mean concretely for Decorator?**
+**Short:** A Decorator only works because it implements the same interface as the object it wraps, letting callers treat both identically.
+A `BufferedInputStream` wrapping a `FileInputStream` only functions as a drop-in enhancement because both implement `InputStream` — the caller holding an `InputStream` reference cannot tell, or need to care, whether it's talking to the raw stream or three layers of decorators. If code depended on the concrete `FileInputStream` type instead, no decorator could be substituted transparently. This is the general shape the module attributes to every GoF pattern in its table: the interface is what makes objects of different concrete classes interchangeable to the client.
+
+**Q: What is the relationship between "program to an interface" and the Dependency Inversion Principle from SOLID?**
+**Short:** DIP is the formal SOLID statement of the same idea — high-level modules and low-level modules should both depend on abstractions.
+"Program to an interface, not an implementation" is the GoF's original 1994 phrasing of the principle; DIP restates it more formally as "high-level modules should not depend on low-level modules, both should depend on abstractions." `OrderService` (high-level) depending on `NotificationService` and `OrderRepository` (abstractions) rather than on `EmailNotificationService` and `MySQLOrderRepository` (low-level concrete implementations) is DIP applied directly. The module treats the GoF principle as the intuitive precursor and DIP as its formal SOLID-letter articulation.
+
+**Q: How does swapping `MySQLOrderRepository` for `PostgreSQLOrderRepository` work under the compliant design, and what has to change in OrderService?**
+**Short:** Nothing in OrderService changes — only the object constructed at the application's composition root changes.
+Because `OrderService`'s constructor accepts an `OrderRepository` interface, replacing the concrete database implementation is a one-line change where the application wires up its dependencies: `OrderRepository repository = new PostgreSQLOrderRepository(dataSource);`. `OrderService`'s own code has zero knowledge of which database backs the repository, so it requires no edit, no recompilation of its logic, and no new test beyond re-running the existing ones against the new wiring. This is the module's direct illustration of "flexibility" as a benefit, distinct from testability.
+
+**Q: What does OpenAPI/Protobuf contract-first design have to do with "program to an interface" at the HLD level?**
+**Short:** Services depend on the API specification, not on any particular service's implementation behind it.
+A consumer of a REST or gRPC API programs against the documented contract — the OpenAPI spec or `.proto` file — rather than against a specific implementation's internal behavior. This lets the implementation behind the contract change freely, or even be replaced by a different team's service entirely, as long as the contract is honored, which the module calls the foundational principle of microservice interoperability. It is the same substitution guarantee as programming to a Java interface, just enforced across a network boundary instead of a JVM boundary.
+
+**Q: How does hexagonal architecture's port/adapter pattern apply "program to an interface" to storage and messaging?**
+**Short:** Application code depends on `StoragePort`/`MessagePort` interfaces; infrastructure adapters implement them underneath.
+Business logic in a hexagonal architecture is written entirely against ports — interfaces like `StoragePort` — with no knowledge of whether the concrete adapter behind it is MySQL, DynamoDB, or an in-memory fake used in tests. Migrating from MySQL to DynamoDB means writing a new adapter that implements the same port; the application's business logic is untouched. This mirrors `OrderService`'s relationship to `OrderRepository` almost exactly, just named with the hexagonal architecture's own vocabulary.
+
+**Q: Why does depending on a `FeatureFlag` interface rather than a specific SDK like LaunchDarkly matter in practice?**
+**Short:** Migrating feature-flag vendors becomes writing one new adapter instead of rewriting every call site that checks a flag.
+If application code called the LaunchDarkly SDK directly everywhere a flag check was needed, switching vendors — say to Split — would require touching every one of those call sites. Programming to a `FeatureFlag` interface means only the adapter implementing that interface needs to change; every caller of the interface is unaffected. This is the same "swap the implementation, not the caller" benefit demonstrated by the `OrderRepository` MySQL-to-PostgreSQL example, applied to a third-party SaaS dependency instead of a database.
+
+**Q: What problem does `CompositeNotificationService` solve, and what design principle does it demonstrate together with "program to an interface"?**
+**Short:** It fans a single `sendConfirmation()` call out to multiple channels while itself satisfying the same `NotificationService` interface.
+`CompositeNotificationService` holds a `List<NotificationService>` and, on `sendConfirmation()`, forwards the call to every service in that list — meaning it can wrap Email, Slack, and any future channel behind one object that itself looks like an ordinary `NotificationService` to `OrderService`. This demonstrates that programming to an interface composes: because the interface is the contract, an aggregator of several implementations can itself implement that same contract and be indistinguishable from a single implementation to any caller. It is also a live instance of the Composite pattern the module's own table lists as depending on this principle.
+
+**Q: In the class diagram sequence the module builds, why does `OrderService` end up with arrows only to two interfaces rather than to five concrete classes?**
+**Short:** Because every concrete collaborator — Email, Slack, Composite, MySQL, PostgreSQL — satisfies one of exactly two interfaces `OrderService` depends on.
+`OrderService` declares dependencies on `NotificationService` and `OrderRepository` only; `EmailNotificationService`, `SlackNotificationService`, `CompositeNotificationService`, `MySQLOrderRepository`, and `PostgreSQLOrderRepository` all sit below those two interfaces without `OrderService` ever referencing them by name. The diagram makes visible what "program to interface" buys structurally: five interchangeable concrete classes were introduced across the compliant example, and `OrderService`'s own dependency count never grew past two.
+
+---
+
 ## Quick Summary
 
 | Aspect | Summary |

@@ -52,7 +52,7 @@ Understanding JVM internals is what separates engineers who can explain *why* a 
 |----|---------|-----------|---------|
 | Serial GC | `-XX:+UseSerialGC` | Stop-the-world (single thread) | Single-core, small heap |
 | Parallel GC | `-XX:+UseParallelGC` | Stop-the-world (multi-thread) | High throughput batch |
-| G1 GC | `-XX:+UseG1GC` — **the default** on any server-class machine | Concurrent marking + STW evacuation | Balanced latency/throughput |
+| G1 GC | `-XX:+UseG1GC` — the default heuristic picks G1 on a "server-class" machine (roughly 2+ cores and 1.8GB+ heap); a small or container-constrained machine can fall through to Serial GC instead. JEP 523 makes G1 the default in **every** environment starting in JDK 27, closing that heuristic gap | Concurrent marking + STW evacuation | Balanced latency/throughput |
 | ZGC | `-XX:+UseZGC` — generational is the only mode (JEP 490, Java 24 removed the non-generational one) | Sub-millisecond STW | Ultra-low latency |
 | Shenandoah | `-XX:+UseShenandoahGC` | Concurrent compaction | Low latency (alternative to ZGC) |
 
@@ -159,6 +159,50 @@ Those three rules are the whole of object sizing, and they explain the two numbe
 ```
 
 HotSpot's field-layout algorithm deliberately fills the 4-byte hole left after the compressed class pointer, so declaration order does not matter here — an `int` declared after a `long` still lands at offset 12. That is why adding one small field to a class often costs zero bytes and adding the next one costs eight. The same arithmetic explains boxing overhead: an `Integer` is a 12-byte header plus a 4-byte `int` value, exactly 16 bytes with no padding, four times the 4 bytes an `int[]` slot costs — and that is before counting the 4-byte reference that has to point at it.
+
+**Compact object headers (JEP 519, Release 25 — opt-in product feature; JEP 534, Release 27 —
+default).** The 12-byte header above (8B mark word + 4B compressed class pointer) is being
+replaced by a single packed **8-byte** header on 64-bit JVMs: the compressed class pointer is
+folded into spare bits of the mark word instead of occupying its own word. `-XX:+UseCompactObjectHeaders`
+made this a supported, opt-in feature in Java 25; JEP 534 flips the default to ON starting in
+Java 27, disableable with `-XX:-UseCompactObjectHeaders` (the 12-byte layout is slated for
+deprecation in a later release). JEP 534's own text cites Amazon running hundreds of production
+services on it today, largely via backports to JDK 21 and 24 — the biggest win goes to workloads
+dominated by many small objects, where 4 fewer header bytes times a very large object count is a
+real fraction of the heap.
+
+Re-run the `int`+`long` example from a 12-byte header down to 8:
+
+```
+  12-byte header (default on Java 25; opt-in earlier; the old layout from Java 27 on):
+    offset  bytes  what
+    0       8      mark word
+    8       4      class pointer         -> header ends at offset 12
+    12      4      int field             <- fills the header gap, as before
+    16      8      long field            -> ends at offset 24
+    total = 24 bytes, 0 padding
+
+  8-byte compact header (-XX:+UseCompactObjectHeaders; default from Java 27):
+    offset  bytes  what
+    0       8      compact header (mark word + class pointer packed together)
+    8       4      int field             <- now sits right after the header
+    12      4      padding               <- long needs an 8-aligned offset; 12 is not one
+    16      8      long field            -> ends at offset 24
+    total = 24 bytes, 4 padding          <- SAME total as the 12-byte layout
+
+  drop the int field entirely (class with only a long field):
+    12-byte header: 8 (mark) + 4 (class ptr) + 4 (gap, free) + 8 (long) = 24 bytes
+    8-byte header:  8 (compact)              + 8 (long)                = 16 bytes
+    -> here the 4 saved header bytes are a full 8-byte win, because nothing
+       was left to absorb them
+```
+
+That is the alignment trap in one pair of examples: the identical 4-byte header shrink saves
+**zero** bytes on the `int`+`long` class (the freed bytes just move which field the padding sits
+in front of) and a full **8** bytes on the `long`-only class (there was no gap to absorb them
+into). Never claim a flat "4 bytes saved per object" — compute it per class. Do not guess either
+number: **JOL** (`org.openjdk.jol`, `ClassLayout.parseClass(Foo.class).toPrintable()`) prints the
+actual header size and field offsets for the JVM and flags genuinely in use.
 
 ### GC Tri-Color Marking (Concurrent GC)
 
@@ -351,6 +395,49 @@ void process() {
     int result = px + py;
 }
 ```
+
+### Vector API — Explicit SIMD, Still Incubating
+
+`jdk.incubator.vector` lets code request SIMD execution explicitly instead of hoping C2's
+auto-vectorizer finds it in a loop. It has now incubated **twelve times**: JEP 489 (Ninth
+Incubator, Release 24), JEP 508 (Tenth Incubator, Release 25), and **JEP 537 (Twelfth
+Incubator, Release 27)** are the three most recent, all `Closed / Delivered` as incubating
+features — none of them GA. The repeated incubation is not stalled design, it is a genuine
+dependency: the API represents a vector as a value holding N lanes, and without Valhalla's
+value types that vector either boxes on the heap (defeating the performance it exists for)
+or every call site needs escape analysis to prove it never escapes. Finalizing the API now
+would either lock in boxed-by-default semantics or make correctness depend on an
+optimization succeeding, so it stays incubating until Valhalla supplies a real carrier type.
+
+```java
+import jdk.incubator.vector.*;
+
+static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
+
+// requires: --add-modules jdk.incubator.vector
+static void vectorAdd(float[] a, float[] b, float[] result) {
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    for (; i < upperBound; i += SPECIES.length()) {
+        var va = FloatVector.fromArray(SPECIES, a, i);
+        var vb = FloatVector.fromArray(SPECIES, b, i);
+        va.add(vb).intoArray(result, i);
+    }
+    for (; i < a.length; i++) {       // scalar tail for the remainder
+        result[i] = a[i] + b[i];
+    }
+}
+```
+
+Contrast with what is free: C2's own auto-vectorization already turns simple countable
+loops — a plain `for` summing two `int[]`s — into SIMD instructions with no API, no flag,
+and no `--add-modules`, but only for loop shapes it can prove safe (no data-dependent
+branches, no aliasing it cannot rule out). The Vector API exists for the cases
+auto-vectorization gives up on: irregular loop bodies, masked/predicated lanes, or a
+*guarantee* rather than a hope. Both paths need real hardware support for the requested
+lane width — `SPECIES_PREFERRED` picks the widest one the running CPU actually has, while a
+hardcoded 512-bit species silently falls back to scalar execution on hardware without
+AVX-512.
 
 ### Safepoints — Definition and TTSP Latency
 
@@ -648,6 +735,11 @@ The code cache is the native memory region holding JIT-compiled methods, and whe
 **Short:** The JIT optimizes for the observed common case, then deoptimizes back to the interpreter if that guess breaks.
 
 Deoptimization is the JVM discarding compiled (C2) code and falling back to the interpreter for a method, then potentially recompiling later. C2 makes *speculative* optimizations based on the profile it has observed — e.g. assuming a branch is never taken, a type is always the same (monomorphic call → inlined), or a class is never loaded. These assumptions are guarded by cheap checks (uncommon traps); if an assumption is later violated (the rare branch is taken, a new subclass is loaded), the guard fires, the optimized frame is deoptimized back to the interpreter at a safepoint, and execution continues correctly. This lets the JIT optimize aggressively for the common case while staying correct. The cost: a sudden deopt storm (e.g. a new implementation class loaded into a hot megamorphic call site) can cause a latency spike as hot code reverts to interpreted speed until recompiled — visible with `-XX:+PrintCompilation` / `-Xlog:deoptimization`.
+
+**Q20: Why has the Vector API (`jdk.incubator.vector`) incubated twelve times without reaching GA?**
+**Short:** It is blocked on Valhalla: without value types a vector either boxes on the heap or needs escape analysis to avoid it.
+
+The Vector API represents a SIMD vector as an object holding N lanes, and Java has no way today to give that object heap-free, identity-free semantics — it either allocates and boxes like any other object (destroying the performance the API exists to deliver) or the JIT must prove via escape analysis that every instance never escapes, call site by call site, which is an optimization guarantee, not a language guarantee. JEP 489 (Ninth Incubator, Java 24), JEP 508 (Tenth Incubator, Java 25), and JEP 537 (Twelfth Incubator, Java 27) are all `Closed / Delivered` as *incubating*, not GA — the repeated incubation is OpenJDK declining to lock in a boxed-by-default API while Project Valhalla's value types are still in progress (Valhalla's own JEP 401 only integrated to mainline as a preview in July 2026, targeting Java 28). Once value types land, a `Vector` can be a true flat, identity-free value with no header and no boxing, which is the carrier type the API was designed for from the start. Until then, the API is fully usable behind `--add-modules jdk.incubator.vector` and delivers real speedups on hardware with wide SIMD registers — it is the finalization, not the functionality, that is waiting on Valhalla.
 
 ---
 

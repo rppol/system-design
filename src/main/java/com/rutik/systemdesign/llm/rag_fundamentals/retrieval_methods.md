@@ -79,6 +79,66 @@ default — and the size of the win is a property of *your* query mix, not a con
 it before budgeting for it. Add reranking on top when top-5 precision is the binding constraint,
 and MMR when redundancy rather than relevance is what wastes the context window.
 
+### RAPTOR — Recursive Abstractive Processing for Tree-Organized Retrieval
+
+Everything above retrieves flat, independent chunks — one level of granularity, never wider
+than a single chunk's boundaries. RAPTOR (Sarthi et al., 2024, arXiv 2401.18059) adds a second
+axis: a hierarchy of chunks and their summaries, so a query can land on a leaf-level fact or a
+high-level synthesis of dozens of chunks, from the same index.
+
+**Build (offline, once per corpus).**
+1. Split the document into ~100-token leaf chunks, preserving sentence boundaries — a sentence
+   that would exceed 100 tokens moves whole to the next chunk rather than being cut mid-sentence.
+2. Embed every leaf chunk.
+3. Cluster the leaf embeddings. RAPTOR uses **soft** clustering — a chunk may belong to more
+   than one cluster — via a Gaussian Mixture Model over UMAP-reduced embeddings, selecting the
+   cluster count per level with the Bayesian Information Criterion rather than a fixed `k`.
+4. Summarize each cluster with an LLM (RAPTOR's own experiments used `gpt-3.5-turbo` with a
+   single "write a summary… including as many key details as possible" prompt), producing one
+   new node per cluster.
+5. Embed the summary nodes and repeat steps 3-4 one level up, until a level collapses to a
+   single root summary.
+
+Each level is coarser and smaller than the one below it — RAPTOR's own runs compressed a
+cluster's combined text to roughly 28% of its input token count per summarization pass. The
+finished tree indexes **every level** — leaf chunks and every summary node alike — in one flat
+vector store; nothing is discarded once a chunk has been summarized.
+
+**Query — two modes.**
+- **Collapsed tree**: flatten every node at every level into one pool and run a single kNN
+  search against the query, keeping results up to a token budget (RAPTOR's paper found 2,000
+  tokens the best cutoff). This is what RAPTOR's own evaluation found performed best, and what
+  production implementations default to.
+- **Tree traversal**: start at the root, keep the top-scoring nodes at that layer, descend to
+  their children, repeat to the leaves. Cheaper to reason about, but rigid — a wrong turn at a
+  coarse layer cannot be corrected by a strong match deeper down.
+
+**The arithmetic.** Building the tree costs one LLM call per *cluster* per level, not one per
+chunk — the cost lives in the summaries, not the leaves. For a 100,000-leaf-chunk corpus, at an
+illustrative branching factor of 10 children per summary node (RAPTOR's GMM step does not fix a
+hard branching factor; this is a worked round number, not a number from the paper):
+
+```
+level 1 summaries: 100,000 / 10 = 10,000 calls
+level 2 summaries:  10,000 / 10 =  1,000 calls
+level 3 summaries:   1,000 / 10 =    100 calls
+level 4 summaries:     100 / 10 =     10 calls
+level 5 (root):          10 / 10 =      1 call
+                                    ----------
+                        total   ~ 11,111 LLM calls
+
+11,111 / 100,000 = 11.1% overhead on top of the leaf-chunk count -- cheap
+relative to reading the entire corpus with an LLM once.
+```
+
+**When it wins, and when it is waste.** RAPTOR earns its build cost on thematic and multi-hop
+queries — "what is this document about," "how do these three sections relate" — where the
+answer lives in a synthesis no single chunk contains, which is exactly what the summary layers
+pre-compute. It is waste on an exact-fact lookup ("what is the value of parameter X in section
+4.2"), where a leaf chunk was always going to answer the query directly and the extra levels
+add index size and stale-data risk — every re-summarization after a corpus edit is a fresh LLM
+bill — for no retrieval benefit.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -701,6 +761,49 @@ Fix: Retrieve top-100 candidates, then rerank to top-5. See [reranking.md](reran
 Queries with stopwords ("what is the best way to handle...") or typos produce poor BM25 results.
 Fix: Apply query preprocessing: lowercase, remove stopwords for BM25 (not dense), spell-check for critical applications.
 
+**7. Summing a bounded cosine score and an unbounded BM25 score as if they were on the same scale**
+```python
+# BROKEN: raw scores added directly, no normalization
+def hybrid_retrieve(query, chunks, alpha=0.5, top_k=5):
+    dense_hits = dense_retrieve(query, chunks, top_k=100)   # cosine in [-1, 1]
+    sparse_hits = sparse_retrieve(query, chunks, top_k=100)  # BM25, unbounded, often 0-30
+
+    combined = {}
+    for chunk, score in dense_hits:
+        combined[chunk["id"]] = alpha * score
+    for chunk, score in sparse_hits:
+        combined.setdefault(chunk["id"], 0.0)
+        combined[chunk["id"]] += (1 - alpha) * score   # score can be 20x the dense term
+
+    ranked = sorted(combined.items(), key=lambda kv: kv[1], reverse=True)
+    return ranked[:top_k]
+```
+Cosine similarity lives in `[-1, 1]` (a range of 2); BM25 is unbounded and routinely lands in the 0-30 range for a corpus like the one in Section 14. Section 6.4's worked example shows the ratio directly: a candidate set with cosine width 0.15 and BM25 width 14.7 is a 98x scale mismatch, so `alpha * cosine + (1 - alpha) * bm25` is BM25's ranking with a decorative `alpha` — moving `alpha` from 0.1 to 0.9 changes nothing because the dense term is too small to matter at any weight.
+```python
+# FIXED: min-max normalize each score list over THIS query's candidates
+# before combining, or skip normalization entirely and use RRF (Section 6.3)
+def hybrid_retrieve(query, chunks, alpha=0.5, top_k=5):
+    dense_hits = dense_retrieve(query, chunks, top_k=100)
+    sparse_hits = sparse_retrieve(query, chunks, top_k=100)
+
+    def minmax(hits):
+        scores = [s for _, s in hits]
+        lo, hi = min(scores), max(scores)
+        span = (hi - lo) or 1.0   # guard a single-candidate or all-tied list
+        return {c["id"]: (s - lo) / span for c, s in hits}
+
+    dense_norm, sparse_norm = minmax(dense_hits), minmax(sparse_hits)
+    ids = set(dense_norm) | set(sparse_norm)
+    combined = {
+        i: alpha * dense_norm.get(i, 0.0) + (1 - alpha) * sparse_norm.get(i, 0.0)
+        for i in ids
+    }
+    ranked = sorted(combined.items(), key=lambda kv: kv[1], reverse=True)
+    return ranked[:top_k]
+```
+Rescaling both lists to `[0, 1]` per query before blending is what makes `alpha` actually do something — Section 6.4's worked example shows the ranking changing completely once both scores share a scale. RRF (Section 6.3) sidesteps the whole problem by fusing on rank position instead of raw score, which is why it is the safer default when there is no labeled eval set to tune `alpha` against.
+Fix: Never sum raw dense and sparse scores. Either min-max (or z-score) normalize each list over the current query's candidates before a weighted blend, or use RRF, which needs no normalization at all.
+
 ---
 
 ## 11. Technologies & Tools
@@ -784,6 +887,14 @@ A: Build a retrieval-only evaluation set: 200-500 (query, relevant_document_ids)
 **Q: Your top-5 retrieved chunks are near-duplicates of each other. How do you fix it?**
 **Short:** Apply Maximal Marginal Relevance to pick each next chunk by relevance minus its similarity to chunks already selected, since independent ranking never penalizes near-duplicate results.
 A: Apply Maximal Marginal Relevance, which picks each next chunk by relevance minus its similarity to the chunks already selected. Ranking scores every candidate independently against the query, so nothing penalizes a chunk for repeating one already chosen — with 15% chunk overlap, boilerplate repeated across document versions, or one dense section that dominates its region of embedding space, the top-5 can be five renderings of a single fact while Recall@5 still reports five filled slots. MMR (Carbonell and Goldstein, SIGIR 1998) selects greedily by `lambda * sim(q, d) - (1 - lambda) * max sim(d, d_selected)`: at lambda=0.5, a candidate scoring 0.81 against the query but 0.97 against an already-selected chunk nets -0.08 and loses to one scoring 0.75 with 0.30 overlap, which nets +0.225. In LangChain it is `max_marginal_relevance_search(query, k=4, fetch_k=20, lambda_mult=0.5)`, where `lambda_mult=0` is maximum diversity and `1` is minimum. Two caveats: MMR cannot promote a chunk the retriever ranked badly, so it fixes redundancy and not recall; and exact duplicates are better removed by content hashing at index time than penalized at query time.
+
+**Q: What problem does RAPTOR solve that flat chunk retrieval cannot?**
+**Short:** RAPTOR indexes an LLM-built hierarchy of cluster summaries alongside the leaf chunks, so a thematic or multi-hop query can retrieve a synthesis no single chunk contains.
+A: Flat retrieval — dense, sparse, or hybrid — always returns independent chunks bounded by wherever chunking cut the document, so a query asking "what is this document about" or "how do these three sections relate" has no single chunk that answers it; the LLM would need every relevant chunk retrieved and stitched together itself. RAPTOR (Sarthi et al., 2024, arXiv 2401.18059) builds a second axis at index time: recursively cluster chunk embeddings with a soft Gaussian Mixture Model over UMAP-reduced vectors, summarize each cluster with an LLM, embed the summary, and repeat one level up until a single root summary remains. Every level — leaf chunks and every summary node — is embedded into the same flat index, so a query can land on a precise leaf fact or a high-level synthesis depending on which is closer in embedding space. The cost is real: one LLM summarization call per cluster per level, paid once at build time and again on any re-summarization after a corpus edit, so it is worth it only when the query mix actually contains thematic or multi-hop questions.
+
+**Q: RAPTOR's paper describes two ways to query the tree — collapsed tree and tree traversal. What is the difference, and which did the paper find better?**
+**Short:** Collapsed tree flattens every level into one pool and runs a single kNN search up to a token budget, and RAPTOR's own evaluation found it beats layer-by-layer tree traversal.
+A: Tree traversal starts at the root, keeps the top-scoring nodes at that layer, descends only to their children, and repeats down to the leaves — cheap to reason about but rigid, since a wrong turn at a coarse layer can never be corrected by a strong match sitting deeper in a sibling branch. Collapsed tree instead flattens every node at every level — leaves and every summary — into one pool and runs a single kNN search against the query, keeping results up to a token budget; RAPTOR's paper found 2,000 tokens the best cutoff and reports collapsed tree as producing its best results, which is why production RAPTOR implementations default to it. The practical reason collapsed tree wins is that it lets the retriever pick its own granularity per query instead of committing to one path top-down — a specific-fact query naturally surfaces leaf nodes, a thematic query naturally surfaces root-level summaries, from the same undifferentiated search.
 
 ---
 

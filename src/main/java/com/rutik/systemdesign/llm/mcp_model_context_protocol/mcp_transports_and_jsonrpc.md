@@ -7,7 +7,7 @@ Deep-dive sub-file of [MCP — Model Context Protocol](mcp_model_context_protoco
 
 MCP uses JSON-RPC 2.0 as its message format over the two transports the spec standardizes: **stdio** (client spawns server as a subprocess, communicates via standard input/output streams) and **Streamable HTTP** (HTTP service receiving POST requests and optionally emitting Server-Sent Events). Clients SHOULD support stdio whenever possible; anything else is a custom, non-standardized transport.
 
-This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications), transport selection trade-offs (stdio vs HTTP), the Streamable HTTP transport in detail, connection lifecycle (handshake, ping, transport-level shutdown), reconnection and resumability semantics, and concrete latency numbers for each. It also covers one JSON-RPC feature MCP deliberately does **not** have: request batching — every message is its own POST. Descriptions here track the current released revision, `2025-11-25`.
+This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications), transport selection trade-offs (stdio vs HTTP), the Streamable HTTP transport in detail, connection lifecycle (handshake, ping, transport-level shutdown), reconnection and resumability semantics, and concrete latency numbers for each. It also covers one JSON-RPC feature MCP deliberately does **not** have: request batching — every message is its own POST. Descriptions here track the `2025-11-25` revision, which remains widely deployed; the now-current `2026-07-28` revision replaces the handshake, the session and SSE-held mid-request questions described here — see [§6, "What the 2026-07-28 Revision Changes"](#what-the-2026-07-28-revision-changes) for the full diff and a worked example.
 
 ---
 
@@ -19,7 +19,7 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 
 **Why it matters**: Transport choice affects latency, security, scalability, and deployment topology. Stdio is fast (~1-2ms message round-trip) but local-only. Streamable HTTP supports remote servers (10-50ms RTT) and multi-client serving. Get the transport choice wrong, and you'll fight infrastructure constraints.
 
-**Key insight**: Streamable HTTP is *one* endpoint that serves both POST and GET, and the server decides per request whether to answer with a single JSON object or upgrade to a `text/event-stream`. That one-endpoint design is what lets the same server handle a stateless single-request client and a stateful streaming session without separate deployment topologies. The `2026-07-28` release candidate pushes further in the same direction, dropping the protocol-level session entirely so any request can land on any server instance.
+**Key insight**: Streamable HTTP is *one* endpoint that serves both POST and GET, and the server decides per request whether to answer with a single JSON object or upgrade to a `text/event-stream`. That one-endpoint design is what lets the same server handle a stateless single-request client and a stateful streaming session without separate deployment topologies. The now-current `2026-07-28` revision pushes further in the same direction, dropping the protocol-level session entirely so any request can land on any server instance.
 
 ---
 
@@ -377,22 +377,117 @@ that machinery, which is exactly why the wire contract stays at one message per 
 
 ### What the 2026-07-28 Revision Changes
 
-Five separate notes above say "the release candidate removes X." They are one change, not five footnotes, and it lands squarely on this file's subject. The RC was locked 2026-05-21 and the final text publishes 2026-07-28 — the largest revision since launch, and it deletes the two things this chapter spends the most words on.
+Five separate notes above described changes the `2026-07-28` revision makes to this file's subject.
+They are one change, not five footnotes. The revision was released `2026-07-28` — the largest since
+launch — and it deletes the two things this chapter spends the most words on.
 
 | 2025-11-25 | 2026-07-28 |
 |------------|------------|
-| `initialize` + `notifications/initialized` handshake | Removed. Protocol version, client info and capabilities travel in `_meta` on **every** request (`io.modelcontextprotocol/clientInfo`), plus required `MCP-Protocol-Version` and `Mcp-Method` headers |
+| `initialize` + `notifications/initialized` handshake | Removed. Protocol version, client info and capabilities travel in `_meta` on **every** request (`io.modelcontextprotocol/clientInfo`), plus required `MCP-Protocol-Version` and `Mcp-Method` headers. A new mandatory `server/discover` RPC advertises supported versions and capabilities up front or as a backward-compatibility probe on stdio |
 | `Mcp-Session-Id` header and the protocol-level session | Removed. Every request is self-contained |
-| Server-initiated SSE stream for mid-request questions | Multi Round-Trip Requests (MRTR): the server returns an `InputRequiredResult` (`resultType: "input_required"`, an `inputRequests` object, a base64 `requestState`); the client gathers answers and **re-issues the original call** with `inputResponses` and the echoed `requestState` |
+| Server-initiated requests (`roots/list`, `sampling/createMessage`, `elicitation/create`) held open on a stream | Multi Round-Trip Requests (MRTR): the server returns an `InputRequiredResult` (`resultType: "input_required"`, an `inputRequests` map, an opaque `requestState`); the client gathers answers and **re-issues the original call** with top-level `inputResponses` and the echoed `requestState` — see the worked example below |
+| HTTP GET endpoint + `resources/subscribe`/`unsubscribe` | Replaced by `subscriptions/listen`: one long-lived POST-response stream a client opts into per notification type (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`, `resourceSubscriptions`), tagged with `io.modelcontextprotocol/subscriptionId` |
+| SSE stream resumability (`Last-Event-ID`, SSE event IDs) | Removed. A broken response stream loses the in-flight request; the client **MUST** re-issue it as a new request with a new id rather than resuming mid-stream |
+| `tools/list`, `resources/list`, `resources/read`, etc. as plain results | Cacheable: a required `CacheableResult` shape adds `ttlMs` (freshness hint) and `cacheScope` (`"public"`/`"private"`) to every list/read result |
+| `ping`, `logging/setLevel`, `notifications/roots/list_changed` | Removed. Log level is set per-request via `io.modelcontextprotocol/logLevel` in `_meta` instead |
 | Roots, Sampling, Logging | Deprecated on 12-month windows — Roots gives way to tool parameters / resource URIs / server config, Sampling to calling your LLM provider directly, Logging to `stderr` on stdio and OpenTelemetry for structured observability |
 | Ad-hoc `experimental` capabilities | Extensions framework: reverse-DNS ids negotiated through an `extensions` map on both sides' capabilities, developed in their own `ext-*` repositories |
-| OAuth 2.1 + PKCE + RFC 8707 audience binding | Same, hardened: clients validate the `iss` parameter per RFC 9207 and declare an OpenID Connect `application_type` at registration |
+| Resource-not-found error `-32002`; ad-hoc `-32001`-`-32004` codes | Resource-not-found renumbered to `-32602` (Invalid Params); `-32020`-`-32099` reserved for MCP-specific codes (`HeaderMismatch` -32020, `MissingRequiredClientCapability` -32021, `UnsupportedProtocolVersion` -32022) |
+| OAuth 2.1 + PKCE + RFC 8707 audience binding | Same, hardened: clients validate the `iss` parameter per RFC 9207, key persisted credentials by issuer, and declare an OpenID Connect `application_type` at registration; Dynamic Client Registration (RFC 7591) is deprecated in favor of Client ID Metadata Documents |
 
-Read that as one sentence: **MCP stops being a session protocol.** The spec's own framing of the payoff — "a remote MCP server that previously needed sticky sessions, a shared session store, and deep packet inspection at the gateway can now run behind a plain round-robin load balancer." The `Mcp-Method` header is the other half of that: the method name is readable at the edge without parsing the JSON body, which is what makes per-method routing and rate limiting a gateway concern instead of an application one.
+Read the first two rows as one sentence: **MCP stops being a session protocol.** The spec's own
+framing of the payoff — a remote MCP server that previously needed sticky sessions, a shared session
+store, and deep packet inspection at the gateway can now run behind a plain round-robin load
+balancer. The `Mcp-Method` header is the other half of that: the method name is readable at the edge
+without parsing the JSON body, which is what makes per-method routing and rate limiting a gateway
+concern instead of an application one.
 
-MRTR is the subtler one. Under 2025-11-25 a server that needs to ask the user something mid-tool-call holds the request open and talks over SSE, so the pause is a *stream* the client must keep alive and resume with `Last-Event-ID`. Under MRTR the pause is a *return value* — the call ends, the client answers at its leisure, and the retry carries the server's own state blob back. Nothing has to stay connected, which is precisely why the session could be deleted.
+The three SSE-shaped rows are easy to blur into one "SSE goes away" story; keep them separate, because
+they replace three different things. **MRTR** replaces *server-initiated requests* — under 2025-11-25
+these arrive over a stream the client must hold open; under MRTR the server returns an
+`InputRequiredResult` and the call **ends**, so the pause is a return value, not a stream. **`subscriptions/listen`**
+replaces the GET-based `resources/subscribe`/`unsubscribe` pair with one opt-in POST-response
+stream. **SSE resumability** is separately removed — a dropped connection no longer resumes with
+`Last-Event-ID`; the client just re-issues the request. All three point the same direction: nothing
+has to stay connected, which is precisely why the session itself could be deleted.
 
-Migration is client-first: a client that speaks 2026-07-28 falls back to the `initialize` handshake when it reaches a server on 2025-11-25 or earlier, so servers are not forced to move on day one. Everything else in this file describes 2025-11-25 and remains accurate for that revision.
+**Worked MRTR example** — a `tools/call` that needs the caller's GitHub username mid-call:
+
+```json
+// 1. Client calls a tool; _meta carries protocol version/capabilities on every request
+--> POST /mcp   (id: 1)
+{
+  "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+  "params": {
+    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
+    "name": "open_pull_request",
+    "arguments": { "repo": "acme/widgets" }
+  }
+}
+
+// 2. Server needs the caller's GitHub login before it can proceed. It does NOT hold
+//    the request open on SSE -- it returns an input-required result and the call ends.
+<-- 200 OK   (id: 1)
+{
+  "jsonrpc": "2.0", "id": 1,
+  "result": {
+    "resultType": "input_required",
+    "inputRequests": {
+      "github_login": {
+        "method": "elicitation/create",
+        "params": {
+          "mode": "form",
+          "message": "Which GitHub username should open this PR?",
+          "requestedSchema": {
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+          }
+        }
+      }
+    },
+    "requestState": "AEAD-protected-blob-opaque-to-client"
+  }
+}
+
+// 3. Client resolves the elicitation (prompts the user), then RETRIES the SAME
+//    tools/call -- new JSON-RPC id, same name/arguments, plus inputResponses and
+//    the echoed requestState as top-level params fields.
+--> POST /mcp   (id: 2)
+{
+  "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+  "params": {
+    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
+    "name": "open_pull_request",
+    "arguments": { "repo": "acme/widgets" },
+    "inputResponses": {
+      "github_login": { "action": "accept", "content": { "name": "octocat" } }
+    },
+    "requestState": "AEAD-protected-blob-opaque-to-client"
+  }
+}
+
+// 4. Server reconstitutes state from requestState and has everything it needs --
+//    an ordinary "complete" result. No stream was ever held open across the pause.
+<-- 200 OK   (id: 2)
+{
+  "jsonrpc": "2.0", "id": 2,
+  "result": {
+    "resultType": "complete",
+    "content": [{ "type": "text", "text": "Opened PR #482 as octocat." }]
+  }
+}
+```
+
+Note the two ids: MRTR is two independent JSON-RPC requests, not one held-open call, which is exactly
+why nothing has to stay connected between steps 2 and 3 — the client can prompt the user, restart, or
+switch networks in between, and the retry in step 3 is indistinguishable from a fresh call plus two
+extra fields.
+
+Migration is client-first: a client that speaks 2026-07-28 falls back to the `initialize` handshake
+when it reaches a server on 2025-11-25 or earlier, so servers are not forced to move on day one.
+Everything else in this file describes 2025-11-25, which remains widely deployed and accurate for
+that revision.
 
 ---
 
@@ -522,7 +617,7 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 | Tool | Purpose |
 |---|---|
 | JSON-RPC 2.0 spec | Wire format |
-| MCP spec (2025-11-25; RC 2026-07-28) | Protocol + transports |
+| MCP spec (current: 2026-07-28; 2025-11-25 still widely deployed) | Protocol + transports |
 | `mcp` SDK | Hides transport details |
 | MCP Inspector | Debug JSON-RPC traffic |
 | `httpx` / `aiohttp` | HTTP client for Streamable transport |
@@ -549,16 +644,16 @@ Stdio for local tools (filesystem, local DB) — fastest, most secure, single-us
 The server chooses per request: it may answer a POSTed JSON-RPC request with `Content-Type: application/json` (one object) or with `text/event-stream` (an SSE stream), and the client MUST support both. That is why every client POST must carry `Accept: application/json, text/event-stream` — you cannot know which form is coming until the response headers arrive, so the HTTP call has to be made in streaming mode. A POSTed notification or response is different: it gets HTTP 202 Accepted with no body. A separate client GET on the same endpoint opens a server-to-client SSE stream for server-initiated requests and notifications, or returns 405 if the server offers none.
 
 **Q: What's the role of the `MCP-Session-Id` header?**
-**Short:** It lets a stateful Streamable HTTP server route requests to the right session, echoed by the client until it's torn down or expires.
-For stateful sessions over Streamable HTTP. The server may return `MCP-Session-Id` on the response carrying `InitializeResult`; if it does, the client MUST echo it on every subsequent request. It lets the server route requests to the right session state (e.g., conversation memory). Two related rules: a server that has expired the session answers with HTTP 404, and the client must then re-initialize without a session id; and a client leaving for good should send an HTTP DELETE with the header. Note that the 2026-07-28 release candidate removes this header along with the protocol-level session.
+**Short:** Under 2025-11-25 it let a stateful Streamable HTTP server route requests to the right session; the current 2026-07-28 revision removed it.
+Under the still-widely-deployed `2025-11-25` revision, this header was for stateful sessions over Streamable HTTP: the server could return `MCP-Session-Id` on the response carrying `InitializeResult`, and if it did, the client had to echo it on every subsequent request so the server could route to the right session state (e.g., conversation memory). Two related rules applied: a server that had expired the session answered with HTTP 404, and the client had to re-initialize without a session id; a client leaving for good sent an HTTP DELETE with the header. The current `2026-07-28` revision removed this header along with the protocol-level session entirely — every request is now self-contained, so there is nothing left to route by session id.
 
 **Q: How does the ping keepalive work?**
 **Short:** Either side sends a ping and expects a prompt empty result back, with no fixed interval mandated, letting the sender detect a stale connection.
 Either party sends a `ping` request and the other MUST reply promptly with an empty `result: {}` — there is no `pong` method, the reply is just an ordinary empty JSON-RPC response. A missed reply lets the sender treat the connection as stale and reconnect. The spec sets no default interval: it says the frequency should be configurable and that excessive pinging should be avoided, so any "every 30s" figure is an implementation choice, not a protocol rule. Most SDKs handle this automatically; it only matters when you implement the transport yourself.
 
 **Q: What does the initialize handshake negotiate?**
-**Short:** Protocol version and each side's optional capabilities, agreed once and then sent as an HTTP header on every later request.
-Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request. The 2026-07-28 release candidate removes this handshake entirely, carrying client info and version in per-request `_meta` and headers instead.
+**Short:** Under 2025-11-25, protocol version and each side's optional capabilities, agreed once and then sent as an HTTP header on every later request.
+Under the still-widely-deployed `2025-11-25` revision: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request. The current `2026-07-28` revision removed this handshake entirely, carrying client info and version in per-request `_meta` and headers instead, with a mandatory `server/discover` RPC available for up-front version selection.
 
 **Q: What does the 2026-07-28 revision change about the connection lifecycle?**
 **Short:** It removes the `initialize` handshake and session entirely, making every request self-contained so a server can sit behind a plain load balancer.
@@ -643,4 +738,4 @@ MCP defines no shutdown or exit message — termination is signalled entirely by
 1. Streamable HTTP at the edge + stdio internally was the right hybrid.
 2. Overlapping the independent discovery calls at the gateway cut startup capability-discovery latency by 40% — the only mechanism available, since MCP permits one message per POST.
 3. Audit logs revealed which MCP tools were most used → guided investment in caching.
-4. Sticky session via `MCP-Session-Id` mattered for stateful operations (multi-turn tool sequences) — a constraint the 2026-07-28 revision removes by going stateless.
+4. Sticky session via `MCP-Session-Id` mattered for stateful operations (multi-turn tool sequences) — a constraint the current 2026-07-28 revision has removed by going stateless.

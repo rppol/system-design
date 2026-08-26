@@ -360,6 +360,68 @@ public class ApplicationLogger {
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What is the difference between a legitimate Singleton and Singleton Abuse?**
+**Short:** Legitimate Singleton models a genuinely unique resource; abuse uses it only to avoid passing dependencies explicitly.
+A legitimate Singleton represents a truly unique resource — a hardware driver, a single log file handle, a connection pool manager — where having more than one instance would be actively wrong. Singleton Abuse is applying the same mechanism to classes that have no inherent uniqueness requirement, purely for the convenience of global access instead of constructor injection. `DatabaseConnection` and `AppConfig` in the example are abuse: nothing about them requires exactly one instance, they were just made Singleton to avoid wiring dependencies through constructors.
+
+**Q: Why does the basic double-checked-locking Singleton implementation break without `volatile`?**
+**Short:** Without volatile, a thread can see a non-null but only partially constructed instance due to reordering.
+The naive `if (instance == null) { instance = new Foo(); }` check is not thread-safe: two threads can both observe `null` and both construct an instance. Double-checked locking patches the race, but it is correct only if the instance field is `volatile` — without it, the write that publishes the reference can be reordered relative to the constructor's field writes, so a second thread can see a non-null reference to an object whose fields are still default or half-written. JSR-133 (Java 5) strengthened `volatile` enough to make the volatile form correct; it was broken on every earlier Java version. An `enum` singleton or a static holder class sidesteps the problem entirely and is the better default.
+
+**Q: Why is a method that calls `Singleton.getInstance()` internally harder to test than one taking a constructor parameter?**
+**Short:** getInstance() is a hidden dependency invisible in the method signature, so no test double can be substituted.
+`UserRepository.findById()` calling `DatabaseConnection.getInstance()` cannot be tested without hitting the real production database, because the dependency is looked up internally rather than injected — there is no seam where a test can hand in a mock. Once the class is refactored to take `DatabaseConnection` and `AppConfig` through its constructor, a test can pass `mock(DatabaseConnection.class)` directly. The core distinction is control: Singleton pulls a dependency from inside the method, DI pushes it in from outside where the caller — including a test — controls what gets passed.
+
+**Q: What exactly goes wrong when Singleton state is assumed "global" across microservice replicas?**
+**Short:** A JVM Singleton is one instance per process, so 10 replicas produce 10 independent singletons, not one shared state.
+A Singleton only guarantees uniqueness within a single JVM process. Across 10 microservice replicas behind a load balancer, there are 10 separate "singletons," each with its own independent state — any logic that assumes the Singleton represents global truth (like a rate limiter counter) will produce inconsistent behavior because each replica enforces its own local view. Truly global unique state requires an external coordinator like Redis, ZooKeeper, or etcd, not a local Singleton.
+
+**Q: List the concrete problems Singleton Abuse creates, in order of how directly they hurt testability.**
+**Short:** Untestability, hidden dependencies, global mutable state, initialization order fragility, and thread-safety bugs.
+Untestable code is the sharpest pain: you cannot substitute a mock for a Singleton because the dependency is looked up internally rather than injected. Hidden dependencies follow directly — a method's signature no longer tells you what it needs. Global mutable state means any code anywhere can mutate the Singleton, making reasoning about state difficult. Initialization order problems arise when Singleton A depends on Singleton B, which may not yet be constructed. And the naive `getInstance()` implementation itself often has a thread-safety bug in the double-checked-null check.
+
+**Q: When you see `Config.getInstance()` scattered across a codebase, how would you refactor it, step by step?**
+**Short:** Remove the static instance and getInstance(), add a real constructor, then push construction to one composition root.
+First, remove the private no-arg constructor and `getInstance()` method entirely, replacing them with a normal public constructor that takes its dependencies (e.g., a config file path) as parameters. Second, change every consumer class to receive the config through its own constructor rather than calling `getInstance()` internally. Third, construct the config object exactly once in a single composition root — the application's `main()` method or DI container configuration — and pass that one instance down to whoever needs it. The result is the same "one instance" behavior, but achieved through explicit wiring instead of a global lookup.
+
+**Q: What did JSR-133 change about `volatile`, and why does it matter for Singleton?**
+**Short:** JSR-133 (Java 5) strengthened volatile semantics so double-checked locking became correct when the field is volatile.
+Before JSR-133, `volatile` only guaranteed visibility ordering for the volatile variable itself, which was insufficient to prevent a thread from observing a partially-constructed object through double-checked locking. JSR-133 redefined the Java Memory Model so that a `volatile` write acts as a full memory barrier, ensuring that all writes made before the volatile write (including the constructor's field writes) are visible to any thread that subsequently reads the volatile field as non-null. This is why the double-checked-locking Singleton idiom is correct on modern Java only when the instance field is declared `volatile` — omitting it reintroduces the exact race it was meant to fix.
+
+**Q: Is Singleton ever the right choice, and what's an example from this file?**
+**Short:** Yes — for a resource that genuinely must be unique, like a single file-backed logger.
+`ApplicationLogger` in the example is a legitimate Singleton: it wraps a single `PrintWriter` backed by one file handle, and having multiple instances would genuinely corrupt the log file through concurrent uncoordinated writes. The narrow legitimate cases are truly unique hardware resources (a hardware clock, a GPU device), a single log writer, or a single connection pool per application — everywhere else, dependency injection should be used instead. The distinguishing question is "does uniqueness matter for correctness, or only for convenience?"
+
+**Q: How does Singleton relate to the Dependency Inversion Principle?**
+**Short:** Singleton violates DIP because consumers depend directly on a concrete global class instead of an abstraction.
+DIP states that high-level modules should depend on abstractions, not concrete implementations. A class that calls `DatabaseConnection.getInstance()` is tightly coupled to that one concrete class by name — it cannot be pointed at a different implementation, mock, or abstraction without changing the call site. Dependency Injection upholds DIP because the consumer declares a dependency (often on an interface) through its constructor, and the composition root decides which concrete implementation to supply, leaving the consumer decoupled from the concrete class.
+
+**Q: Why does "no DI framework in the project" often lead teams toward Singleton Abuse?**
+**Short:** Without a container to manage object lifecycles, Singleton becomes the easiest substitute for "construct once, use everywhere."
+In projects predating widespread Spring/Guice/Dagger adoption, or in codebases without a DI container at all, developers still want "construct this expensive object once and share it" — and without a framework to do that wiring for them, `getInstance()` looks like the simplest way to get that behavior. The fix is not necessarily adopting a full framework; even a hand-written composition root in `main()` that constructs objects once and passes them down achieves the same result without the testability cost of a global static.
+
+**Q: What is a "Singleton web" and why is it worse than one abused Singleton?**
+**Short:** Multiple Singletons calling other Singletons multiplies hidden dependencies and initialization-order fragility.
+When `GameManager`, `AudioManager`, and `InputManager` are all Singletons that call each other's `getInstance()` internally, the hidden-dependency problem compounds: tracing what any one of them actually needs requires following a chain of static lookups through several classes. Initialization order becomes especially fragile here, since Singleton A's constructor might trigger Singleton B's lazy construction, which might in turn call back into A before A has finished constructing — a scenario that DI's explicit composition root avoids entirely by constructing dependencies in a known, deterministic order.
+
+**Q: How would you explain the testing problem shown in this file's `UserRepositoryTest` example?**
+**Short:** The test always hits the real production database because there's no way to inject a mock connection.
+`new UserRepository()` internally calls `DatabaseConnection.getInstance()` and `AppConfig.getInstance()`, so the test has no constructor parameter through which to supply a mock — every test run either fails without a real database available or silently exercises production infrastructure. After refactoring to constructor injection, the same test can call `new UserRepository(mockDb, mockConfig)` and verify behavior without touching any real infrastructure. This single example captures why Singleton Abuse is described as "the primary reason Java enterprise code is untestable."
+
+**Q: What operational fix replaces "static config in a singleton field" at the distributed-systems level?**
+**Short:** A dynamic config service that replicas poll or subscribe to, instead of hard-coded static fields.
+Hard-coding configuration in a static Singleton field means every config change requires redeploying all replicas, which defeats the purpose of dynamic configuration management. The HLD-level fix mirrors the LLD fix: instead of each service instance looking up its own static config, inject a client for a config service (or feature-flag service) that can push updates without a redeploy — the same shift from "look up a global" to "receive an injected, externally-managed dependency."
+
+**Q: Name a legitimate use of Service Registry-as-Singleton at the architecture level, and its risk.**
+**Short:** A service registry is a legitimate single point of truth but becomes a single point of failure if unmitigated.
+A service registry that all other services depend on for discovery is conceptually similar to a Singleton — there is meant to be one source of truth for "where is service X." The risk mirrors Singleton's downside at scale: if the registry is unavailable, the entire system can fail, since every service's ability to find its dependencies routes through it. Mitigations include client-side caching of previously resolved addresses, health checks, and fallback discovery mechanisms, so a registry outage degrades gracefully rather than causing a hard system-wide failure.
+
+**Q: What test question can a developer ask themselves to detect Singleton Abuse before it ships?**
+**Short:** "Can I test this class without hitting real infrastructure?" — if not, it likely depends on a Singleton.
+If constructing and exercising a class in a unit test requires a live database connection, a real file on disk, or any other piece of real infrastructure, that is a strong sign the class is reaching for a Singleton internally rather than receiving its dependencies through its constructor. This question is deliberately simple enough to apply during code review on every new `getInstance()` call site, which is also the recommended review-time flag: treat any new static field or `getInstance()` reach as a prompt to ask whether DI would work instead.
+
 ## Interview Relevance
 
 **Common interview questions:**

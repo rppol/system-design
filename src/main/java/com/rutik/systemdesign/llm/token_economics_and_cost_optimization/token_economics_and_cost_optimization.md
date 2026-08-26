@@ -839,6 +839,54 @@ def route_and_call(query: str) -> str:
     return response.choices[0].message.content
 ```
 
+### Reasoning Tokens — the Multiplier That Is Not on the Price Sheet
+
+Every multiplier in §4 is published. The largest one on a 2026 bill is not: **reasoning tokens
+bill at the output rate but are not bounded by the visible answer**, so a forecast calibrated on
+"average output = 300 tokens" is not slightly wrong, it is wrong by an order of magnitude the
+moment a feature is switched to a reasoning model or its thinking budget is raised.
+
+Treat it the way this module treats residency and caching — as a multiplier on a rate you already
+know, not as a new price to look up:
+
+```
+effective_output_tokens = visible_output + reasoning_tokens
+reasoning_multiplier    = effective_output_tokens / visible_output
+```
+
+Worked against this module's own anchor of $3.00/$15.00 per 1M for Sonnet 5, on 1M requests a
+month with a 2K-token prompt and a 300-token visible answer:
+
+```
+  input   1M x 2,000 tok  = 2.0B tok  x $3.00/1M   =  $6,000
+  output, thinking OFF
+          1M x   300 tok  = 0.3B tok  x $15.00/1M  =  $4,500   -> $10,500/mo
+  output, thinking ON at a 4,000-token mean budget
+          1M x 4,300 tok  = 4.3B tok  x $15.00/1M  = $64,500   -> $70,500/mo
+
+  reasoning multiplier = 4,300 / 300 = 14.3x on the output line
+  bill multiplier      = 70,500 / 10,500 = 6.7x   (input dilutes it)
+```
+
+Three properties make this behave unlike the published multipliers, and each one costs a team
+money the first time it is met:
+
+- **It is not a constant.** Thinking length scales with problem difficulty, so the mean is set by
+  your traffic mix and moves when the mix moves. A 10% shift toward hard queries moves the bill
+  without a single deploy. Budget on a p90 of reasoning tokens, never the mean.
+- **Caching does not touch it.** Prompt caching discounts *input*; reasoning tokens are output.
+  A team that has driven input cost down 90% with a 1-hour cache can find that the lever it
+  spent a quarter on now moves 8% of the bill.
+- **It is often invisible in the response.** Where the provider hides the trace you still pay for
+  it, so the only trustworthy count is the usage field on the response, not a tokenizer run over
+  the text you got back. Log it as its own metric next to input and visible output — a dashboard
+  that reports two token classes cannot see the one that is growing.
+
+The lever is the mode, not the model: turning thinking off for the easy band removes most of a
+request's output tokens, where downgrading a model tier only scales both token classes by a fixed
+ratio. That decision, its cascade form, and the provider-specific parameter names live in
+[LLM Routing & Model Selection](../llm_routing_and_model_selection/llm_routing_and_model_selection.md).
+
 ### Budget Enforcement
 
 ```python

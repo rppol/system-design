@@ -264,7 +264,6 @@ order (MRO)` at class-definition time rather than picking an arbitrary order at 
 ### 6.1 Attribute Lookup — Full Walk-Through
 
 ```python
-from __future__ import annotations
 import sys
 
 
@@ -598,7 +597,6 @@ print(len(s))    # 1 — correctly deduplicated
 ### 6.7 Operator Overloading with `__add__` and `__radd__`
 
 ```python
-from __future__ import annotations
 from functools import total_ordering
 
 
@@ -669,9 +667,6 @@ print(sorted([v2, v1])) # [Vector2D(x=1.0, y=2.0), Vector2D(x=3.0, y=4.0)]
 ### 6.8 `__init_subclass__` for Class Registration [3.6]
 
 ```python
-from __future__ import annotations
-
-
 class PluginBase:
     _registry: dict[str, type[PluginBase]] = {}
 
@@ -1000,11 +995,14 @@ D2().setup()
 | `attrs` | Richer than dataclasses; validators, converters, slots | `__slots__`, `__eq__`, `__hash__` |
 | `pydantic` v2 | Runtime type validation via descriptors + Rust core | Descriptor protocol, `__get__`, `__set__` |
 | `functools.total_ordering` | Synthesize comparison methods from `__eq__` + one of `__lt__`/`__gt__` | Rich comparisons |
-| `abc.ABCMeta` + `collections.abc` | Register virtual subclasses; mixin methods for container protocol | `__subclasshook__`, container dunders |
+| `abc.ABCMeta` | Register virtual subclasses | `__subclasshook__` |
+| `collections.abc` | Mixin methods for the container protocols | Container dunders |
 | `typing.Protocol` [3.8] | Structural subtyping; static duck-typing for data model interfaces | MRO-independent protocol |
 | `sys.getsizeof` | Measure per-instance memory | `__slots__` profiling |
-| `pympler` / `tracemalloc` | Deep memory profiling including referenced objects | Memory optimization |
-| `mypy` / `pyright` | Type-check `__dunder__` return types, descriptor `__get__` overloads | `__repr__: str`, `__eq__: bool` |
+| `pympler` | Deep memory profiling including referenced objects | Memory optimization |
+| `tracemalloc` | Stdlib allocation tracing with per-line attribution | Memory optimization |
+| `mypy` | Type-check `__dunder__` return types, descriptor `__get__` overloads | `__repr__: str`, `__eq__: bool` |
+| `pyright` | Same checks with stricter descriptor overload resolution | Powers Pylance |
 
 ---
 
@@ -1145,7 +1143,6 @@ that requires leaving the object model entirely -- see Discussion Question 3.
 #### Implementation
 
 ```python
-from __future__ import annotations
 import math
 import sys
 from typing import ClassVar

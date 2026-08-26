@@ -2,6 +2,8 @@
 
 > Phase 1 — Foundations · Difficulty: Intermediate
 
+> **Version anchor (2026-08-25).** **Linux kernel mainline v7.2** (2026-08-16), with **6.18.x the current LTS line** (shipped late 2025, supported through December 2028); **cgroup v2 is what a current cluster requires** — Kubernetes 1.35's kubelet refuses to start on a cgroup v1 node by default (KEP-5573); **systemd v261** (2026-06-19); **RHEL 10** (GA 2025-05-20); **Ubuntu 26.04 LTS "Resolute Raccoon"** (2026-04-23, current LTS; 24.04 remains supported).
+
 The operating system is the substrate every container, pod, and cloud VM runs on. A senior DevOps engineer who understands processes, signals, file descriptors, cgroups, and namespaces can explain *why* a pod gets OOMKilled, *why* a graceful shutdown hangs, and *why* a "container" is just a process with a restricted view of the kernel — not a virtual machine.
 
 ---
@@ -66,8 +68,8 @@ User space talks to the kernel through **system calls** (`read`, `write`, `opena
 | Hierarchy | Multiple, one per controller | Single unified tree |
 | Memory limit file | `memory.limit_in_bytes` | `memory.max` |
 | Soft limit | `memory.soft_limit_in_bytes` | `memory.high` (throttle before OOM) |
-| Default on modern distros | Legacy | Default (RHEL 9, Ubuntu 22.04+) |
-| Kubernetes support | Mature | GA since 1.25 |
+| Default on modern distros | No longer shipped as the default anywhere mainstream | Default (RHEL 10, Ubuntu 24.04+) |
+| Kubernetes support | Deprecated since 1.31; kubelet refuses to start on it by default from 1.35 (`failCgroupV1: false` overrides it; no removal date set before 1.38) | GA since 1.25; the only version a 1.35+ kubelet starts on by default |
 
 ---
 
@@ -475,8 +477,8 @@ Use `nsenter --target <host-pid> --mount --net --pid` to enter the container's n
 Capabilities split root's powers into ~40 units (`CAP_NET_BIND_SERVICE`, `CAP_SYS_ADMIN`, etc.). Dropping all and adding back only what's needed shrinks the blast radius of a compromise — a container that only needs to bind port 80 gets `CAP_NET_BIND_SERVICE` and nothing else. `securityContext.capabilities.drop: ["ALL"]` is the hardened default.
 
 **Q10: cgroups v1 vs v2 — why does it matter for Kubernetes?**
-**Short:** cgroups v2's single unified hierarchy gives better memory pressure control, since `memory.high` throttles before `memory.max` triggers an OOM kill.
-v2 is a single unified hierarchy with better memory pressure control (`memory.high` throttles before `memory.max` OOMs) and accurate accounting. Kubernetes added GA cgroup v2 support in 1.25; on cgroup v2 nodes, memory QoS and the OOM behavior are more predictable. Mismatches between the runtime's expectation and the node's cgroup version cause subtle resource-enforcement bugs.
+**Short:** cgroups v2 gives better memory pressure control and, since Kubernetes 1.35, is what the kubelet requires — it won't start on a cgroup v1 node by default.
+v2 is a single unified hierarchy with better memory pressure control (`memory.high` throttles before `memory.max` OOMs) and accurate accounting. Kubernetes added GA cgroup v2 support in 1.25, and starting in 1.35 the kubelet refuses to start on a cgroup v1 node by default (override with `failCgroupV1: false`, though the KEP sets no removal date before 1.38) — cgroup v2 is no longer just the modern option, it's what a current cluster requires. Mismatches between the runtime's expectation and the node's cgroup version cause subtle resource-enforcement bugs.
 
 **Q11: What does `ulimit -n` control and where does it bite in production?**
 **Short:** It's the per-process soft limit on open file descriptors, so high-connection servers hit `EMFILE` and stop accepting connections once it's exhausted.
@@ -501,6 +503,10 @@ Heap is only part of a JVM container's memory footprint — metaspace, thread st
 **Q16: When would you choose gVisor or Kata Containers over standard namespace-based containers?**
 **Short:** Choose gVisor or Kata for untrusted multi-tenant workloads needing stronger isolation than a shared kernel, at the cost of extra syscall or virtualization overhead.
 Choose gVisor or Kata Containers when running untrusted, multi-tenant workloads that need stronger isolation than a shared kernel provides. gVisor interposes a user-space kernel that intercepts syscalls, and Kata runs each container in a lightweight VM with its own kernel, so a container escape no longer hands an attacker the host kernel directly, at the cost of added syscall-interception or virtualization overhead versus native namespaces/cgroups. This tradeoff matters for platforms like serverless multi-tenant sandboxes or CI runners executing arbitrary customer code, where the isolation strength justifies the performance hit. For trusted, single-tenant workloads such as your own microservices, standard namespace isolation is faster and sufficient.
+
+**Q17: A node still on cgroup v1 fails to join a freshly upgraded Kubernetes 1.35 cluster. Why, and what are the options?**
+**Short:** Kubernetes 1.35 sets `failCgroupV1` to true by default, so the kubelet refuses to start on a cgroup v1 node unless that flag is explicitly overridden.
+Kubernetes 1.35 flips the kubelet's `FailCgroupV1` setting from `false` to `true` by default, so a kubelet that detects cgroup v1 on startup exits instead of running in a degraded state — this is a hard failure, not a warning buried in the logs. The supported fix is migrating the node to a cgroup-v2 distro (RHEL 10 and Ubuntu 24.04+ ship it by default); the escape hatch is setting `failCgroupV1: false` in the kubelet config, which is explicitly a stopgap since the removal KEP commits to eventually deleting the cgroup v1 code path entirely, with no removal date set before 1.38. Treat the override as a migration deadline you're borrowing time against, not a setting to leave in place.
 
 ---
 

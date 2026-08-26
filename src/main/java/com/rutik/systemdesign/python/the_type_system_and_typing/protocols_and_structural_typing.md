@@ -956,8 +956,8 @@ needs push you to ABC; everything else defaults to Protocol, which is why Best P
 - You need **shared mixin implementation** — Protocols cannot carry method bodies that would be
   inherited (any method body in a Protocol becomes implementation detail of the Protocol class,
   not inherited by conforming classes).
-- The team is not using a type checker — without mypy/pyright, Protocol annotations provide
-  zero enforcement and only add cognitive overhead.
+- The team is not using a type checker — without a static type checker (mypy, pyright, pyrefly,
+  ty), Protocol annotations provide zero enforcement and only add cognitive overhead.
 - You need **abstract enforcement at instantiation time** — use ABC if you want `TypeError`
   when someone forgets to implement an abstract method.
 
@@ -1124,7 +1124,9 @@ second, but it is `0.2 s` you get for free by hoisting the check.
 | Tool | Protocol Support | Notes |
 |---|---|---|
 | **mypy** | Full PEP 544 — structural checking, variance, generic Protocols | `--strict` recommended for Protocol-heavy code |
-| **pyright / pylance** | Full PEP 544 — often stricter than mypy on edge cases | Default in VS Code Python extension |
+| **pyright** | Full PEP 544 — often stricter than mypy on edge cases | Powers Pylance, the default in VS Code's Python extension |
+| **pyrefly** | Full PEP 544 structural checking, written in Rust | Meta's fast checker, v1.0 in 2026-05; default for Instagram, adopted by PyTorch and JAX |
+| **ty** | PEP 544 structural checking; still beta, 0.0.x versioning | Astral's fast checker; breaking changes possible between releases — not yet a safe team default |
 | **ruff** | Linting only — does not check Protocol structural conformance | Catches some `typing` anti-patterns via rules |
 | **beartype** | Runtime enforcement, but for a Protocol parameter it delegates to `isinstance()` — same shallow name check | ~0.3 µs per call with a Protocol hint (measured, 3.13) |
 | **typing_extensions** | Backports newer typing constructs (`TypeIs`, PEP 696 defaults, `override`) to older supported Pythons | Requires 3.9+; `Protocol` itself is in `typing` on every supported version |
@@ -1292,6 +1294,21 @@ importing the Protocol. The type checker verifies the match at the injection sit
 the dependency: the interface is owned by the consumer (high-level module), not the implementor.
 Test doubles implement the same Protocol without inheriting any production code, giving clean
 isolation with zero mocking overhead.
+
+**Q: How should you choose which static type checker to standardise on for a team in 2026?**
+**Short:** Weigh maturity against speed: mypy is the safe default, pyright leads conformance breadth, pyrefly is fast and production-proven, ty is fast but still beta.
+There is no single "best" checker, and the official `python/typing` conformance suite deliberately
+reports only per-category results rather than one blended score, so treat any single overall
+percentage you see quoted elsewhere as somebody else's aggregation, not an official number. mypy is
+the reference implementation of the typing PEPs and the conservative default — slower on large
+codebases but the most predictable. pyright leads on conformance breadth and is the engine behind
+Pylance, so teams already in VS Code get it for free. pyrefly, Meta's Rust checker, reached 1.0 in
+2026 and is now the default checker for Instagram's codebase and adopted by PyTorch and JAX, trading
+some maturity for dramatically faster checks. ty, Astral's checker, is comparably fast but still
+versioned 0.0.x with breaking changes possible between releases — promising, but not yet safe to
+standardise a team on. For a Protocol-heavy codebase specifically, confirm PEP 544 structural
+checking is solid in whichever tool you pick before committing, since that is exactly the kind of
+edge case where newer checkers most often diverge from mypy's behavior.
 
 ---
 

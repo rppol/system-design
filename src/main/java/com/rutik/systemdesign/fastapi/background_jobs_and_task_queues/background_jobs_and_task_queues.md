@@ -1,6 +1,6 @@
 # Background Jobs and Task Queues
 
-> Cross-references: [`../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md),
+> Cross-references: [`../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md),
 > [`../message_queues_and_event_driven/message_queues_and_event_driven.md`](../message_queues_and_event_driven/message_queues_and_event_driven.md),
 > [`../../../hld/case_studies/`](../../hld/case_studies/case_studies.md)
 
@@ -25,6 +25,7 @@ This module covers:
 - **ARQ**: async Redis-backed task queue, native `asyncio`, lightweight
 - **Celery**: battle-tested, broker-agnostic (Redis/RabbitMQ), prefork workers, Canvas
 - **Dramatiq**: middleware-based, simpler than Celery, broker-agnostic
+- **TaskIQ**: async-native distributed task manager with typed signatures and `Depends`-style DI
 - Idempotency keys: deduplication under at-least-once delivery
 - Retry semantics: at-least-once vs at-most-once vs exactly-once
 - Dead-letter queues (DLQ): poison-message handling and monitoring
@@ -154,19 +155,58 @@ def send_invoice(order_id: int) -> None:
     ...
 ```
 
-### 4.5 Decision Matrix
+### 4.5 TaskIQ
 
-| Concern | BackgroundTasks | ARQ | Celery | Dramatiq |
-|---|---|---|---|---|
-| Durability | None (in-process) | Redis | Redis/RabbitMQ/SQS | Redis/RabbitMQ |
-| Async-native workers | Yes (same loop) | Yes | No (eventlet shim) | No |
-| Result backend | No | Redis | Redis/DB/RPC | Plugin |
-| Periodic scheduling | No | Built-in cron | Celery Beat | APScheduler |
-| Task Canvas (chain/chord) | No | No | Yes | group/pipeline |
-| Worker concurrency | Coroutine | Coroutine | Prefork/eventlet | Thread/fork |
-| Monitoring UI | No | arq-dashboard (3rd party) | Flower | Dramatiq-dashboard |
-| Setup complexity | None | Low | High | Medium |
-| Best for | Fire-and-forget | Async I/O tasks | Enterprise/complex | Simpler Celery |
+TaskIQ is the async-native distributed task manager that sits closest to how a FastAPI
+codebase is already written. Its own framing is "consider taskiq as an asyncio celery
+implementation — almost the same patterns, but more modern and flexible", and it is explicit
+that it is **not** a drop-in replacement for Celery: different ecosystem, different feature
+set, and it targets asynchronous projects specifically. It runs both sync and async task
+functions, and it is strongly typed, which is the practical difference from ARQ — task
+arguments are checked rather than serialized into an untyped payload.
+
+```python
+from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
+
+broker = ListQueueBroker("redis://localhost:6379").with_result_backend(
+    RedisAsyncResultBackend("redis://localhost:6379")
+)
+
+
+@broker.task(retry_on_error=True, max_retries=3)
+async def send_invoice(order_id: int) -> str:
+    # A real async function, awaited on the worker's event loop -- the same
+    # httpx / SQLAlchemy client code the request path uses, with no shim.
+    async with httpx.AsyncClient() as client:
+        await client.post(BILLING_URL, json={"order_id": order_id})
+    return "sent"
+```
+
+The broker is driven from `lifespan` like any other resource, and enqueueing is
+`await send_invoice.kiq(order_id)`, which returns a task handle you can `await` for a result
+if you want one. Its dependency-injection system deliberately mirrors `Depends`, so a task
+declares what it needs the way a route does — the reason it reads as native in a FastAPI
+codebase where ARQ's `ctx` dict does not.
+
+Pick it over ARQ when you want typing and DI and a result backend; over Celery when the
+codebase is async throughout and you do not need Canvas workflows or Celery's much larger
+operational ecosystem.
+
+### 4.6 Decision Matrix
+
+| Concern | BackgroundTasks | ARQ | TaskIQ | Celery | Dramatiq |
+|---|---|---|---|---|---|
+| Durability | None (in-process) | Redis | Redis/RabbitMQ/NATS/Kafka | Redis/RabbitMQ/SQS | Redis/RabbitMQ |
+| Async-native workers | Yes (same loop) | Yes | Yes | No (eventlet shim) | No |
+| Result backend | No | Redis | Pluggable | Redis/DB/RPC | Plugin |
+| Periodic scheduling | No | Built-in cron | `taskiq` scheduler | Celery Beat | APScheduler |
+| Task Canvas (chain/chord) | No | No | Pipelines | Yes | group/pipeline |
+| Dependency injection | `Depends` | `ctx` dict | `Depends`-style DI | No | Middleware |
+| Typed task signatures | Yes | No | Yes | No | No |
+| Worker concurrency | Coroutine | Coroutine | Coroutine | Prefork/eventlet | Thread/fork |
+| Monitoring UI | No | arq-dashboard (3rd party) | 3rd party | Flower | Dramatiq-dashboard |
+| Setup complexity | None | Low | Low | High | Medium |
+| Best for | Fire-and-forget | Async I/O tasks | Async I/O with typing + DI | Enterprise/complex | Simpler Celery |
 
 ---
 
@@ -648,19 +688,26 @@ instances for 1,000 concurrent outbound calls total.
 | Retry | Manual (no built-in) | Built-in with backoff |
 | Best for | Audit log, non-critical warmup | Emails, payments, heavy processing |
 
-### 8.2 ARQ vs Celery
+### 8.2 ARQ vs TaskIQ vs Celery
 
-| Dimension | ARQ | Celery |
-|---|---|---|
-| Worker model | Single async loop | Prefork / eventlet / gevent |
-| Async-native | Yes | No (requires shim) |
-| Task Canvas | No | chain, group, chord |
-| Scheduling | Built-in cron | Celery Beat (separate process) |
-| Broker support | Redis only | Redis, RabbitMQ, SQS, more |
-| Result backend | Redis | Redis, DB, RPC, cache |
-| Monitoring | arq dashboard (minimal) | Flower (mature) |
-| Lines of config | ~20 | ~100+ |
-| Production maturity | Growing | Extremely mature |
+| Dimension | ARQ | TaskIQ | Celery |
+|---|---|---|---|
+| Worker model | Single async loop | Single async loop | Prefork / eventlet / gevent |
+| Async-native | Yes | Yes | No (requires shim) |
+| Task Canvas | No | Pipelines via `taskiq-pipelines` | chain, group, chord |
+| Scheduling | Built-in cron | `taskiq-scheduler` | Celery Beat (separate process) |
+| Broker support | Redis only | Redis, RabbitMQ, Kafka, NATS | Redis, RabbitMQ, SQS, more |
+| Result backend | Redis | Redis, in-memory, custom | Redis, DB, RPC, cache |
+| Monitoring | arq dashboard (minimal) | TaskIQ Admin (early) | Flower (mature) |
+| Lines of config | ~20 | ~25 | ~100+ |
+| Production maturity | Growing | Younger than ARQ | Extremely mature |
+
+The ARQ and TaskIQ columns differ in one dimension that matters at design time: **broker
+portability**. Both run the task coroutine on the worker's own event loop, so the execution model
+is identical and moving between them is close to a decorator rename. TaskIQ buys the option to
+leave Redis later without rewriting the task layer; ARQ buys a smaller dependency and a longer
+track record. Celery is a different decision entirely — take it for the Canvas primitives or an
+existing Flower/Beat deployment, not for throughput.
 
 ### 8.3 Result Backend Tradeoffs
 
@@ -909,6 +956,7 @@ Slack notification.
 |---|---|---|---|---|---|---|
 | `BackgroundTasks` | None (in-process) | Same coroutine | Yes | No | No | None |
 | ARQ | Redis only | asyncio event loop | Yes | No | cron built-in | arq-dashboard |
+| TaskIQ | Redis/RabbitMQ/NATS/Kafka | asyncio event loop | Yes | Pipelines | taskiq scheduler | 3rd party |
 | Celery | Redis/RabbitMQ/SQS | prefork/eventlet/gevent | No (shim) | chain/group/chord | Celery Beat | Flower |
 | Dramatiq | Redis/RabbitMQ | Thread/prefork | No | pipeline/group | APScheduler | dramatiq-dashboard |
 | RQ (Redis Queue) | Redis only | Sync prefork | No | No | rq-scheduler | rq-dashboard |
@@ -921,6 +969,13 @@ Slack notification.
 | Redis | ~100k msg/s | AOF/RDB (configurable) | Yes | Yes (ZADD) | Low |
 | RabbitMQ | ~30k msg/s per quorum queue at 1 KB, RF=3 | Disk-persistent queues | Yes (exchanges) | Via TTL+DLX, or the delayed-message-exchange plugin | Medium |
 | Amazon SQS | ~3k msg/s (standard) | Managed, very high | No | DelaySeconds | Zero ops |
+
+**Note on typing.** ARQ, Celery, Dramatiq and RQ all enqueue by function *name* plus a
+serialized argument payload, so a renamed function or a changed signature is a runtime
+failure on the worker, discovered after the job is already in the queue. `BackgroundTasks`
+and TaskIQ both take the callable itself, so the type checker sees the call site. That is a
+small difference in a small codebase and a large one in a codebase where jobs outlive the
+deploy that enqueued them.
 
 ---
 
@@ -1073,6 +1128,22 @@ polling from the same request cycle. PostgreSQL costs roughly 5ms per write but 
 indefinitely, making it the right choice for audit trails or results a support team must query
 days later. RPC (RabbitMQ) suits callers blocking synchronously on `.get()`, and disabling the
 result backend entirely removes all storage overhead for true fire-and-forget tasks.
+
+**Q17: Where does TaskIQ fit against ARQ and Celery for a FastAPI service?**
+**Short:** TaskIQ is the async-native queue with typed task signatures and Depends-style DI — ARQ's async model with Celery-shaped ergonomics.
+TaskIQ describes itself as an asyncio Celery implementation: the same patterns, a different
+and explicitly non-drop-in ecosystem, and a requirement that the project be asynchronous. Its
+worker is an event loop, so tasks await the same `httpx` and SQLAlchemy clients the request
+path uses, with no eventlet or gevent shim. Against ARQ, which is also async-native, the
+differences are ergonomic and they matter: TaskIQ has typed task signatures and enqueues the
+callable rather than a function name plus an untyped payload, so a changed signature is a
+type error rather than a worker crash after the job is queued; and it has a dependency
+injection system that mirrors `Depends`, where ARQ passes a `ctx` dict. Against Celery, you
+give up Canvas workflows and much the larger operational ecosystem — Flower, the
+battle-tested prefork model, a decade of deployment lore — and get a codebase that reads the
+same on both sides of the queue. Reach for Celery when you need workflows or already run it;
+TaskIQ when the service is async throughout and you want the queue to look like the rest of
+the app.
 
 ---
 

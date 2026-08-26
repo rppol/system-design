@@ -9,12 +9,6 @@ key-value, rate-limiting, broker and semantic-cache roles.
 
 Record format and the full rules: [tech_bank.md](tech_bank.md).
 
-### /client
-**Short:** MCP TypeScript SDK client module: the tier-1 Node.js entry point for connecting to MCP servers.
-**Kind:** api
-**Lang:** js
-**Roles:** llm-apps/tool-use-and-mcp @1
-
 ### 2captcha
 **Short:** Paid API that solves CAPTCHAs on demand, used to keep browser automation and web agents moving past challenge pages.
 **Kind:** tech
@@ -74,6 +68,12 @@ Reach for it when an assistant must feel continuous across sessions rather than 
 Run it against a server command or URL and it launches a local web app that connects as a genuine MCP client: it performs the initialize handshake, lists tools, resources and prompts, gives you a generated form per tool, and shows the raw JSON-RPC traffic in both directions alongside anything the server writes to stderr.
 
 Use it as the first step whenever a server misbehaves, before the server is ever wired into a model -- most failures are a malformed input schema, a capability the server never advertised, or a handler that throws, and all three are obvious in the message log. What it cannot tell you is whether a model will choose the tool correctly; that depends on the description and is a separate experiment.
+
+### @modelcontextprotocol/client
+**Short:** MCP TypeScript SDK client module: the tier-1 Node.js entry point for connecting to MCP servers.
+**Kind:** api
+**Lang:** js
+**Roles:** llm-apps/tool-use-and-mcp @1
 
 ### @modelcontextprotocol/sdk
 **Short:** Official TypeScript SDK for building MCP servers and clients over stdio or streamable HTTP transports.

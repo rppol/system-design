@@ -67,7 +67,7 @@ This module covers the internal implementation of the major collection types: th
 | `Collections.unmodifiableList(list)` | View (unmodifiable wrapper) | UnsupportedOperationException | Depends on wrapped list |
 | `List.copyOf(list)` (Java 10+) | Immutable copy | UnsupportedOperationException | Yes |
 
-Key difference: `Collections.unmodifiableList()` is a *view* — modifications to the underlying list are reflected in the unmodifiable wrapper. `List.of()` is a fully independent immutable instance.
+Key difference: `Collections.unmodifiableList()` is a *view* — modifications to the underlying list are reflected in the unmodifiable wrapper. `List.of()` is a fully independent immutable instance [Effective Java Item 17: "Minimize mutability"].
 
 ---
 
@@ -241,6 +241,71 @@ static final int hash(Object key) {
 // Entries in same bucket split into two lists: lo (stay) and hi (move)
 // This is O(n) but with minimal allocations
 ```
+
+### Node Footprint Under Compact Object Headers (JEP 519 / JEP 534)
+
+Every `HashMap.Node<K,V>` and boxed `Integer` in this module carries the JVM object header,
+and that header is shrinking. Today's default on the Java 25 LTS baseline is a **12-byte**
+header (8B mark word + 4B compressed class pointer). `-XX:+UseCompactObjectHeaders` (JEP
+519, Java 25) packs the two into a single **8-byte** header and is opt-in; JEP 534 makes it
+the *default* starting in **Java 27**, disableable with `-XX:-UseCompactObjectHeaders`. Both
+numbers are live right now — a reader on Java 25 gets 12 bytes unless they pass the flag,
+gets 8 by default from Java 27, and whichever it is, the honest way to check is **JOL**
+(`org.openjdk.jol`, `ClassLayout.parseClass(Foo.class).toPrintable()`), not a memorized
+constant.
+
+`HashMap.Node<K,V>` has four fields: `int hash`, `K key`, `V value`, `Node<K,V> next` — one
+`int` and three compressed references, 4 bytes each:
+
+```
+  12-byte header (today's default):
+    8 (mark) + 4 (class ptr) + 4 (hash) + 4 (key) + 4 (value) + 4 (next)
+    = 28 bytes  ->  rounds up to 32 (next multiple of 8): 4 bytes of tail padding
+
+  8-byte compact header (-XX:+UseCompactObjectHeaders, default from Java 27):
+    8 (header) + 4 (hash) + 4 (key) + 4 (value) + 4 (next)
+    = 24 bytes  ->  already a multiple of 8: ZERO padding
+
+  Node shrinks 32 -> 24 bytes: a REAL 8-byte win, not just the 4 header bytes,
+  because removing the 4-byte gap also removes the 4 bytes of padding it used to need.
+```
+
+Contrast that with a boxed `Integer` (one header, one `int` field), which is the alignment
+trap in miniature:
+
+```
+  12-byte header: 8 (mark) + 4 (class ptr) + 4 (int value) = 16 bytes, 0 padding
+  8-byte header:  8 (header)                + 4 (int value) = 12 bytes -> rounds up to 16
+
+  Integer stays 16 bytes EITHER WAY. The 4 saved header bytes are fully absorbed by
+  the padding that 12 bytes needed to reach the next multiple of 8.
+```
+
+So the win is not uniform across a `HashMap<Integer,Integer>` — it lands entirely on the
+`Node` objects and nothing on the boxed keys/values. For **1,000,000 entries** at a load
+factor of 0.75, the table array has `2,097,152` buckets (next power of two ≥ 1,000,000 /
+0.75), each a 4-byte compressed reference:
+
+```
+  per-entry cost            12-byte-header default    8-byte compact header
+  Node<K,V>                          32 B                      24 B
+  boxed Integer key                  16 B                      16 B   <- unchanged
+  boxed Integer value                16 B                      16 B   <- unchanged
+  -----------------------------------------------------------------
+  subtotal x 1,000,000           64,000,000 B              56,000,000 B
+                                  = 61.04 MiB               = 53.41 MiB
+
+  table array (shared, unaffected by header size on its own elements' payload)
+  2,097,152 slots x 4 B         = 8,388,608 B  = 8.00 MiB   (same both ways)
+
+  TOTAL                           ~69.03 MiB                 ~61.41 MiB
+  savings                                        ~7.63 MiB  (~11%)
+```
+
+The whole 11% comes from the `Node` objects alone — 8 bytes saved per entry, times a
+million entries. Pre-cached `Integer`s (`-128..127`) do not change this arithmetic: caching
+means fewer *distinct* boxed objects get allocated, not that any individual `Integer`
+object is smaller.
 
 ### ConcurrentHashMap Java 8 Internals
 
@@ -607,7 +672,7 @@ through to the source — copy with `List.copyOf(list.reversed())` if you need a
 ## 10. Common Pitfalls
 
 ### War Story 1: HashMap with bad hashCode() → O(n) before Java 8
-A team deployed a class used as a HashMap key whose `hashCode()` always returned a constant (a common "always failing" hashCode). Before Java 8, this created a single linked list bucket of length n for all entries — O(n) lookup. Production performance degraded to unusable under load. Fix: correct `hashCode()` with field distribution; in Java 8+, treeification at bucket size 8 mitigates to O(log n) but it's still much worse than O(1).
+A team deployed a class used as a HashMap key whose `hashCode()` always returned a constant (a common "always failing" hashCode). Before Java 8, this created a single linked list bucket of length n for all entries — O(n) lookup. Production performance degraded to unusable under load. Fix: correct `hashCode()` with field distribution [Effective Java Item 11: "Always override hashCode when you override equals"]; in Java 8+, treeification at bucket size 8 mitigates to O(log n) but it's still much worse than O(1).
 
 ### War Story 2: ConcurrentModificationException in production
 A service iterated a `List` and called `list.remove()` inside the loop. In testing (single-threaded sequential), it worked. In production, the iterator's `modCount` check triggered `ConcurrentModificationException`. **Fix**: use `Iterator.remove()`, `removeIf()`, or collect to-remove items and bulk-remove after iteration.
@@ -680,7 +745,7 @@ HashMap: O(1) average get/put/remove via hash table; unordered. TreeMap: O(log n
 **Q8: Why is ArrayList preferred over LinkedList in most cases?**
 **Short:** ArrayList wins on random access, cache locality, and per-element memory over LinkedList in nearly every case.
 
-(1) Random access: ArrayList O(1), LinkedList O(n). (2) Cache locality: ArrayList stores elements contiguously in memory — CPU cache prefetch works well; LinkedList nodes scattered in heap — cache misses on traversal. (3) Memory: LinkedList nodes have 24B overhead each (object header + 2 pointers + value pointer) vs ArrayList's 4B per element reference. Only use LinkedList when you need O(1) insertions at both ends AND never need random access — and even then, `ArrayDeque` is usually better.
+(1) Random access: ArrayList O(1), LinkedList O(n). (2) Cache locality: ArrayList stores elements contiguously in memory — CPU cache prefetch works well; LinkedList nodes scattered in heap — cache misses on traversal. (3) Memory: a `LinkedList.Node` has three reference fields (`prev`, `next`, `item`) on top of the object header — `8 (mark) + 4 (class ptr) + 4 + 4 + 4 = 24 bytes` with today's default 12-byte header, and `8 (compact header) + 4 + 4 + 4 = 20 bytes` rounded up to **24 bytes** under `-XX:+UseCompactObjectHeaders` (JEP 519/534) — the 4 header bytes saved get fully absorbed by alignment padding, so this particular node gets *zero* smaller either way, unlike `ArrayList`'s flat 4B per element reference. Only use LinkedList when you need O(1) insertions at both ends AND never need random access — and even then, `ArrayDeque` is usually better.
 
 **Q9: What is fail-fast iteration and what causes ConcurrentModificationException?**
 **Short:** A collection's modCount changes on structural modification, and a mismatched iterator throws ConcurrentModificationException.
@@ -747,12 +812,17 @@ Java 21 added `SequencedCollection`, `SequencedSet` and `SequencedMap`, giving e
 
 All four `toMap` overloads reject a null value even though the `HashMap` they build would accept it. The two-argument form calls `Objects.requireNonNull` on the mapped value before `putIfAbsent`; the overloads that take a merge function accumulate with `map.merge(k, v, f)`, and `Map.merge` requires a non-null value because it reserves `null` — returned from the remapping function — to mean "remove the mapping". Only `toUnmodifiableMap` documents the rejection, so the other forms fail at runtime with an NPE whose stack trace points inside `Collectors` rather than at your lambda. That also disqualifies `merge` as the workaround. The fix is the three-argument `collect`, which puts directly into a supplied map: `people.stream().collect(HashMap::new, (m, p) -> m.put(p.dept(), p.manager()), HashMap::putAll)`. Better still, do not store null values at all — a sentinel or an empty collection keeps a `null` return unambiguous and keeps the code portable to `ConcurrentHashMap`, which bans null outright.
 
+**Q22: What does a 1-million-entry `HashMap<Integer,Integer>` actually cost in memory, and how does that change with compact object headers?**
+**Short:** About 69 MiB by default today, dropping to about 61 MiB (11% less) once compact object headers are on.
+
+Three pieces make up the footprint: the `Node<K,V>` objects (one `int` hash plus three references), the boxed `Integer` key and value per entry, and the shared bucket array. With today's default 12-byte object header, a `Node` is `8+4+4+4+4+4 = 28` bytes rounded up to `32`; a boxed `Integer` is `8+4+4 = 16` bytes with no padding. At 1,000,000 entries that is `(32+16+16) × 1,000,000 = 64,000,000` bytes (~61.04 MiB) of entries, plus a `2,097,152`-slot table (next power of two above `1,000,000 / 0.75`) at 4 bytes a slot, ~8.00 MiB — about **69.03 MiB** total. Under `-XX:+UseCompactObjectHeaders` (JEP 519, Java 25, opt-in; JEP 534 makes it the *default* from Java 27), the 8-byte header shrinks `Node` to `8+4+4+4+4 = 24` bytes exactly — no padding needed, a real 8-byte-per-entry saving — but the boxed `Integer` stays at 16 bytes (`8+4 = 12` rounds back up to 16), because alignment fully absorbs the header's saving there. The entries subtotal drops to `56,000,000` bytes (~53.41 MiB), the table is unchanged, and the total falls to about **61.41 MiB — roughly 11% smaller**, with every byte of that saving coming from the `Node` objects alone. Do not trust either figure without checking: run **JOL** (`ClassLayout.parseClass(HashMap.Node.class).toPrintable()`) against the actual JVM and flags in production.
+
 ---
 
 ## 13. Best Practices
 
 1. **Use `HashMap` by default** for key-value; switch to `TreeMap` only when sorted order is needed.
-2. **Override both `equals()` and `hashCode()`** for HashMap keys — IDE can generate these.
+2. **Override both `equals()` and `hashCode()`** for HashMap keys — IDE can generate these [Effective Java Item 10: "Obey the general contract when overriding equals"].
 3. **Specify initial capacity** for large maps to avoid resize: `new HashMap<>(expectedSize * 2)`.
 4. **Use `computeIfAbsent()`** for lazy initialization in maps (atomic in `ConcurrentHashMap`).
 5. **Prefer `ArrayDeque` over `Stack` and `LinkedList`** as a queue/deque.

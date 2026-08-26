@@ -610,9 +610,10 @@ why a cross-region cache read is usually slower than just querying the local dat
 
 | Tool | Purpose |
 |------|---------|
-| Redis (Standalone) | Single-node cache/data structure server |
-| Redis Cluster | Sharded Redis for horizontal scaling |
-| Redis Sentinel | High availability for standalone Redis |
+| Redis (Standalone) | Single-node cache/data structure server; tri-licensed RSALv2 / SSPLv1 / AGPLv3 since Redis 8 |
+| Valkey | BSD-3-Clause fork of Redis 7.2.4 under the Linux Foundation, wire- and command-compatible. **This is what you actually get by default now**: AWS ElastiCache and Google Memorystore provision Valkey, not Redis, for new clusters, and it is the distro cache package on Ubuntu 24.04+, Debian 13 and Fedora 40+. Every pattern in this module — cache-aside, `SETNX` locks, Lua stampede guards, sorted-set windows — runs unchanged. Engine-level differences (multi-DB cluster mode, atomic slot migration, database ACLs, lock-free I/O threads) are covered in [`../../database/redis_internals/redis_internals.md`](../../database/redis_internals/redis_internals.md) |
+| Redis Cluster / Valkey Cluster | Sharded deployment for horizontal scaling; 16,384 hash slots in both |
+| Redis Sentinel | High availability for standalone Redis / Valkey |
 | Caffeine | High-performance in-process Java cache |
 | Spring Cache | Cache abstraction (@Cacheable, @CacheEvict) |
 | Spring Data Redis | RedisTemplate, ReactiveRedisTemplate |
@@ -706,6 +707,11 @@ A cache key collision happens when two different objects are stored or read unde
 **Short:** allkeys-lru ignores object size, so evicting by recency can remove many small hot keys to free space for one large object.
 
 LRU eviction tracks only recency, not size, so a 10 MB blob and a 1-byte counter count as exactly one item when deciding what to evict. When large objects dominate the cache, evicting by recency alone can remove many small, frequently-accessed objects just to free enough space for one large, less-frequently-accessed one — directly hurting hit rate for the small objects that make up most of the traffic. This is worse under skewed access patterns, where a handful of hot small keys should clearly outrank a rarely-touched large object, but pure LRU has no way to express that preference. Use `maxmemory-policy allkeys-lfu` instead for workloads with mixed object sizes, since frequency-based eviction protects hot small keys regardless of how large the competing objects are.
+
+**Q: Your new ElastiCache cluster reports itself as Valkey, not Redis. What changes in your caching layer?**
+**Short:** Essentially nothing — Valkey is a wire- and command-compatible BSD-3-Clause fork of Redis 7.2.4, so existing clients, keys, Lua scripts and eviction policies all work unchanged.
+
+Essentially nothing at the application layer, and that is the point. Valkey is the Linux Foundation's BSD-3-Clause fork of Redis 7.2.4, created when Redis relicensed in March 2024, and it keeps the same wire protocol, the same commands, the same 16,384-slot cluster hashing and the same `maxmemory-policy` semantics — Jedis, Lettuce, Redisson, Spring Data Redis and your existing `EVALSHA` scripts all connect without a code change. The reason it matters is that it is no longer a niche choice: AWS ElastiCache and Google Memorystore now provision Valkey rather than Redis for new clusters, and it is the cache package the major Linux distributions ship, so most teams end up on it by default rather than by decision. What you should actually check is licensing and feature edges, not compatibility — Redis 8 is tri-licensed RSALv2 / SSPLv1 / AGPLv3 while Valkey is BSD-3-Clause, and the engines have diverged on specifics like multi-database cluster mode, atomic slot migration and database-level ACLs (Valkey) versus the Redis Stack modules for search and JSON (Redis only). The practical rule: pin the engine version in your infrastructure code rather than accepting "latest", and if you depend on a Redis module there is no Valkey equivalent, so that dependency decides the engine for you. The engine-internals comparison lives in [`../../database/redis_internals/redis_internals.md`](../../database/redis_internals/redis_internals.md).
 
 ---
 

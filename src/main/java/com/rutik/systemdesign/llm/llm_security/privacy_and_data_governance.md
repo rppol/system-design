@@ -479,6 +479,51 @@ narrow: regulated data that must reach a hosted model where a DPA alone will not
 auditor, and protecting your own weights when you rent someone else's hardware. Everything in this
 file's PII pipeline, dedup, and canary gating still applies on top of it.
 
+### 6.6 Beyond GDPR — the regimes that change your topology
+
+Everything above is jurisdiction-neutral mechanism, and the regulatory discussion in this file is
+GDPR-shaped. That is the common blind spot: GDPR mostly constrains *what you may do* with personal
+data, and it is satisfiable with policy, a DPA and the pipeline in §6.2. The two regimes below
+constrain **where the bytes may physically be**, which is not a policy problem — it decides how many
+inference regions you run and where your prompt logs land. For an LLM system that is unusually
+expensive, because prompts and completions are personal-data-bearing by default and your logging
+stack is the largest uncontrolled copy of them.
+
+**China — PIPL.** Cross-border transfer of personal information out of China requires one of exactly
+three legal pathways, and the framework is now complete: a **CAC security assessment**, the **China
+standard contract**, or **certification**. Two engineering-relevant details. The standard contract is
+the CAC's own template — it is *not* the EU SCC and the two are not interchangeable — and it must be
+filed with the provincial-level CAC together with a **PIPIA** (personal information protection impact
+assessment). The pathway is chosen by volume: transfers covering **sensitive personal information of
+more than 10,000 individuals**, or **general personal information of more than 1,000,000
+individuals**, require the standard-contract filing or certification rather than nothing. The
+certification route was operationalised by measures issued 2025-10-14 and effective **2026-01-01**,
+with the technical requirements in **GB/T 46068-2025**, effective **2026-03-01**.
+
+**India — DPDP.** The DPDP Act 2023 is in force and the Data Protection Board has been constituted;
+the **DPDP Rules 2025**, notified **2025-11-13**, operationalise most of the delegated provisions,
+and the day-to-day duties — notice and consent, breach notification, rights handling — phase in over
+an 18-month window with full compliance required by **mid-May 2027**. The part that matters for
+architecture is precisely the part still open: **cross-border transfer restrictions, Significant Data
+Fiduciary designation, and data-localisation requirements all await separate notification.** So the
+correct posture is not "DPDP does not localise" — it is that the localisation question is unresolved
+and your design should keep the option cheap.
+
+**What this means when you build.** Design the region boundary before you need it, because retrofitting
+it is a data migration plus a re-audit rather than a config change:
+
+| Decision | Why the regime forces it |
+|---|---|
+| Region-pinned inference, not just region-pinned storage | The prompt crosses the border at inference time, not at save time |
+| Prompt and completion logs treated as personal data from the start | They are your largest uncontrolled copy, and they are what a regulator asks for |
+| Provider region and sub-processor list as a first-class config | The pathway you qualify for depends on where the model actually runs |
+| Volume accounting per jurisdiction | PIPL's pathway is chosen by individual counts, so you need the count before you need the paperwork |
+| An abstraction over "which regime applies to this request" | Hard-coding one regime is the same mistake as hard-coding one model |
+
+Treat this as orientation, not advice — thresholds and notification status move, and the numbers
+above carry their dates for exactly that reason. Confirm the current position with counsel before
+building to any of them.
+
 ---
 
 ## 7. Real-World Examples
@@ -621,6 +666,14 @@ SISA (Sharded, Isolated, Sliced, Aggregated) trains an ensemble on disjoint data
 **Q17: What does confidential computing actually buy you for LLM inference, and what does it not?**
 **Short:** Confidential computing removes the datacenter operator from the trust boundary via an attested enclave, but does nothing to stop a model regurgitating a memorized secret.
 It removes the machine's operator from your trust boundary: the workload runs in a hardware TEE with encrypted memory, so the hypervisor and host OS cannot read prompts, responses, or weights. The part that makes it more than a promise is remote attestation — a hardware-signed statement of exactly what code and firmware are running, which is a verifiable claim where a DPA is only a contractual one. The pieces are shipping: NVIDIA Confidential Computing on Hopper, Blackwell, and Rubin protects GPU execution, memory, and register state with attestation via the NVIDIA Remote Attestation Service, a CPU TEE (Intel TDX, AMD SEV-SNP, AWS Nitro Enclaves) covers the host, and the two attestations compose; Anthropic and Pattern Labs published a Confidential Inference design in June 2025 using encrypted memory, a TPM root of trust, and a minimal model loader in an isolated VM, motivated in both directions — user data hidden from the operator, and model weights hidden from an attacker who owns the datacenter. What it does *not* buy is anything in Q1-Q5 of this file: attestation proves what code is running, not that the code is harmless, so memorization, extraction, and embedding inversion are untouched — a confidential enclave will faithfully regurgitate a memorized SSN. The crisp framing is that it removes the operator from the trust boundary but not the model, which is why it slots in as a third option beside "trust the DPA" and "self-host" for regulated data that must reach a hosted model, and not as a replacement for pseudonymization, deduplication, or canary gates.
+
+**Q: How do PIPL and DPDP change an LLM architecture in ways GDPR does not?**
+**Short:** GDPR mostly constrains what you may do with personal data and is satisfiable with policy and a DPA, while PIPL and DPDP can constrain where the bytes physically are, which decides your inference topology.
+GDPR is largely a purpose-and-lawful-basis regime, so a DPA plus the redaction and retention pipeline in this file satisfies most of it without changing where compute runs. PIPL is different in kind: moving personal information out of China requires one of exactly three pathways — a CAC security assessment, the China standard contract, or certification — and the pathway is selected by volume, with transfers covering sensitive personal information of more than 10,000 individuals or general personal information of more than 1,000,000 individuals needing the standard-contract filing or certification. Two traps sit in the detail: the China standard contract is the CAC's own template and is not interchangeable with the EU SCC, and it must be filed with the provincial-level CAC alongside a personal information protection impact assessment. India's DPDP is at a different stage — the Act is in force and the DPDP Rules 2025 notified on 2025-11-13 operationalise most delegated provisions on an 18-month runway to mid-May 2027, but cross-border transfer restrictions, Significant Data Fiduciary designation and localisation all await separate notification, so the honest position is that the localisation question is open rather than settled. The architectural consequence in both cases is that you pin inference by region and not merely storage, because the prompt crosses the border at inference time, and you treat prompt and completion logs as personal data from day one since they are the largest uncontrolled copy you hold.
+
+**Q: Why is region-pinned storage insufficient for a data-residency requirement on an LLM system?**
+**Short:** The prompt crosses the border at inference time, not at save time, so residency is a property of where the model runs and of the logging stack, not of the database region.
+Because the regulated bytes move when the request is served, not when a row is written. A design that keeps its database in-region but calls a model endpoint elsewhere has already transferred the personal data in the prompt, and usually a second time into the provider's own logs. Three places leak in practice and none of them is the primary datastore: the inference endpoint itself, which must be a region-pinned deployment rather than a global one; the observability stack, where prompts and completions land as trace attributes and are typically retained longer and replicated more widely than the application data they came from; and the provider's sub-processor chain, which can move the workload without changing anything you control. So residency work is mostly routing and logging work — pin the model deployment per jurisdiction, scrub or region-partition the trace store, and treat the provider region and sub-processor list as first-class configuration rather than a procurement footnote. Build the "which regime applies to this request" decision as an abstraction from the start, for the same reason you abstract the model: hard-coding one regime is the identical mistake, and retrofitting a region boundary is a data migration plus a re-audit rather than a config change.
 
 ---
 

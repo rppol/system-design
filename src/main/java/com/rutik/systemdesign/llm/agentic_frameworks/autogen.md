@@ -6,10 +6,12 @@
 
 AutoGen (Microsoft Research) is a multi-agent framework where agents collaborate through conversational message passing. Unlike frameworks that define explicit workflows, AutoGen agents communicate by exchanging text messages — each agent processes incoming messages and generates responses. The key innovation: `UserProxyAgent` can automatically execute code written by `AssistantAgent`, creating a feedback loop where AI writes code, the agent runs it, and errors are automatically fed back for correction.
 
-AutoGen 0.2 established the conversation-based paradigm. AutoGen 0.4 (released late 2024) introduced a complete rewrite with an actor model (`AgentChat` and `Core` APIs), better async support, and cleaner multi-agent patterns.
+**AutoGen's successor is Microsoft Agent Framework 1.0**, which reached general availability on 2026-04-03 as the single, direct successor to both AutoGen and Semantic Kernel (docs: https://learn.microsoft.com/en-us/agent-framework/overview/). Microsoft describes it as combining AutoGen's simple agent/multi-agent abstractions with Semantic Kernel's enterprise-grade plumbing (session-based state, type safety, filters, telemetry), plus new graph-based workflows. AutoGen continues to receive bug fixes and security patches but is no longer where new capability lands; Microsoft publishes an AutoGen -> Agent Framework migration guide. This file now documents AutoGen as **lineage**: the conversational-agent and group-chat orchestration ideas that carried forward, and what breaks if you migrate an existing `autogen-agentchat` 0.7.x codebase. For the sibling migration, see [Semantic Kernel](semantic_kernel.md); for Magentic-One (Microsoft Research's orchestrator built on AutoGen v0.4), see [Magentic-One and AutoGen v0.4](../multi_agent_systems/magentic_one_and_autogen_v04.md).
 
-**Current version**: pyautogen 0.4.x (2024)
-**Production adoption signal**: Microsoft-backed, used in internal Microsoft products. Widely adopted for code generation automation, research assistants, and enterprise AI workflows.
+AutoGen 0.2 established the conversation-based paradigm and shipped as the `pyautogen` package. AutoGen 0.4 previewed in fall 2024 and reached general availability on 2025-01-17, introducing a complete rewrite with an actor model (`AgentChat` and `Core` APIs), better async support, and cleaner multi-agent patterns — distributed as separate `autogen-agentchat` / `autogen-core` / `autogen-ext` packages, not as a new `pyautogen` version. (`pyautogen` itself still exists today, but only as a thin proxy package that installs `autogen-agentchat` under its own, unrelated version number — it was never versioned "0.4.x".)
+
+**Current version**: `autogen-agentchat` 0.7.5 (2025-09-30) — the last widely-used release line before the framework moved into Agent Framework
+**Production adoption signal**: Microsoft-backed, used in internal Microsoft products before the Agent Framework transition. Widely adopted historically for code generation automation, research assistants, and enterprise AI workflows; new work should target Microsoft Agent Framework instead.
 
 ---
 
@@ -486,16 +488,19 @@ Code that raises uncaught exceptions returns a stack trace to the LLM. Most mode
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `pyautogen` | Framework | `pip install pyautogen` |
-| `autogen-agentchat` | 0.4 API | New AgentChat + Core API |
+| `autogen-agentchat` | Framework (current line) | `pip install autogen-agentchat`; the canonical 0.4+ package name — `pyautogen` was never versioned "0.4.x" |
+| `autogen-core` | Actor runtime | Low-level message-passing runtime `AgentChat` is built on |
 | `autogen-ext` | Extensions | Model clients, tools, executors |
+| `agent-framework` | Successor | Microsoft Agent Framework 1.0 — where new Microsoft-stack agent work goes |
 | Docker | Code execution sandbox | Required for production code execution |
-| `LangSmith` | Observability | AutoGen uses LangChain internally in 0.2 |
+| OpenTelemetry | Observability | `autogen-core` emits OTel spans natively; no LangChain dependency required |
 
 **Version notes:**
-- AutoGen 0.2.x: original, widely documented; `ConversableAgent`, `GroupChat`
-- AutoGen 0.4.x (late 2024): complete rewrite; `AgentChat` API, `Core` API, better async; breaking changes from 0.2
-- Install: `pip install "pyautogen>=0.4"` for new API, `pip install "pyautogen<0.3"` for 0.2
+- AutoGen 0.2.x: original, widely documented; `ConversableAgent`, `GroupChat`; distributed as `pyautogen`
+- AutoGen 0.4.x (previewed fall 2024, GA 2025-01-17): complete rewrite; `AgentChat` API, `Core` API, better async; breaking changes from 0.2; distributed as `autogen-agentchat`/`autogen-core`/`autogen-ext`, not a new `pyautogen` version
+- `autogen-agentchat` 0.7.x (current: 0.7.5, 2025-09-30): last widely-used release line
+- Microsoft Agent Framework 1.0 (2026-04-03): direct successor to both AutoGen and Semantic Kernel
+- Install: `pip install "autogen-agentchat>=0.4"` for the current API; the `pyautogen` name still works as a proxy but installs the same `autogen-agentchat` code under its own version numbering
 
 ---
 
@@ -571,6 +576,14 @@ Set explicit termination conditions using is_termination_msg callbacks, maximum 
 **Q: How does AutoGen's code execution sandbox work and what are its security implications?**
 **Short:** Docker isolates execution by default; harden it with read-only mounts, resource limits, and no network, and never use the local executor in production.
 AutoGen executes generated code in a Docker container by default (DockerCommandLineCodeExecutor), providing process isolation. Security considerations: (1) mount only necessary directories read-only; (2) set resource limits (CPU, memory, network); (3) disable network access unless explicitly needed; (4) never run with host filesystem access in production. The local executor (LocalCommandLineCodeExecutor) is faster but runs code directly on the host — use only in development.
+
+**Q: What replaces AutoGen's core abstractions in Microsoft Agent Framework?**
+**Short:** `Agent` (with a chat client like `OpenAIChatClient`) replaces `AssistantAgent`, and graph-based Workflows replace `GroupChat`.
+`AssistantAgent` maps to `agent_framework.Agent`, constructed with a `client` (e.g. `OpenAIChatClient`) instead of a `model_client`/`llm_config` dict. `UserProxyAgent`'s code-execution role is now a tool the agent calls rather than a distinct conversational participant. The bigger shift is multi-agent: `GroupChat`/`RoundRobinGroupChat`/`SelectorGroupChat` orchestrate through an event-driven actor runtime (`autogen-core`'s message bus), while Agent Framework orchestrates through explicit, graph-based Workflows — a data-flow model closer to LangGraph than to AutoGen's conversation loop. Teams already familiar with AutoGen's `GraphFlow` extension find this transition easier since it is the same mental model formalized.
+
+**Q: What breaks when you migrate an existing `autogen-agentchat` 0.7.x codebase to Agent Framework?**
+**Short:** Single-agent code ports almost directly, but multi-agent code needs a rewrite from event-driven message passing to data-flow workflows.
+Microsoft's own migration guide frames it in two tiers: single-agent migration is straightforward — similar APIs, so `AssistantAgent` -> `Agent` and `model_client` -> `client` swaps are close to mechanical. Multi-agent migration is not a rename — it requires rethinking the architecture from AutoGen's event-driven actor model (agents as mailboxes exchanging typed messages via `autogen-core`'s runtime) to Agent Framework's data-flow Workflows (explicit graph edges, executor-local vs. shared state, and built-in checkpointing at superstep boundaries with no manual state management). Observability setup also changes: AutoGen wires OpenTelemetry manually per-runtime, while Agent Framework offers zero-code instrumentation via environment variables alongside the same manual path. Budget migration time proportional to how much multi-agent coordination logic the codebase has, not to its total line count.
 
 ---
 

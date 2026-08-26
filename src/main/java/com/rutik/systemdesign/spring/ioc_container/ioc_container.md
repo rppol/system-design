@@ -61,6 +61,14 @@ Spring MVC creates a **child** ApplicationContext (servlet context) from a **par
 - Child can see parent beans; parent cannot see child beans
 - Spring Boot collapses this to a single context unless explicitly configured otherwise
 
+### BeanRegistrar (Spring Framework 7+)
+- `org.springframework.beans.factory.BeanRegistrar` (`@since 7.0`) — a functional interface with one method: `void register(BeanRegistry registry, Environment env)`
+- Applied either via `@Import(MyBeanRegistrar.class)` on a `@Configuration` class (`@Conditional` on the `@Import` works normally), or programmatically via `GenericApplicationContext.register(BeanRegistrar...)`
+- `BeanRegistry` exposes `registerBean(Class<?>)`, `registerBean(String, Class<?>)`, and a spec overload `registerBean(String, Class<?>, Consumer<Spec>)` whose `Spec` sets `.prototype()`, `.lazyInit()`, `.description(String)`, and `.supplier(Function<SupplierContext, T>)` — the supplier pulls collaborators with `SupplierContext.bean(Class<T>)` / `.bean(String)`
+- The modern, type-safe replacement for `ImportBeanDefinitionRegistrar` / `BeanDefinitionRegistryPostProcessor` in the common case: registration is plain Java control flow against `BeanRegistry`, never a hand-built `BeanDefinition`
+- Registers without reflection under Spring AOT processing and GraalVM native image, supplier form included — a real advantage over the reflection-heavy `BeanDefinitionRegistryPostProcessor` path
+- Kotlin gets a dedicated `BeanRegistrarDsl`
+
 ---
 
 ## 5. Architecture Diagrams
@@ -212,6 +220,72 @@ public class MyRegistrar implements ImportBeanDefinitionRegistrar {
     }
 }
 ```
+
+### BeanRegistrar — Registering N Beans from a List, Without a BeanDefinitionRegistryPostProcessor (Spring Framework 7+)
+
+`@Bean` is declarative and static: one method, one bean. Registering one client per entry in a configured list — one `RegionClient` per region, one `DataSource` per shard — needs registration *logic* (a loop over `Environment`), which forces a drop to `BeanDefinitionRegistryPostProcessor` and raw `BeanDefinition` assembly:
+
+```java
+// BROKEN (verbose): a BeanDefinitionRegistryPostProcessor registering N beans by hand.
+// Every constructor argument is wired positionally through BeanDefinitionBuilder, there is no
+// compile-time check that RegionClient even has that constructor, and it runs before Environment
+// is guaranteed populated unless the processor also implements EnvironmentAware.
+@Component
+public class RegionClientRegistrar implements BeanDefinitionRegistryPostProcessor, EnvironmentAware {
+
+    private Environment env;
+
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.env = environment;
+    }
+
+    @Override
+    public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+        int timeoutMs = env.getProperty("app.timeout-ms", Integer.class, 5000);
+        for (String region : env.getProperty("app.regions", String[].class, new String[0])) {
+            BeanDefinition def = BeanDefinitionBuilder
+                .genericBeanDefinition(RegionClient.class)
+                .addConstructorArgValue(region)
+                .addConstructorArgValue(timeoutMs)
+                .getBeanDefinition();
+            registry.registerBeanDefinition(region + "RegionClient", def);
+        }
+    }
+
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) { }
+}
+```
+
+```java
+// FIXED (Spring Framework 7): BeanRegistrar. Environment is a method parameter, not a
+// separately-wired dependency; the supplier resolves collaborators type-safely via
+// SupplierContext.bean(...) instead of a positional constructor-arg list.
+public class RegionClientRegistrar implements BeanRegistrar {
+
+    @Override
+    public void register(BeanRegistry registry, Environment env) {
+        int timeoutMs = env.getProperty("app.timeout-ms", Integer.class, 5000);
+        for (String region : env.getProperty("app.regions", String[].class, new String[0])) {
+            registry.registerBean(region + "RegionClient", RegionClient.class, spec -> spec
+                .description("HTTP client for region " + region)
+                .supplier(context -> new RegionClient(region, timeoutMs,
+                    context.bean(HttpClientFactory.class))));
+        }
+    }
+}
+
+// Wired in exactly like any other configuration import; @Conditional works on the @Import too.
+@Configuration
+@Import(RegionClientRegistrar.class)
+public class RegionClientConfig { }
+
+// Or skip @Configuration entirely and register straight onto the context:
+// ((GenericApplicationContext) ctx).register(new RegionClientRegistrar());
+```
+
+Same outcome, no `BeanDefinition`, no `BeanDefinitionBuilder`, and — because both `registerBean` and the `.supplier(...)` form avoid reflection — it registers cleanly under Spring AOT processing and GraalVM native image, which a hand-rolled `BeanDefinitionRegistryPostProcessor` is not guaranteed to do.
 
 ### Shutdown Hook — Critical for Resource Cleanup
 
@@ -448,6 +522,11 @@ The container publishes: `ContextRefreshedEvent` (refresh complete), `ContextSta
 **Short:** Both implement ApplicationContext identically after startup, differing only in whether definitions come from XML or annotations.
 
 `ClassPathXmlApplicationContext` reads XML files from the classpath and builds `BeanDefinition`s from XML element tags (`<bean>`, `<property>`). `AnnotationConfigApplicationContext` reads `@Configuration` classes and `@Component`-annotated classes (via scanning) and builds `BeanDefinition`s from annotations. Both implement `ApplicationContext` and behave identically after startup. XML config is legacy and rarely used in new code; annotated Java config is the modern standard.
+
+**Q: What is `BeanRegistrar` in Spring Framework 7, and why use it instead of a `BeanDefinitionRegistryPostProcessor`?**
+**Short:** BeanRegistrar is a type-safe functional interface for registering beans in code, without a raw BeanDefinition.
+
+`BeanRegistrar` (`@since 7.0`) is a functional interface with one method, `register(BeanRegistry registry, Environment env)`, applied via `@Import(MyRegistrar.class)` on a `@Configuration` class or by calling `GenericApplicationContext.register(BeanRegistrar...)` directly. `BeanRegistry.registerBean(name, Class, Consumer<Spec>)` exposes `.prototype()`, `.lazyInit()`, `.description(...)`, and `.supplier(...)`, the last of which resolves collaborators via `SupplierContext.bean(...)` — no `BeanDefinitionBuilder`, no hand-built `BeanDefinition`. Reach for it instead of `BeanDefinitionRegistryPostProcessor` whenever registration is *logic* rather than a single static declaration — branching on `Environment`/profile, or looping over a configured list to register one bean per entry, which `@Bean` cannot express without writing N methods. It is also AOT- and GraalVM-native-image-friendly: both the direct and supplier forms register without reflection.
 
 ---
 

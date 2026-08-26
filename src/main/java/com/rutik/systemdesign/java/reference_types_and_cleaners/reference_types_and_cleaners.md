@@ -30,9 +30,9 @@ This module covers what each level buys you: `SoftReference` for memory-sensitiv
 - **`ReferenceQueue` is the notification channel**: pairing a reference with a queue is how code learns, after the fact, that a referent died — polling `get() == null` in a loop is racy and wasteful by comparison.
 - **`WeakHashMap` clears lazily, not at GC time**: the GC nulls the referent immediately, but the dead map *entry* is only expunged from the table on the next `get()`/`put()`/`size()` call.
 - **`ThreadLocalMap` trades a weak key for a strong value**: this stops a `ThreadLocal` *variable* from pinning a `ClassLoader` forever, but does nothing to bound the *value* stored under it.
-- **`Cleaner` is a backstop, not a substitute for `close()`**: it exists to catch what `try-with-resources` misses, on a schedule the GC — not application code — controls.
+- **`Cleaner` is a backstop, not a substitute for `close()`**: it exists to catch what `try-with-resources` misses, on a schedule the GC — not application code — controls [Effective Java Item 8: "Avoid finalizers and cleaners"].
 - **A cleanup action must never reference the object it cleans**: capturing the registered object keeps it strongly reachable, so it never becomes phantom-reachable and the action never fires.
-- **A leak is a reachable object nobody wants anymore**: the GC has no concept of "leaked" memory, only memory some strong path still (wrongly) reaches — leak-hunting is entirely about finding that path.
+- **A leak is a reachable object nobody wants anymore**: the GC has no concept of "leaked" memory, only memory some strong path still (wrongly) reaches — leak-hunting is entirely about finding that path [Effective Java Item 7: "Eliminate obsolete object references"].
 
 ---
 
@@ -63,7 +63,7 @@ Because each level is defined in terms of "not reachable at any stronger level,"
 
 | Strategy | Deterministic? | Runs on | Exceptions | Verdict |
 |----------|-----------------|---------|-------------|---------|
-| `try-with-resources` / explicit `close()` | Yes — exact call site | Calling thread | Propagate normally | Primary mechanism — always prefer this |
+| `try-with-resources` / explicit `close()` | Yes — exact call site | Calling thread | Propagate normally | Primary mechanism — always prefer this [Effective Java Item 9: "Prefer try-with-resources to try-finally"] |
 | `java.lang.ref.Cleaner` [Java 9+] | No — GC-driven, best-effort | Cleaner's own dedicated daemon thread | Isolated per registration | Safety net for forgotten `close()` calls |
 | FFM `Arena.ofConfined()` [JEP 454, Java 22] | Yes — closed by try-with-resources | Calling thread | Propagate normally | Off-heap memory: scope it to an arena rather than a `Cleaner` |
 

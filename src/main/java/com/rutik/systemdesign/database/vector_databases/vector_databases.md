@@ -1,5 +1,20 @@
 # Vector Databases
 
+> **Version anchor — August 2026.** **pgvector 0.8.x** is the current extension line
+> (0.8.0, November 2024, added **iterative index scans** — `hnsw.iterative_scan` /
+> `ivfflat.iterative_scan`, the fix for the classic overfiltering problem where a
+> filtered ANN query returns fewer rows than `LIMIT` asked for — plus the `sparsevec`
+> type for BM25/SPLADE-style embeddings; 0.8.2, February 2026, fixed a parallel-HNSW
+> buffer overflow, CVE-2026-3172, so anything older than 0.8.2 should be patched).
+> **Redis 8** ships a native HNSW-backed **vector set** type (`VADD`/`VSIM`) with
+> attribute filtering applied during the graph walk — see
+> [`redis_internals`](../redis_internals/redis_internals.md). **Cassandra 5.0** has a
+> `VECTOR` CQL type with an SAI-backed HNSW ANN index — see
+> [`wide_column_databases`](../wide_column_databases/wide_column_databases.md).
+> **Elasticsearch 9.5** carries `dense_vector` with BBQ quantization — see
+> [`elasticsearch_internals`](../elasticsearch_internals/elasticsearch_internals.md).
+> Behaviour that depends on a version is tagged inline like `[0.8]`.
+
 ## 1. Concept Overview
 
 Vector databases store and query high-dimensional vector embeddings — dense numerical representations of text, images, audio, and other data produced by machine learning models. They enable semantic similarity search: finding items that are conceptually similar even when they share no keywords. This is the core technology behind RAG (Retrieval-Augmented Generation), semantic search, recommendation systems, and image search.

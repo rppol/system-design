@@ -687,18 +687,23 @@ A migration adding an index to a 40-million-row `events` table used `CREATE INDE
 
 A contributor's `git config core.autocrlf=true` silently rewrote every migration file's line endings from LF to CRLF on checkout. Flyway's checksum is sensitive to raw byte content, so the entire migration set showed as "changed" in CI even though no SQL logic differed, blocking merges team-wide until `.gitattributes` was added to force LF for `db/migration/**`.
 
+### Pitfall 7: Migrations Silently Stop Running After Upgrading to Boot 4.0
+
+A team upgraded from Spring Boot 3.5 to 4.0 by bumping the parent version and leaving the existing `flyway-core`/`liquibase-core` dependency in place, exactly as every prior Boot upgrade had worked. The application started cleanly, `flyway_schema_history`/`DATABASECHANGELOG` simply stopped gaining new rows, and nobody noticed until a later deploy's entity change failed `ddl-auto=validate` against a schema three migrations behind. Boot 4 modularized its starters: `FlywayAutoConfiguration`/`LiquibaseAutoConfiguration` now activate only when `spring-boot-starter-flyway` or `spring-boot-starter-liquibase` is on the classpath, so a bare `flyway-core`/`liquibase-core` dependency that used to be sufficient on Boot 3.x no longer triggers autoconfiguration at all — no error, no warning, just a migration step that quietly never runs. The fix is to add the new starter dependency as part of any Boot 4.0 upgrade, not just bump the BOM version.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Role |
 |---|---|
-| Flyway Community 10.x | SQL-first migrations, `flyway_schema_history`, callbacks; the paid Teams and Enterprise tiers add undo migrations, drift detection and dry-run scripting |
-| Liquibase OSS 4.x | Declarative changesets, built-in rollback, preconditions |
+| Flyway Community 12.x | SQL-first migrations, `flyway_schema_history`, callbacks; the paid Teams and Enterprise tiers add undo migrations, drift detection and dry-run scripting |
+| Liquibase OSS 5.x | Declarative changesets, built-in rollback, preconditions |
 | Liquibase Pro | Quality/policy checks, structured drift reporting |
+| Spring Boot `spring-boot-starter-flyway` / `spring-boot-starter-liquibase` | Required on the classpath since Boot 4.0 — a bare `flyway-core`/`liquibase-core` dependency no longer triggers autoconfiguration (Section 10, Pitfall 7) |
 | Spring Boot `spring-boot-starter-data-jpa` | Auto-wires `EntityManagerFactory` as `@DependsOn` the migration bean |
-| Testcontainers 1.20.x | Real Postgres/MySQL in CI for migration-apply tests |
-| JUnit 5.10 | Test runner driving the migration CI gate |
+| Testcontainers 2.0.x | Real Postgres/MySQL in CI for migration-apply tests |
+| JUnit Jupiter 6.0.x | Test runner driving the migration CI gate |
 | pt-online-schema-change / gh-ost | Online DDL for large-table `ALTER`s outside expand-contract's scope |
 | Atlas (Ariga) | Schema-as-code alternative with diff-based migration generation |
 | DBeaver / DataGrip | Manual review of generated SQL/changelog diffs before merge |
@@ -859,7 +864,7 @@ Each tenant gets its own schema, and the same versioned migration set runs once 
 
 ### Scenario
 
-A payments platform needs to standardize `orders.customer_phone` to E.164 format for a new SMS notification vendor integration — a rename plus a data transformation, not a pure additive change. The `orders` table holds 80,000,000 rows on PostgreSQL 16, served by 12 Kubernetes replicas on a rolling deployment (`maxUnavailable=25%`, `maxSurge=25%`, full rollout roughly 8 minutes), running Spring Boot 3.3 on Java 17 with Flyway 10.x. Checkout traffic is continuous, so zero read/write downtime is a hard requirement, and every migration pull request must pass a Testcontainers-backed CI gate against PostgreSQL 16 before merge.
+A payments platform needs to standardize `orders.customer_phone` to E.164 format for a new SMS notification vendor integration — a rename plus a data transformation, not a pure additive change. The `orders` table holds 80,000,000 rows on PostgreSQL 16, served by 12 Kubernetes replicas on a rolling deployment (`maxUnavailable=25%`, `maxSurge=25%`, full rollout roughly 8 minutes), running Spring Boot 4.1 on Java 25 with Flyway 12.x. Checkout traffic is continuous, so zero read/write downtime is a hard requirement, and every migration pull request must pass a Testcontainers-backed CI gate against PostgreSQL 16 before merge.
 
 ### Architecture Overview
 

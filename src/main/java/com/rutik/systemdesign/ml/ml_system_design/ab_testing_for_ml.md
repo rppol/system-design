@@ -840,7 +840,7 @@ FWER = 1 - (1 - alpha)^k
 | Experimentation Platform | LaunchDarkly | Feature flags + experiments |
 | Experimentation Platform | Statsig | ML-team-friendly; auto stats, sequential testing. Acquired by OpenAI (Sept 2025) |
 | Experimentation Platform | Eppo | Warehouse-native; BH correction; CUPED built-in. Acquired by Datadog (May 2025), now "Eppo by Datadog" |
-| In-House Platform | Most large tech companies | Google's overlapping-experiment infrastructure (Tang et al., KDD 2010), Meta's PlanOut (open-sourced 2014), Airbnb's ERF |
+| In-House Platform | PlanOut | Meta's experiment-definition language, open-sourced 2014; the reference in-house design alongside Google's overlapping-experiment infrastructure (Tang et al., KDD 2010) and Airbnb's ERF |
 | Statistical Libraries | scipy.stats | Gold standard for statistical tests |
 | Statistical Libraries | statsmodels | Power calculations, regression, ANOVA |
 | Statistical Libraries | PyMC | Bayesian A/B testing |

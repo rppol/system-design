@@ -14,6 +14,36 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 
 ---
 
+## Intuition
+
+Picture the gateway as the reception desk of a large office building with twenty separate
+companies (services) inside. Every visitor enters through the same lobby, shows ID (JWT),
+gets a visitor badge (trace ID and forwarded headers), and reception directs them to the
+right floor. Reception does not do any of the companies' actual work — it does not process
+orders or handle payments — it only decides which door to open and how fast to let people
+through. If reception itself is slow or falls over, no visitor reaches any company, no
+matter how healthy each company is inside.
+
+The mental model that keeps a gateway design honest is: every filter in the chain runs on
+the same tiny pool of threads that serves every request in the building. With Reactor Netty
+this pool is `max(cores, 4)` threads, not one thread per visitor — so a single filter that
+blocks (a synchronous JWKS fetch, a blocking DB call) does not just slow one visitor down,
+it stops the reception desk itself, and every visitor behind them, regardless of which
+company they were headed to. This is why the design keeps circling back to "never block the
+event loop" — it is not a style preference, it is the one invariant a reactive gateway
+cannot survive violating.
+
+The second half of the mental model is where failure should land. A gateway sits between
+the internet and services that are actually valuable — orders, payments, inventory. Its own
+dependencies (the Redis rate limiter, service discovery) are conveniences that make the
+building run smoother, not requirements for the building to open. So the design treats
+every gateway-side dependency as something that should degrade to "let more traffic through
+and page someone" rather than "stop letting anyone in" — fail-open with alerts, never
+fail-closed with silence. A gateway that trades a temporarily loose rate limit for a hard
+outage has made the wrong trade every time.
+
+---
+
 ## 1. Requirements Clarification
 
 **Functional requirements:**
@@ -385,6 +415,133 @@ public class FallbackController {
 }
 ```
 
+### 4.7 BROKEN/FIX — Widening Retry to POST Without Idempotency
+
+`RetryGatewayFilterFactory` defaults `methods` to `{GET}` for exactly this reason —
+retrying a write is dangerous unless the write is idempotent. The order-service route in
+§4.1 never calls `.setMethods(...)`, so it silently inherits the safe GET-only default even
+though at a glance it looks incomplete. The failure mode is when someone "fixes" that.
+
+```java
+// BROKEN: added .setMethods(...) to also retry POST, reasoning "we want checkout retries
+// too" -- but a BAD_GATEWAY can mean the backend processed the write and only the
+// response was lost, so the retry replays an already-successful charge
+.route("payment-service", r -> r
+    .path("/api/v1/payments/**")
+    .filters(f -> f
+        .circuitBreaker(config -> config.setName("payment-service-cb")
+            .setFallbackUri("forward:/fallback/payments"))
+        .retry(r2 -> r2.setRetries(2)
+            .setMethods(HttpMethod.GET, HttpMethod.POST)   // POST added "for completeness"
+            .setStatuses(HttpStatus.BAD_GATEWAY, HttpStatus.SERVICE_UNAVAILABLE)))
+    .uri("lb://payment-service"))
+```
+
+```java
+// FIX: keep POST out of the retry filter's methods; require callers to send an
+// Idempotency-Key so the BACKEND can safely dedupe if the CLIENT retries instead
+.route("payment-service", r -> r
+    .path("/api/v1/payments/**")
+    .filters(f -> f
+        .circuitBreaker(config -> config.setName("payment-service-cb")
+            .setFallbackUri("forward:/fallback/payments"))
+        .retry(r2 -> r2.setRetries(2)               // methods left at default: GET only
+            .setStatuses(HttpStatus.BAD_GATEWAY, HttpStatus.SERVICE_UNAVAILABLE))
+        .filter((exchange, chain) -> {
+            var req = exchange.getRequest();
+            if (req.getMethod() == HttpMethod.POST
+                    && req.getHeaders().getFirst("Idempotency-Key") == null) {
+                exchange.getResponse().setStatusCode(HttpStatus.BAD_REQUEST);
+                return exchange.getResponse().setComplete();
+            }
+            return chain.filter(exchange);
+        }))
+    .uri("lb://payment-service"))
+```
+
+Retries are safe for GET because re-fetching is free; for a write, the only safe retry is
+one the backend can recognize and deduplicate, which is what `Idempotency-Key` buys — the
+gateway itself has no way to know if a lost response means "not processed" or "processed,
+ack lost."
+
+### 4.8 Global Default Filters and CORS
+
+Route-specific filters (§4.1) apply per-route; `default-filters` apply to every route
+without repeating them, and `globalcors` centralizes CORS instead of scattering
+`@CrossOrigin` across 20 backend services:
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          default-filters:
+            - AddResponseHeader=X-Frame-Options, DENY
+            - DedupeResponseHeader=Access-Control-Allow-Origin
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 10s
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "https://app.example.com"
+                allowedMethods: [GET, POST, PUT, DELETE]
+                allowCredentials: true
+```
+
+`response-timeout: 10s` matters more than it looks: it is the gateway's own ceiling on how
+long it will hold a connection open waiting for a backend, independent of anything the
+backend's own timeout is configured to. Without it, a hung backend holds a gateway
+connection (and the caller's connection) open indefinitely — a slow-leak toward the pool
+exhaustion scenario in §8's Runbook 5, not a fast failure.
+
+### 4.9 Custom GatewayFilterFactory
+
+Gateway ships no built-in request-body-size limit for the WebFlux flavour; writing one is a
+five-minute `AbstractGatewayFilterFactory` subclass, and it is the template for any
+route-configurable custom behavior:
+
+```java
+@Component
+public class RequestSizeLimitGatewayFilterFactory
+        extends AbstractGatewayFilterFactory<RequestSizeLimitGatewayFilterFactory.Config> {
+
+    public RequestSizeLimitGatewayFilterFactory() { super(Config.class); }
+
+    @Override
+    public GatewayFilter apply(Config config) {
+        return (exchange, chain) -> {
+            long contentLength = exchange.getRequest().getHeaders().getContentLength();
+            if (contentLength > config.getMaxSizeBytes()) {
+                exchange.getResponse().setStatusCode(HttpStatus.PAYLOAD_TOO_LARGE);
+                return exchange.getResponse().setComplete();
+            }
+            return chain.filter(exchange);
+        };
+    }
+
+    @Override
+    public List<String> shortcutFieldOrder() { return List.of("maxSizeBytes"); }
+
+    public static class Config {
+        private long maxSizeBytes = 5_242_880; // 5 MB default
+        public long getMaxSizeBytes() { return maxSizeBytes; }
+        public void setMaxSizeBytes(long v) { maxSizeBytes = v; }
+    }
+}
+```
+
+```yaml
+# usage: shortcut notation resolves against shortcutFieldOrder
+filters:
+  - RequestSizeLimit=1048576   # 1 MB for this route
+```
+
+The factory name is derived by convention: `RequestSizeLimitGatewayFilterFactory` registers
+as `RequestSizeLimit` in route YAML — Gateway strips the `GatewayFilterFactory` suffix.
+Component-scan picks it up automatically; no manual registration needed.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -407,6 +564,17 @@ public class FallbackController {
 | Nginx + OpenResty | Limited — Lua scripts | Lua | None | Low, very fast |
 | AWS API Gateway | Config only | N/A | None | Zero ops |
 
+### Operational reality: the train supports a range; the BOM manages one version
+
+The 2025.1 "Oakwood" train supports Spring Boot **4.0.x and 4.1.x**, the latter from
+2025.1.2 onward, so a Gateway on Boot 4.1 GA (2026-06-10) is a supported combination.
+What each patch is *built against* is a single Boot patch — 2025.1.3 (2026-08-20) is
+based on Boot 4.0.8 — and that is what `spring-cloud-dependencies` manages, so BOM
+import order decides which Boot version you actually run. Two official sources currently
+disagree here: the `spring-cloud-release` wiki lists Oakwood against 4.0.x alone, while
+the project page's compatibility matrix lists both; the wiki is stale. See §8(d) for the
+operational check this forces before any Boot version bump.
+
 ---
 
 ## 6. Real-World Implementations
@@ -418,6 +586,10 @@ public class FallbackController {
 **Stripe — "Scaling your API with rate limiters":** Stripe published the design this section's limiter is modelled on: token buckets held in Redis, and *four different* limiter types layered together — a request-rate limiter, a concurrent-request limiter, a fleet-usage load shedder, and a worker-utilization load shedder. The point worth stealing is the last two: rate limits protect against one noisy client, but load shedding protects against *everyone* being reasonable at once, which no per-client limit can catch. This design only implements the first.
 
 **AWS API Gateway + Lambda authorizers:** the counterexample to §4.2's fail-open choice. A Lambda authorizer that errors or exceeds its 10-second limit produces `AUTHORIZER_FAILURE` and a 500 — the request is rejected, never forwarded. That is fail-**closed**, and it is the right default for a managed service that cannot know whether your backend re-validates. Fail-open is only defensible here because §4.2 explicitly assumes backends validate the JWT independently; drop that assumption and the fail-open branch becomes an authentication bypass.
+
+**Envoy (Lyft):** Envoy began inside Lyft to solve exactly this class of problem — dozens of services, no consistent place to apply routing, retries, and observability — and was open-sourced in 2016, later becoming a CNCF graduated project and the default data plane for Istio. Its defining idea is the xDS API family (LDS/RDS/CDS/EDS): configuration is pushed to a running fleet of proxies over a streaming gRPC API rather than reloaded from a file, so routes update in milliseconds with zero connection drops. `RouteDefinitionRepository` + `RefreshRoutesEvent` (§11) is the same idea at much smaller scale — a database-backed route source and an in-process refresh event instead of a dedicated control-plane protocol. A team that outgrows polling a database for route changes is, in effect, rebuilding a narrow slice of xDS.
+
+**Finagle (Twitter/X):** Twitter's protocol-agnostic RPC framework popularized a filter-chain model strikingly close to Gateway's `GlobalFilter`/`GatewayFilter` split — a `Service` wraps a `Filter` stack where each filter can short-circuit, transform, or forward, and cross-cutting concerns (retries, timeouts, load balancing, circuit breaking) compose as filters rather than being baked into the transport. Finagle's `Future`-based composition is also one of the lineages that popularized the "never block the request thread" discipline this design leans on so heavily in §4.3.
 
 ---
 
@@ -475,6 +647,30 @@ and confirm every span has a downstream child span in the target service.
 - Diagnose: check if any filter decorates `ServerHttpResponse.writeWith()` without a size guard; use MAT or heap dump analysis for `DataBuffer` retention roots
 - Mitigate: identify and disable the buffering filter; add a `contentLength > 8192` guard to any body-reading filter; set JVM `-Xmx` with 2-3× headroom above expected reactive steady-state heap
 - Resolve: load test with file download traffic before re-enabling the filter
+
+**Runbook 5: Upstream connection pool exhaustion**
+- Symptom: `reactor.netty.connection.provider.pending.connections` rising past 0 sustained; P99 latency climbing without a corresponding CPU or backend latency increase
+- Diagnose: check `pool.max-connections` against the Little's Law math in §10; check whether a single slow backend (elevated `gateway.request.duration` for one route) is holding connections open longer than expected
+- Mitigate: temporarily raise `pool.max-connections` via a config bump (requires restart unless externalized) or shed load on the slow route by tightening its circuit breaker `sliding-window-size`; verify `pool.type=fixed` is actually set — an accidental revert to `elastic` masks the symptom by silently removing the backpressure signal
+- Resolve: after the slow backend recovers, confirm pending connections return to 0; add an alert on `pending.connections > 0 for 2m` so this is caught before P99 degrades
+
+**Runbook 6: JWKS key rotation causes a wave of 401s**
+- Symptom: `gateway.request.rate_limited` unaffected but 401 rate spikes across all authenticated routes simultaneously, correlated with an identity-provider key rotation event
+- Diagnose: check `jwksCache` (§4.3) TTL — `expireAfterWrite(5m)` / `refreshAfterWrite(4m)` means a rotation can be visible for up to 5 minutes before the cache refreshes; confirm the new key ID (`kid`) appears in gateway logs at TRACE
+- Mitigate: nothing to do operationally if within the 5-minute window — this is expected staleness, not an outage; if the IdP rotated without publishing the new key to JWKS in advance, escalate to the IdP team rather than restarting the gateway, which would not fix a genuinely missing key
+- Resolve: confirm 401 rate returns to baseline within 5 minutes of rotation; if it does not, the JWKS endpoint itself may be unreachable — check `jwksCache` refresh failures in logs
+
+### (d) Pre-Deployment Version Compatibility Check
+
+Before bumping either Spring Boot or the Spring Cloud release train, confirm the pairing
+against the Spring Cloud compatibility matrix (not just Boot's release notes) — Gateway
+5.x ships inside the Cloud train, and the train declares a *range* of supported Boot
+generations while each patch is built against one of them (§5). Assert on the **resolved**
+Boot version, not the declared one, since BOM import order is what changes it. A green
+build on a mismatched pair still fails at runtime with
+`NoSuchMethodError`/`NoClassDefFoundError` on classes Gateway's autoconfiguration expects,
+because the mismatch is binary, not source, incompatibility. See War Story 4 for what this
+looks like in canary.
 
 ---
 
@@ -549,6 +745,18 @@ Early design used a per-JVM `AtomicLong` token bucket instead of Redis. With 4 g
 
 Fix: move to Redis-backed `RedisRateLimiter` which uses a Lua script to atomically decrement a shared counter. Per-instance counters are fundamentally broken for distributed rate limiting regardless of how precise they are locally.
 
+### War Story 4: Boot Bumped Ahead of the Spring Cloud Train — Gateway Would Not Start
+
+A team upgraded `spring-boot-starter-parent` to a newer Boot patch during a routine dependency-bump sprint, without checking whether the pinned `spring-cloud-dependencies` BOM supported it. The build compiled clean — the mismatch is a runtime binary-compatibility issue, not a compile-time one — but every gateway instance failed to start in the canary environment with `NoSuchMethodError` inside `RouteLocatorBuilder`, because the newer Boot's autoconfiguration classes had shifted in ways the older Cloud release did not expect.
+
+**Impact:** 40-minute delayed rollout (caught in canary, never reached production) plus most of a day tracking down that the fix was a Cloud BOM version bump, not a code change. **Fix:** pin Boot and Cloud versions together from the Spring Cloud release train's compatibility table (§5, §8(d)) rather than the Boot release notes alone, and add a CI check that fails the build if the two BOM versions are not a documented-compatible pair.
+
+### War Story 5: Retry Filter Widened to POST — Duplicate Payment Charges
+
+During an incident-response cleanup, an engineer noticed `payment-service` returned occasional `BAD_GATEWAY` errors during backend deploys and added `.setMethods(HttpMethod.GET, HttpMethod.POST)` to the retry filter so checkout requests would "retry through" the blip, without adding an idempotency check (§4.7). Over the following two weeks, 340 customers were charged twice for the same order — the backend had processed the original request and returned a slow response that the gateway's connection timeout treated as `BAD_GATEWAY`, triggering a retry that reached a now-healthy backend instance and processed the charge again.
+
+**Impact:** 340 duplicate charges, roughly $28,000 in refunds, and a week of manual reconciliation against payment-processor logs to identify every affected order. **Fix:** reverted the retry filter to GET-only per §4.7, and required an `Idempotency-Key` header on all payment POST requests, checked at the gateway before forwarding and deduplicated by the backend using the key as a database unique constraint.
+
 ---
 
 ## 10. Capacity Planning
@@ -585,6 +793,46 @@ JVM heap:                       2-4 GB handles 50k req/sec in reactive model
 Redis memory for rate limiter:  10,000 active users x 200 bytes = ~2 MB (negligible)
 Redis connections (Lettuce):    single multiplexed connection by default; use small pool
                                 (8-16) for pipelined workloads at 50k+ ops/sec
+```
+
+### TLS termination overhead
+
+```
+TLS handshake (session resumption, TLS 1.3, 1-RTT): ~1-2ms CPU per new connection
+Steady-state connections (Little's Law, above): ~1,000 in-flight, mostly HTTP/1.1
+  keep-alive or HTTP/2 multiplexed -> handshake cost amortizes across many requests
+  per connection, not paid per-request
+New-connection rate (rough estimate, 5% of requests open a fresh TCP+TLS session):
+  50,000 x 0.05 = 2,500 new connections/sec
+TLS CPU budget: 2,500 x 1.5ms = 3.75 core-seconds/sec of handshake work -> ~4 cores of
+  a 16-core node just for handshakes if session resumption ever regresses; monitor
+  `tls.handshake.duration` and treat a rising rate of full (non-resumed) handshakes as
+  a client-population or load-balancer config problem, not gateway capacity
+```
+
+### GC pause budget
+
+```
+P99 gateway overhead target (§1): <= 10ms
+G1GC default target pause: 200ms -- unacceptable if it lands inside the P99 window
+Gateway JVM flag: -XX:MaxGCPauseMillis=50 keeps worst-case pause under half the P99
+  budget, paid for in slightly more frequent minor collections (cheap on a 2-4 GB
+  reactive heap that is mostly short-lived DataBuffers)
+```
+
+### Netty direct memory budget
+
+```
+Reactor Netty pools DataBuffers off-heap (direct memory) by default for zero-copy I/O
+Default -XX:MaxDirectMemorySize: matches -Xmx if unset -- easy to exhaust silently,
+  since a direct-memory OOM (OutOfDirectMemoryError) does not show up in a heap dump
+  or an -Xmx alert the way the leak in War Story 2 did
+Per-connection buffer estimate: ~64 KB (Netty's default ByteBufAllocator chunk slice)
+At 1,500 max-connections (pool.max-connections, §2): 1,500 x 64 KB = ~96 MB direct
+  memory floor just for connection buffers, before any request/response body buffering
+Set explicitly: -XX:MaxDirectMemorySize=512m and alert on `netty.direct.memory.used`
+  approaching it -- this is the guard that turns a buffering regression into a bounded,
+  visible allocation failure on one request instead of a process-killing crash
 ```
 
 ---
@@ -630,3 +878,31 @@ A: It depends on the trust model. In a gateway-only auth model, the gateway vali
 **Q: How do you debug why a specific request is being routed incorrectly?**
 
 A: Enable `logging.level.org.springframework.cloud.gateway=TRACE` to log every predicate evaluation and route match decision. In production where TRACE is too verbose, add a `GlobalFilter` that logs the matched route ID (`exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR)`) at INFO level. Hit `/actuator/gateway/routes` to inspect all configured routes and their predicates. Hit `/actuator/gateway/globalfilters` to see all active global filters and their execution order.
+
+**Q: Why does Gateway's retry filter default to GET-only, and when is it safe to widen it?**
+
+A: Because a retried write can duplicate a side effect the backend already applied — a `BAD_GATEWAY` can mean the response was lost after the write succeeded, not that the write never happened. `RetryGatewayFilterFactory.RetryConfig` defaults `methods` to `{GET}` for this reason; widening it to include POST/PUT/DELETE is only safe when the backend can deduplicate, typically via a client-supplied `Idempotency-Key` that the backend stores and checks before processing (§4.7). Without that, a widened retry filter is a "why did the customer get charged twice" incident waiting to happen (War Story 5).
+
+**Q: Why is the httpclient connection pool's default `type` dangerous at scale, and how would you catch it in review?**
+
+A: `pool.type` defaults to `elastic`, under which `pool.max-connections` is silently ignored and the pool grows on demand instead of providing backpressure. A slow backend then converts into unbounded connection growth toward it rather than a bounded queue at the gateway, which is the precursor to the pending-connections symptom in §8's Runbook 5. Catch it by grepping route/property config for an explicit `pool.type=fixed` and failing review if it is absent — the property namespace is also easy to get wrong (`server.webflux.httpclient.pool.*`, not the old unnamespaced form, §2), so a config that "looks right" can still bind to nothing.
+
+**Q: What operational risk does upgrading Spring Boot independently of the Spring Cloud release train create?**
+
+A: A release train declares a *range* of supported Boot generations — 2025.1 "Oakwood" supports 4.0.x and 4.1.x from 2025.1.2 onward (§5) — while each of its patches is built against one specific Boot patch, 2025.1.3 against Boot 4.0.8. Two distinct risks follow. Inside the supported range the risk is silent: `spring-cloud-dependencies` manages the Boot version it was built against, and Maven honours the first BOM that declares an artifact, so importing it ahead of `spring-boot-dependencies` runs 4.0.8 while the project believes it is on 4.1. Outside the supported range the risk is real breakage, and it compiles cleanly — binary incompatibility is a runtime concern, not a compile-time one — then fails at startup with `NoSuchMethodError`/`NoClassDefFoundError` inside Gateway's autoconfiguration (War Story 4). The guard for both is a CI check that fails the build when the resolved Boot and Cloud BOM versions are not a documented-compatible pair (§8(d)), asserting on the *resolved* version rather than the declared one, since that is precisely what BOM ordering changes.
+
+**Q: How do you test gateway route matching and filter behavior without standing up real backend services?**
+
+A: Bind `WebTestClient` to the running `RouteLocator`/application context (`@SpringBootTest(webEnvironment = RANDOM_PORT)`) and stub the backends with WireMock or `MockWebServer`, asserting on the resolved status code, forwarded headers, and rewritten path rather than on real service behavior. For filter logic in isolation — a `KeyResolver`, a custom `GatewayFilterFactory` like §4.9's — unit-test the class directly against a `MockServerWebExchange`, which needs no HTTP server at all and runs in milliseconds. Reserve a full Testcontainers-backed integration test for the handful of paths where the route DSL, a real Redis rate limiter, and a real circuit breaker all need to be exercised together.
+
+**Q: How would you change §4.4's `RateLimiterKeyResolver` to rate-limit per tenant instead of per user?**
+
+A: Resolve the key from a tenant identifier instead of (or in addition to) the user ID — typically a claim already present in the JWT (`claims.get("tenantId")`) rather than a separate lookup, so the resolver stays a pure, non-blocking `Mono.just(...)` and does not reintroduce the blocking-call trap from §4.3. Compose the key as `tenant:{tenantId}` for a shared tenant-wide budget, or `tenant:{tenantId}:user:{userId}` for per-user limits within a tenant's overall envelope — the latter needs two `RedisRateLimiter` checks (tenant bucket and user bucket) chained in the filter, since Gateway's built-in filter only checks one bucket per route. The routing decision (which plan/tier a tenant is on) is a config lookup, not a code change, if the per-tenant limit values live in a database the `RateLimiterKeyResolver` can read from a cached, periodically-refreshed map rather than querying per request.
+
+**Q: Does rate limiting stay correct while the gateway fleet itself is scaling up or down during a rolling deploy?**
+
+A: Yes, and this is precisely why §5 chose Redis over a per-JVM counter (War Story 3): the token bucket lives in Redis, not in any one gateway instance, so the configured limit (100 req/sec, burst 200) is enforced against the shared bucket regardless of whether 2 instances or 6 are currently serving traffic. A per-JVM counter would have made this worse during a rolling deploy, not just steady-state — each new pod starts with its own fresh counter, so a deploy would transiently multiply the effective limit by however many old-and-new instances briefly coexist. The one thing that *does* need attention during a rolling deploy is in-flight requests on terminating pods: configure a graceful shutdown period (`server.shutdown=graceful` with a `spring.lifecycle.timeout-per-shutdown-phase`) so Kubernetes stops routing new traffic to a pod before it stops accepting the requests already in its Netty accept queue.
+
+**Q: Why can't the fallback controller in §4.6 just return the same body shape for every route's failure?**
+
+A: A generic `{"error": "SERVICE_UNAVAILABLE"}` loses information the caller needs to act correctly: whether a retry is safe (it usually is for a read-only order-status lookup, almost never for a payment charge), how long to back off (`retryAfterSeconds`, tuned per route to that backend's typical recovery time), and whether the operation might have partially succeeded (the payments fallback in §4.6 explicitly states the payment was NOT processed, because a generic message would leave the caller unsure whether to retry a checkout and risk a double charge). The fallback response is part of each route's contract with its caller, not boilerplate — it deserves the same route-specific thought as the route's rate limit or circuit-breaker threshold.

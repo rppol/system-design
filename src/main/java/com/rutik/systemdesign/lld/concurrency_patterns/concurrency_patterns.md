@@ -102,7 +102,25 @@ Java 21 virtual threads (`Thread.ofVirtual().start(...)`) are cheap enough (~few
 - Read-Write Lock semantics: virtual threads can still race on shared mutable state. `ReentrantReadWriteLock` is still necessary.
 - Producer-Consumer backpressure: if consumers are CPU-bound, having 10,000 virtual threads producing work they cannot process still causes memory pressure. Bounded `BlockingQueue` backpressure remains essential.
 
-**Caution:** `synchronized` blocks pin virtual threads to their carrier platform thread, eliminating the benefit of virtual threads. Prefer `ReentrantLock` over `synchronized` in code paths expected to run on virtual threads.
+**Caution:** a virtual thread still pins its carrier when it blocks inside a **native frame** — a JNI call, a Foreign Function & Memory upcall, class resolution, or a class initializer. Those are the surviving pinning cases; `synchronized` is not one of them, so choose between `synchronized` and `java.util.concurrent.locks` on the merits of the problem (JEP 491, JDK 24). Diagnose the remainder with the `jdk.VirtualThreadPinned` JFR event, which now reports both the reason and the carrier thread.
+
+### Scoping data and tasks instead of pooling them
+
+Cheap threads change what the surrounding structure should be, and two APIs carry that:
+
+- **`ScopedValue`** (final in Java 25, JEP 506) replaces `ThreadLocal` for sharing immutable data down a call chain. `ScopedValue.where(CONTEXT, ctx).run(task)` binds a value for exactly the dynamic extent of `run`, so it is unbound on return — there is nothing left to leak into the next task that reuses the thread, which is precisely the `ThreadLocal` hazard the pooling patterns below have to guard against manually.
+- **`StructuredTaskScope`** (still a preview API — fifth preview in Java 25 via JEP 505, and re-previewed since) makes fan-out/fan-in a single unit of work: fork subtasks inside a `try`-with-resources scope, `join()` once, and the scope guarantees every subtask has finished or been cancelled before the block exits. It is the structural answer to the orphaned-subtask and lost-cancellation failure modes that raw `ExecutorService.submit()` leaves to the caller.
+
+```java
+static final ScopedValue<RequestContext> CONTEXT = ScopedValue.newInstance();
+
+ScopedValue.where(CONTEXT, ctx).run(() -> {
+    // every callee on this thread reads CONTEXT.get(); nothing outlives the run()
+    handle();
+});
+```
+
+Because `StructuredTaskScope` is preview, it needs `--enable-preview` and its API is still moving between releases; `ScopedValue` does not and is safe to adopt in production on Java 25. Do not describe them as having the same maturity. Deep coverage of both lives in [`java/structured_concurrency_and_loom/`](../../java/structured_concurrency_and_loom/structured_concurrency_and_loom.md); this section is the design-pattern view.
 
 ---
 
@@ -133,7 +151,7 @@ flowchart LR
 
 ---
 
-## 9. Code Examples — Broken Then Fixed
+## 8. Code Examples — Broken Then Fixed
 
 ### DCL Without volatile — Broken and Fixed
 
@@ -289,7 +307,7 @@ ExecutorService pool = new ThreadPoolExecutor(
 
 ---
 
-## 10. Common Pitfalls — Production War Stories
+## 9. Common Pitfalls — Production War Stories
 
 **The ConcurrentModificationException in a multi-threaded cache** — A team used `HashMap` as a shared cache across request threads with no synchronization. Under load, `HashMap.get()` entered an infinite loop because another thread's `put()` caused a resize mid-traversal (JDK 7 behavior). Fix: `ConcurrentHashMap`. Lesson: `HashMap` is never safe for concurrent use, even for read-only access during writes.
 
@@ -297,11 +315,11 @@ ExecutorService pool = new ThreadPoolExecutor(
 
 **Write starvation killed the configuration service** — A configuration service used `ReentrantReadWriteLock` (unfair). 200 web threads read config every 100ms. Configuration updates (writes) were attempted every 30 seconds. Writers waited for minutes because new readers arrived faster than the queue drained. Fix: `new ReentrantReadWriteLock(true)` (fair). Alternatively: read-through cache so config updates are infrequent; readers hit the cache, not the lock.
 
-**Virtual thread pinning in Hibernate** — After upgrading to Java 21 and switching to `newVirtualThreadPerTaskExecutor()`, a team saw no throughput improvement. Profiling showed virtual threads pinned to carrier threads for the entire Hibernate session. Reason: Hibernate internally uses `synchronized` blocks. Fix: stay on platform threads for Hibernate-heavy paths until the library migrates to `ReentrantLock`, or use a separate thread pool for Hibernate tasks.
+**Virtual thread pinning through a native driver** — After switching a service to `newVirtualThreadPerTaskExecutor()`, a team saw no throughput improvement. A `jdk.VirtualThreadPinned` JFR recording showed virtual threads pinned for the whole of each database call, with the reason reported as a native frame: the driver dropped into JNI and blocked there, so the carrier could not be released. Note what the event did *not* say — the `synchronized` blocks inside the ORM, the usual suspect before Java 24, no longer pin anything. Fix: move the JNI-bound calls to a bounded platform-thread pool sized to the database's own connection limit and keep the virtual threads for the rest of the request, or move to a pure-Java driver. The general lesson: when virtual threads buy nothing, read the pinning event's reason before rewriting any locks — a native-frame diagnosis and a monitor diagnosis have different fixes, and only one of them still exists.
 
 ---
 
-## 11. Technologies and Tools
+## 10. Technologies and Tools
 
 | Tool / Library | Concurrency Pattern |
 |----------------|-------------------|
@@ -317,7 +335,7 @@ ExecutorService pool = new ThreadPoolExecutor(
 
 ---
 
-## 8. Cross-References
+## 11. Cross-References
 
 | Pattern | See Also |
 |---------|---------|
@@ -405,12 +423,38 @@ Look for: (1) mutable shared fields accessed from multiple threads without synch
 
 ---
 
-**Q: What is the `synchronized` pinning problem with virtual threads and how do you avoid it?**
-**Short:** A virtual thread inside a synchronized block pins to its carrier thread, blocking the carrier too if I/O then blocks.
+**Q: What still pins a virtual thread to its carrier, and what should you do about it?**
+**Short:** Only native frames pin now — JNI or FFM upcalls, class loading and class initializers; `synchronized` stopped pinning in Java 24.
 
-When a virtual thread enters a `synchronized` block, it is pinned to its carrier platform thread for the duration of the block. If the virtual thread then blocks on I/O inside the `synchronized` block, the carrier platform thread is also blocked — eliminating the scalability benefit of virtual threads. On Java 21, this means a `synchronized`-heavy codebase does not benefit from `newVirtualThreadPerTaskExecutor()`. Fix: replace `synchronized` with `ReentrantLock`. `ReentrantLock.lock()`/`unlock()` allows the virtual thread to unmount from the carrier while waiting, freeing the carrier to run other virtual threads.
+Native frames are the surviving cause: a JNI call or a Foreign Function & Memory upcall that blocks, blocking while resolving a symbolic reference to a class, and blocking inside or waiting on a class initializer. `synchronized` is no longer one of them — JEP 491 (JDK 24) changed the JVM so a monitor is tracked against the virtual thread rather than its carrier, so a virtual thread now unmounts when it blocks acquiring a monitor, while holding one, or inside `Object.wait()`. That removed the blanket "prefer `ReentrantLock` over `synchronized`" advice: pick between them on the merits — `synchronized` where it is practical because it is less error-prone, `ReentrantLock` when you need `tryLock` with a timeout, interruptibility, fairness, or a `Condition`. To find the remainder, record the `jdk.VirtualThreadPinned` JFR event, which now reports both the pinning reason and the carrier identity; the old `jdk.tracePinnedThreads` system property was removed by the same JEP and setting it does nothing.
 
 ---
+
+**Q: How does `ScopedValue` differ from `ThreadLocal` for sharing data down a call chain?**
+**Short:** ScopedValue binds a value only for one run() call's dynamic extent, so it can't leak into a pooled thread's next task.
+
+`ScopedValue.where(CONTEXT, ctx).run(task)` binds a value for exactly the dynamic extent of that `run()` call and unbinds it automatically on return, whereas `ThreadLocal.set()` leaves a value attached to the thread indefinitely until something explicitly calls `remove()`. On a per-task-thread model — one virtual thread per task, never reused — this matters less, but on any pooled platform-thread model it is the difference that eliminates the classic `ThreadLocal` leak: with `ScopedValue` there is nothing left over for the next task that happens to reuse the same thread to accidentally read. It replaces `ThreadLocal` specifically for immutable data that needs to be visible down the call chain, not for mutable per-thread accumulator state.
+
+---
+
+**Q: What does `StructuredTaskScope` guarantee that a raw `ExecutorService.submit()` does not?**
+**Short:** The scope guarantees every forked subtask has finished or been cancelled before the try-with-resources block exits.
+
+Forking subtasks inside a `StructuredTaskScope`'s `try`-with-resources block and calling `join()` once guarantees that every subtask has either completed or been cancelled before the block exits — there is no path out of the scope that leaves a subtask still running unsupervised. Raw `ExecutorService.submit()` gives no such guarantee: a caller that stops waiting on a `Future` leaves that task's thread running to completion regardless, an orphaned subtask with no owner tracking it. `StructuredTaskScope` is the structural fix for exactly that failure mode, plus the related one of a cancellation silently getting lost when one subtask fails and the others are never told to stop.
+
+---
+
+**Q: Why is pooling virtual threads pointless?**
+**Short:** Virtual threads cost only a few KB of stack and are cheap to create per task, so reuse saves almost nothing.
+
+A platform thread costs roughly 1MB of stack and ~1ms to create, which is exactly why thread pools exist — reusing a thread amortizes that real creation cost across many tasks. A virtual thread costs only a few KB and is cheap enough to create fresh for every single task, so the entire reason a pool exists (avoiding creation overhead) is no longer a meaningful cost to avoid. The idiomatic pattern is `Executors.newVirtualThreadPerTaskExecutor()` — one virtual thread per task, created and discarded freely, with no fixed pool size to tune at all.
+
+---
+
+**Q: When do virtual threads buy you nothing over platform threads?**
+**Short:** For CPU-bound work, since virtual threads only help hide blocking I/O wait, not add compute parallelism beyond core count.
+
+Virtual threads solve the problem of a thread sitting idle while blocked on I/O — they let thousands of them unmount from their carriers and free those carriers for other work during the wait. For CPU-bound work, there is no idle wait to hide: every thread is actively consuming a core the entire time, so adding more virtual threads than you have CPU cores just adds scheduling overhead without adding real parallelism. A fixed platform-thread pool sized to the CPU core count is still the right tool for CPU-bound work; virtual threads are for the I/O-bound case where the old thread-per-request model wasted memory on threads that spent most of their life blocked.
 
 ---
 
@@ -423,8 +467,8 @@ Concurrency patterns are chosen by failure mode, not by elegance, so every one o
 | Thread-safe singleton (enum or holder idiom) | Correct lazy initialisation with no locking on the hot path | Nothing beyond one extra class for the holder — this is the cheap option | Double-checked locking without `volatile` publishes a partially constructed object; the enum and holder forms cannot have this bug |
 | Producer-consumer with a bounded `BlockingQueue` | Backpressure: a fast producer is throttled instead of exhausting the heap | Producer threads block, so the pressure moves upstream and must be handled there | An unbounded queue instead: latency climbs, then `OutOfMemoryError` under a burst |
 | Thread pool (`ThreadPoolExecutor`) | Bounded parallelism and reused threads instead of one thread per task | Every parameter is a tuning decision, and the rejection policy is a design choice | A saturated pool with tasks waiting on results from the same pool — deadlock at exactly the wrong moment |
-| Virtual threads (Java 21+) | Blocking code that scales to hundreds of thousands of concurrent tasks | Pooling them is pointless, and `synchronized` pins a virtual thread to its carrier | Throughput no better than platform threads because the hot path is inside `synchronized` |
-| `ReentrantLock` over `synchronized` | `tryLock` with timeout, interruptibility, fairness, and no carrier pinning | `unlock()` must be in a `finally` block — the compiler will not do it for you | An exception on the happy path leaves the lock held forever, and every subsequent caller hangs |
+| Virtual threads (Java 21+) | Blocking code that scales to hundreds of thousands of concurrent tasks | Pooling them is pointless, and a blocking native frame still pins the carrier | Throughput no better than platform threads because the hot path drops into JNI |
+| `ReentrantLock` over `synchronized` | `tryLock` with timeout, interruptibility, fairness, and a `Condition` per queue | `unlock()` must be in a `finally` block — the compiler will not do it for you, where `synchronized` releases automatically | An exception on the happy path leaves the lock held forever, and every subsequent caller hangs |
 | Read-write lock (`ReentrantReadWriteLock` or `StampedLock`) | Concurrent readers when reads dominate | Writer starvation without fairness, and more expensive than a plain lock when writes are frequent | A read-heavy assumption that was wrong: throughput below what one `synchronized` block would have given |
 | Immutability and confinement | No synchronisation needed at all, because there is nothing to race on | Allocation per change, and the whole object graph must be immutable to count | A `final` field pointing at a mutable collection — immutable in name only |
 | Lock-free CAS (`AtomicReference`, `LongAdder`) | No blocking, no deadlock, and excellent throughput at low contention | Retry loops that live-lock under heavy contention, and code that is hard to prove correct | CPU pinned at 100% with throughput falling as contention rises |

@@ -20,7 +20,7 @@ Why it matters:
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: CAP theorem is like a bank during a communication outage — you can either refuse all transactions until the network recovers (Consistency), or keep processing with possibly stale balances (Availability). You can't do both simultaneously.
 
@@ -32,7 +32,7 @@ Why it matters:
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 **Partition Tolerance is Non-Negotiable**
 If you have two nodes and a network between them, partitions will happen. Hardware fails, cables are cut, routers crash, cloud availability zones lose connectivity. A system that stops working entirely on a partition is not partition tolerant — and in practice, stopping entirely is often unacceptable.
@@ -51,7 +51,7 @@ CAP only describes behavior during a partition. During normal operation (no part
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Architectures / Strategies
 
 ### CP Systems (Consistency + Partition Tolerance)
 During a partition, CP systems refuse to return potentially stale data. They may become unavailable (return errors or block) until consistency can be re-established.
@@ -91,7 +91,7 @@ The four session guarantees in the middle of that table (read-your-writes, monot
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### CAP Triangle
 
@@ -218,7 +218,7 @@ stateDiagram-v2
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Why Partitions Force a Choice
 
@@ -345,7 +345,7 @@ Used by Riak, Redis Enterprise active-active databases, and collaborative-editin
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Apache Cassandra (AP)** — Designed for active-active multi-datacenter deployments. No single point of failure. Tunable consistency: you can request `QUORUM` reads/writes for stronger guarantees at the cost of availability, or `ONE` for maximum availability. Used by Netflix, Instagram, Apple (for iCloud metadata).
 
@@ -363,7 +363,7 @@ Used by Riak, Redis Enterprise active-active databases, and collaborative-editin
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 ### Choosing CP
 | Gain | Lose |
@@ -383,7 +383,9 @@ Used by Riak, Redis Enterprise active-active databases, and collaborative-editin
 
 ---
 
-## 8. When to Use
+## 9. When to Use / When NOT to Use
+
+### When to Use
 
 **CP Systems:**
 - Financial transactions (bank balances, payment processing)
@@ -402,7 +404,7 @@ Used by Riak, Redis Enterprise active-active databases, and collaborative-editin
 
 ---
 
-## 9. When NOT to Use
+### When NOT to Use
 
 Do not use a pure AP system for:
 - Account balances or anything with strong correctness requirements
@@ -451,7 +453,7 @@ Last-write-wins assumes accurate clocks. In distributed systems, clocks drift. N
 
 ---
 
-## 12. Interview Questions
+## 12. Interview Questions with Answers
 
 **Q1: Explain the CAP theorem in plain language.**
 **Short:** In a network partition, a distributed system must choose between returning consistent or stale-but-available data.
@@ -555,7 +557,7 @@ A distributed lock is not a substitute for database-level serializability becaus
 
 ---
 
-## 14. Metrics & Monitoring
+### Metrics & Monitoring
 
 | Metric | What It Indicates | Alert Condition |
 |--------|-------------------|-----------------|
@@ -598,7 +600,7 @@ For a balance-read path, 840 errors per minute is well past "alert" and into "pa
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement CAP Tradeoffs**
 
@@ -612,7 +614,7 @@ For a balance-read path, 840 errors per minute is well past "alert" and into "pa
 
 ---
 
-## 15. Case Study: Designing a Global Shopping Cart
+## 14. Case Study: Designing a Global Shopping Cart
 
 **Problem:** Build a shopping cart system for a global e-commerce platform. The system must handle 100,000 concurrent users across 5 continents. Cart data must never be lost, but brief inconsistency is acceptable.
 
@@ -646,7 +648,7 @@ For a balance-read path, 840 errors per minute is well past "alert" and into "pa
 
 ---
 
-## Case Study: Choosing Between CP and AP for a Financial Ledger
+### Companion Case Study: Choosing Between CP and AP for a Financial Ledger
 
 ### Problem Statement
 

@@ -253,6 +253,9 @@ try {
 
 } catch (Exception e) {
     conn.rollback();  // rollback everything
+    // Wrap the low-level SQLException in an abstraction-appropriate exception
+    // rather than letting it leak past the DAO boundary [Effective Java Item 73:
+    // "Throw exceptions appropriate to the abstraction"].
     throw new OrderException("Order processing failed", e);
 } finally {
     conn.setAutoCommit(true);  // restore default (for pool reuse)
@@ -485,6 +488,74 @@ one is about throughput, the other about whether the connection is accepted at a
 have, it just relocates the queue from HikariCP (where you can see it via
 `getThreadsAwaitingConnection()`) to the DB scheduler (where you cannot).
 
+### Virtual Threads and the Connection Pool
+
+Virtual threads (GA in Java 21, JEP 444) remove the reason most people had for a *thread*
+pool, and none of the reasons for a *connection* pool. This is the case that makes the
+sizing rule above urgent rather than merely counter-intuitive, so it is worth being exact
+about what changes and what does not.
+
+**What changes.** On platform threads the two pools were accidentally coupled: a 200-thread
+Tomcat pool meant at most 200 concurrent JDBC borrowers, so an oversized connection pool was
+capped by the thread pool and the mistake stayed hidden. Swap in
+`Executors.newVirtualThreadPerTaskExecutor()` and that cap is gone — 20,000 in-flight
+requests means 20,000 threads all calling `dataSource.getConnection()`. The connection pool
+becomes the only thing standing between your service and the database, and every sizing
+error it was hiding surfaces at once.
+
+**What does not change.** The formula. A connection is still one server-side backend on the
+database, still ~5–10 MB of its RAM, and the database still executes only as many queries in
+parallel as it has cores and disks. The right pool size after the migration is the same
+number it was before. What a reader must not do — and this is the single most common
+virtual-thread mistake in a data-access layer — is reason "virtual threads are cheap, so I
+can afford more connections."
+
+```java
+// The shape that works on virtual threads: unbounded threads, bounded connections.
+HikariConfig cfg = new HikariConfig();
+cfg.setJdbcUrl(url);
+cfg.setMaximumPoolSize(10);          // sized to the DB, unchanged by Loom
+cfg.setConnectionTimeout(3_000);     // fail fast rather than queue forever
+HikariDataSource ds = new HikariDataSource(cfg);
+
+try (var exec = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (Order order : orders) {                 // may be 100,000 tasks
+        exec.submit(() -> {
+            try (Connection c = ds.getConnection();          // 10 at a time, by design
+                 PreparedStatement ps = c.prepareStatement(SQL)) {
+                ps.setLong(1, order.id());
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+}   // close() blocks until every task finishes
+```
+
+The pool IS the bounded resource. Do not put a `Semaphore` in front of it as well — that is
+two queues doing one job, and the second one hides the first one's metrics.
+
+**The two operational consequences.**
+
+*Queueing moves, and so does the failure signature.* With 20,000 virtual threads against a
+10-connection pool, 19,990 of them are parked in HikariCP's handoff queue.
+`getThreadsAwaitingConnection()` — which read 0 to single digits on platform threads —
+now reads in the thousands, and that is normal, not an incident. What you alert on changes
+accordingly: not the queue depth, but `connectionTimeout` exceptions, because a borrower
+that waits past 3,000 ms is the real signal and its latency floor is exactly the timeout.
+
+*Pinning is no longer the issue it was.* HikariCP takes a lock around connection handoff.
+Before Java 24 a virtual thread that blocked inside a `synchronized` block pinned its
+carrier thread, so a saturated pool could starve the whole carrier pool — a handful of
+pinned carriers and the service stopped making progress on unrelated work. **JEP 491
+(Java 24) removed that**: `synchronized` and `Object.wait()` no longer pin. On the Java 25
+baseline the remaining pinning cause is a native frame on the stack, which for JDBC means a
+**JNI-backed driver**. Check that before you migrate: pure-Java drivers (PostgreSQL JDBC,
+MySQL Connector/J, the Microsoft SQL Server driver) are fine; a driver that shells out to a
+native client library (the Oracle OCI driver in thick mode, an ODBC bridge) is not. Confirm
+it empirically rather than by reputation — run a load test with a JFR recording and check
+for `jdk.VirtualThreadPinned` events. Zero events means you are clear.
+
 ### The 4 Isolation Levels with Concrete Scenarios
 
 ```java
@@ -607,37 +678,47 @@ READ_UNCOMMITTED: allows dirty reads (seeing uncommitted data), non-repeatable r
 
 `connections = (core_count * 2) + effective_spindle_count`, where `core_count` and the spindle count describe the **database** server, not the application server. For a 4-core database host on SSD storage (1 spindle equivalent): 4×2 + 1 = 9 connections. This is much smaller than most teams assume, and the fact that no term references application threads is the point. The reasoning: more connections than the database has cores creates contention on the DB server — each connection competes for DB CPU time, and the overhead of managing many connections outweighs the parallelism benefit. Start with this formula and tune based on `pg_stat_activity` or equivalent monitoring. Two consequences teams miss: the answer is a budget for every client of that database put together, so with N application instances each pool gets roughly `formula / N`; and it must also stay under `max_connections` minus the reserved superuser slots, which is a separate and harder ceiling.
 
-**Q6: How do you stream large result sets without OOM?**
+**Q6: Your service migrates to virtual threads. Should the connection pool get bigger?**
+**Short:** No — the pool is sized to the database's parallelism, which virtual threads do not change; only the number of waiters grows.
+
+No, and this is the most common virtual-thread mistake in a data-access layer. The formula in Q5 contains no term for application threads because it never described them: a connection is a server-side backend costing the database ~5–10 MB of RAM, and the database still executes only as many queries in parallel as it has cores and disks. Virtual threads change the *client* side of that relationship, not the server side. What actually changes is that the accidental coupling disappears. On platform threads a 200-thread Tomcat pool capped concurrent borrowers at 200, so an oversized connection pool was masked by the thread pool and the mistake stayed invisible; with `Executors.newVirtualThreadPerTaskExecutor()` there is no cap, 20,000 in-flight requests means 20,000 threads calling `getConnection()`, and every sizing error the thread pool was hiding surfaces at once. The connection pool becomes the only bounded resource in the path — which is exactly what you want, so do not also put a `Semaphore` in front of it. Keep `maximumPoolSize` where the database's parallelism puts it and let the pool queue.
+
+**Q7: On virtual threads, `getThreadsAwaitingConnection()` jumps from 2 to 8,000. Is that an incident?**
+**Short:** No — thousands of parked virtual threads are the expected shape; alert on connectionTimeout exceptions instead of queue depth.
+
+Not by itself — the queue moved, and so did the signal you should be alerting on. With 20,000 virtual threads against a 10-connection pool, 19,990 of them are parked in HikariCP's handoff queue by design; parking a virtual thread is nearly free, so a deep queue no longer means threads are being burned. A queue-depth alert that was meaningful on platform threads (where a waiter held a ~1 MB stack and a scarce pool slot) now fires constantly and tells you nothing. The metric that still means something is `connectionTimeout`: a borrower that waits past the configured timeout throws `SQLTransientConnectionException`, and its request's latency floor is exactly that timeout, which is why p99 pins to the timeout value under exhaustion. Alert on the exception rate and on p99 approaching `connectionTimeout`, and treat queue depth as a capacity-planning input rather than a page. Also confirm your driver is pure Java before migrating: JEP 491 (Java 24) stopped `synchronized` from pinning carrier threads, so HikariCP's own handoff lock is no longer a hazard, but a JNI-backed driver still pins on a native frame — check for `jdk.VirtualThreadPinned` events in a JFR recording under load rather than trusting the driver's reputation.
+
+**Q8: How do you stream large result sets without OOM?**
 **Short:** Streaming large result sets requires disabling auto-commit and setting a bounded server-side fetch size.
 
 MySQL: create `Statement` with `TYPE_FORWARD_ONLY + CONCUR_READ_ONLY`, then `stmt.setFetchSize(Integer.MIN_VALUE)` — this magic value enables streaming mode where rows are delivered one at a time from the server. PostgreSQL: disable autoCommit (`conn.setAutoCommit(false)`) then `ps.setFetchSize(1000)` — PostgreSQL uses a server-side cursor, delivering results in 1000-row batches. Both approaches keep memory at O(fetchSize) rows rather than O(total rows). Trade-off: the transaction/connection must stay open for the duration of iteration; don't stream inside a short-lived connection from a pool without ensuring the connection outlives the iteration.
 
-**Q7: What happens if you forget to close a `Connection`?**
+**Q9: What happens if you forget to close a `Connection`?**
 **Short:** An unclosed Connection never returns to the pool, eventually exhausting it and timing out new requests.
 
 If not using `try-with-resources`: the `Connection` is never returned to the pool (if using HikariCP) or the TCP socket to the DB is never closed. Pool consequence: the connection is "leaked" — counted as active, never recycled. After enough leaks, the pool is exhausted and all new requests time out. TCP socket consequence: the OS eventually closes the socket via TCP keepalive (hours), but the pool doesn't know — it still counts the connection as in-use. `HikariCP.setLeakDetectionThreshold(2000)` logs a stack trace if a connection is held > 2 seconds, pointing to the offending code.
 
-**Q8: What are distributed transactions (XA) and when do you need them?**
+**Q10: What are distributed transactions (XA) and when do you need them?**
 **Short:** XA transactions use two-phase commit to atomically commit or roll back across multiple resources.
 
 XA transactions coordinate a commit/rollback across multiple transactional resources (two databases, a database and a JMS queue) atomically. They use a two-phase commit (2PC) protocol: (1) Prepare phase — coordinator asks all resources if they can commit; (2) Commit phase — if all say yes, coordinator tells all to commit. In Java, implemented via `javax.transaction.xa.XAResource` (a Java SE package, in the `java.transaction.xa` module), `javax.sql.XADataSource`, and a JTA transaction manager such as Narayana or Atomikos. When needed: orders must be both saved to DB AND published to MQ atomically (both or neither). Cost: 2PC adds latency (two round trips) and complexity; blocked coordinator causes all resources to wait (heuristic failure). Modern alternatives: saga pattern (compensating transactions), outbox pattern (event stored in same DB as data, then forwarded by CDC).
 
-**Q9: How does `executeBatch()` differ from individual `executeUpdate()` calls in terms of performance?**
+**Q11: How does `executeBatch()` differ from individual `executeUpdate()` calls in terms of performance?**
 **Short:** executeBatch sends many statements in one round trip, while individual calls pay a round trip each.
 
 `executeBatch()` sends all accumulated statements in one or a few network round trips to the DB server, which processes them in bulk. Individual `executeUpdate()` sends one statement per round trip — N inserts = N round trips. Network latency dominates: at 1ms round-trip time, 1000 individual inserts take 1000ms minimum; 1000 inserts in one batch take ~1ms + DB processing time. Additionally, the DB may optimize the batch internally (single WAL write for the batch instead of N separate WAL writes). The `BatchUpdateException` complicates error handling — `getUpdateCounts()` shows which rows in the batch succeeded before failure, enabling selective retry.
 
-**Q10: What is `Savepoint` and how does it differ from a regular rollback?**
+**Q12: What is `Savepoint` and how does it differ from a regular rollback?**
 **Short:** A Savepoint lets you roll back only the work done after it, keeping earlier work in the transaction.
 
 A `Savepoint` marks a point within a transaction to which you can partially roll back. `conn.rollback()` undoes ALL work since `setAutoCommit(false)`. `conn.rollback(savepoint)` undoes work done AFTER the savepoint but keeps work done before it. Use savepoints when a transaction has a main critical path plus optional enrichment steps — if enrichment fails, roll back only the enrichment and commit the main path. Example: save an order (critical), try to add loyalty points (optional). If loyalty service fails, rollback to the savepoint (undo the loyalty points insert), then commit the order. Savepoints are part of the same database transaction and do not release any locks.
 
-**Q11: What `ResultSet` type should you use for a standard OLTP query?**
+**Q13: What `ResultSet` type should you use for a standard OLTP query?**
 **Short:** A standard OLTP query should use the default TYPE_FORWARD_ONLY, CONCUR_READ_ONLY result set.
 
 `TYPE_FORWARD_ONLY` (default) with `CONCUR_READ_ONLY` — it is the fastest and most efficient. Forward-only means you can only call `next()` — no `previous()`, `absolute()`, or `relative()`. Read-only means no `updateRow()` or `insertRow()`. The JDBC driver can use a server-side cursor or buffer efficiently without supporting bidirectional navigation. `TYPE_SCROLL_INSENSITIVE` is needed only if you need random access within the result set (rare for OLTP). `CONCUR_UPDATABLE` is needed for `ResultSet`-based updates (almost never used in modern code — use separate UPDATE statements).
 
-**Q12: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
+**Q14: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
 **Short:** Each stricter isolation level trades more locking overhead for preventing one more concurrency anomaly.
 
 Each level prevents one more anomaly than the one below it, and pays for that with more locking and lower concurrency.
@@ -651,7 +732,7 @@ Each level prevents one more anomaly than the one below it, and pays for that wi
 
 *InnoDB's MVCC prevents most phantom reads in `REPEATABLE_READ` via gap locks. Practical rule: start with `READ_COMMITTED` for OLTP; escalate to `REPEATABLE_READ` if your service reads a value and writes a decision based on it in the same transaction (non-repeatable-read anomaly). Only use `SERIALIZABLE` for financial audit or reporting queries where phantom rows would produce incorrect totals.
 
-**Q13: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
+**Q15: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
 **Short:** HikariCP prevents dirty connections by rolling back and resetting autoCommit before reuse.
 
 A dirty connection is one returned to the pool with uncommitted transaction state — `autoCommit=false` and an open transaction. The next borrower inherits that transaction context and may see or commit data it did not intend to. HikariCP prevents this in two ways: (1) on connection return it calls `rollback()` if `autoCommit=false`, discarding any uncommitted work; (2) it resets `autoCommit` to the configured pool default before making the connection available. The broken pattern:
@@ -678,7 +759,7 @@ try {
 }
 ```
 
-**Q14: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
+**Q16: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
 **Short:** SKIP LOCKED turns a table into a queue by letting workers claim only unlocked rows without blocking.
 
 It turns a table into a competing-consumer queue by letting each worker lock a disjoint batch of rows without ever waiting on another worker. A plain `FOR UPDATE` acquires exclusive row locks and blocks; `SKIP LOCKED` (PostgreSQL, MySQL 8+) extends this: instead of blocking on locked rows, the statement skips them and returns only unlocked rows. Multiple competing consumers can run the same query concurrently — each gets a disjoint set of rows. Pattern:
@@ -699,7 +780,7 @@ COMMIT;
 
 This gives at-least-once delivery semantics (a failed/crashed consumer never commits, so the rows become visible to the next consumer). Throughput scales linearly with concurrent consumers up to the database connection limit.
 
-**Q15: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
+**Q17: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
 **Short:** RETURN_GENERATED_KEYS fetches the new primary key in the same round trip as the insert itself.
 
 It returns the generated primary key in the same network round trip as the `INSERT`, where a follow-up SELECT costs a second one. The driver implements it by adding a `RETURNING` clause or using a protocol-level mechanism, depending on the database. A follow-up `SELECT LAST_INSERT_ID()` (MySQL) or `SELECT currval()` (PostgreSQL) is a second round trip and has a TOCTOU hazard in some configurations (scoped per-session in MySQL, but worth avoiding). Usage:
@@ -721,7 +802,7 @@ try (PreparedStatement ps = conn.prepareStatement(
 
 The `getGeneratedKeys()` `ResultSet` is a resource that must be closed explicitly or the underlying cursor leaks.
 
-**Q16: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
+**Q18: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
 **Short:** setFetchSize pages a large result set instead of buffering the whole thing in the client's heap.
 
 By default, most JDBC drivers buffer the entire `ResultSet` in the client JVM heap. For a query returning 1M rows, this can OOM the process. `stmt.setFetchSize(1000)` instructs the driver to fetch rows in pages of 1,000. PostgreSQL (`org.postgresql.Driver`) requires `autoCommit=false` for server-side cursors to be honoured; MySQL uses the special value `Integer.MIN_VALUE` to switch to row-by-row streaming. Broken:
@@ -901,11 +982,11 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 
 ### Common Pitfalls
 
-**Connection not returned in a `finally`/try-with-resources -> pool exhaustion.** Any path (especially an exception) that skips `connection.close()` permanently removes a connection from the pool; ten leaks empties a default pool. Always acquire connections in try-with-resources so `close()` (which returns them to the pool, not closes the socket) runs on every path.
+**Connection not returned in a `finally`/try-with-resources -> pool exhaustion.** Any path (especially an exception) that skips `connection.close()` permanently removes a connection from the pool; ten leaks empties a default pool. Always acquire connections in try-with-resources so `close()` (which returns them to the pool, not closes the socket) runs on every path — this is exactly [Effective Java Item 9: "Prefer try-with-resources to try-finally"], and `Connection`/`Statement`/`ResultSet` are the canonical three-resource nesting the item uses to make its case.
 
 **`Statement` instead of `PreparedStatement`.** String-concatenated `Statement` is open to SQL injection and forces the database to parse and plan every query afresh; `PreparedStatement` parameterizes inputs (closing the injection hole) and lets the driver/DB cache the plan.
 
-**`autoCommit=true` for a multi-step operation.** With auto-commit on, each statement commits independently, so a failure midway through a debit-then-credit leaves the database half-updated. Wrap multi-statement units of work in `setAutoCommit(false)` ... `commit()`/`rollback()`.
+**`autoCommit=true` for a multi-step operation.** With auto-commit on, each statement commits independently, so a failure midway through a debit-then-credit leaves the database half-updated — a failure that is not atomic, in the sense of [Effective Java Item 76: "Strive for failure atomicity"]. Wrap multi-statement units of work in `setAutoCommit(false)` ... `commit()`/`rollback()` so a failed operation leaves the database exactly as it was before the attempt.
 
 **`ResultSet`/`Connection` held open across an HTTP request boundary.** Returning a lazily-loaded `ResultSet` (or an open JPA session) to be iterated by the view layer pins the connection for the whole request, defeating pooling and causing exhaustion under load. Materialize results into DTOs and release the connection before returning.
 

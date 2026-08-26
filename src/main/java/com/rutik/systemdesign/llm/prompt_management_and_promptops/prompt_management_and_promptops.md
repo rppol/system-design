@@ -9,11 +9,11 @@ untracked modifications cause regressions that are nearly impossible to debug af
 
 PromptOps is the operational discipline that applies DevOps principles to the prompt lifecycle:
 version control, environment promotion, A/B testing, eval-gated continuous integration, and rollback
-capability. Just as code without version control would be unthinkable in 2025, shipping prompts
+capability. Just as code without version control is unthinkable today, shipping prompts
 without a management layer is now considered an engineering anti-pattern.
 
 **Scale of impact:** A 200-token system prompt served to 1 million requests per day at GPT-4o
-pricing costs $500/day in input tokens. Removing a redundant instruction, fixing a format that
+(legacy, still served) pricing costs $500/day in input tokens. Removing a redundant instruction, fixing a format that
 causes parsing failures downstream, or switching model targets are changes that need tracked,
 tested, and reversible deployment — not ad-hoc edits in a config file.
 
@@ -91,6 +91,19 @@ injection.
 - *Shadow mode* — call both prompts, use v1 response in production, log v2 response for offline
   comparison. Zero risk to users.
 - *Interleaved* — alternate per user session for clean comparison.
+
+**Programmatic prompt optimization** — a fourth PromptOps stage alongside storage, versioning,
+and A/B testing, for teams past hand-editing: instead of a human iterating on prompt wording, a
+compiler searches over instructions and few-shot example selections against a scored metric and a
+labeled dev set. [DSPy](../agentic_frameworks/dspy.md) is the leading framework — you declare the
+task as typed input/output signatures plus a metric, and an optimizer (MIPROv2, GEPA,
+BootstrapFewShot) compiles the prompt program; TextGrad applies a similar textual-gradient search
+outside the DSPy ecosystem. This changes what belongs in the registry: the versioned artifact is
+the program and its training set, not a hand-written string, so a PromptOps pipeline that adopts
+it needs a CI step that re-runs the optimizer against the eval set rather than a human diffing
+prompt text. See [Prompt Engineering](../prompt_engineering/prompt_engineering.md) §12 for the
+meta-prompting-vs-automatic-optimization comparison and worked DSPy example — this section covers
+where the compiled artifact lives operationally, not how the search itself works.
 
 ---
 
@@ -382,7 +395,7 @@ services are tenants, not owners.
 
 **Pitfall 6 — Prompt bloat.** System prompts grow to 2,000+ tokens because nothing is ever
 removed. At 1M requests/day, 1,000 extra tokens is 1B extra input tokens per day — ~$2,500/day
-(~$912K/year) at GPT-4o's $2.50/1M input pricing. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
+(~$912K/year) at GPT-4o's (legacy, still served) $2.50/1M input pricing. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
 instruction without a corresponding golden-dataset test.
 
 ---
@@ -501,8 +514,8 @@ model name and version in the registry row alongside the prompt content.
 **Q: What is prompt bloat and how do you manage it?**
 **Short:** Prompt bloat is system prompts accumulating instructions without pruning until they reach thousands of tokens, driving real cost and diluting instruction-following.
 Prompt bloat occurs when system prompts accumulate instructions over time without any being
-removed — eventually reaching 2,000+ tokens. At 1 million daily requests and GPT-4o pricing
-($2.50/1M input), 1,000 extra tokens means 1B extra tokens/day — $2,500/day, roughly $912K/year.
+removed — eventually reaching 2,000+ tokens. At 1 million daily requests and GPT-4o's
+(legacy, still served) pricing ($2.50/1M input), 1,000 extra tokens means 1B extra tokens/day — $2,500/day, roughly $912K/year.
 Beyond cost, longer prompts reduce
 instruction-following reliability because attention is diluted. Manage it by: requiring every
 instruction to have a corresponding eval test; running quarterly prompt audits with token-count
@@ -553,6 +566,31 @@ its training data, not the raw string. DSPy is more powerful for tasks where the
 not obvious, but it requires a differentiable evaluation metric and a training set. Most production
 systems use traditional prompt management for fixed-format tasks and reserve DSPy-style
 optimization for high-value tasks where manual prompting has plateaued.
+
+**Q: What changes in a PromptOps CI pipeline once a team adopts a compiler like DSPy instead of hand-written prompts?**
+**Short:** The CI gate shifts from a human diffing prompt text to re-running the optimizer against the eval set, since the versioned artifact is now a program plus training data, not a string.
+A: A traditional PromptOps pipeline gates promotion on a human-readable diff plus a passing eval
+run. Once the prompt is compiled — by DSPy's MIPROv2/GEPA/BootstrapFewShot, or by a textual-gradient
+optimizer like TextGrad — the diff a reviewer would read is meaningless on its own: the same
+instructions and few-shot selections could have been reached by many different search paths, and
+what actually matters is whether the compiled program still clears the metric on the labeled dev
+set. So the CI step changes from "did the prompt text pass review" to "does re-running the
+optimizer (or re-scoring the frozen compiled artifact) against the current eval set still pass the
+promotion threshold" — the registry stores the program, its training/dev data, and the metric
+alongside the compiled prompt output, not the string alone. Re-compilation should also be
+triggered whenever the underlying model is repinned, since a program compiled against one model's
+quirks does not necessarily transfer to another.
+
+**Q: When is programmatic prompt optimization (DSPy, TextGrad) worth adopting over hand-written PromptOps?**
+**Short:** Programmatic optimization pays off at high request volume with a measurable metric and labeled dev set; for one-off or unscored tasks, manual iteration under a registry is faster and cheaper.
+A: It is worth the added machinery when three things are true together: the task has a scorable
+metric (exact match, a rubric an LLM judge can apply, a downstream business metric), you have or
+can build a labeled dev set, and the prompt runs at high enough volume that a few points of
+quality justify optimizer compute and the added review burden of a compiled artifact. It is
+overkill for a one-off prompt, a task with no clean automatic metric, or a small team without the
+eval infrastructure the optimizer needs to score candidates. See
+[Prompt Engineering](../prompt_engineering/prompt_engineering.md) §12 for the deeper mechanics of
+DSPy's optimizers and how automatic optimization differs from single-shot meta-prompting.
 
 ---
 

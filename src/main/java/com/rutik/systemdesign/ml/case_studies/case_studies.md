@@ -70,6 +70,8 @@ Studies are grouped by primary engineering concern, not product category.
 | [NER Pipeline](design_ner_pipeline.md) | BERT token classification | BIO tagging, BERT-CRF, span extraction, nested NER, active learning for annotation, streaming document processing |
 | [Question Answering System](design_question_answering_system.md) | Extractive + open-domain QA | Span prediction (BERT), DPR retriever + reader, multi-hop QA, answer confidence calibration, latency/accuracy tradeoffs |
 
+| [LLM + Classical Hybrid Support Triage](design_llm_hybrid_support_triage.md) | Paradigm choice per traffic slice | Head/tail split, LLM label distillation, temperature-scaled confidence router, conformal abstention, async correction off the SLO path, prompt-drift eval harness, category graduation, cost-per-ticket economics. |
+
 ### Group 7: Product Data Science (DS Analytics)
 
 | Study | Primary Concern | What It Teaches |
@@ -195,6 +197,7 @@ Map from common "design X" interview question to the best case study.
 | Semantic search engine | [Semantic Search Engine](design_semantic_search_engine.md) | Bi-encoder FAISS IVF, RRF hybrid, cross-encoder reranking, hard negatives |
 | Named entity recognition | [NER Pipeline](design_ner_pipeline.md) | BERT-CRF token classification, BIO tagging, span extraction, active learning |
 | Question answering system | [Question Answering System](design_question_answering_system.md) | BERT extractive QA, DPR open-domain, retriever + reader, multi-hop |
+| Support ticket triage / when to use an LLM vs a classical model | [LLM + Classical Hybrid Support Triage](design_llm_hybrid_support_triage.md) |
 
 ---
 

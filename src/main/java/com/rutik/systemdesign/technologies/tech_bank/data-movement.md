@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 153 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 152 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -410,16 +410,6 @@ Reach for it when dbt is a large part of the pipeline and you want its structure
 It builds a model of the cluster from broker and partition metrics, then optimizes replica placement against an ordered list of goals -- replica counts, leader distribution, disk usage, network in and out, rack awareness -- and produces a proposal you can inspect before it executes the reassignment with throttled data movement. The same model drives self-healing: broker failure, disk failure and goal-violation anomalies can trigger a rebalance automatically, and adding or decommissioning a broker becomes an API call rather than hand-written reassignment JSON.
 
 Reach for it once a Kafka cluster is large enough that partitions drift into imbalance faster than anyone wants to fix by hand, and hot brokers start showing up as producer latency. The costs are another service to run plus a metrics reporter on every broker, and the fact that a rebalance moves real data, so throttles and timing matter. Managed Kafka services do this internally, and a small static cluster rarely needs it.
-
-### custom
-**Short:** Not a product: a placeholder for hand-rolled implementations such as a bespoke CDC relay or A/B harness.
-**Kind:** concept
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @3
-
-The entry stands in for the case where no product is adopted at all -- an outbox relay polling a table and publishing to a broker, a hand-written experiment assignment harness, a bespoke sync job -- because those appear in real designs alongside named tools and need somewhere to sit. What it actually names is a decision to own a mechanism rather than take one off the shelf, usually justified by the narrowness of the requirement.
-
-Hand-rolling is right when the need is genuinely small and a mature product's operational surface would dominate it, and wrong far more often than teams expect, because the parts that get skipped are exactly the ones a real tool has already paid for: restart and resume semantics, ordering, backpressure, dead-lettering, schema change, metrics and a way to see what is stuck. Cost it over the second year, not the first week.
 
 ### custom Kafka-based state machine
 **Short:** Hand-rolled saga orchestrator whose state transitions are driven by Kafka topics rather than a workflow engine.

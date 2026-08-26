@@ -366,7 +366,7 @@ A data transformation pipeline had `sanitize.andThen(validate).andThen(transform
 A developer used `.parallelStream().forEach(list::add)` where `list` was an `ArrayList`. Under parallel execution, concurrent `add()` calls caused `ConcurrentModificationException` and data corruption (some elements silently lost). **Fix**: Use `collect(toList())` or `ConcurrentLinkedQueue` or `Collections.synchronizedList()`.
 
 ### War Story 3: Stream pipeline with stateful lambda
-A lambda captured and modified an external `int[]` counter inside a `parallelStream` — both threads incremented the same array cell, causing data races. **Fix**: Use `count()`, `reduce()`, or `Collectors.counting()` — all thread-safe aggregation mechanisms.
+A lambda captured and modified an external `int[]` counter inside a `parallelStream` — both threads incremented the same array cell, causing data races. **Fix**: Use `count()`, `reduce()`, or `Collectors.counting()` — all thread-safe aggregation mechanisms [Effective Java Item 46: "Prefer side-effect-free functions in streams"].
 
 ---
 
@@ -422,7 +422,7 @@ A variable is effectively final if it's initialized once and never reassigned. J
 **Q8: Explain the difference between `Function<A,B>` and `BiFunction<A,B,C>`.**
 **Short:** Function takes one argument and returns a result; BiFunction takes two arguments and returns a result.
 
-`Function<T,R>` takes one argument of type T, returns R. `BiFunction<T,U,R>` takes two arguments (T and U), returns R. Java has no `TriFunction` in the standard library — for 3+ arguments, use a custom functional interface or compose. `BiFunction` is commonly used with `Map.merge()`, `Map.replaceAll()`, and building binary operators. `UnaryOperator<T>` is `Function<T,T>`; `BinaryOperator<T>` is `BiFunction<T,T,T>` — useful for reduce operations.
+`Function<T,R>` takes one argument of type T, returns R. `BiFunction<T,U,R>` takes two arguments (T and U), returns R. Java has no `TriFunction` in the standard library — for 3+ arguments, use a custom functional interface or compose [Effective Java Item 44: "Favor the use of standard functional interfaces"]. `BiFunction` is commonly used with `Map.merge()`, `Map.replaceAll()`, and building binary operators. `UnaryOperator<T>` is `Function<T,T>`; `BinaryOperator<T>` is `BiFunction<T,T,T>` — useful for reduce operations.
 
 **Q9: How does Records' auto-generated `equals()` differ from a typical POJO's?**
 **Short:** A record's equals() compares every component field by field and is regenerated automatically at compile time.
@@ -459,7 +459,7 @@ public BigDecimal rate(String currency) {
 }
 ```
 
-`ConcurrentHashMap.computeIfAbsent` holds a bin-level lock so the mapping function is called at most once per key (unless two keys hash to the same bin — use `putIfAbsent` for strict once-only semantics). Critical caveat: never call `computeIfAbsent` recursively on the same map inside the mapping function — it deadlocks because the bin lock is not reentrant.
+`ConcurrentHashMap.computeIfAbsent` holds a bin-level lock so the mapping function is called at most once per key (unless two keys hash to the same bin — use `putIfAbsent` for strict once-only semantics). Critical caveat: never call `computeIfAbsent` recursively on the same map inside the mapping function — it deadlocks because the bin lock is not reentrant [Effective Java Item 83: "Use lazy initialization judiciously"].
 
 **Q13: What is the difference between `Supplier<T>` and `Callable<T>`, and when does the distinction matter?**
 **Short:** Callable declares throws Exception and integrates with ExecutorService, while Supplier is for pure lazy evaluation.
@@ -495,7 +495,7 @@ Practical guidance: treat functional interfaces as trusted contracts; in code re
 1. **Prefer `andThen` over `compose`** for readability — the name matches the execution order.
 2. **Document parallel stream assumptions** — which operations are stateless, splittable, associative.
 3. **Use custom Collectors over collect-then-transform** for single-pass aggregation.
-4. **Make domain objects immutable by default** — use defensive copy in constructors and getters.
+4. **Make domain objects immutable by default** — use defensive copy in constructors and getters [Effective Java Item 17: "Minimize mutability"].
 5. **Use `Predicate.not()`** (Java 11) for negation: `stream.filter(Predicate.not(String::isEmpty))`.
 6. **Prefer `reduce(identity, accumulator, combiner)`** for parallel-safe reductions.
 7. **Test Collector combiner** explicitly — parallel correctness depends on the combiner being associative.

@@ -5,6 +5,8 @@
 
 **Key insight**: Fixed Window Counter is the simplest but allows a **2x burst at window boundaries** (a client can send the full limit at 0:59 and again at 1:00, doubling the effective rate for a brief instant). Sliding Window Log is exact — it never over- or under-counts — but costs **O(N) memory per client** where N is the limit (e.g., 1000 timestamps per client for a 1000 req/min limit). Sliding Window Counter approximates the sliding window using two fixed-window counters and a weighted overlap, getting close to exact accuracy at O(1) memory. Token Bucket (and its cousin Leaky Bucket) decouples "rate" from "burst capacity" entirely — a bucket holds tokens that refill continuously, so clients can spend a saved-up burst instantly but are throttled to the refill rate over time. **The interview is really about articulating these tradeoffs out loud** — coding any single one of them correctly is necessary but not sufficient; explaining *why* you'd pick one over another for a given API is what separates a pass from a strong pass.
 
+**Full runnable implementation:** [`RateLimiter.java`](RateLimiter.java) — 467 lines, one file, `main()` at the bottom. It demonstrates all four algorithms behind one `RateLimiter` interface — fixed window counter, sliding window log, sliding window counter, token bucket — selected by `RateLimiterFactory`, with a `main()` that drives each through a burst so the boundary behaviour is visible.
+
 ---
 
 ## Problem Statement
@@ -431,3 +433,82 @@ Note: exact decimal values for Token Bucket vary slightly between runs because r
 4. **Graceful degradation with `Retry-After`** — instead of a bare `boolean`, return a result object `{allowed: boolean, retryAfterMs: long}`. For Fixed Window, `retryAfterMs` = time until the window resets; for Token Bucket, `retryAfterMs` = time until `tokens >= 1` given the refill rate. The HTTP layer surfaces this as a `Retry-After` header on a 429 response.
 
 5. **Leaky Bucket as a queueing variant** — Token Bucket rejects immediately when empty; Leaky Bucket instead enqueues the request and processes it at a fixed output rate (like a FIFO queue with a constant drain rate), smoothing bursts into a steady stream rather than dropping them. Useful when the downstream system can tolerate queued work but not a burst (e.g., writing to a slow database) — implement with a bounded `BlockingQueue` plus a single consumer thread draining at the configured rate.
+
+---
+
+## Interview Questions with Answers
+
+**Q: Why does Fixed Window Counter allow up to 2x the configured limit?**
+**Short:** a counter that resets on a clock edge can be drained fully on both sides of that edge.
+
+A client can send the full limit right before a window resets and the full limit again right after, because the counter has no memory of the previous window at all — with limit=5 and a 60s window, 5 requests at 0:59.9 and 5 more at 1:00.1 puts 10 requests into a span of just 0.2 seconds, double the configured rate. This is a structural property of resetting on a fixed clock boundary, not a bug in the implementation — the worst-case rolling count is exactly `2 x limit` regardless of how carefully the counter itself is coded. It's the reason Sliding Window Counter and Token Bucket both exist: either smooth the boundary artifact (sliding window) or abandon window-based counting entirely (token bucket).
+
+**Q: Why is Sliding Window Log's memory O(N) in the *limit*, rather than O(N) in actual traffic?**
+**Short:** exactness requires storing one timestamp per request you're willing to allow, so the bill scales with the limit itself.
+
+Sliding Window Log stores every request's timestamp in a per-client deque so it can compute the exact count in any rolling window — which means the deque's worst-case size is bounded by the limit (the maximum number of requests you'd ever allow to sit in the window at once), not by how much traffic the client actually sends. Counterintuitively, this means a *more generous* limit costs *more* memory per client, the opposite of what you'd expect from "loosening a restriction should be cheaper to enforce" — a 10,000 req/min limit stores 10,000 timestamps per client regardless of whether that client ever comes close to using it.
+
+**Q: Walk the numbers — what's the actual memory gap between Sliding Window Log and Token Bucket at 1,000,000 clients?**
+**Short:** roughly 8GB for the log versus 16MB for token bucket at a 1,000 req/min limit — a 500x gap.
+
+At a 1,000 req/min limit, Sliding Window Log needs 1,000 timestamps × 8 bytes = 8,000 bytes per client; scaled to 1,000,000 clients that's 8,000,000,000 bytes, roughly 8GB, just for the timestamp deques. Token Bucket needs only two fields per client (a `double` and a `long`, 16 bytes total) regardless of the configured limit, so the same fleet costs 1,000,000 × 16 bytes = 16MB. That 500x gap is the concrete, quantified reason the "exact" algorithm loses in production despite being provably correct — and it's a lower bound, since the real `ArrayDeque<Long>` implementation costs more per entry than the 8-byte floor (see the next question).
+
+**Q: Why is the real per-entry cost of `ArrayDeque<Long>` higher than the "8 bytes per timestamp" figure used in the memory table?**
+**Short:** boxed `Long` objects cost ~24-32 bytes each with object-header overhead, not the 8-byte primitive `long` floor.
+
+The 8-byte figure assumes a primitive `long[]`, but the implementation stores boxed values in an `ArrayDeque<Long>`, where each entry is a full `Long` object — a 12-byte header padded to a 24-byte object, plus the array slot holding a reference to it — landing around 28 bytes with compressed oops or 32 without, roughly 3.5-4x the primitive floor. This means the "500x gap" figure computed from the 8-byte floor is itself conservative — it's a lower bound on how badly Sliding Window Log loses, not an upper one. The practical fix is a `long[]` ring buffer per client instead of a boxed `ArrayDeque<Long>`, which recovers the primitive-array memory cost while keeping the same eviction logic.
+
+**Q: Why is Token Bucket's refill computed lazily on each call instead of with a background thread ticking a timer?**
+**Short:** lazy refill means zero cost when idle; a ticking thread would burn CPU on buckets nobody is touching.
+
+Computing `tokensToAdd = elapsedMs / 1000.0 x refillRate` only when a request actually arrives means an idle client's bucket costs nothing between requests — no background thread is running, no CPU is spent updating buckets nobody is checking. A background ticking timer, by contrast, would need to periodically wake up and update every client's bucket regardless of whether that client has made a request recently, wasting cycles on inactive clients and adding a whole class of scheduling and thread-safety concerns the lazy approach avoids entirely. The tradeoff is that `lastRefillTimestamp` must be updated on *every* call — allowed or denied — or the next call would double-count the elapsed time.
+
+**Q: Walk the token bucket math — why does idling 10 seconds earn the same maximum burst as idling only 5 seconds?**
+**Short:** the `min(capacity, tokens + tokensToAdd)` cap discards any credit earned beyond the bucket's brim.
+
+With `capacity = 5` and `refillRate = 1 token/sec`, idling 5 seconds computes `tokensToAdd = 5.0`, capped at `min(5, 0 + 5.0) = 5.0` tokens — the full bucket. Idling 10 seconds computes `tokensToAdd = 10.0`, but the same cap gives `min(5, 0 + 10.0) = 5.0` — identical, because 5 tokens are forfeited past the capacity brim. This is exactly what makes `capacity` mean anything at all: without the `min(...)`, a client that stayed quiet all day could fire an unbounded burst the instant it returned, turning "capacity" into an unenforced number rather than an actual ceiling.
+
+**Q: Why must `lastRefillTimestamp` update even on a request that gets denied?**
+**Short:** skipping the update on denial would let the next call double-count the time that already elapsed.
+
+If a denied request left `lastRefillTimestamp` unchanged, the *next* call — allowed or denied — would compute `elapsedMs` from the older, stale timestamp, effectively crediting the client for time that was already accounted for once but never actually converted into tokens because the request that measured it was denied. Updating the timestamp on every call, regardless of outcome, ensures elapsed time is measured and consumed exactly once, matching the lazy-refill design's core invariant: every millisecond of idle time is counted toward exactly one future refill calculation, never zero and never twice.
+
+**Q: Why is `RateLimiterFactory` called a Simple Factory and not GoF Factory Method?**
+**Short:** it's one static method switching on an enum, not an overridable instance method deferred to a subclass.
+
+`RateLimiterFactory.create(RateLimiterType, RateLimiterConfig)` centralizes construction by switching on an enum — the same shape as `ParkingLot`'s `VehicleFactory` and `RideSharing`'s `VehicleFactory` — which is a Simple Factory, a pattern not actually in the GoF catalogue. GoF's Factory Method instead defers the decision of *what* to instantiate to an overridable method on a subclass, and Abstract Factory produces families of related products together; neither describes a static switch statement. This page states outright that calling this "Factory Method" in an interview is "a cheap point to lose" — precision on pattern naming is graded.
+
+**Q: Why does `InstrumentedRateLimiter` increment its counters after delegating to the wrapped limiter, not before?**
+**Short:** it waits for the delegate's actual answer, so metrics can never drift from what was really decided.
+
+`InstrumentedRateLimiter.allowRequest()` calls through to the wrapped `RateLimiter` first, receives the true `true`/`false` outcome, and only then increments `allowedCount` or `deniedCount` to match — incrementing beforehand (or optimistically assuming an outcome) risks the metric disagreeing with what actually happened if the delegate's logic is more complex than a simple pass-through. This after-the-fact accounting is what makes the decorator composable with any of the four algorithms interchangeably: it never needs to predict an algorithm's decision, only faithfully record whatever decision was actually made.
+
+**Q: Why does Sliding Window Counter only approximate the sliding window rather than compute it exactly?**
+**Short:** it weights the previous window's count by overlap fraction instead of tracking every individual timestamp.
+
+Sliding Window Counter keeps just two counters — current window and previous window — and estimates the effective count in the current rolling window as a weighted blend of the two, assuming requests are evenly distributed within each fixed window. That assumption is what introduces the approximation error: real traffic isn't perfectly uniform within a window, so the weighted estimate can be slightly off from the true exact count a full timestamp log would give. The payoff is O(1) memory regardless of the limit, instead of Sliding Window Log's O(N) — a tradeoff of a small, bounded accuracy error for a massive reduction in memory cost.
+
+**Q: What accuracy tradeoff did Cloudflare measure for its weighted sliding-window scheme in production?**
+**Short:** 0.003% of requests wrongly allowed or limited over 400M requests, with a ~6% average gap from the true rate.
+
+Cloudflare's measurement of its own weighted-previous-window sliding counter found that only 0.003% of requests were misclassified (wrongly allowed or wrongly limited) across a sample of 400 million requests, with roughly a 6% average gap between the approximated rate and the true rate. This is the concrete evidence behind the table's "good approximation" characterization for Sliding Window Counter — the error is small and bounded in practice, not a theoretical hand-wave, which is exactly why Kong's Rate Limiting Advanced plugin ships the identical scheme as its default and recommended window type rather than something more exact.
+
+**Q: How would you implement composite limits — a different rate for `/search` than for `/export`, per client?**
+**Short:** key the per-client state map on a composite `clientId + ":" + endpoint`, or compose two limiters requiring both to allow.
+
+The simplest approach is keying whatever per-client map each algorithm already maintains (windows, buckets, logs) on a composite key like `clientId + ":" + endpoint` instead of just `clientId` — this needs no interface change, since `allowRequest` still takes one string key, it's just constructed differently by the caller. An alternative is composing two independent `RateLimiter` instances (a per-client one and a per-endpoint one) and requiring both to return `true` before allowing the request, which keeps the two limits conceptually separate at the cost of two lookups instead of one per check.
+
+**Q: Leaky Bucket vs Token Bucket — what's the behavioral difference under a burst of traffic?**
+**Short:** Token Bucket rejects immediately when empty; Leaky Bucket queues the excess and drains it at a fixed rate instead.
+
+Token Bucket makes an instant allow/deny decision — once tokens run out, every further request is rejected outright until the bucket refills, which is appropriate when the caller can retry later. Leaky Bucket instead enqueues incoming requests into a bounded queue and processes them at a constant output rate regardless of how bursty the input was, smoothing a burst into a steady stream rather than dropping the excess — useful specifically when the downstream system can tolerate queued work but genuinely cannot tolerate a burst, such as writing to a slow database. The implementation shape differs correspondingly: Token Bucket is two fields and arithmetic, Leaky Bucket needs a bounded `BlockingQueue` plus a dedicated consumer thread draining it at the configured rate.
+
+**Q: What changes when this design moves from a single JVM to a distributed rate limiter?**
+**Short:** state moves from a `ConcurrentHashMap` to Redis, and atomicity moves from a `synchronized` block to a Lua script.
+
+In this LLD, each algorithm's per-client state (windows, logs, buckets) lives in a `ConcurrentHashMap` inside one process's heap, and a `synchronized` block or the map's own atomic operations guarantee correctness under concurrent calls *within that process*. At distributed scale — multiple service instances behind a load balancer, each with its own independent map — a client could get `N x instanceCount` requests through, since no instance knows what any other instance has already allowed. The fix moves the state into Redis (an `INCR`+`EXPIRE` pair for Fixed Window, a sorted set for Sliding Window Log, a Lua script executed via `EVAL` for Token Bucket's refill-and-decrement, since it must happen atomically) so every instance shares one logical view of each client's state instead of maintaining N disconnected ones.
+
+**Q: How would you add a `Retry-After` response instead of returning a bare boolean?**
+**Short:** return `{allowed, retryAfterMs}`; compute it from the window reset time or the time until enough tokens refill.
+
+Rather than `boolean allowRequest(clientId)`, a richer contract returns a small result object carrying both the allow/deny decision and a `retryAfterMs` field telling the caller exactly how long to wait before trying again. For Fixed Window, that's the time remaining until the current window resets; for Token Bucket, it's the time until `tokens >= 1` given the configured refill rate, computed directly from the same elapsed-time arithmetic the refill calculation already uses. The HTTP layer then surfaces this as a standard `Retry-After` header on a 429 response, giving the client actionable guidance instead of a bare rejection it has to guess how to handle.

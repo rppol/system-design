@@ -14,7 +14,7 @@ The answers produce the five canonical algorithms in §3, each trading off **acc
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Rate limiting is like a nightclub bouncer with a capacity limit — no matter how many people arrive, only N per minute get in, protecting the venue from overcrowding.
 
@@ -26,7 +26,7 @@ The answers produce the five canonical algorithms in §3, each trading off **acc
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 Rate limiting is a technique used to control the rate at which clients can make requests to a server or service. It is a foundational component of any production-grade API or distributed system.
 
@@ -52,7 +52,7 @@ Some APIs are rate-limited for business reasons: limiting free-tier scraping, en
 
 ---
 
-## 3. Types / Strategies — Rate Limiting Algorithms
+## 4. Types / Architectures / Strategies — Rate Limiting Algorithms
 
 ### Token Bucket
 
@@ -473,7 +473,7 @@ class SlidingWindowCounter:
 
 ---
 
-## 4. Distributed Rate Limiting
+### Distributed Rate Limiting
 
 ### The Problem
 
@@ -1044,17 +1044,6 @@ A: It missed concurrency — how many of that client's requests are in flight at
 
 ---
 
-## Cross-Perspective: LLD Connections
-
-**LLD View — Design Patterns That Implement Rate Limiting**
-
-- **Strategy** — Rate limiting algorithms (token bucket, leaky bucket, fixed window, sliding window, sliding window log) are interchangeable Strategy implementations behind a `RateLimitingStrategy` interface. The algorithm can be configured per-client tier, per-endpoint, or per-API key.
-- **Decorator** — Rate limiting is applied as a Decorator wrapping service handlers: the rate limit check executes before delegating to the actual handler, transparently enforcing quotas without modifying business logic.
-- **Chain of Responsibility** — In an API gateway, rate limiting is one middleware link: auth → rate limit → validation → business logic. Each handler decides to process, reject (429), or forward to the next link.
-- **Singleton** — The token bucket / sliding window counter store (backed by Redis or in-memory `AtomicLong`) is managed by a Singleton `RateLimiterRegistry`, shared across all request-handling threads.
-
----
-
 ## 13. Best Practices
 
 ### 1. Graceful Degradation
@@ -1101,6 +1090,17 @@ Provide SDK helpers that track and respect rate limits proactively, sending `X-R
 ---
 
 **Cross-references:** [backend/rate_limiting_in_depth](../../backend/rate_limiting_in_depth/rate_limiting_in_depth.md) (production implementation: Redis Lua scripts, sliding-window counters, header conventions), [llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) (token-bucket rate limiting for LLM API quotas).
+
+---
+
+### Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement Rate Limiting**
+
+- **Strategy** — Rate limiting algorithms (token bucket, leaky bucket, fixed window, sliding window, sliding window log) are interchangeable Strategy implementations behind a `RateLimitingStrategy` interface. The algorithm can be configured per-client tier, per-endpoint, or per-API key.
+- **Decorator** — Rate limiting is applied as a Decorator wrapping service handlers: the rate limit check executes before delegating to the actual handler, transparently enforcing quotas without modifying business logic.
+- **Chain of Responsibility** — In an API gateway, rate limiting is one middleware link: auth → rate limit → validation → business logic. Each handler decides to process, reject (429), or forward to the next link.
+- **Singleton** — The token bucket / sliding window counter store (backed by Redis or in-memory `AtomicLong`) is managed by a Singleton `RateLimiterRegistry`, shared across all request-handling threads.
 
 ---
 

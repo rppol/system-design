@@ -5,6 +5,8 @@ Deep learning recommenders replace hand-crafted similarity functions and shallow
 
 The key advancement over collaborative filtering is the ability to incorporate heterogeneous features: sparse ID features (user_id, item_id, category), dense numerical features (price, age, click rate), and sequential features (last 50 items viewed) — all jointly learned in a single model. Deep models also learn cross-feature interactions automatically, eliminating manual feature engineering.
 
+The most recent turn in this lineage reframes the problem again. SASRec and BERT4Rec (Section 4.5) already treat recommendation as sequence modeling — predict the next item from a sequence of past items — but they still predict over a fixed embedding table with one row per item ID. Meta's HSTU (Hierarchical Sequential Transduction Units, 2024) and Google's TIGER push the sequence-modeling framing one step further: instead of scoring a candidate set, the model **generates** the next item as a short sequence of discrete tokens, the same way an LLM generates text token by token. That only works if the catalogue itself can be re-expressed as a vocabulary — see Section 3.
+
 ---
 
 ## 2. Intuition
@@ -30,6 +32,8 @@ Key insight for Wide & Deep: Memorization and generalization are complementary. 
 **Negative Sampling**: Training data is sparse positive examples. Models need negative examples (items not clicked). Uniform negative sampling is simple but biased toward popular items. Hard negative mining (sample items the model nearly recommends) improves discrimination.
 
 **In-Batch Negatives**: In two-tower training, use all other items in the batch as negatives for each user. Efficient — no extra sampling needed. Requires correction for sampling bias because popular items appear as negatives more often.
+
+**The Catalogue as Vocabulary**: Every architecture above — two-tower, NCF, Wide & Deep, DeepFM, SASRec — treats "which item" as a lookup: one row of an embedding table, one class in a softmax over N items. Generative retrieval (HSTU, TIGER) instead assigns each item a short sequence of discrete tokens (a **semantic ID**, Section 4.7) drawn from a shared, much smaller vocabulary — a few thousand codebook entries instead of tens of millions of item rows. Recommendation becomes decoding: a Transformer generates the next item's token sequence the way a language model generates the next word. This is the principle that lets scaling laws start applying to recommendation at all — a two-tower model's item embedding table grows linearly with catalogue size and has no shared structure for a bigger model to exploit, while a shared token vocabulary means adding model capacity (more layers, wider attention) improves the fit for *every* item simultaneously, the same mechanism that makes a bigger LLM a better model of language rather than just a bigger lookup table.
 
 ---
 
@@ -77,6 +81,24 @@ Embedding tables: sparse feature lookup (user_id, item_id, category)
 Feature interaction: dot product between all pairs of embedding vectors (upper triangle)
 Top MLP: scores interaction output
 Optimized for commodity hardware with massive embedding table sharding
+
+### 4.7 Generative Retrieval / Semantic ID Recommenders
+
+Every model in Sections 4.1-4.6 gives each item a **learned atomic ID** -- a row in an
+`nn.Embedding(n_items, dim)` table, an arbitrary integer with no relationship to any other item's ID,
+so a new item needs a freshly-initialized untrained row and starts with zero signal. Generative
+recommenders replace that with a **semantic ID**: a short tuple of codebook indices produced by an
+RQ-VAE over the item's content embedding, e.g. `(214, 87, 3)`. Because residual quantization is
+coarse-to-fine, semantically similar items **share an ID prefix**, which is the entire cold-start
+mechanism -- a brand-new item is retrievable the moment its content embedding exists. Retrieval then
+stops being an ANN search and becomes **autoregressive decoding**: a sequence model conditioned on the
+user's history generates the target item's tokens, with beam search over the semantic-ID tree
+returning a ranked top-K without a separate ranking pass.
+
+The mechanism in full -- RQ-VAE versus plain VQ-VAE, HSTU's target-aware attention and generative
+objective, scaling laws for recommendation, a runnable tokenizer with beam-search decoding, the
+memory arithmetic, and the migration path -- is in
+**[Generative Recommenders](generative_recommenders.md)**.
 
 ---
 
@@ -245,6 +267,12 @@ flowchart TD
 DLRM keeps dense features in a bottom MLP and sparse IDs in sharded embedding
 tables, then computes explicit pairwise dot products between every vector pair —
 a more interpretable, hardware-friendly interaction than the learned crosses in DeepFM.
+
+### 5.5 Classical Funnel vs Generative Retrieval
+
+The side-by-side flow of the classical two-stage funnel against the generative one -- and what the
+generative path buys in index simplicity versus what it spends in decode latency -- is diagrammed in
+**[Generative Recommenders](generative_recommenders.md)**, Section 5.
 
 ---
 
@@ -717,6 +745,13 @@ is worth. Keeping them separate is more expressive and far more hardware-friendl
 batched matrix multiply — but it is also why the interaction output width, and therefore the top
 MLP's first layer, grows quadratically with the feature count.
 
+### Generative Retrieval: RQ-VAE Tokenizer and Beam-Search Decoding
+
+A runnable RQ-VAE tokenizer (straight-through estimator, commitment loss, residual chain) and the
+beam-search decoder that walks the semantic-ID tree -- plus the arithmetic showing why `3 x 256`
+codebook rows address 16.7M items where an atomic-ID table for 50M items costs 1.6B floats -- are in
+**[Generative Recommenders](generative_recommenders.md)**, Section 6.
+
 ---
 
 ## 7. Real-World Examples
@@ -728,6 +763,10 @@ MLP's first layer, grows quadratically with the feature count.
 **Pinterest PinSage (2018)**: Graph convolutional network for pin recommendation. Treats the pin-board bipartite structure as a graph; pin embeddings are computed by aggregating neighborhood pin features via GCN. Scales to 3 billion nodes and 18 billion edges. Key innovation: importance-based neighborhood sampling (not all neighbors equally — sample proportional to random walk visit count) makes GCN tractable at Pinterest's scale.
 
 **Sequential Modeling for Session Context**: Streaming services use sequential models to capture "session context" — the series you are currently watching matters more than your 5-year watch history. A self-attention model over the last N watched items improves same-session next-episode recommendations compared to static user embeddings; the specific window and gain are internal numbers that platforms rarely publish, so tune N on your own data.
+
+**Generative recommenders in production**: Meta's HSTU, Shopify's 2026 commerce engine, Google's
+TIGER and Snapchat's semantic-ID design are covered with their published numbers and sources in
+**[Generative Recommenders](generative_recommenders.md)**, Section 7.
 
 ---
 
@@ -748,6 +787,10 @@ MLP's first layer, grows quadratically with the feature count.
 | Hard negative mining | Better discrimination | More complex pipeline, risk of false negatives |
 | Temperature scaling | Controls confidence of dot product | Requires tuning |
 | L2 normalization of tower outputs | Cosine similarity instead of dot product | May lose magnitude signal |
+
+Classical two-tower + ANN against generative semantic-ID retrieval -- on embedding-table memory,
+cold start, serving cost, interpretability, scaling behaviour and migration cost -- is tabulated in
+**[Generative Recommenders](generative_recommenders.md)**, Section 8.
 
 ---
 
@@ -777,6 +820,12 @@ MLP's first layer, grows quadratically with the feature count.
 **Do NOT use BERT4Rec for very long sequences:**
 Bidirectional attention is O(N^2) in sequence length. For sequences longer than 200 items, SASRec (causal attention) or hierarchical approaches are preferred.
 
+**Generative retrieval** is worth it when the catalogue is huge and cold-start-heavy, you can afford
+sequential decode latency instead of a sub-5ms ANN lookup, and you have good content embeddings to
+tokenize. It is the wrong move against a small, stable catalogue with a mature ranker, or before the
+team can operate the tokenizer as its own versioned artifact. Full lists in
+**[Generative Recommenders](generative_recommenders.md)**, Section 9.
+
 ---
 
 ## 10. Common Pitfalls
@@ -790,6 +839,12 @@ Bidirectional attention is O(N^2) in sequence length. For sequences longer than 
 **Pitfall 4 — Not sharing category embeddings between user and item towers**: A team used independent category embedding tables for the user tower and item tower. The user's "favorite category = Electronics" and the item's "category = Electronics" got different representations. The model could not align them in the shared embedding space. Fix: use a shared category embedding table across both towers — the same category ID maps to the same vector.
 
 **Pitfall 5 — Sequence padding causing attention leakage**: SASRec was deployed with right-padding (padding tokens at the end of sequences). The causal mask was applied based on position, but padding tokens at end positions were attended to by real tokens at earlier positions (padding appearing at "future" positions violated the causal assumption). Fix: use left-padding for causal sequence models (padding at the beginning, real items at the end), and apply attention masking to ignore padding tokens.
+
+**Pitfalls specific to generative retrieval** -- tokenizer collapse when codebooks are undersized,
+tokenizer drift after the content-embedding model is retrained, and offline recall wins that do not
+survive an A/B test because the downstream ranker was trained on the old candidate distribution --
+are written up with their incidents and fixes in
+**[Generative Recommenders](generative_recommenders.md)**, Section 10.
 
 ---
 
@@ -901,6 +956,7 @@ Design the item tower to operate purely on content features — no item ID embed
 
 The two towers never interact until the final dot product, so the model cannot learn fine-grained user-item feature crosses that a cross-attention ranker captures. This "late interaction" is exactly the property that makes item vectors precomputable and ANN-searchable, but it forfeits expressiveness — the score is just a dot product of two independently computed vectors. That is why production stacks use two-tower for cheap high-recall retrieval (top-500) and then a heavier cross-feature ranker (Wide & Deep, DLRM) to re-score those candidates for the final ordering.
 
+
 ---
 
 ## 13. Best Practices
@@ -915,6 +971,8 @@ The two towers never interact until the final dot product, so the model cannot l
 8. Cache item vectors with TTL matching catalog update frequency — stale item vectors cause silent recommendation quality degradation.
 9. Evaluate recall@100 (retrieval quality) separately from NDCG@10 (ranking quality) — they require different optimizations.
 10. For sequences, left-pad rather than right-pad — causal attention models should have real items at the rightmost positions.
+11. Ship generative retrieval (semantic IDs) as an *additional* candidate source merged alongside the incumbent two-tower, never as a day-one replacement — this is the migration that actually works, because it lets the ranker and the online metrics adapt to the new candidate distribution (Section 10 Pitfall 8) before the incumbent is retired.
+12. Version the item tokenizer as its own artifact tied to the content-embedding model that feeds it, and re-tokenize the catalogue whenever either changes — an untracked tokenizer drifts silently (Section 10 Pitfall 7).
 
 ---
 

@@ -2,6 +2,8 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
+> **Version anchor (2026-08-25).** **containerd v2.3** (2026-04-30, current LTS) — **Kubernetes 1.35 is the last release that supports containerd 1.x**, and containerd 2.0+ is required before upgrading a node's kubelet to 1.36 (kubernetes.io, 2025-12-17); **containerd 1.7's extended LTS support ends September 2026**, scoped to Kubernetes 1.30-1.32; **runc v1.5.1** (2026-07-14); **OCI Image Spec v1.1.1** (2025-03-03) and **Runtime Spec v1.3.0** (2024-11-04); **CRI-O's release train tracks each Kubernetes minor 1:1** (its 1.35.x line ships alongside Kubernetes 1.35).
+
 When Kubernetes "runs a container," Docker is not involved in production — a CRI runtime (containerd or CRI-O) pulls the image, sets up namespaces/cgroups, and hands off to a low-level OCI runtime (runc) that actually `execve`s the process. Understanding this stack explains the "dockershim removal", why a node can run pods without Docker installed, and how sandboxed runtimes (gVisor, Kata) provide stronger isolation.
 
 ---
@@ -14,7 +16,9 @@ The runtime stack has three layers, standardized by the **OCI (Open Container In
 2. **Low-level/OCI runtime** — `runc` (default), `crun`, `gVisor (runsc)`, `Kata`. Given an OCI bundle (rootfs + `config.json`), it creates the namespaces/cgroups and starts the process.
 3. **Shim** — a small process that keeps containers running independently of the runtime daemon (so restarting containerd doesn't kill pods). containerd's `runc.v2` shim groups on the CRI sandbox id, so under Kubernetes one shim serves every container in a pod.
 
-The **OCI specs** define three things: the **image spec** (layered image format), the **runtime spec** (the `config.json` bundle a runtime consumes), and the **distribution spec** (registry pull/push API). Because these are open standards, an image built by Docker runs on containerd, and runc can be swapped for gVisor transparently.
+The **OCI specs** define three things: the **image spec** (v1.1.1, layered image format), the **runtime spec** (v1.3.0, the `config.json` bundle a runtime consumes), and the **distribution spec** (registry pull/push API). Because these are open standards, an image built by Docker runs on containerd, and runc can be swapped for gVisor transparently.
+
+**Where containerd itself stands:** the project is on the **2.x line** (2.3 is the current LTS, cut 2026-04-30). **Kubernetes 1.35 is the last release the project supports running against containerd 1.x** — a node must be upgraded to containerd 2.0 or later before its kubelet moves to 1.36, and containerd 1.7 (the final 1.x LTS) only carries extended support through September 2026, scoped to the older 1.30-1.32 Kubernetes line. CRI-O sidesteps this migration: its release train tracks the Kubernetes minor version 1:1, so there is no separate CRI-O 1.x/2.x runtime line to move off.
 
 ---
 
@@ -171,6 +175,25 @@ spec:
       image: tenant/job:latest
 ```
 
+### The containerd 1.x → 2.x runtime boundary (Kubernetes 1.35 / 1.36)
+
+Kubernetes 1.35 is the **last** release the project supports running against containerd 1.x;
+from **1.36** onward, containerd 2.0+ is the expected runtime. The 1.35 kubelet exposes a
+`kubelet_cri_losing_support` metric specifically so operators can find nodes still on
+containerd 1.x before they upgrade the kubelet past it — moving the kubelet first leaves the
+node on an unsupported combination. containerd 1.7, the last 1.x LTS, only has extended
+support through **September 2026**, and that support is scoped to the older 1.30-1.32
+Kubernetes line, so it was never meant to carry a fleet across the 1.36 boundary.
+
+```bash
+crictl version | grep RuntimeVersion   # containerd 2.x.y  <- required before kubelet -> 1.36
+containerd --version                   # same check, run directly on the host
+```
+
+CRI-O has no equivalent cliff: its release train tracks the Kubernetes minor version 1:1
+(CRI-O 1.35.x ships alongside Kubernetes 1.35), so upgrading Kubernetes and upgrading CRI-O
+are the same event rather than two runtimes drifting apart.
+
 ### Why the shim exists
 
 ```mermaid
@@ -290,9 +313,9 @@ crictl exec -it <id> sh        # exec (if the image has a shell)
 
 | Tool | Purpose |
 |------|---------|
-| containerd | Default CRI runtime; image/snapshot/lifecycle |
-| CRI-O | K8s-focused CRI runtime (OpenShift) |
-| runc | Reference OCI runtime |
+| containerd | Default CRI runtime; image/snapshot/lifecycle. On the 2.x line (2.3 current LTS); Kubernetes 1.35 is the last release supporting containerd 1.x |
+| CRI-O | K8s-focused CRI runtime (OpenShift); release train tracks the Kubernetes minor version 1:1, no 1.x/2.x migration |
+| runc | Reference OCI runtime (v1.5.1 current) |
 | crun | Faster C-based OCI runtime |
 | gVisor (runsc) | User-space kernel sandbox |
 | Kata Containers | Per-container lightweight VM isolation |
@@ -367,6 +390,10 @@ containerd translates the pod's CPU and memory requests into the `linux.resource
 **Q16: What is overlayfs and why is it the default snapshotter?**
 **Short:** overlayfs layers read-only image layers under a thin writable directory as one merged view, letting many containers share the same base-image layers while each keeps its own writable layer.
 overlayfs is a union filesystem that layers a container's read-only image layers under a thin writable "upper" directory, presenting them as one merged view without copying the read-only data. Multiple containers can share the same lower (image) layers on disk while each gets its own isolated upper layer for writes, which is why pulling a common base image once and starting 50 containers from it costs almost no extra disk. It's the default snapshotter because it's fast (no copy-on-first-write across whole layers, just directory merging) and built into the mainline Linux kernel, though pluggable alternatives like stargz trade this for lazy-pull startup latency instead.
+
+**Q17: What happens if you try to run Kubernetes 1.36 on a node still on containerd 1.x?**
+**Short:** It isn't supported — Kubernetes 1.35 is the last release supporting containerd 1.x, and containerd 2.0+ is required before the kubelet moves to 1.36.
+Kubernetes 1.35 is the last release the project supports against containerd 1.x; from 1.36 onward containerd 2.0+ is the expected runtime, so a kubelet upgraded past 1.35 while the node is still on containerd 1.x is running an unsupported combination. The 1.35 kubelet exposes a `kubelet_cri_losing_support` metric precisely so operators can find lagging containerd installs and fix the runtime first. containerd 1.7's own LTS clock is shorter and separate — its extended support runs only through September 2026 and is scoped to the older 1.30-1.32 Kubernetes line, so it was never meant to carry a fleet across the 1.36 boundary; CRI-O users don't face this cliff at all since its releases track the Kubernetes minor 1:1.
 
 ---
 

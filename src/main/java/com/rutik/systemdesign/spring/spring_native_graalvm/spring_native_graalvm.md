@@ -1,10 +1,11 @@
 # Spring Native & GraalVM (AOT)
 
-> How Spring Boot 3 turns a reflection-and-proxy-heavy framework into a GraalVM
+> How Spring Boot turns a reflection-and-proxy-heavy framework into a GraalVM
 > native executable: ahead-of-time (AOT) processing, reachability metadata
 > (reflection/resource/proxy hints), build-time vs runtime initialization, and the
 > startup/memory-vs-peak-throughput tradeoff that decides when native is worth it.
-> Spring Boot 3.0+ / GraalVM 22.3+; always note the version.
+> Spring Boot 4.1.x / Spring Framework 7.0.8 / GraalVM for JDK 25 / Java 25 LTS.
+> Spring Boot 4 requires GraalVM native-image **25 or later**; always note the version.
 
 ---
 
@@ -19,7 +20,7 @@ ahead-of-time into a single self-contained native executable with no JVM, using 
 
 Those two facts are in direct tension. Native image's static analysis cannot see
 code reached only through reflection, dynamic proxies, JNI, or runtime resource
-loading unless you *tell* it — via **reachability metadata** (hints). Spring Boot 3's
+loading unless you *tell* it — via **reachability metadata** (hints). Spring Boot's
 **AOT engine** exists to bridge the gap: at build time it runs a special processing
 phase that pre-computes the bean definitions and *emits* the reflection/proxy/
 resource hints GraalVM needs, so the framework's dynamic behavior is "frozen" into
@@ -228,7 +229,7 @@ unless a hint re-includes it. This is the #1 cause of native runtime failures.
 
 ## 6. How It Works — Detailed Mechanics
 
-### 6.1 Building a native image (Spring Boot 3 + GraalVM)
+### 6.1 Building a native image (Spring Boot 4 + GraalVM for JDK 25)
 
 ```bash
 # Native build via the Spring Boot Maven plugin + GraalVM native-maven-plugin
@@ -340,7 +341,15 @@ missing metadata at build/test time instead of in production.
 
 - **Spring Boot 3.0 (Nov 2022)** — folded the experimental "Spring Native"
   incubator into the core framework as first-class AOT support; GraalVM became a
-  supported target rather than a side project.
+  supported target rather than a side project. Spring Boot 4 raised the floor to
+  GraalVM native-image 25, which is also where the metadata format settled: JNI
+  registration now rides in the `"reflection"` section of a single
+  `reachability-metadata.json` under a `"jniAccessible"` attribute, and resource-bundle
+  registration folded into that file's `"resources"` section — replacing the old
+  scatter of `reflect-config.json`, `jni-config.json` and their siblings. GraalVM 25
+  also improved `--exact-reachability-metadata`, so reflection and JNI queries on
+  invalid class names throw the JDK exception you would expect instead of demanding a
+  metadata entry.
 - **AWS Lambda** — Spring Boot native images cut Java cold starts from seconds to
   ~tens of ms, making Java competitive with Node/Python on FaaS; widely used for
   latency-sensitive event handlers.
@@ -357,14 +366,31 @@ missing metadata at build/test time instead of in production.
 
 ## 8. Tradeoffs
 
-| Dimension | JVM (JIT) | Native image (AOT) | Native wins when… |
-|-----------|-----------|--------------------|--------------------|
-| Startup | Seconds | Tens of ms | Cold start / FaaS dominates cost |
-| Memory (RSS) | Hundreds of MB | Tens of MB | High pod density / memory-billed |
-| Peak throughput | Higher (warmed JIT) | Lower (no JIT; PGO helps) | Throughput is not the bottleneck |
-| Build time | Seconds | Minutes | You can absorb slow CI builds |
-| Flexibility | Full reflection/dynamic | Closed-world, hints needed | App is mostly static |
-| Debuggability | Mature JVM tooling | Harder; less mature | — |
+Native image is no longer the only way to buy startup, and framing this as
+JVM-versus-native hides the option most teams should try first. On Java 25 the JVM
+itself carries an **AOT cache** (Project Leyden, `-XX:AOTCache`), which memoises class
+loading and linking from a training run. It is a different trade from native image:
+you keep the JIT, full reflection and dynamic class loading, and you pay a training
+run rather than a closed-world analysis.
+
+| Dimension | JVM (JIT) | JVM + AOT cache | Native image (AOT) | Native wins when… |
+|-----------|-----------|-----------------|--------------------|--------------------|
+| Startup | Seconds | Faster than plain JVM, not native-class | Tens of ms | Cold start / FaaS dominates cost |
+| Memory (RSS) | Hundreds of MB | Similar to plain JVM | Tens of MB | High pod density / memory-billed |
+| Peak throughput | Higher (warmed JIT) | Same as plain JVM — the JIT is untouched | Lower (no JIT; PGO helps) | Throughput is not the bottleneck |
+| Build time | Seconds | Seconds plus one training run | Minutes | You can absorb slow CI builds |
+| Flexibility | Full reflection/dynamic | Full reflection/dynamic | Closed-world, hints needed | App is mostly static |
+| Reachability metadata | Not needed | Not needed | Required for anything dynamic | — |
+| Debuggability | Mature JVM tooling | Mature JVM tooling | Harder; less mature | — |
+| Minimum JDK | 17 | **25** | 17 (GraalVM 25 for Boot 4) | — |
+
+Read that table top to bottom before reaching for native image. The AOT cache costs a
+training run and nothing else — no hints, no closed-world constraint, no loss of peak
+throughput — so it is the cheaper first move whenever startup is merely *slow* rather
+than *fatal*. Native image earns its complexity only when the memory row or the
+tens-of-milliseconds startup row is what you are actually buying. The CDS and
+AOT-cache mechanics live in
+[Spring Performance](../spring_performance/spring_performance.md).
 
 | Concern | JVM | Native |
 |---------|-----|--------|
@@ -590,6 +616,16 @@ the start (constructor injection, minimal reflection, no runtime bytecode gen), 
 on Spring AOT and the metadata repository, and validate continuously with native
 tests so you do not discover a wall of missing metadata at the end.
 
+**Q: On Java 25, when should you reach for the JDK AOT cache instead of a native image?**
+**Short:** Reach for the AOT cache whenever startup is merely slow — it costs a training run and keeps the JIT, reflection and peak throughput.
+
+Reach for the AOT cache first, and for native image only when you are buying the memory footprint or a genuinely tens-of-milliseconds cold start. The AOT cache (Project Leyden, Java 25+) memoises class loading and linking from a training run into a file you pass as `-XX:AOTCache=app.aot`; the JIT still runs, reflection still works, dynamic class loading still works, and peak throughput is untouched, so there are no hints to write and no closed-world constraint to design around. Native image gives a much larger startup and RSS win but takes it out of your flexibility budget: every reflective path needs reachability metadata, conditional beans freeze at build time, the build takes minutes, and peak throughput is lower without profile-guided optimisation. The practical decision rule is the billing model — if you pay per pod-memory or per Lambda cold start, native image pays for itself; if you just want a rolling deploy to converge faster, the AOT cache gets most of the benefit for an afternoon of work.
+
+**Q: What changed about reachability metadata in GraalVM 25, and why does Spring Boot 4 require it?**
+**Short:** GraalVM 25 consolidates the per-concern config files into one reachability-metadata.json, and Boot 4 requires native-image 25 or later.
+
+GraalVM 25 finished consolidating the metadata format into a single `reachability-metadata.json` instead of the old spread of `reflect-config.json`, `jni-config.json`, `resource-config.json` and their siblings: JNI registration now appears inside that file's `"reflection"` section under a `"jniAccessible"` attribute, and resource-bundle registration folded into its `"resources"` section. It also improved `--exact-reachability-metadata`, so a reflective or JNI query on an invalid class name throws the JDK exception you would expect rather than demanding a metadata entry for a class that does not exist — which removes a whole category of confusing build-time noise. Spring Boot 4 requires GraalVM native-image 25 or later precisely because the AOT engine emits the new format; pointing a Boot 4 build at an older GraalVM is not a degraded experience, it is an unsupported one. The upgrade cost for an existing app is usually zero, because Spring AOT and the GraalVM Reachability Metadata Repository generate the file for you — hand-written metadata is the only thing you may need to reshape.
+
 ---
 
 ## 13. Best Practices
@@ -629,8 +665,8 @@ function is short-lived and bursty — the worst case for JVM warmup.
 
 **Design.**
 
-1. **Native image build.** `./mvnw -Pnative native:compile` (Spring Boot 3.2,
-   GraalVM 22.3) produces the executable; deployed via a Lambda custom runtime.
+1. **Native image build.** `./mvnw -Pnative native:compile` (Spring Boot 4.1,
+   GraalVM for JDK 25) produces the executable; deployed via a Lambda custom runtime.
 
 2. **Hints for the payload DTOs.** Provider payloads are deserialized reflectively by
    Jackson, so the DTOs are registered:

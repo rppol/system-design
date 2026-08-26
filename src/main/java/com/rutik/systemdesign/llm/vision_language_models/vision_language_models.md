@@ -151,9 +151,9 @@ Architecture: CLIP ViT image encoder feeding a small MLP projection layer whose 
 **Key models**:
 - LLaVA-1.5 (2023): CLIP ViT-L/14@336 + 2-layer MLP + Vicuna-13B or Llama-2-13B; 336px input
 - LLaVA-1.6 / LLaVA-NeXT (2024): dynamic high-resolution tiling (up to 1344px), better chart and document understanding
-- Qwen-VL (Alibaba): strong multilingual visual understanding
-- InternVL2 (OpenGVLab): InternViT-6B encoder + InternLM; competitive with GPT-4V on MMMU
-- MiniCPM-V: optimized for edge deployment; strong performance at 3B parameters
+- Qwen3-VL (Alibaba, 7B/32B/72B, Apache 2.0): current generation of the Qwen-VL line; unified text/image/video understanding, leads open models on OCR, math reasoning, and GUI automation benchmarks
+- InternVL3.5 (OpenGVLab): current generation of InternVL; natively multimodal training rather than a bolted-on adapter, strong on pure image understanding (MMMU, OCRBench)
+- MiniCPM-V 4.5 (OpenBMB, 8.7B): optimized for edge deployment; strong OCR and high-resolution document/video understanding for its size
 - LLaVA-Med: domain-adapted version fine-tuned on medical images
 
 **Advantage over BLIP-2**: all 196 (or more) visual patch tokens are passed directly to the LLM rather than compressed through a Q-Former bottleneck. The LLM can attend to individual patch embeddings, preserving spatial detail.
@@ -165,9 +165,10 @@ Architecture: CLIP ViT image encoder feeding a small MLP projection layer whose 
 Architecture: a single model that handles text and image input natively, with vision tokens interleaved directly with text tokens in the input sequence. No separate encoder that feeds a separate decoder — one unified transformer stack.
 
 **Key models**:
-- GPT-4V / GPT-4o (OpenAI): most capable; GPT-4o natively processes images, text, and audio in one model
-- Gemini 1.5 Pro (Google): multi-image and video frame support; native multimodality from pre-training
-- Claude 3 / Claude 3.5 (Anthropic): strong on text-heavy images, document extraction, form parsing
+- GPT-5.6 family (OpenAI): most capable closed model; natively processes images, text, and audio in one model
+- Gemini 3.1 Pro (Google): multi-image and video frame support; native multimodality from pre-training
+- Claude Opus 5 / Sonnet 5 (Anthropic): strong on text-heavy images, document extraction, form parsing
+- Llama 4 (Meta, open-weight): early fusion — text and vision tokens are concatenated into one sequence from layer 1 rather than merged through a late adapter, pre-trained jointly on text, image, and video
 - Flamingo (DeepMind, 2022): pioneered the interleaved image-text sequence architecture
 
 **Capabilities not available in simpler VLMs**:
@@ -902,6 +903,10 @@ Image captioning produces a fixed-style description of image content without ext
 ### Visual Product Search at 50M Product Scale
 
 **Problem**: An e-commerce platform (similar to Shopify's merchant ecosystem) has 50 million product images. A customer uploads a photo of a product they want to find or buy similar items to. The system must: (1) retrieve the top-10 visually similar products, (2) generate a text description of the uploaded product, and (3) rank results by combined visual similarity + text relevance.
+
+This case study's spine is the CLIP-vs-LLaVA architecture decision per subtask. For the same
+problem at 8x the catalog and 6x the QPS, with the full indexing and freshness pipeline, see
+[Multimodal Models — Multimodal Visual-Language Search at E-Commerce Scale](../multimodal_models/multimodal_models.md).
 
 ---
 

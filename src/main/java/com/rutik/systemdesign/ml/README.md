@@ -18,7 +18,7 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Forty-six modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty-seven modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#34) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
@@ -40,45 +40,45 @@ Forty-six modules organized across eight learning phases take you from linear al
 | 12 | [Recurrent Neural Networks](recurrent_neural_networks/recurrent_neural_networks.md) | RNN, LSTM, GRU, vanishing gradients, sequence modeling, CTC loss | 3 — Deep Learning Foundations | Intermediate |
 | 13 | [Training Deep Networks](training_deep_networks/training_deep_networks.md) | Regularization, dropout, gradient clipping, mixed precision, distributed training basics | 3 — Deep Learning Foundations | Intermediate |
 | 14 | [PyTorch Deep Dive](pytorch_deep_dive/pytorch_deep_dive.md) | Storage vs view and strides, autograd tape and hooks, caching allocator and OOM debugging, async execution and CUDA graphs, torch.compile / Dynamo / Inductor guards and recompilation, autocast and GradScaler, DataLoader workers, nn.Module internals, torch.export | 3 — Deep Learning Foundations | Advanced |
-| 14 | [Generative Models](generative_models/generative_models.md) | VAEs, GANs, normalizing flows, diffusion models, mode collapse, FID score | 3 — Deep Learning Foundations | Advanced |
-| 15 | [Computer Vision](computer_vision/computer_vision.md) | Object detection, segmentation, vision transformers, self-supervised vision | 4 — Domain Specializations | Intermediate |
-| 16 | [Natural Language Processing](natural_language_processing/natural_language_processing.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 11 sub-files: BERT, attention/seq2seq, retrieval, evaluation, tokenization, word embeddings, sequence labeling/CRF, text classification, topic modeling, language modeling, syntactic parsing | 4 — Domain Specializations | Intermediate |
-| 17 | [Recommender Systems](recommender_systems/recommender_systems.md) | Collaborative filtering, content-based, matrix factorization, deep recommenders, ranking | 4 — Domain Specializations | Intermediate |
-| 18 | [Time Series Forecasting](time_series_forecasting/time_series_forecasting.md) | ARIMA, Prophet, temporal CNNs, LSTMs for time series, anomaly detection in streams | 4 — Domain Specializations | Intermediate |
-| 19 | [Reinforcement Learning](reinforcement_learning/reinforcement_learning.md) | MDP, Q-learning, policy gradients, PPO, actor-critic, reward shaping, exploration | 4 — Domain Specializations | Advanced |
-| 20 | [ML System Design](ml_system_design/ml_system_design.md) | Design framework, feature stores, training pipelines, A/B testing, latency optimization | 5 — ML Systems & Infrastructure | Advanced |
-| 21 | [Data Pipelines and Processing](data_pipelines_and_processing/data_pipelines_and_processing.md) | Spark, Flink, Kafka, feature computation, data validation, schema evolution | 5 — ML Systems & Infrastructure | Intermediate |
-| 22 | [Distributed Training](distributed_training/distributed_training.md) | Data parallelism, model parallelism, AllReduce, Horovod, PyTorch DDP, FSDP | 5 — ML Systems & Infrastructure | Advanced |
-| 23 | [Experiment Tracking and Versioning](experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) | MLflow, DVC, model registry, artifact lineage, reproducibility, metadata stores | 5 — ML Systems & Infrastructure | Intermediate |
-| 24 | [GPU and Hardware Optimization](gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) | CUDA, memory bandwidth, tensor cores, multi-GPU topology, TPUs, cost modeling | 5 — ML Systems & Infrastructure | Advanced |
-| 25 | [Model Serving and Inference](model_serving_and_inference/model_serving_and_inference.md) | REST vs gRPC, batching, TorchServe, Triton, latency SLOs, shadow mode | 6 — Production ML | Intermediate |
-| 26 | [Model Compression and Efficiency](model_compression_and_efficiency/model_compression_and_efficiency.md) | Pruning, quantization (INT8/FP16), knowledge distillation, ONNX export, TensorRT | 6 — Production ML | Advanced |
-| 27 | [Monitoring and Drift Detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | Data drift, concept drift, PSI, KL divergence monitoring, alerting, retraining triggers | 6 — Production ML | Intermediate |
-| 28 | [MLOps and CI/CD](mlops_and_ci_cd/mlops_and_ci_cd.md) | Model pipelines, automated retraining, canary deployments, rollback, governance | 6 — Production ML | Intermediate |
-| 29 | [Graph Neural Networks](graph_neural_networks/graph_neural_networks.md) | GCN, GAT, GraphSAGE, message passing, link prediction, node classification | 7 — Advanced Topics | Advanced |
-| 30 | [Self-Supervised and Contrastive Learning](self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) | SimCLR, MoCo, BYOL, masked autoencoders, representation learning, downstream tasks | 7 — Advanced Topics | Advanced |
-| 31 | [Causal Inference and ML](causal_inference_and_ml/causal_inference_and_ml.md) | Potential outcomes, DAGs, propensity scores, uplift modeling, A/B test analysis | 7 — Advanced Topics | Advanced |
-| 32 | [ML Interview Patterns](ml_interview_patterns/ml_interview_patterns.md) | End-to-end design framework, common question archetypes, anti-patterns, cheat sheets | 8 — Interview Consolidation | Intermediate |
-| 33 | [Model Selection and Algorithm Choice](model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md) | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline | Cross-Cutting Reference | Advanced |
-| 34 | [Active Learning and Weak Supervision](active_learning_and_weak_supervision/active_learning_and_weak_supervision.md) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, weak supervision, data-centric AI | 5 — ML Systems & Infrastructure | Advanced |
-| 35 | [Adversarial ML and Robustness](adversarial_ml_and_robustness/adversarial_ml_and_robustness.md) | Evasion (FGSM/PGD/C&W), data poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | 7 — Advanced Topics | Advanced |
-| 36 | [Uncertainty Quantification and Conformal Prediction](uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) | Aleatoric vs epistemic uncertainty, MC dropout, deep ensembles, calibration (ECE), conformal prediction sets/intervals, CQR | 7 — Advanced Topics | Advanced |
-| 37 | [Interpretability and Explainability](interpretability_and_explainability/interpretability_and_explainability.md) | SHAP (KernelSHAP/TreeSHAP), LIME, integrated gradients, Grad-CAM, permutation importance, PDP/ICE, counterfactuals | 7 — Advanced Topics | Advanced |
-| 38 | [Privacy-Preserving ML](privacy_preserving_ml/privacy_preserving_ml.md) | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | 7 — Advanced Topics | Advanced |
-| 39 | [Multi-Task and Multi-Objective Learning](multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md) | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto optimization, multi-objective ranking | 4 — Domain Specializations | Advanced |
-| 40 | [Anomaly Detection](anomaly_detection/anomaly_detection.md) | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC evaluation | 4 — Domain Specializations | Intermediate |
-| 41 | [Imbalanced Data and Leakage Traps](imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) | Class imbalance (SMOTE, class weights, focal loss), PR-AUC vs ROC-AUC, threshold moving; data leakage (target/temporal/group), leaky CV, fit-inside-fold discipline | 2 — Classical ML | Intermediate |
-| 42 | [Information Retrieval and Search](information_retrieval_and_search/information_retrieval_and_search.md) | Inverted index, BM25, dense/hybrid retrieval (HNSW, RRF), cross-encoder reranking, learning-to-rank (LambdaMART), NDCG/MRR/MAP | 4 — Domain Specializations | Advanced |
-| 43 | [Speech and Audio ML](speech_and_audio_ml/speech_and_audio_ml.md) | Spectrograms/MFCC, ASR (CTC, RNN-T, Whisper, wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | 4 — Domain Specializations | Advanced |
-| 44 | [Meta-Learning and Few-Shot](meta_learning_and_few_shot/meta_learning_and_few_shot.md) | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | 7 — Advanced Topics | Advanced |
-| 45 | [Fairness and Responsible AI](fairness_and_responsible_ai/fairness_and_responsible_ai.md) | Fairness definitions + impossibility, disparate impact, pre/in/post-processing mitigation, proxies, model cards, EU AI Act | 7 — Advanced Topics | Advanced |
-| 46 | [MLflow Deep Dive](mlflow_deep_dive/mlflow_deep_dive.md) | Tracking server and backend schema, artifact access modes, the `MLmodel` format, signatures and enforcement, registry aliases vs stages, autolog gaps, MLflow 3 migration, tracing and prompt registry | 5 — ML Systems & Infrastructure | Advanced |
+| 15 | [Generative Models](generative_models/generative_models.md) | VAEs, GANs, normalizing flows, diffusion models, mode collapse, FID score | 3 — Deep Learning Foundations | Advanced |
+| 16 | [Computer Vision](computer_vision/computer_vision.md) | Object detection, segmentation, vision transformers, self-supervised vision | 4 — Domain Specializations | Intermediate |
+| 17 | [Natural Language Processing](natural_language_processing/natural_language_processing.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 11 sub-files: BERT, attention/seq2seq, retrieval, evaluation, tokenization, word embeddings, sequence labeling/CRF, text classification, topic modeling, language modeling, syntactic parsing | 4 — Domain Specializations | Intermediate |
+| 18 | [Recommender Systems](recommender_systems/recommender_systems.md) | Collaborative filtering, content-based, matrix factorization, deep recommenders, ranking | 4 — Domain Specializations | Intermediate |
+| 19 | [Time Series Forecasting](time_series_forecasting/time_series_forecasting.md) | ARIMA, Prophet, temporal CNNs, LSTMs for time series, anomaly detection in streams | 4 — Domain Specializations | Intermediate |
+| 20 | [Reinforcement Learning](reinforcement_learning/reinforcement_learning.md) | MDP, Q-learning, policy gradients, PPO, actor-critic, reward shaping, exploration | 4 — Domain Specializations | Advanced |
+| 21 | [ML System Design](ml_system_design/ml_system_design.md) | Design framework, feature stores, training pipelines, A/B testing, latency optimization | 5 — ML Systems & Infrastructure | Advanced |
+| 22 | [Data Pipelines and Processing](data_pipelines_and_processing/data_pipelines_and_processing.md) | Spark, Flink, Kafka, feature computation, data validation, schema evolution | 5 — ML Systems & Infrastructure | Intermediate |
+| 23 | [Distributed Training](distributed_training/distributed_training.md) | Data parallelism, model parallelism, AllReduce, Horovod, PyTorch DDP, FSDP | 5 — ML Systems & Infrastructure | Advanced |
+| 24 | [Experiment Tracking and Versioning](experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) | MLflow, DVC, model registry, artifact lineage, reproducibility, metadata stores | 5 — ML Systems & Infrastructure | Intermediate |
+| 25 | [GPU and Hardware Optimization](gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) | CUDA, memory bandwidth, tensor cores, multi-GPU topology, TPUs, cost modeling | 5 — ML Systems & Infrastructure | Advanced |
+| 26 | [Model Serving and Inference](model_serving_and_inference/model_serving_and_inference.md) | REST vs gRPC, batching, Triton, BentoML, latency SLOs, shadow mode | 6 — Production ML | Intermediate |
+| 27 | [Model Compression and Efficiency](model_compression_and_efficiency/model_compression_and_efficiency.md) | Pruning, quantization (INT8/FP16), knowledge distillation, ONNX export, TensorRT | 6 — Production ML | Advanced |
+| 28 | [Monitoring and Drift Detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | Data drift, concept drift, PSI, KL divergence monitoring, alerting, retraining triggers | 6 — Production ML | Intermediate |
+| 29 | [MLOps and CI/CD](mlops_and_ci_cd/mlops_and_ci_cd.md) | Model pipelines, automated retraining, canary deployments, rollback, governance | 6 — Production ML | Intermediate |
+| 30 | [Graph Neural Networks](graph_neural_networks/graph_neural_networks.md) | GCN, GAT, GraphSAGE, message passing, link prediction, node classification | 7 — Advanced Topics | Advanced |
+| 31 | [Self-Supervised and Contrastive Learning](self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) | SimCLR, MoCo, BYOL, masked autoencoders, representation learning, downstream tasks | 7 — Advanced Topics | Advanced |
+| 32 | [Causal Inference and ML](causal_inference_and_ml/causal_inference_and_ml.md) | Potential outcomes, DAGs, propensity scores, uplift modeling, A/B test analysis | 7 — Advanced Topics | Advanced |
+| 33 | [ML Interview Patterns](ml_interview_patterns/ml_interview_patterns.md) | End-to-end design framework, common question archetypes, anti-patterns, cheat sheets | 8 — Interview Consolidation | Intermediate |
+| 34 | [Model Selection and Algorithm Choice](model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md) | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline | Cross-Cutting Reference | Advanced |
+| 35 | [Active Learning and Weak Supervision](active_learning_and_weak_supervision/active_learning_and_weak_supervision.md) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, weak supervision, data-centric AI | 5 — ML Systems & Infrastructure | Advanced |
+| 36 | [Adversarial ML and Robustness](adversarial_ml_and_robustness/adversarial_ml_and_robustness.md) | Evasion (FGSM/PGD/C&W), data poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | 7 — Advanced Topics | Advanced |
+| 37 | [Uncertainty Quantification and Conformal Prediction](uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) | Aleatoric vs epistemic uncertainty, MC dropout, deep ensembles, calibration (ECE), conformal prediction sets/intervals, CQR | 7 — Advanced Topics | Advanced |
+| 38 | [Interpretability and Explainability](interpretability_and_explainability/interpretability_and_explainability.md) | SHAP (KernelSHAP/TreeSHAP), LIME, integrated gradients, Grad-CAM, permutation importance, PDP/ICE, counterfactuals | 7 — Advanced Topics | Advanced |
+| 39 | [Privacy-Preserving ML](privacy_preserving_ml/privacy_preserving_ml.md) | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | 7 — Advanced Topics | Advanced |
+| 40 | [Multi-Task and Multi-Objective Learning](multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md) | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto optimization, multi-objective ranking | 4 — Domain Specializations | Advanced |
+| 41 | [Anomaly Detection](anomaly_detection/anomaly_detection.md) | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC evaluation | 4 — Domain Specializations | Intermediate |
+| 42 | [Imbalanced Data and Leakage Traps](imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md) | Class imbalance (SMOTE, class weights, focal loss), PR-AUC vs ROC-AUC, threshold moving; data leakage (target/temporal/group), leaky CV, fit-inside-fold discipline | 2 — Classical ML | Intermediate |
+| 43 | [Information Retrieval and Search](information_retrieval_and_search/information_retrieval_and_search.md) | Inverted index, BM25, dense/hybrid retrieval (HNSW, RRF), cross-encoder reranking, learning-to-rank (LambdaMART), NDCG/MRR/MAP | 4 — Domain Specializations | Advanced |
+| 44 | [Speech and Audio ML](speech_and_audio_ml/speech_and_audio_ml.md) | Spectrograms/MFCC, ASR (CTC, RNN-T, Whisper, wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | 4 — Domain Specializations | Advanced |
+| 45 | [Meta-Learning and Few-Shot](meta_learning_and_few_shot/meta_learning_and_few_shot.md) | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | 7 — Advanced Topics | Advanced |
+| 46 | [Fairness and Responsible AI](fairness_and_responsible_ai/fairness_and_responsible_ai.md) | Fairness definitions + impossibility, disparate impact, pre/in/post-processing mitigation, proxies, model cards, EU AI Act | 7 — Advanced Topics | Advanced |
+| 47 | [MLflow Deep Dive](mlflow_deep_dive/mlflow_deep_dive.md) | Tracking server and backend schema, artifact access modes, the `MLmodel` format, signatures and enforcement, registry aliases vs stages, autolog gaps, MLflow 3 migration, tracing and prompt registry | 5 — ML Systems & Infrastructure | Advanced |
 
 ---
 
 ## Sub-Files Index
 
-Thirty-six deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
+Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
 
 ### supervised_learning/ (4 sub-files)
 
@@ -370,6 +370,7 @@ recommender_systems
   deep_learning_recommenders.md   senior
   online_learning_and_bandits.md  principal
   content_and_hybrid.md           -
+  generative_recommenders.md  senior
 information_retrieval_and_search
   information_retrieval_and_search.md  senior
 speech_and_audio_ml
@@ -377,7 +378,8 @@ speech_and_audio_ml
 multi_task_and_multi_objective_learning
   multi_task_and_multi_objective_learning.md  principal
 time_series_forecasting
-  time_series_forecasting.md  -
+  time_series_forecasting.md  senior
+  time_series_foundation_models.md  senior
 anomaly_detection
   anomaly_detection.md  -
 reinforcement_learning
@@ -458,6 +460,7 @@ case_studies
   design_anomaly_detection.md              -
   design_ner_pipeline.md                   -
   design_question_answering_system.md      -
+  design_llm_hybrid_support_triage.md  principal
 -->
 ## Learning Paths
 
@@ -468,7 +471,7 @@ This section is exhaustive by design — 47 modules from the math spine to produ
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the math foundations, every domain (CV, time series, RL, GNNs), the advanced-research row (causal, SSL, privacy, adversarial, conformal), and every infrastructure deep-dive. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (27 modules)
+### Senior Path (28 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -486,8 +489,9 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 14 | [training_deep_networks](training_deep_networks/training_deep_networks.md) | module page only |
 | 15 | [pytorch_deep_dive](pytorch_deep_dive/pytorch_deep_dive.md) | module page only |
 | 18 | [natural_language_processing](natural_language_processing/natural_language_processing.md) | 3 files |
-| 19 | [recommender_systems](recommender_systems/recommender_systems.md) | 4 files |
+| 19 | [recommender_systems](recommender_systems/recommender_systems.md) | 5 files |
 | 20 | [information_retrieval_and_search](information_retrieval_and_search/information_retrieval_and_search.md) | module page only |
+| 23 | [time_series_forecasting](time_series_forecasting/time_series_forecasting.md) | 2 files |
 | 26 | [ml_system_design](ml_system_design/ml_system_design.md) | 6 files |
 | 27 | [data_pipelines_and_processing](data_pipelines_and_processing/data_pipelines_and_processing.md) | module page only |
 | 28 | [distributed_training](distributed_training/distributed_training.md) | module page only |
@@ -500,7 +504,7 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 43 | [interpretability_and_explainability](interpretability_and_explainability/interpretability_and_explainability.md) | module page only |
 | 46 | [ml_interview_patterns](ml_interview_patterns/ml_interview_patterns.md) | module page only |
 
-**Not in this path** (20 of 47, Full Path only): `linear_algebra_and_calculus`, `recurrent_neural_networks`, `generative_models`, `computer_vision`, `speech_and_audio_ml`, `multi_task_and_multi_objective_learning`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `gpu_and_hardware_optimization`, `active_learning_and_weak_supervision`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`, `causal_inference_and_ml`, `adversarial_ml_and_robustness`, `privacy_preserving_ml`, `fairness_and_responsible_ai`, `uncertainty_quantification_and_conformal_prediction`, `model_selection_and_algorithm_choice`
+**Not in this path** (19 of 47, Full Path only): `linear_algebra_and_calculus`, `recurrent_neural_networks`, `generative_models`, `computer_vision`, `speech_and_audio_ml`, `multi_task_and_multi_objective_learning`, `anomaly_detection`, `reinforcement_learning`, `gpu_and_hardware_optimization`, `active_learning_and_weak_supervision`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`, `causal_inference_and_ml`, `adversarial_ml_and_robustness`, `privacy_preserving_ml`, `fairness_and_responsible_ai`, `uncertainty_quantification_and_conformal_prediction`, `model_selection_and_algorithm_choice`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored on the phases this section already flags as highest-yield (classical ML, ML system design, production ML, interview consolidation). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -601,7 +605,7 @@ The LLM section (`llm/`) covers a separate but complementary body of knowledge. 
 | Embeddings | Word2Vec, GloVe, learned embeddings for tabular/vision | Sentence embeddings, contextual embeddings, MTEB benchmarks (see `llm/embeddings_and_similarity_search/`) |
 | Quantization | INT8/FP16/INT4 for classical and vision models, ONNX | GPTQ, AWQ, GGUF, LLM-specific quantization (see `llm/optimization_and_quantization/`) |
 | Distributed training | Data parallelism, AllReduce, PyTorch DDP, Horovod | Tensor/pipeline parallelism, ZeRO, FSDP at LLM scale (see `llm/training_infrastructure/`) |
-| Model serving | TorchServe, Triton, REST/gRPC, latency budgets | vLLM, TensorRT-LLM, PagedAttention, KV cache (see `llm/inference_engines/`) |
+| Model serving | Triton, BentoML, REST/gRPC, latency budgets | vLLM, TensorRT-LLM, PagedAttention, KV cache (see `llm/inference_engines/`) |
 | Monitoring | Data drift, PSI, concept drift, model degradation | Hallucination monitoring, output quality, LLM-specific observability (see `llm/llm_observability_and_monitoring/`) |
 | Generative models | VAEs, GANs, diffusion model foundations | Stable Diffusion architecture, multimodal LLMs, image generation at scale (see `llm/multimodal_models/`) |
 | Recommender systems | Full recommender system design (this section) | LLM-augmented recommendations, conversational recommenders — not covered separately in LLM section |

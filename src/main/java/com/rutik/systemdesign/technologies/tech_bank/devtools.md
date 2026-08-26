@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: devtools -->
 
-The 301 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 300 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Build & test tooling** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -977,12 +977,6 @@ The skill is choosing properties that are not just a reimplementation of the cod
 It converts a JSON Schema into a Hypothesis strategy that generates instances satisfying it, honouring `type`, `enum`, numeric and length bounds, `required`, `patternProperties` and the combinators, and it deliberately biases toward the awkward values a hand-written example set omits: empty objects, boundary numbers, unicode strings, the missing optional field.
 
 That makes it the shortest path to property-testing an API against its own contract — take the OpenAPI request schema, or `Model.model_json_schema()` from a Pydantic model, and assert that every generated instance validates and round-trips. Where it strains is schemas full of `$ref` indirection or regex-constrained strings, which can slow generation or exhaust it; narrow the schema for the test rather than fighting the generator.
-
-### IDE "expand inferred type
-**Short:** IDE action that displays the compiler's inferred generic type inline, exposing an unintended Object inference.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/version-control-and-workbench @1, runtime-systems/runtime-internals-and-types @2
 
 ### Immutables
 **Short:** Annotation processor that generates immutable value classes with builders and build-time mandatory-field checks.

@@ -64,6 +64,30 @@ Check membership, type, or attribute existence before accessing. Appropriate for
 - Starred right: `*init, last = items`.
 - Interior discard: `a, *_, b = items`.
 
+**Parameter-ordering grammar — `/` and `*`.**
+The full signature grammar is `def f(pos_only, /, standard, *, kw_only):`, and it has three
+regions. Everything before a bare `/` [3.8, PEP 570] is **positional-only** — the caller
+cannot pass it by keyword, so a library author is free to rename that parameter in a later
+release without breaking any caller, and `**kwargs` can safely accept a key that would
+otherwise collide with the parameter's name. Between `/` and `*` is the **standard** region,
+callable either way — the default for every parameter that has neither marker. Everything
+after a bare `*` (Python 3.0, PEP 3102) is **keyword-only** — the caller must name it, which
+kills the boolean-trap call site `f(data, True, False)` in favour of a self-documenting
+`f(data, strict=True, cache=False)`. Many C-implemented builtins have always been
+positional-only (`len(obj)` rejects `len(obj=x)`); `/` lets ordinary Python functions declare
+the same contract. Both markers show up literally in `help()` output and in stdlib
+signatures — `help(len)` prints `len(obj, /)`.
+
+```python
+def f(a, /, b, *, c):
+    return a, b, c
+
+f(1, 2, c=3)        # OK — a positional, b either way, c keyword
+f(a=1, b=2, c=3)    # TypeError: f() got some positional-only arguments
+                     #            passed as keyword arguments: 'a'
+f(1, 2, 3)           # TypeError: f() takes 2 positional arguments but 3 were given
+```
+
 **Walrus `:=` [3.8].**
 Assigns and returns a value in a single expression. Primary use cases: eliminating double computation in `while` loops, `if` conditions, and comprehension filters.
 
@@ -905,6 +929,16 @@ Yes — CPython emits `SyntaxWarning: "is" with 'str' literal. Did you mean "=="
 **Short:** `sys.intern()` forces a string into CPython's intern table so future equal strings share one object.
 
 `sys.intern(string)` forces a string into CPython's intern table and returns the canonical interned copy, guaranteeing that all future calls with an equal string return the identical object. The main use case is a micro-optimization for large symbol tables or parsers that compare the same strings millions of times — once interned, comparisons can safely use `is` instead of `==`, and duplicate strings share one object in memory instead of many. This differs from the automatic compile-time interning of identifier-like literals (see Q13): `sys.intern()` works on any string, including ones built at runtime, and the guarantee is explicit rather than an implementation accident. Only reach for it after profiling shows string comparison or memory duplication is an actual bottleneck — for typical application code, `==` on regular strings is already fast enough.
+
+**Q: What do `/` and `*` do in a function signature, and why does a library author want both?**
+**Short:** `/` marks parameters positional-only and `*` marks parameters keyword-only, both for a stable API.
+
+`/` marks every parameter before it as positional-only — the caller cannot pass it by name — and a bare `*` marks every parameter after it as keyword-only — the caller must pass it by name. A library author wants `/` because a positional-only parameter has no externally visible name, so it can be renamed in a later release (`def f(x, /)` → `def f(value, /)`) without breaking any caller that wrote `f(x=1)`, and because it frees `**kwargs` to accept a key that would otherwise collide with the parameter's own name (`def f(name, /, **kwargs)` lets `kwargs` contain `"name"`). A library author wants `*` because keyword-only parameters make every call site self-documenting and immune to argument-order mistakes, which matters most for optional flags. `len(obj)` already rejects `len(obj=x)` because CPython's C-implemented builtins have always been positional-only; `/` [3.8, PEP 570] lets ordinary Python functions declare that same contract explicitly.
+
+**Q: What is the boolean-trap and how do keyword-only parameters fix it?**
+**Short:** Keyword-only parameters turn an unreadable `f(data, True, False)` into a self-documenting call.
+
+The boolean-trap is a call site like `f(data, True, False)`, where two positional Boolean arguments read as opaque literals — nothing at the call site says what `True` or `False` mean without checking the function's definition, and swapping the order silently compiles. Keyword-only parameters (Python 3.0, PEP 3102) fix it by putting the flags after a bare `*` in the signature — `def f(data, *, strict=True, cache=False)` — which forces every caller to write `f(data, strict=True, cache=False)`. The call is now self-documenting and the two flags can no longer be swapped by accident, because a keyword argument's meaning does not depend on its position.
 
 ---
 

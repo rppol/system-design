@@ -101,6 +101,12 @@ Each of these has a hard constraint (legal privilege, HIPAA, financial regulatio
 
 ---
 
+### Phase 7 — Internal Agent Platforms
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [Design an Agent Platform](design_agent_platform.md) | Multi-tenant agent execution, durability, cost attribution | Running other teams' agents safely: tenant isolation at the execution boundary, durable resumption across tool calls, per-tenant token accounting, and the observability needed when the workload is non-deterministic by construction. |
+
 ## Cross-Cutting Infrastructure Files
 
 These nine files live in `cross_cutting/` and are referenced by multiple case studies. Read them alongside the phase where they become relevant — not all at the start.
@@ -162,3 +168,4 @@ If you are preparing for a specific interview question, jump directly to the cas
 | "How do you handle multi-tenancy in LLM apps?" | [cross_cutting/tenant_isolation_patterns.md](./cross_cutting/tenant_isolation_patterns.md) |
 | "Design a content moderation system" | [design_ai_content_moderation.md](./design_ai_content_moderation.md) |
 | "Design a legal / medical / financial AI platform" | Phase 6 files |
+| Design an internal agent platform | [Design an Agent Platform](design_agent_platform.md) |

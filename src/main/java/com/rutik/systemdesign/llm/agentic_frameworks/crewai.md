@@ -8,8 +8,8 @@ CrewAI is a multi-agent framework built around the metaphor of a "crew" — a te
 
 CrewAI abstracts the complexity of multi-agent coordination behind familiar workplace concepts: agents have job titles, tasks have expected outputs, and the crew has a process (workflow type). This makes it accessible to non-ML engineers who can think in terms of "assign this task to the researcher agent."
 
-**Current version**: crewai 0.60.x (2024)
-**Production adoption signal**: Over 13K GitHub stars within 6 months of release. Used in content generation pipelines, research automation, and code generation workflows at hundreds of companies.
+**Current version**: crewai 1.15.17 (released 2026-08-20). CrewAI crossed the 1.0 boundary in 2026, so the framework and its `Agent`/`Task`/`Crew`/`Flow` API are now under a stability commitment, not the fast-moving pre-1.0 surface of the framework's first year.
+**Production adoption signal**: Used by roughly 60% of the US Fortune 500; CrewAI reports approximately 450 million agent executions per month. Used in content generation pipelines, research automation, and code generation workflows at hundreds of companies.
 
 ---
 
@@ -65,8 +65,8 @@ CrewAI abstracts the complexity of multi-agent coordination behind familiar work
 | `goal` | Primary objective | "Find accurate, current data on the topic" |
 | `backstory` | Experience description | "Expert with 10 years synthesizing complex research" |
 | `tools` | Available capabilities | `[web_search, arxiv_search]` |
-| `llm` | LLM model to use | `ChatOpenAI(model="gpt-4o")` |
-| `max_iter` | Max reasoning iterations | 10 (default) |
+| `llm` | LLM model to use | `LLM(model="openai/gpt-4o")` (CrewAI's native, LiteLLM-backed class) |
+| `max_iter` | Max reasoning iterations | 20 (default) |
 | `allow_delegation` | Can delegate to other agents | True/False |
 
 ---
@@ -154,15 +154,15 @@ ReAct Loop:
 ### Basic Crew Setup
 
 ```python
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
 from crewai_tools import SerperDevTool, WebsiteSearchTool
-from langchain_openai import ChatOpenAI
 
 # Tools
 web_search = SerperDevTool()  # Google search via Serper API
 web_reader = WebsiteSearchTool()
 
-# Agents
+# Agents — crewai.LLM is the native, LiteLLM-backed class (no LangChain dependency
+# required); model names take a provider prefix, e.g. "openai/gpt-4o", "anthropic/claude-sonnet-4-6"
 researcher = Agent(
     role="Senior Research Analyst",
     goal="Uncover cutting-edge developments in AI and synthesize key findings",
@@ -171,7 +171,7 @@ researcher = Agent(
         "You provide well-organized, accurate research reports."
     ),
     tools=[web_search, web_reader],
-    llm=ChatOpenAI(model="gpt-4o", temperature=0.1),
+    llm=LLM(model="openai/gpt-4o", temperature=0.1),
     verbose=True,
     max_iter=10
 )
@@ -184,7 +184,7 @@ writer = Agent(
         "Your writing is clear, accurate, and tailored to a tech-savvy audience."
     ),
     tools=[],
-    llm=ChatOpenAI(model="gpt-4o", temperature=0.7),
+    llm=LLM(model="openai/gpt-4o", temperature=0.7),
     verbose=True
 )
 
@@ -226,10 +226,9 @@ print(result.raw)
 ### Hierarchical Process
 
 ```python
-from crewai import Agent, Task, Crew, Process
-from langchain_openai import ChatOpenAI
+from crewai import Agent, Task, Crew, Process, LLM
 
-manager_llm = ChatOpenAI(model="gpt-4o")
+manager_llm = LLM(model="openai/gpt-4o")
 
 researcher = Agent(role="Research Specialist", goal="...", backstory="...", tools=[web_search])
 analyst = Agent(role="Data Analyst", goal="...", backstory="...", tools=[])
@@ -473,15 +472,17 @@ The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo d
 |------|----------|-------|
 | `crewai` | Framework core | `pip install crewai` |
 | `crewai-tools` | Pre-built tools | SerperDevTool, WebsiteSearchTool, FileReadTool |
-| `langchain-openai` | LLM provider | `ChatOpenAI` for agent LLMs |
-| `langchain-anthropic` | LLM provider | `ChatAnthropic` for Claude agents |
+| `crewai.LLM` | LLM provider (native) | LiteLLM-backed; provider-prefixed model strings (`"openai/gpt-4o"`, `"anthropic/claude-sonnet-4-6"`), no LangChain dependency |
+| `langchain_openai` | LLM provider (alternative) | `ChatOpenAI` objects still accepted by `llm=` for teams already standardized on LangChain |
+| `langchain_anthropic` | LLM provider (alternative) | `ChatAnthropic` objects still accepted by `llm=` for teams already standardized on LangChain |
 | `SerperDevTool` | Web search | Google search via Serper API |
-| `LangSmith` | Observability | Traces CrewAI runs via LangChain callbacks |
+| `LangSmith` | Observability | Traces CrewAI runs when LangChain-based LLM objects are used |
 
 **Version notes:**
 - crewai 0.1.x (Jan 2024): initial release
 - crewai 0.30.x (mid 2024): memory system, async tasks, Flow API
-- crewai 0.60.x (late 2024): improved hierarchical, enterprise features
+- crewai 0.6x-0.9x (late 2024-2025): native `LLM` class (LiteLLM-backed, dropping the LangChain requirement), improved hierarchical process, enterprise features
+- crewai 1.x (current: 1.15.17, 2026-08-20): stable 1.0 API surface
 
 ---
 
@@ -555,7 +556,7 @@ When `allow_delegation=True` on an agent and the process is hierarchical, the ma
 2. **Always set `expected_output`** — explicit output format prevents parsing failures in downstream tasks.
 3. **Use `context=[specific_tasks]`** explicitly for large crews — prevents context window exhaustion.
 4. **Test each agent individually** before composing into a crew.
-5. **Set `max_iter`** on all agents — prevents infinite ReAct loops; default is 15, set to 5-10 for most tasks.
+5. **Set `max_iter`** on all agents — prevents infinite ReAct loops; default is 20, set to 5-10 for most tasks.
 6. **Use sequential process by default** — hierarchical adds complexity and cost; only use when coordination itself is the hard problem.
 7. **Add `verbose=True` during development** — disable in production to reduce log noise.
 8. **Use cheaper models for simple tasks** — GPT-4o-mini for formatting, classification, QA checkers.
@@ -571,9 +572,8 @@ When `allow_delegation=True` on an agent and the process is hierarchical, the ma
 ### Crew Design
 
 ```python
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
 from crewai_tools import SerperDevTool, WebsiteSearchTool, FileReadTool
-from langchain_openai import ChatOpenAI
 
 # Agents
 researcher = Agent(
@@ -585,7 +585,7 @@ researcher = Agent(
         "and distinguish between verified facts and speculation."
     ),
     tools=[SerperDevTool(), WebsiteSearchTool()],
-    llm=ChatOpenAI(model="gpt-4o", temperature=0.1),
+    llm=LLM(model="openai/gpt-4o", temperature=0.1),
     max_iter=8
 )
 
@@ -598,7 +598,7 @@ writer = Agent(
         "and includes working code snippets."
     ),
     tools=[],
-    llm=ChatOpenAI(model="gpt-4o", temperature=0.6),
+    llm=LLM(model="openai/gpt-4o", temperature=0.6),
     max_iter=5
 )
 
@@ -611,7 +611,7 @@ tech_reviewer = Agent(
         "You suggest specific improvements without rewriting the entire article."
     ),
     tools=[],
-    llm=ChatOpenAI(model="gpt-4o", temperature=0.2),
+    llm=LLM(model="openai/gpt-4o", temperature=0.2),
     max_iter=5
 )
 
@@ -624,7 +624,7 @@ seo_optimizer = Agent(
         "accurately represent the content."
     ),
     tools=[],
-    llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3),  # cheaper model for this task
+    llm=LLM(model="openai/gpt-4o-mini", temperature=0.3),  # cheaper model for this task
     max_iter=3
 )
 

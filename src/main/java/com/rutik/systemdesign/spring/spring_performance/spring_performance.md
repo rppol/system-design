@@ -427,7 +427,7 @@ public class CacheConfig {
             .entryTtl(Duration.ofMinutes(10))
             .disableCachingNullValues()
             .serializeValuesWith(RedisSerializationContext.SerializationPair
-                .fromSerializer(new GenericJackson2JsonRedisSerializer()));
+                .fromSerializer(new GenericJacksonJsonRedisSerializer()));
 
         // Per-cache TTL overrides
         Map<String, RedisCacheConfiguration> cacheConfigs = Map.of(
@@ -580,6 +580,24 @@ public class OrderServiceHints implements RuntimeHintsRegistrar {
 <!-- Result: ./target/orders-service binary, ~80MB, starts in <200ms -->
 ```
 
+### Startup: four options, not two
+
+Startup cost is a four-way decision on a Java 25 / Boot 4.1 baseline, and the two
+middle options are the ones teams skip:
+
+| Option | What it does | Min JDK | Peak throughput | Cost to adopt |
+|---|---|---|---|---|
+| Plain JVM | Loads and links every class on every boot | 17 | Full | None |
+| CDS / AppCDS | Memory-maps a pre-parsed class archive | 17 | Full | One training run |
+| **JDK AOT cache** | Memoises class loading *and* linking from a training run | **25** | Full | One training run |
+| Native image | Compiles a closed-world binary ahead of time | 17 (GraalVM 25 for Boot 4) | Lower (no JIT) | Reachability metadata, minutes-long builds |
+
+The rule of thumb: try the AOT cache before native image. It keeps the JIT, full
+reflection and dynamic class loading, so nothing about your application has to change
+— you pay a training run and get faster startup with identical steady-state
+behaviour. Native image buys a much bigger win on both startup and RSS, but takes it
+out of your flexibility budget.
+
 ### Class Data Sharing (CDS)
 
 ```bash
@@ -596,11 +614,53 @@ java -Xshare:on -XX:SharedArchiveFile=orders-cds.jsa -jar orders-service.jar
 
 ```xml
 <!-- Application class data sharing (AppCDS) with Spring Boot Maven plugin -->
-<!-- Spring Boot 3.3+ supports CDS out of the box -->
+<!-- Spring Boot supports CDS out of the box -->
 <configuration>
     <jvmArguments>-XX:ArchiveClassesAtExit=app-cds.jsa</jvmArguments>
 </configuration>
 ```
+
+### JDK AOT cache (Project Leyden) — Java 25+
+
+Spring Boot recommends the AOT cache over CDS wherever the JDK allows it. The cache
+records the result of class loading and linking during a **training run** and replays
+it on every subsequent boot. Two rules make or break it: the application must be run
+in **extracted** form, not straight from the fat jar, and the training run must
+actually exercise the paths you care about.
+
+```bash
+# Step 1: extract the application (the cache does NOT work against the jar directly)
+java -Djarmode=tools -jar orders-service.jar extract --destination application
+cd application
+
+# Step 2: training run -- start the context, then exit as soon as it has refreshed
+java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -jar orders-service.jar
+
+# Step 3: every real boot from here on
+java -XX:AOTCache=app.aot -jar orders-service.jar
+```
+
+`-Dspring.context.exit=onRefresh` is the Spring-side half of the trick: it lets the
+container finish wiring — which is where the class-loading cost lives — and then exits
+without serving traffic, so the training run is seconds rather than a full startup
+plus shutdown.
+
+**What invalidates the cache.** The archive is valid only while the application and
+the Java version are unchanged. That is stricter than it sounds in a CI pipeline: a
+dependency bump, a rebuild, or a JDK patch upgrade all mean a stale cache, so the
+training run belongs in the image build alongside the jar, not in a one-off script
+someone ran last quarter. A stale or mismatched cache is not a crash — the JVM falls
+back to normal loading — so the failure mode is a silent loss of the win you think you
+are getting. Assert on startup time in CI, or you will not notice.
+
+**CRaC is the third option, and it is a different animal.** Checkpoint/restore
+snapshots a *running, warmed* process and restores it in milliseconds, which beats
+every option above on raw restore time. It also inherits every hazard of resurrecting
+a process: open sockets and file descriptors must be closed before the checkpoint and
+reopened after (the `Resource` callbacks), any secret or token in memory is written
+into the snapshot file, and the restored process believes no time has passed. Use it
+when milliseconds of restore genuinely matter and you can own that operational
+surface; otherwise the AOT cache gets most of the benefit with none of the hazards.
 
 ### JVM and GC Tuning
 
@@ -1029,7 +1089,10 @@ spring:
 | async-profiler | CPU/memory/lock profiler | Wall-clock profiling, flame graphs, zero overhead |
 | JFR (Java Flight Recorder) | JVM event profiling | Built-in since JDK 11; production-safe |
 | JMH (Java Microbenchmark Harness) | Microbenchmarking | Prevents JIT warmup issues in benchmarks |
-| GraalVM native-image | AOT native compilation | Build-time analysis, native binary |
+| GraalVM native-image | AOT native compilation | Build-time analysis, native binary; GraalVM 25+ required by Boot 4 |
+| JDK AOT cache (`-XX:AOTCache`) | Startup: memoised class load/link | Java 25+; needs a training run and the extracted app form |
+| AppCDS (`-XX:ArchiveClassesAtExit`) | Startup: shared class archive | Java 17+; superseded by the AOT cache where the JDK allows |
+| CRaC | Startup: checkpoint/restore of a warmed process | Fastest restore; open-file and in-memory-secret hazards |
 | spring-context-indexer | Compile-time component index | Eliminates classpath scanning at startup |
 | Gatling / k6 | Load testing | Measure throughput, latency, saturation |
 | Hibernate Statistics | Query count, cache hits | Detect N+1, measure 2nd-level cache effectiveness |
@@ -1099,6 +1162,16 @@ GraalVM native image AOT compilation (Spring Boot 3.x + GraalVM) produces a plat
 **Q: What is Spring Boot lazy initialisation (`spring.main.lazy-initialization=true`) and what are its risks?**
 **Short:** Lazy initialisation defers bean creation to first use, risking deferred startup failures and a slow first request.
 Lazy initialisation defers bean creation until the bean is first requested (first HTTP request, first use) instead of initialising all beans at startup. Benefits: faster startup (relevant for tests and development), lower initial memory. Risks: (1) **Deferred failure** — a misconfigured bean that would fail at startup now fails on the first user request, potentially in production. (2) **Slow first request** — initialising expensive beans (HikariCP pool establishment, cache warm-up) on the first request adds latency visible to the user. (3) **Kubernetes readiness probes** — the pod reports ready before it is actually ready to serve traffic efficiently. Mitigation: only enable lazy initialisation for development and test; use it in production only for clearly isolated optional feature modules. For production startup-time optimisation, prefer GraalVM native image or class data sharing (`-XX:+UseSharedSpaces`) over lazy initialisation.
+
+**Q: What is the JDK AOT cache, and how is it different from CDS and from a native image?**
+**Short:** The AOT cache memoises class loading and linking from a training run; unlike native image it keeps the JIT, reflection and full peak throughput.
+
+The AOT cache (Project Leyden, Java 25+) records what happens during class loading and linking on a training run and replays it on every later boot via `-XX:AOTCache=app.aot`. CDS is the same idea one generation earlier and narrower: it memory-maps a pre-parsed class archive, which saves parsing but not the linking work, and it runs on Java 17+. A native image is not in the same category at all — it is a different program, compiled closed-world by GraalVM, with no JIT, no dynamic class loading, and reachability metadata required for anything reflective. Ranked by what you give up: CDS and the AOT cache cost you a training run and nothing else, keeping identical steady-state behaviour and full peak throughput; native image costs you flexibility and build time and pays back a much larger startup and RSS win. Spring Boot recommends the AOT cache over CDS wherever the JDK allows, so on Java 25 the honest default is AOT cache first, native image only if you are specifically buying the memory footprint or a tens-of-milliseconds cold start.
+
+**Q: What are the two ways an AOT cache silently stops helping you?**
+**Short:** Running from the fat jar instead of the extracted app, and any rebuild or JDK change invalidating the archive — both fail soft, not loud.
+
+The first is form: the cache works against the **extracted** application (`java -Djarmode=tools -jar app.jar extract`), not the fat jar, so a Dockerfile that keeps `java -jar app.jar` gets no benefit at all. The second is staleness: the archive is valid only while the application and the Java version are unchanged, which in a real pipeline means a dependency bump, a rebuild, or a JDK patch upgrade all invalidate it. Both failures are silent — the JVM simply falls back to normal class loading and starts as slowly as it did before, with no warning and no error. That is why the training run belongs inside the image build next to the jar rather than in a script someone ran once, and why you should assert on measured startup time in CI. A performance optimisation whose absence looks exactly like its presence will rot; the check is the only thing that keeps it real.
 
 ---
 

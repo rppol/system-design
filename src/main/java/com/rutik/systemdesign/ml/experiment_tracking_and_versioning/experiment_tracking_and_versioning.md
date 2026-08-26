@@ -650,12 +650,12 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 | Comet ML | Experiment tracking | Auto code capture, diff logging |
 | Optuna | HPO | TPE sampler, Hyperband pruner, distributed |
 | Ray Tune | HPO | Distributed HPO, PBT, integrates with all trackers |
-| Hyperopt | HPO | TPE-based, older but widely used |
+| Hyperopt | HPO | No longer maintained upstream — use Optuna |
 | DVC | Data + pipeline versioning | Git-native, content-addressable storage |
 | DVCLive | Metric logging for DVC | Integrates with DVC pipelines |
 | Delta Lake | Data versioning | ACID Parquet, time travel queries |
 | Git LFS | Large file versioning | Simple but not ML-optimized |
-| Pachyderm | Data versioning | Kubernetes-native, strong lineage |
+| Pachyderm (HPE) | Data versioning | Kubernetes-native, strong lineage |
 | W&B Artifacts | Artifact versioning | Lineage graph between datasets + models |
 | Marquez / OpenLineage | Data lineage | Vendor-neutral lineage standard |
 

@@ -713,6 +713,35 @@ A mid-size SaaS company's security team received the public Log4Shell disclosure
 | OpenTelemetry Logs | Vendor-neutral log/trace correlation | `trace_id`/`span_id` fields tie logs to distributed traces |
 | Micrometer `context-propagation` | Context bridging library | Bridges MDC/ThreadLocal with reactive/virtual-thread contexts |
 | OWASP Dependency-Check / Snyk / Dependabot | Software composition analysis | Catches vulnerable transitive versions — the standard post-Log4Shell practice |
+| OpenTelemetry Java agent (`opentelemetry-javaagent`) | 2.31.x | `-javaagent:opentelemetry-javaagent.jar`, auto-instruments libraries with no code change; auto-populates MDC with `trace_id`/`span_id`/`trace_flags` |
+| `opentelemetry-logback-appender-1.0` | 2.31.x-alpha | Forwards Logback events directly to the OpenTelemetry Log SDK over OTLP, bypassing local disk |
+| `opentelemetry-log4j-appender-2.17` | 2.31.x-alpha | Same role for Log4j2 2.17+ |
+
+### OpenTelemetry Beyond `trace_id`/`span_id` — Auto-Instrumentation and Log Appenders
+
+The `OpenTelemetry Logs` row above and the correlation IDs taught by hand in §5-§6 are only half the story: `trace_id`/`span_id` fields don't write themselves into MDC, and shipping log records over OTLP is a genuinely different mechanism from writing structured JSON to a file.
+
+**The Java agent auto-instruments logging correlation with zero code change.** Attaching `-javaagent:opentelemetry-javaagent.jar` at JVM startup — alongside `-Dotel.service.name=...` and an exporter endpoint — instruments dozens of common libraries automatically, and for logging specifically its built-in Logback/Log4j2 MDC instrumentation populates `trace_id`, `span_id`, and `trace_flags` into the MDC automatically whenever a span is active. The correlation pattern this module teaches by hand — a servlet filter calling `MDC.put("requestId", uuid)` — happens for the trace/span pair with no application code at all: a `PatternLayout` that already references `%X{trace_id}` starts populating the moment the agent is attached. The equivalent library-only modules (`opentelemetry-logback-mdc-1.0`, or `opentelemetry-log4j-context-data-2.17-autoconfigure` for Log4j2) provide the identical MDC injection for teams instrumenting manually via the SDK instead of attaching an agent.
+
+**Two ways a log record can leave the process, and they are not the same design decision:**
+
+| Path | Mechanism | Tradeoff |
+|------|-----------|----------|
+| stdout + collector (the default recommendation) | App writes JSON to stdout; a Filebeat/Fluent Bit sidecar or a collector `filelog` receiver tails and forwards it | Simplest; zero network dependency inside the app's own logging path; survives an OTLP endpoint outage because the collector retries independently of the application |
+| Direct OTLP appender | `opentelemetry-logback-appender-1.0` / `opentelemetry-log4j-appender-2.17` forwards each event straight to the OpenTelemetry Log SDK, which exports it over OTLP | Structured attributes and exact trace/span association at export time, at the cost of a network dependency sitting inside the logging path itself |
+
+```xml
+<!-- logback.xml: ship records directly over OTLP instead of only to a file -->
+<appender name="OTEL" class="io.opentelemetry.instrumentation.logback.appender.v1_0.OpenTelemetryAppender">
+    <captureMdcAttributes>*</captureMdcAttributes>
+</appender>
+<root level="INFO">
+    <appender-ref ref="OTEL"/>
+    <appender-ref ref="STDOUT"/>   <!-- keep a local sink too -->
+</root>
+```
+
+**The trap worth naming: a network call in the logging path can turn a logging failure into an application failure.** An `OpenTelemetryAppender` that blocks on a slow or unreachable OTLP collector stalls whatever thread logged the line — exactly the failure mode async appenders (§6, §8) exist to prevent. What protects against it is the same discipline already applied to any other slow appender: wrap it in an `AsyncAppender`/Async Logger so the export happens on a background thread against a bounded queue with an explicit drop policy (`discardingThreshold`, `neverBlock`), rather than on the request thread. Even with that protection, the safe **default** for most services is still stdout-plus-collector: it has no network dependency in the application's own logging path at all, and the direct-OTLP appender is worth its added coupling only when a team specifically needs export-time structured attributes or trace linkage that stdout-plus-collector can't provide.
 
 ---
 
@@ -822,6 +851,11 @@ Virtual threads don't eliminate the MDC problem by themselves — MDC is still `
 **Short:** Without a history or size cap, a rolling appender keeps every file forever until the disk fills.
 
 Without `maxHistory` and a `totalSizeCap`, a rolling file appender keeps every rolled file forever, and the log directory grows until it fills the disk. A full disk on the host doesn't just stop logging — many systems fail loudly in unrelated ways once the volume hits 100% (crash-looping processes, other writes failing, a database unable to extend its WAL file), which has caused real outages where logging retention, not application logic, was the root cause. Always pair a rolling policy with an explicit retention cap and alert on log-volume disk usage independently of application metrics.
+
+**Q: When would you choose a direct OTLP log appender over writing to stdout and letting a collector ship it?**
+**Short:** Choose the OTLP appender for structured export-time trace linkage; default to stdout plus collector.
+
+Choose the direct OTLP appender (`opentelemetry-logback-appender-1.0` / `opentelemetry-log4j-appender-2.17`) when the team specifically needs export-time structured attributes and exact trace/span association on every log record, and can commit to the operational discipline a network call in the logging path requires — wrapping it in an async appender with a bounded queue and an explicit drop policy so a stalled collector degrades to dropped events instead of blocked request threads. The safe default for most services is still stdout-plus-collector: write structured JSON to stdout and let a Filebeat/Fluent Bit sidecar or `filelog` receiver tail and forward it, because that path has zero network dependency inside the application's own logging code and survives an OTLP endpoint outage entirely, since the collector retries independently of the app. The direct appender earns its added coupling only when a concrete requirement makes stdout-plus-collector insufficient, not as a default choice.
 
 ---
 

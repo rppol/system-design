@@ -1,37 +1,6 @@
 # Consistent Hashing — High-Level Design
 
-## Table of Contents
-1. [Overview and Motivation](#overview-and-motivation)
-2. [The Problem with Naive Modulo Hashing](#the-problem-with-naive-modulo-hashing)
-3. [The Consistent Hashing Solution](#the-consistent-hashing-solution)
-4. [The Hash Ring](#the-hash-ring)
-5. [Adding and Removing Nodes](#adding-and-removing-nodes)
-6. [Virtual Nodes (Vnodes)](#virtual-nodes-vnodes)
-7. [Rebalancing](#rebalancing)
-8. [The Hotspot Problem](#the-hotspot-problem)
-9. [Implementation](#implementation)
-10. [Real-World Systems](#real-world-systems)
-11. [Consistent Hashing vs Rendezvous Hashing](#consistent-hashing-vs-rendezvous-hashing)
-12. [Tradeoffs and Considerations](#tradeoffs-and-considerations)
-13. [Best Practices](#best-practices)
-14. [Case Study: Distributed Cache](#case-study-distributed-cache)
-15. [Interview Questions](#interview-questions)
-
----
-
-## Intuition
-
-> **One-line analogy**: Consistent hashing is like arranging restaurants around a circular city map — when a new restaurant opens (node added), only nearby customers need to change their favorite restaurant, not everyone in the city.
-
-**Mental model**: Naive hashing assigns each key to server `key % N`. When you add a server (N → N+1), every key remaps — massive cache misses and data rebalancing. Consistent hashing maps both keys and servers onto a ring. Each key goes to the nearest server clockwise. Adding a server only moves keys between the new server and its neighbor — only 1/N fraction of keys are affected. Virtual nodes ensure even distribution even with heterogeneous servers.
-
-**Why it matters**: Consistent hashing enables adding/removing cache nodes (or distributed storage nodes) with minimal disruption. It's used in Cassandra, DynamoDB, Memcached, and CDN routing. Without it, horizontal scaling of caches and distributed storage would cause thundering herds of cache misses on every topology change.
-
-**Key insight**: Virtual nodes (each physical server maps to V points on the ring) solve the load imbalance problem — without them, inconsistent key distribution between servers wastes capacity on some nodes and overloads others.
-
----
-
-## Overview and Motivation
+## 1. Concept Overview
 
 **Consistent hashing** is a distributed hashing technique that minimizes the number of keys that need to be remapped when the number of nodes in a distributed system changes (nodes added or removed).
 
@@ -45,7 +14,21 @@ The core insight: by mapping both nodes and keys to the same circular space, onl
 
 ---
 
-## The Problem with Naive Modulo Hashing
+## 2. Intuition
+
+> **One-line analogy**: Consistent hashing is like arranging restaurants around a circular city map — when a new restaurant opens (node added), only nearby customers need to change their favorite restaurant, not everyone in the city.
+
+**Mental model**: Naive hashing assigns each key to server `key % N`. When you add a server (N → N+1), every key remaps — massive cache misses and data rebalancing. Consistent hashing maps both keys and servers onto a ring. Each key goes to the nearest server clockwise. Adding a server only moves keys between the new server and its neighbor — only 1/N fraction of keys are affected. Virtual nodes ensure even distribution even with heterogeneous servers.
+
+**Why it matters**: Consistent hashing enables adding/removing cache nodes (or distributed storage nodes) with minimal disruption. It's used in Cassandra, DynamoDB, Memcached, and CDN routing. Without it, horizontal scaling of caches and distributed storage would cause thundering herds of cache misses on every topology change.
+
+**Key insight**: Virtual nodes (each physical server maps to V points on the ring) solve the load imbalance problem — without them, inconsistent key distribution between servers wastes capacity on some nodes and overloads others.
+
+---
+
+## 3. Core Principles
+
+### The Problem with Naive Modulo Hashing
 
 ### How naive hashing works:
 
@@ -130,7 +113,7 @@ One key in five survived here purely by chance; the formula says expect one in f
 
 ---
 
-## The Consistent Hashing Solution
+### The Consistent Hashing Solution
 
 Consistent hashing maps both **nodes** and **keys** to the same circular hash space (the ring). When nodes change, only keys that were mapped to the affected arc of the ring need to move.
 
@@ -184,7 +167,9 @@ The penalty for modulo hashing is not a constant overhead — it grows linearly 
 
 ---
 
-## The Hash Ring
+## 4. Types / Architectures / Strategies
+
+### The Hash Ring
 
 ### How it works:
 
@@ -301,7 +286,9 @@ Every lookup is one ceiling search on the sorted ring: hash the key, jump to the
 
 ---
 
-## Adding and Removing Nodes
+## 5. Architecture Diagrams
+
+### Adding and Removing Nodes
 
 ### Adding a node:
 
@@ -395,7 +382,9 @@ AFTER removing Node B:
 
 ---
 
-## Virtual Nodes (Vnodes)
+## 6. How It Works — Detailed Mechanics
+
+### Virtual Nodes (Vnodes)
 
 ### The problem with few physical nodes:
 
@@ -507,7 +496,7 @@ The model reproduces every bar in the chart. It also explains the "100-200 vnode
 
 ---
 
-## Rebalancing
+### Rebalancing
 
 When the ring topology changes (node added/removed), only a subset of keys need to migrate.
 
@@ -561,59 +550,7 @@ This is a significant advantage: migration bandwidth is distributed across many 
 
 ---
 
-## The Hotspot Problem
-
-### What is a hotspot?
-
-A hotspot occurs when a disproportionate amount of traffic goes to a single node, typically because:
-1. Key distribution is skewed (a few keys are extremely popular — "celebrity" keys).
-2. The hash function distributes keys unevenly.
-3. A single node has too large an arc on the ring.
-
-### Solutions:
-
-**1. Key hashing with salt (address popularity skew)**
-
-For extremely popular keys (e.g., `celebrity_user_123`), append a random suffix before hashing:
-```
-shard_key = hash("celebrity_user_123_" + random_suffix(0, num_shards))
-```
-This spreads a single logical key across multiple physical shards. Requires the application to know how many shards and scatter-gather reads.
-
-**2. Virtual nodes (address ring arc imbalance)**
-
-More vnodes = smaller, more even arcs. Reduces the probability of any single physical node owning an outsized arc.
-
-**3. Request rate limiting per key**
-
-At the application layer, rate-limit requests for known hot keys and serve from an in-process cache.
-
-**4. Dedicated hot key handling**
-
-Detect hot keys dynamically (e.g., keys with > 1000 req/sec). Route them to a dedicated tier of nodes rather than the general ring.
-
-**5. Consistent hashing with bounded loads (cap the node, not the key)**
-
-The first four fixes all require you to identify the hot key. Bounded-load consistent hashing does not: it caps how overloaded *any* node may become, whatever the key distribution, and does so inside the ring lookup itself.
-
-The rule is a single parameter `c = 1 + epsilon`. Compute the average load across the cluster, multiply by `c` to get a per-node ceiling, then do the normal clockwise walk — but if the node you land on is already at its ceiling, keep walking to the next node that is not. Because every node applies the same deterministic rule to the same ring state, all clients agree on where an overflowing key goes; nothing is centrally coordinated.
-
-Mirrokni, Thorup and Zadimoghaddam ("Consistent Hashing with Bounded Loads", arXiv:1608.01350) prove the cost of that cap is small: node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. You are trading a bounded amount of extra data movement for a hard ceiling on imbalance — a much better deal than the unbounded tail that plain consistent hashing leaves you with.
-
-This is not theoretical. Both major L7 proxies ship it against the same paper:
-
-| Proxy | Setting | Meaning |
-|-------|---------|---------|
-| Envoy | `hash_balance_factor` (default 0 = off) | `150` caps any host at 1.5x the cluster's average load; typical values 120-200, minimum 100 |
-| HAProxy | `hash-balance-factor` with `hash-type consistent` | Same semantics; documented reasonable range 125-200 |
-
-The tuning intuition is that `c` is a dial between the two failure modes. `c` near 1 forces near-perfect balance but spills keys off their natural node constantly, destroying the cache locality the ring existed to provide. Large `c` restores locality and lets hotspots re-form. Start around 1.25-1.5, which is where both proxies point you.
-
-Note what it does *not* fix: a single key hotter than one node's entire capacity. Bounded load spreads *distinct* keys off an overloaded node; one key is indivisible, so that case still needs salting (fix 1) or a replicated local cache.
-
----
-
-## Implementation
+### Implementation
 
 ### Data structure: Sorted Map (TreeMap)
 
@@ -770,7 +707,7 @@ class ConsistentHashRing:
 
 ---
 
-## Real-World Systems
+## 7. Real-World Examples
 
 ### Amazon Dynamo (2007 Paper)
 
@@ -835,7 +772,9 @@ Redis Cluster uses a hybrid approach: a fixed set of **16384 hash slots** (not a
 
 ---
 
-## Consistent Hashing vs Rendezvous Hashing
+## 8. Tradeoffs
+
+### Consistent Hashing vs Rendezvous Hashing
 
 **Rendezvous hashing** (also called highest random weight hashing) is an alternative algorithm that achieves the same minimal disruption property.
 
@@ -867,7 +806,7 @@ A third family worth knowing is **Maglev hashing** (Google), which replaces the 
 
 ---
 
-## Tradeoffs and Considerations
+### Tradeoffs and Considerations
 
 | Consideration               | Notes                                                                      |
 |-----------------------------|----------------------------------------------------------------------------|
@@ -882,7 +821,209 @@ A third family worth knowing is **Maglev hashing** (Google), which replaces the 
 
 ---
 
-## Best Practices
+## 9. When to Use / When NOT to Use
+
+### When to Use
+
+- **The backend holds per-key state** — a cache tier, a sharded database, a stateful session or connection tier. This is the whole point: a mapping that survives resize.
+- **The node set changes** — autoscaling, rolling deploys, spot-instance churn, or node failure. If nodes come and go, plain `hash(key) % N` remaps ~100% of keys every time.
+- **Node count is large** — the ring's O(log N) lookup and the 1/N disruption bound both get *better* relative to alternatives as N grows into the hundreds or thousands.
+- **You need deterministic, coordination-free routing** — every client computes the same answer from the same membership view, with no lookup service in the request path.
+- **Replica placement follows placement** — "next K nodes clockwise" gives you replica sets for free, which is why Dynamo-lineage stores are built on it.
+
+### When NOT to Use
+
+- **The backend is stateless.** If any server can serve any request, round-robin or least-connections balances better and costs nothing. Do not pin traffic you have no reason to pin.
+- **The node set is genuinely fixed.** A permanent 3-node pool that never resizes gets nothing from a ring; `% 3` is simpler and easier to reason about.
+- **You need exact key-to-node control.** Ring placement is a consequence of hashing, not a decision. Tenant isolation, data-residency pinning, or "this customer must live on these nodes" call for an explicit shard map (a directory) instead.
+- **Node count is small and lookup cost matters more than memory.** Below roughly a few dozen nodes, rendezvous hashing gives naturally even distribution with no vnode bookkeeping (§8).
+- **The workload is dominated by one hot key.** The ring distributes *keys*, not *load*. A single celebrity key is indivisible and no amount of vnodes helps — see §10.
+
+---
+
+## 10. Common Pitfalls
+
+### The Hotspot Problem
+
+**What is a hotspot?**
+
+A hotspot occurs when a disproportionate amount of traffic goes to a single node, typically because:
+1. Key distribution is skewed (a few keys are extremely popular — "celebrity" keys).
+2. The hash function distributes keys unevenly.
+3. A single node has too large an arc on the ring.
+
+**Solutions:**
+
+**1. Key hashing with salt (address popularity skew)**
+
+For extremely popular keys (e.g., `celebrity_user_123`), append a random suffix before hashing:
+```
+shard_key = hash("celebrity_user_123_" + random_suffix(0, num_shards))
+```
+This spreads a single logical key across multiple physical shards. Requires the application to know how many shards and scatter-gather reads.
+
+**2. Virtual nodes (address ring arc imbalance)**
+
+More vnodes = smaller, more even arcs. Reduces the probability of any single physical node owning an outsized arc.
+
+**3. Request rate limiting per key**
+
+At the application layer, rate-limit requests for known hot keys and serve from an in-process cache.
+
+**4. Dedicated hot key handling**
+
+Detect hot keys dynamically (e.g., keys with > 1000 req/sec). Route them to a dedicated tier of nodes rather than the general ring.
+
+**5. Consistent hashing with bounded loads (cap the node, not the key)**
+
+The first four fixes all require you to identify the hot key. Bounded-load consistent hashing does not: it caps how overloaded *any* node may become, whatever the key distribution, and does so inside the ring lookup itself.
+
+The rule is a single parameter `c = 1 + epsilon`. Compute the average load across the cluster, multiply by `c` to get a per-node ceiling, then do the normal clockwise walk — but if the node you land on is already at its ceiling, keep walking to the next node that is not. Because every node applies the same deterministic rule to the same ring state, all clients agree on where an overflowing key goes; nothing is centrally coordinated.
+
+Mirrokni, Thorup and Zadimoghaddam ("Consistent Hashing with Bounded Loads", arXiv:1608.01350) prove the cost of that cap is small: node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. You are trading a bounded amount of extra data movement for a hard ceiling on imbalance — a much better deal than the unbounded tail that plain consistent hashing leaves you with.
+
+This is not theoretical. Both major L7 proxies ship it against the same paper:
+
+| Proxy | Setting | Meaning |
+|-------|---------|---------|
+| Envoy | `hash_balance_factor` (default 0 = off) | `150` caps any host at 1.5x the cluster's average load; typical values 120-200, minimum 100 |
+| HAProxy | `hash-balance-factor` with `hash-type consistent` | Same semantics; documented reasonable range 125-200 |
+
+The tuning intuition is that `c` is a dial between the two failure modes. `c` near 1 forces near-perfect balance but spills keys off their natural node constantly, destroying the cache locality the ring existed to provide. Large `c` restores locality and lets hotspots re-form. Start around 1.25-1.5, which is where both proxies point you.
+
+Note what it does *not* fix: a single key hotter than one node's entire capacity. Bounded load spreads *distinct* keys off an overloaded node; one key is indivisible, so that case still needs salting (fix 1) or a replicated local cache.
+
+---
+
+### Assuming the Ring Balances Load
+
+It balances **keys**, not **requests**. A ring with 200 vnodes per node distributes key *ownership* to within a few percent, and then one celebrity key can still take a single node to 100% CPU. Key distribution and load distribution are different problems; the ring solves only the first.
+
+### Too Few Virtual Nodes
+
+With one token per physical node, arc sizes follow the order statistics of random points on a circle and the standard deviation of load is enormous — a node owning 2-3x its fair share is routine at 10 nodes. This is the single most common misconfiguration, and it presents as "consistent hashing does not work" rather than as a tuning error. Use 100-256 vnodes per node (Cassandra's `num_tokens` default is 16 with the token-allocation algorithm enabled; Dynamo-style rings and client libraries typically use 100-200).
+
+### Different Clients Computing Different Rings
+
+Every client must agree on the hash function, the vnode count, the node-key format used to derive vnode positions, and the membership list. A single client library configured with a different vnode naming scheme silently routes to different nodes — writes land on one node and reads miss on another, which looks like data loss rather than a configuration bug. Pin the hash algorithm and the ring parameters explicitly in configuration, never by library default.
+
+### Ignoring Membership Propagation Delay
+
+Gossip takes time. During propagation, two clients hold different rings and the same key routes to two different nodes, so a resize is a window of temporary inconsistency rather than an instant switch. For a cache that just means a brief dip in hit rate; for a datastore it means the read path must tolerate a key living on the "wrong" node — hence hinted handoff and read repair in Dynamo-lineage systems.
+
+### Treating a Ring Split as a Ring Problem
+
+A network partition leaves each side with a plausible-looking ring covering the whole keyspace, and both will happily accept writes. Consistent hashing has nothing to say about this — it is a placement function, not a consensus protocol. Quorum (`R + W > N`) or an external coordinator is what prevents divergence; see [Consensus Algorithms](../consensus_algorithms/consensus_algorithms.md).
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Where the ring appears | Notes |
+|------|------------------------|-------|
+| **Apache Cassandra** | Partitioner (`Murmur3Partitioner`) places every partition key on a token ring; replicas are the next N nodes clockwise, skewed by the replication strategy | `num_tokens` is the vnode count; the token-allocation algorithm lets a low value (16) balance as well as the old 256 |
+| **Amazon DynamoDB / Riak** | Dynamo-lineage partitioning — the original consistent-hashing-plus-vnodes design | DynamoDB hides the ring entirely; you see only the partition key |
+| **memcached clients (ketama)** | Client-side ring; the server knows nothing | `libketama` is the de-facto compatible layout — mismatched client configuration is the classic cause of a silent cache-wide miss |
+| **Valkey / Redis Cluster** | **Not** a ring — 16,384 fixed hash slots explicitly assigned to nodes | Worth knowing as the counter-example: a directory of slots gives exact placement control at the cost of an explicit resharding step |
+| **Envoy** | `ring_hash` and `maglev` load-balancing policies; `hash_balance_factor` implements bounded loads (§10) | Maglev uses a 65,537-entry table instead of a ring — faster lookup, more disruption on membership change |
+| **HAProxy** | `hash-type consistent` with `hash-balance-factor` | Same bounded-load semantics as Envoy |
+| **Katran / Maglev (Meta, Google)** | L4 load balancers using consistent hashing so backend churn does not break existing flows | See [Load Balancing](../load_balancing/load_balancing.md) |
+| **Apache Kafka** | **Not** a ring — partition count is fixed and `hash(key) % partitions` is deliberate | The reason adding partitions to a keyed topic breaks ordering: it is exactly the modulo-resize failure in §3, accepted on purpose |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: What is the problem with using `hash(key) % N` for distributed systems?**
+**Short:** Plain hash(key) % N remaps nearly all keys when N changes, triggering a thundering herd of cache misses.
+
+When N changes (node added or removed), nearly all keys remap to different nodes — going from N to N+1 servers moves `N/(N+1)` of them. For a distributed cache this means a thundering herd of cache misses simultaneously hitting the backend database, causing overload and cascading failures.
+
+**Q2: How does consistent hashing solve the remapping problem?**
+**Short:** Consistent hashing maps nodes and keys onto a ring, so adding or removing a node only moves 1/N of the keys.
+
+Both nodes and keys are mapped to the same circular hash space. A key is assigned to the first node clockwise from its hash position. When a node is added, only keys in the arc immediately preceding it move (to the new node). When a node is removed, only its keys move (to the next node). Total disruption is O(1/N) — the theoretical minimum.
+
+**Q3: What happens when a node is added to a consistent hash ring?**
+**Short:** Adding a node to the ring only migrates the keys in the arc between its predecessor and its own position.
+
+The new node's position on the ring is determined by hashing its ID. It takes ownership of keys in the arc between its predecessor and its position. Only those keys need to migrate from the predecessor to the new node. All other nodes are unaffected.
+
+**Q4: What are virtual nodes and why are they needed?**
+**Short:** Virtual nodes give each physical node many ring positions, evening out load that raw hashing would leave uneven.
+
+Virtual nodes (vnodes) are multiple positions on the ring assigned to each physical node. With only a few physical nodes, the ring arc sizes are highly uneven due to hash collisions — one node might own 60% of the ring. Vnodes distribute each physical node's ownership across many small arcs, resulting in even load distribution. ketama, the reference Memcached client implementation, uses 160 points per server.
+
+**Q5: What is the time complexity of a lookup in a consistent hash ring?**
+**Short:** A consistent-hash ring lookup runs in O(log(N*V)) time via binary search over a sorted ring structure.
+
+O(log(N * V)) where N is the number of physical nodes and V is the number of virtual nodes per physical node. The ring is a sorted data structure (TreeMap / sorted array); lookup uses binary search to find the first node at or after the key's hash position.
+
+**Q6: How do you handle replication in consistent hashing?**
+**Short:** Replication stores each key on the next R distinct physical nodes clockwise from its primary, the preference list.
+
+Store copies on the next R distinct physical nodes clockwise from the primary — the Dynamo paper calls this set the preference list. For a key mapping to node A with RF=3, the key is also stored on nodes B and C (the next two clockwise), and reads and writes require a quorum of `floor(RF/2) + 1` nodes. Two details bite in practice: with vnodes you must skip successor positions that belong to a physical node already in the set, or your three "replicas" land on one machine; and rack- or AZ-aware placement (Cassandra's NetworkTopologyStrategy) further skips positions in a rack already represented, so the replica set is derived from the ring but is not simply the next R ring entries.
+
+**Q7: What is a hotspot in consistent hashing and how do you mitigate it?**
+**Short:** A hotspot is one node getting disproportionate traffic from uneven arcs or popularity skew, fixed by vnodes or splitting.
+
+A hotspot occurs when a single node receives disproportionate traffic, either due to uneven ring arc sizes (mitigated by vnodes) or because certain keys are much more popular than others (popularity skew). For popular keys, solutions include: key splitting (appending a shard suffix), maintaining a dedicated hot-key cache tier, or application-level rate limiting.
+
+**Q8: How does consistent hashing compare to Rendezvous hashing?**
+**Short:** Rendezvous hashing balances load without vnodes but costs O(N) per lookup versus the ring's O(log N).
+
+Both achieve O(1/N) key disruption on node changes. Rendezvous hashing has better natural load balance without needing vnodes, but has O(N) lookup cost (must score all nodes per key). Consistent hashing with vnodes has O(log N) lookup and is preferred for large clusters. Rendezvous hashing suits CDN routing where N is small.
+
+**Q9: Why does Cassandra use Murmur3 instead of MD5 for hashing?**
+**Short:** Cassandra uses Murmur3 over MD5 purely for speed, since neither offers Cassandra a distribution advantage.
+
+Murmur3 is chosen for speed, not for better distribution — Cassandra documents a 3-5x performance improvement over the MD5-based RandomPartitioner. Both partitioners spread partition keys equally well; MD5 has no clustering bias to fix. What Murmur3 removes is cryptographic work Cassandra never needed: an attacker cannot meaningfully bias partition placement, so paying MD5's cost on every read and write is pure overhead. SHA-1/SHA-256 are slower still for the same non-benefit, which is why no partitioner uses them.
+
+**Q10: How do you handle heterogeneous nodes (different hardware capacities) in a consistent hash ring?**
+**Short:** Heterogeneous nodes get vnodes assigned proportionally to capacity, so a bigger node owns a bigger arc.
+
+Assign vnodes proportionally to the node's capacity. A node with 2x the RAM and CPU receives 2x the number of virtual nodes, so it naturally owns twice the arc space and handles twice the traffic. This is supported natively in Cassandra via manual token assignment or proportional vnode allocation.
+
+**Q11: How would you implement a consistent hash ring in production? What monitoring would you set up?**
+**Short:** A production ring is a TreeMap keyed by hash position, monitored for per-node arc size and rebalancing time.
+
+Implement using a TreeMap keyed by hash position. Monitor: (a) arc size per physical node — alert if any node owns more than 2x its fair share; (b) actual request distribution vs expected distribution; (c) rebalancing duration when nodes join/leave; (d) key migration throughput. Use Murmur3, 150–256 vnodes, and test ring balance distribution before deploying to production.
+
+**Q12: What happens during a network partition in a consistent hash ring?**
+**Short:** Consistent hashing only handles data placement, not consistency; partitions still need gossip and quorum reads/writes.
+
+Consistent hashing defines data placement but not consistency guarantees. During a partition, different nodes may disagree on ring membership. Systems like Dynamo/Cassandra use gossip protocols for eventual membership convergence and quorum reads/writes to tolerate node unavailability. The ring itself does not provide consistency — the application layer (quorum, vector clocks, conflict resolution) handles split-brain scenarios.
+
+**Q13: Why would you choose a composite partition key like `(user_id, day_bucket)` over a raw `user_id` or a random UUID for a time-series events table?**
+**Short:** A composite key like (user_id, day_bucket) bounds partition size and avoids the scatter-gather cost of a raw UUID key.
+
+A raw `user_id` creates unbounded partitions for power users, while a random UUID scatters every read across the cluster. Without a shared partition key to route on, a UUID-keyed table turns "get this user's events" into a scatter-gather query across every node instead of a single-partition lookup. The Cassandra ring case study's Key Design Decision #3 bounds this by combining `user_id` with a `day_bucket`, capping each partition at roughly one user's daily event volume (~50 KB) — small enough to avoid hotspots, large enough that a "get today's events for this user" query still lands on a single partition. Compute expected partition size at your target retention and write rate before picking the bucket granularity — hourly versus daily buckets change partition size by 24x.
+
+**Q14: A cluster configured with only 8 vnodes per physical node saw one node hold 31% of the data — why, and how do you fix it?**
+**Short:** Too few vnodes leaves ownership uneven since each node has only a handful of randomly placed ring arcs.
+
+Too few vnodes means each node's ownership is just a handful of randomly-placed arcs, which stay uneven until you have many of them. The consistent-hashing Cassandra case study hit exactly this: 8 vnodes per node was chosen "for faster repair," but one node ended up owning 31% of the ring, hit its disk-IOPS limit, and p99 latency spiked to 200ms. The fix was raising vnode count to 256 — the module's vnode-count chart shows load std dev dropping from 45% at 1 vnode to 3% at 256 — and decommissioning the hot node so the cluster could rebalance, which took roughly 6 hours. Vnode count is a balance-vs-overhead dial: too few causes hotspots like this one, while too many (4096+) increases gossip and repair overhead for diminishing balance gains.
+
+**Q15: How does Redis Cluster's hash-slot design differ from a classic consistent-hash ring?**
+**Short:** Redis Cluster uses 16,384 fixed, explicitly assigned hash slots instead of virtual-node ring positions.
+
+Redis Cluster divides the keyspace into a fixed 16,384 hash slots instead of a continuous ring. Each key maps to a slot via `CRC16(key) % 16384`, and each node owns an explicit, administrator-assigned range of slots rather than deriving ownership from virtual-node ring positions. This is simpler to operate — you can query which node owns slot 12182 directly — but it loses the ring's automatic "add a node, only 1/(N+1) of keys move" property, since slot migration is a manual (or externally orchestrated) `MIGRATE` operation per slot. It achieves similar minimal-disruption results to a ring in practice, but through explicit slot ownership rather than hash-position math, trading automation for operational transparency.
+
+**Q: What is consistent hashing with bounded loads, and what does the balancing factor actually trade away?**
+**Short:** Bounded-load consistent hashing caps every node near the average load, trading cache locality for balance.
+
+It caps every node at `c = 1 + epsilon` times the cluster's average load, and the walk simply continues clockwise past any node already at its ceiling. Because every client applies the same deterministic rule to the same ring state, they all agree on where an overflowing key lands — no coordination needed. The Hotspot Problem section explains why this is different from the other four fixes: salting, dedicated hot-key tiers and per-key rate limits all require you to *identify* the hot key first, whereas bounded load caps the damage from any key distribution. Mirrokni, Thorup and Zadimoghaddam (arXiv:1608.01350) show the cost is bounded too — node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. The tradeoff is cache locality: a `c` near 1 forces near-perfect balance but constantly spills keys off their natural node, which is exactly the locality the ring existed to provide, so both Envoy (`hash_balance_factor`, typical 120-200) and HAProxy (`hash-balance-factor`, reasonable 125-200) point you at roughly 1.25-1.5. It does not help with a single key hotter than one node's whole capacity — one key is indivisible, so that case still needs salting or a replicated local cache.
+
+**Q16: Salting a hot key spreads its writes across multiple shards — what does that cost you on the read path?**
+**Short:** Salting a hot key turns one read into a scatter-gather across every shard the key was split into.
+
+Salting turns one logical key into several physical keys, so a single GET becomes a scatter-gather read across every shard. The Hotspot Problem section's key-splitting fix appends a random suffix before hashing (`hash("celebrity_user_123_" + random_suffix(0, num_shards))`), which requires the application to know the shard count and merge the scattered results back into one value. This moves cost rather than eliminating it: a hot key that used to cost one GET now costs `num_shards` parallel GETs plus an application-side merge, and any change to the shard count means re-salting existing data. Reserve salting for keys specifically detected as hot — the module's dedicated hot-key handling suggests a >1000 req/sec threshold — rather than applying it preemptively, since most keys don't need the scatter-gather overhead it introduces.
+
+---
+
+---
+
+## 13. Best Practices
 
 ### Vnode Count
 With randomly placed tokens, use 150–256 virtual nodes per physical node; more than 256 provides diminishing returns on distribution while increasing ring management overhead. With a deterministic token allocator, start far lower — Cassandra 4.0+ defaults `num_tokens` to 16 for exactly this reason. Either way, tune on the actual standard deviation of key distribution observed in production, not on the default.
@@ -914,7 +1055,7 @@ Before decommissioning a node, first transfer its data to its successor(s). Then
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement Consistent Hashing**
 
@@ -928,7 +1069,9 @@ Before decommissioning a node, first transfer its data to its successor(s). Then
 
 ---
 
-## Case Study: Distributed Cache
+## 14. Case Study
+
+### Case Study 1: Distributed Cache
 
 ### Context
 A social media platform has a large distributed Memcached cluster for caching user profile data. The cluster starts with 8 nodes handling 500,000 cache lookups/sec. Due to user growth, the team needs to add 4 new nodes.
@@ -1029,96 +1172,9 @@ Note the second row is still marginally above the 50,000 q/s ceiling on paper �
 
 ---
 
-## Interview Questions
-
-**Q1: What is the problem with using `hash(key) % N` for distributed systems?**
-**Short:** Plain hash(key) % N remaps nearly all keys when N changes, triggering a thundering herd of cache misses.
-
-When N changes (node added or removed), nearly all keys remap to different nodes — going from N to N+1 servers moves `N/(N+1)` of them. For a distributed cache this means a thundering herd of cache misses simultaneously hitting the backend database, causing overload and cascading failures.
-
-**Q2: How does consistent hashing solve the remapping problem?**
-**Short:** Consistent hashing maps nodes and keys onto a ring, so adding or removing a node only moves 1/N of the keys.
-
-Both nodes and keys are mapped to the same circular hash space. A key is assigned to the first node clockwise from its hash position. When a node is added, only keys in the arc immediately preceding it move (to the new node). When a node is removed, only its keys move (to the next node). Total disruption is O(1/N) — the theoretical minimum.
-
-**Q3: What happens when a node is added to a consistent hash ring?**
-**Short:** Adding a node to the ring only migrates the keys in the arc between its predecessor and its own position.
-
-The new node's position on the ring is determined by hashing its ID. It takes ownership of keys in the arc between its predecessor and its position. Only those keys need to migrate from the predecessor to the new node. All other nodes are unaffected.
-
-**Q4: What are virtual nodes and why are they needed?**
-**Short:** Virtual nodes give each physical node many ring positions, evening out load that raw hashing would leave uneven.
-
-Virtual nodes (vnodes) are multiple positions on the ring assigned to each physical node. With only a few physical nodes, the ring arc sizes are highly uneven due to hash collisions — one node might own 60% of the ring. Vnodes distribute each physical node's ownership across many small arcs, resulting in even load distribution. ketama, the reference Memcached client implementation, uses 160 points per server.
-
-**Q5: What is the time complexity of a lookup in a consistent hash ring?**
-**Short:** A consistent-hash ring lookup runs in O(log(N*V)) time via binary search over a sorted ring structure.
-
-O(log(N * V)) where N is the number of physical nodes and V is the number of virtual nodes per physical node. The ring is a sorted data structure (TreeMap / sorted array); lookup uses binary search to find the first node at or after the key's hash position.
-
-**Q6: How do you handle replication in consistent hashing?**
-**Short:** Replication stores each key on the next R distinct physical nodes clockwise from its primary, the preference list.
-
-Store copies on the next R distinct physical nodes clockwise from the primary — the Dynamo paper calls this set the preference list. For a key mapping to node A with RF=3, the key is also stored on nodes B and C (the next two clockwise), and reads and writes require a quorum of `floor(RF/2) + 1` nodes. Two details bite in practice: with vnodes you must skip successor positions that belong to a physical node already in the set, or your three "replicas" land on one machine; and rack- or AZ-aware placement (Cassandra's NetworkTopologyStrategy) further skips positions in a rack already represented, so the replica set is derived from the ring but is not simply the next R ring entries.
-
-**Q7: What is a hotspot in consistent hashing and how do you mitigate it?**
-**Short:** A hotspot is one node getting disproportionate traffic from uneven arcs or popularity skew, fixed by vnodes or splitting.
-
-A hotspot occurs when a single node receives disproportionate traffic, either due to uneven ring arc sizes (mitigated by vnodes) or because certain keys are much more popular than others (popularity skew). For popular keys, solutions include: key splitting (appending a shard suffix), maintaining a dedicated hot-key cache tier, or application-level rate limiting.
-
-**Q8: How does consistent hashing compare to Rendezvous hashing?**
-**Short:** Rendezvous hashing balances load without vnodes but costs O(N) per lookup versus the ring's O(log N).
-
-Both achieve O(1/N) key disruption on node changes. Rendezvous hashing has better natural load balance without needing vnodes, but has O(N) lookup cost (must score all nodes per key). Consistent hashing with vnodes has O(log N) lookup and is preferred for large clusters. Rendezvous hashing suits CDN routing where N is small.
-
-**Q9: Why does Cassandra use Murmur3 instead of MD5 for hashing?**
-**Short:** Cassandra uses Murmur3 over MD5 purely for speed, since neither offers Cassandra a distribution advantage.
-
-Murmur3 is chosen for speed, not for better distribution — Cassandra documents a 3-5x performance improvement over the MD5-based RandomPartitioner. Both partitioners spread partition keys equally well; MD5 has no clustering bias to fix. What Murmur3 removes is cryptographic work Cassandra never needed: an attacker cannot meaningfully bias partition placement, so paying MD5's cost on every read and write is pure overhead. SHA-1/SHA-256 are slower still for the same non-benefit, which is why no partitioner uses them.
-
-**Q10: How do you handle heterogeneous nodes (different hardware capacities) in a consistent hash ring?**
-**Short:** Heterogeneous nodes get vnodes assigned proportionally to capacity, so a bigger node owns a bigger arc.
-
-Assign vnodes proportionally to the node's capacity. A node with 2x the RAM and CPU receives 2x the number of virtual nodes, so it naturally owns twice the arc space and handles twice the traffic. This is supported natively in Cassandra via manual token assignment or proportional vnode allocation.
-
-**Q11: How would you implement a consistent hash ring in production? What monitoring would you set up?**
-**Short:** A production ring is a TreeMap keyed by hash position, monitored for per-node arc size and rebalancing time.
-
-Implement using a TreeMap keyed by hash position. Monitor: (a) arc size per physical node — alert if any node owns more than 2x its fair share; (b) actual request distribution vs expected distribution; (c) rebalancing duration when nodes join/leave; (d) key migration throughput. Use Murmur3, 150–256 vnodes, and test ring balance distribution before deploying to production.
-
-**Q12: What happens during a network partition in a consistent hash ring?**
-**Short:** Consistent hashing only handles data placement, not consistency; partitions still need gossip and quorum reads/writes.
-
-Consistent hashing defines data placement but not consistency guarantees. During a partition, different nodes may disagree on ring membership. Systems like Dynamo/Cassandra use gossip protocols for eventual membership convergence and quorum reads/writes to tolerate node unavailability. The ring itself does not provide consistency — the application layer (quorum, vector clocks, conflict resolution) handles split-brain scenarios.
-
-**Q13: Why would you choose a composite partition key like `(user_id, day_bucket)` over a raw `user_id` or a random UUID for a time-series events table?**
-**Short:** A composite key like (user_id, day_bucket) bounds partition size and avoids the scatter-gather cost of a raw UUID key.
-
-A raw `user_id` creates unbounded partitions for power users, while a random UUID scatters every read across the cluster. Without a shared partition key to route on, a UUID-keyed table turns "get this user's events" into a scatter-gather query across every node instead of a single-partition lookup. The Cassandra ring case study's Key Design Decision #3 bounds this by combining `user_id` with a `day_bucket`, capping each partition at roughly one user's daily event volume (~50 KB) — small enough to avoid hotspots, large enough that a "get today's events for this user" query still lands on a single partition. Compute expected partition size at your target retention and write rate before picking the bucket granularity — hourly versus daily buckets change partition size by 24x.
-
-**Q14: A cluster configured with only 8 vnodes per physical node saw one node hold 31% of the data — why, and how do you fix it?**
-**Short:** Too few vnodes leaves ownership uneven since each node has only a handful of randomly placed ring arcs.
-
-Too few vnodes means each node's ownership is just a handful of randomly-placed arcs, which stay uneven until you have many of them. The consistent-hashing Cassandra case study hit exactly this: 8 vnodes per node was chosen "for faster repair," but one node ended up owning 31% of the ring, hit its disk-IOPS limit, and p99 latency spiked to 200ms. The fix was raising vnode count to 256 — the module's vnode-count chart shows load std dev dropping from 45% at 1 vnode to 3% at 256 — and decommissioning the hot node so the cluster could rebalance, which took roughly 6 hours. Vnode count is a balance-vs-overhead dial: too few causes hotspots like this one, while too many (4096+) increases gossip and repair overhead for diminishing balance gains.
-
-**Q15: How does Redis Cluster's hash-slot design differ from a classic consistent-hash ring?**
-**Short:** Redis Cluster uses 16,384 fixed, explicitly assigned hash slots instead of virtual-node ring positions.
-
-Redis Cluster divides the keyspace into a fixed 16,384 hash slots instead of a continuous ring. Each key maps to a slot via `CRC16(key) % 16384`, and each node owns an explicit, administrator-assigned range of slots rather than deriving ownership from virtual-node ring positions. This is simpler to operate — you can query which node owns slot 12182 directly — but it loses the ring's automatic "add a node, only 1/(N+1) of keys move" property, since slot migration is a manual (or externally orchestrated) `MIGRATE` operation per slot. It achieves similar minimal-disruption results to a ring in practice, but through explicit slot ownership rather than hash-position math, trading automation for operational transparency.
-
-**Q: What is consistent hashing with bounded loads, and what does the balancing factor actually trade away?**
-**Short:** Bounded-load consistent hashing caps every node near the average load, trading cache locality for balance.
-
-It caps every node at `c = 1 + epsilon` times the cluster's average load, and the walk simply continues clockwise past any node already at its ceiling. Because every client applies the same deterministic rule to the same ring state, they all agree on where an overflowing key lands — no coordination needed. The Hotspot Problem section explains why this is different from the other four fixes: salting, dedicated hot-key tiers and per-key rate limits all require you to *identify* the hot key first, whereas bounded load caps the damage from any key distribution. Mirrokni, Thorup and Zadimoghaddam (arXiv:1608.01350) show the cost is bounded too — node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. The tradeoff is cache locality: a `c` near 1 forces near-perfect balance but constantly spills keys off their natural node, which is exactly the locality the ring existed to provide, so both Envoy (`hash_balance_factor`, typical 120-200) and HAProxy (`hash-balance-factor`, reasonable 125-200) point you at roughly 1.25-1.5. It does not help with a single key hotter than one node's whole capacity — one key is indivisible, so that case still needs salting or a replicated local cache.
-
-**Q16: Salting a hot key spreads its writes across multiple shards — what does that cost you on the read path?**
-**Short:** Salting a hot key turns one read into a scatter-gather across every shard the key was split into.
-
-Salting turns one logical key into several physical keys, so a single GET becomes a scatter-gather read across every shard. The Hotspot Problem section's key-splitting fix appends a random suffix before hashing (`hash("celebrity_user_123_" + random_suffix(0, num_shards))`), which requires the application to know the shard count and merge the scattered results back into one value. This moves cost rather than eliminating it: a hot key that used to cost one GET now costs `num_shards` parallel GETs plus an application-side merge, and any change to the shard count means re-salting existing data. Reserve salting for keys specifically detected as hot — the module's dedicated hot-key handling suggests a >1000 req/sec threshold — rather than applying it preemptively, since most keys don't need the scatter-gather overhead it introduces.
-
 ---
 
-## Case Study: Cassandra Ring Partitioning for a 20-Node User-Event Cluster
+### Case Study 2: Cassandra Ring Partitioning for a 20-Node User-Event Cluster
 
 ### Problem Statement
 

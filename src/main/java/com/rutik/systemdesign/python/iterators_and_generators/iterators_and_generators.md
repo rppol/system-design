@@ -247,7 +247,6 @@ sequenceDiagram
 `iter(obj)` calls `type(obj).__iter__(obj)`. `next(it)` calls `type(it).__next__(it)`. When `__next__` has no more values, it must raise `StopIteration`. The `for` statement desugars exactly to this protocol — there is no magic beyond these two dunder methods.
 
 ```python
-from __future__ import annotations
 from typing import Iterator
 
 
@@ -587,7 +586,50 @@ running_sum = list(itertools.accumulate([1, 2, 3, 4, 5]))  # [1, 3, 6, 10, 15]
 
 # starmap — map with argument unpacking
 results = list(itertools.starmap(pow, [(2, 3), (3, 2), (10, 2)]))  # [8, 9, 100]
+
+# pairwise — overlapping consecutive pairs [3.10]
+readings = [100, 105, 103, 110]
+deltas = list(itertools.pairwise(readings))
+# [(100, 105), (105, 103), (103, 110)]  — one shorter than the input, each (a, b)
+# adjacent. Replaces the old zip(seq, seq[1:]) trick for consecutive-element work
+# such as sensor deltas, timestamp gaps, or detecting a decrease between readings.
 ```
+
+**Chunking a stream into fixed-size batches.** The pre-3.12 recipe pulls `n` items at a
+time from a shared iterator with `islice`, stopping when a pull comes back empty — this is
+the version worth understanding because it shows *how* lazy chunking works, and it is still
+the right fallback below 3.12:
+
+```python
+def chunked_islice(iterable, n):
+    """Yield successive n-sized batches from iterable (pre-3.12 fallback)."""
+    it = iter(iterable)
+    while batch := list(itertools.islice(it, n)):   # islice returns a lazy islice
+        yield batch                                  # object, so list() makes it a
+                                                       # reusable, sized batch
+```
+
+`itertools.batched(iterable, n)` [3.12] is the primary tool for this now — same idea,
+built in, and faster:
+
+```python
+for batch in itertools.batched(range(10), 3):
+    print(batch)
+# (0, 1, 2)
+# (3, 4, 5)
+# (6, 7, 8)
+# (9,)              <- final batch is SHORT (1 item, not 3) unless strict=True
+
+for batch in itertools.batched(range(10), 3, strict=True):   # [3.13]
+    print(batch)
+# ValueError: batched(): incomplete batch
+```
+
+Two precise differences from the hand-rolled recipe: `batched` yields **tuples** (the
+`chunked_islice` recipe above yields `list`s, and a bare `islice` call yields a lazy
+`islice` object), and `batched`'s final batch is **short** rather than padded unless you
+pass `strict=True` [3.13], which raises `ValueError` on a ragged final batch instead of
+silently returning it.
 
 ### 6.7 `send()`, `throw()`, and `close()`
 
@@ -1103,6 +1145,16 @@ They are, in order, what the generator gives out, what it takes in, and what it 
 
 Every stage before it — `read_lines`, `parse_rows`, `filter_valid` — is a generator that holds at most one line or one row dict in memory at a time, so their memory footprint is O(1) regardless of file size. `aggregate_by_merchant` must accumulate a running total per merchant in a `defaultdict`, so its memory is proportional to the number of *distinct* merchant IDs, not the 80 million rows processed — the case study assumes roughly 50,000 merchants at about 150 bytes each, for 7.5 MB total. This is why the same pipeline processes a 10 GB file in about 7.5 MB of peak memory — the streaming stages contribute under 2 KB between them: cardinality of the aggregation key, not row count, is what determines memory for any stage that must remember state across the stream. Design pipelines so only the final aggregation stage buffers, and keep every upstream stage a pure pass-through generator.
 
+**Q: How does `itertools.batched` [3.12] differ from a hand-rolled `islice`-based chunker?**
+**Short:** batched yields tuples and its final batch is short unless strict=True [3.13] raises instead.
+
+`itertools.batched(iterable, n)` is the built-in replacement for the classic recipe `it = iter(iterable); while batch := list(itertools.islice(it, n)): yield batch` — both pull `n` items at a time from a shared iterator and stop when a pull comes back empty, but they differ in two concrete ways. `batched` yields **tuples**, while the hand-rolled recipe above yields whatever container you wrap the `islice` call in (commonly a `list`), and a bare `islice(it, n)` call by itself yields a lazy `islice` object rather than either. And when the input does not divide evenly by `n`, both approaches produce a **short final batch** by default — `batched(range(10), 3)` ends with `(9,)`, one item instead of three — but `batched` alone can pass `strict=True` [3.13] to turn that short final batch into a `ValueError` instead of silently returning it, which matters when a ragged final batch would signal a bug (a batch size that must evenly divide a fixed-record file, for example).
+
+**Q: What does `itertools.pairwise` [3.10] replace, and what does it return?**
+**Short:** pairwise(iterable) replaces zip(seq, seq[1:]) and returns overlapping consecutive (a, b) tuples.
+
+`itertools.pairwise(iterable)` returns successive overlapping pairs — `pairwise('ABCD')` yields `('A','B'), ('B','C'), ('C','D')` — and replaces the older `zip(seq, seq[1:])` idiom, which requires the sequence to already be a materialised, sliceable object (a `list` or `tuple`) since you cannot slice a lazy iterator. `pairwise` works directly on any iterable, including a one-pass generator, because it holds only the previous element in a local variable rather than slicing. It is the natural tool for consecutive-element work: computing deltas between sensor readings, detecting a decrease between adjacent timestamps, or diffing neighboring rows in a sorted stream. Note that the output is always one element shorter than the input, and it yields nothing at all for an input of length 0 or 1.
+
 ---
 
 ## 13. Best Practices
@@ -1362,6 +1414,25 @@ def process_sample(path: Path, max_rows: int = 100_000) -> dict[str, Decimal]:
     capped = itertools.islice(valid, max_rows)   # stop after max_rows
     return aggregate_by_merchant(capped)
 ```
+
+**Extending the pipeline to batch writes.** If this pipeline instead had to bulk-upsert
+`valid` rows into a warehouse table rather than aggregate them in memory, the same
+`islice`-pulling-from-a-shared-iterator idea chunks the stream into fixed-size batches. The
+pre-3.12 hand-rolled version:
+
+```python
+def chunked(rows, n):
+    it = iter(rows)
+    while batch := list(itertools.islice(it, n)):
+        yield batch
+
+for batch in chunked(valid, 5_000):
+    bulk_upsert(batch)          # one round trip per 5,000 rows, not per row
+```
+
+`itertools.batched(valid, 5_000)` [3.12] replaces `chunked()` directly — same chunking
+behavior, built in, yielding tuples instead of lists, and with the final short batch
+raising instead of silently shipping if `strict=True` [3.13] is passed.
 
 **Key lessons from this case study**:
 

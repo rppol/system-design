@@ -9,11 +9,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 | Module Directory | Phase | Topic |
 |-----------------|-------|-------|
-| `ioc_container/` | 1 | BeanFactory vs ApplicationContext, refresh lifecycle, BeanDefinition |
+| `ioc_container/` | 1 | BeanFactory vs ApplicationContext, refresh lifecycle, BeanDefinition, `BeanRegistrar` programmatic registration (Framework 7) |
 | `bean_lifecycle/` | 1 | Full lifecycle sequence, scopes, BPP vs BFPP, prototype gotchas |
 | `dependency_injection/` | 1 | Constructor/setter/field injection, @Primary, @Qualifier, ObjectProvider |
 | `spring_configuration/` | 1 | @Configuration full vs lite mode, @Conditional, @Profile, @Import |
-| `spring_proxies/` | 2 | JDK proxy vs CGLIB, self-invocation problem, proxyTargetClass |
+| `spring_proxies/` | 2 | JDK proxy vs CGLIB, self-invocation problem, proxyTargetClass, per-bean `@Proxyable` override (Framework 7) |
 | `spring_aop/` | 2 | Pointcut expressions, advice types, @Around, AspectJ vs Spring AOP — sub-file: `pointcut_designators` |
 | `spring_boot_autoconfiguration/` | 3 | @EnableAutoConfiguration, AutoConfiguration.imports, custom starters |
 | `spring_boot_configuration/` | 3 | @ConfigurationProperties, relaxed binding, property source priority |
@@ -26,30 +26,33 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `spring_data_jpa/` | 5 | JpaRepository, N+1, projections, locking, Specifications |
 | `spring_transactions/` | 5 | Propagation, isolation, self-invocation, rollback rules |
 | `spring_caching/` | 5 | @Cacheable, @CacheEvict, RedisCacheManager, stampede prevention |
-| `spring_security_architecture/` | 6 | FilterChainProxy, AuthenticationManager, CSRF, method security |
-| `spring_security_jwt_oauth/` | 6 | JWT, OAuth2 resource server, PKCE, refresh token rotation |
+| `spring_security_architecture/` | 6 | FilterChainProxy, AuthenticationManager, CSRF, method security, passkeys/WebAuthn, one-time-token login, factor-aware MFA |
+| `spring_security_jwt_oauth/` | 6 | JWT, OAuth2 resource server, PKCE, refresh token rotation, DPoP sender-constrained tokens, OAuth 2.1 |
 | `spring_cloud_config/` | 7 | Config Server, @RefreshScope, Spring Cloud Bus, Vault |
-| `spring_cloud_patterns/` | 7 | Gateway, Resilience4j, Feign, Eureka, Micrometer Tracing — sub-file: `gateway_server_webmvc` |
+| `spring_cloud_patterns/` | 7 | Gateway, Resilience4j, Feign, Eureka, Micrometer Tracing, Framework 7 core `@Retryable`/`@ConcurrencyLimit` — sub-file: `gateway_server_webmvc` |
 | `spring_messaging/` | 7 | Kafka, RabbitMQ, Spring Cloud Stream, @Async, WebSocket |
-| `spring_batch/` | 7 | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope/@JobScope, JobRepository, skip/retry, partitioning |
+| `spring_batch/` | 7 | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope/@JobScope, JobOperator, JobRepository, ChunkOrientedStep, skip/retry, partitioning (Batch 6) |
 | `spring_events_and_scheduling/` | 7 | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled/@Async, ShedLock |
-| `spring_testing/` | 8 | @SpringBootTest, test slices, MockMvc, @MockBean, Testcontainers |
-| `spring_performance/` | 8 | HikariCP tuning, lazy init, GraalVM native, virtual threads |
+| `spring_testing/` | 8 | @SpringBootTest, test slices, MockMvc, @MockitoBean, @ServiceConnection, RestTestClient, Testcontainers |
+| `spring_performance/` | 8 | HikariCP tuning, lazy init, CDS, JDK AOT cache (Leyden), CRaC, GraalVM native, virtual threads |
 | `observability_and_tracing/` | 8 | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
-| `spring_ai/` | 7 | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans (Spring AI 1.0 GA) |
-| `spring_native_graalvm/` | 8 | AOT processing, reachability metadata (reflection/resource/proxy hints), build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff (Boot 3.0+) |
+| `spring_ai/` | 7 | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans; MCP server/client (Spring AI 2.0 GA) |
+| `spring_native_graalvm/` | 8 | AOT processing, reachability metadata (reflection/resource/proxy hints), build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff; contrasted against the JDK AOT cache (Boot 4.1 / GraalVM for JDK 25) |
+| `spring_boot_4_migration/` | Boot 3.5 to 4.x: modular starters, package relocations, Jackson 3, JSpecify, OpenRewrite | AOT processing, reachability metadata (reflection/resource/proxy hints), build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff; contrasted against the JDK AOT cache (Boot 4.1 / GraalVM for JDK 25) |
 | `spring_integration/` | 7 | EIP: message channels, channel adapters/gateways, router/splitter/aggregator/transformer/filter, Java DSL; contrast with spring_messaging (Kafka/Rabbit) |
-| `spring_modulith/` | 3 | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, @ApplicationModuleTest, Documenter (Boot 3.1+) |
+| `spring_modulith/` | 3 | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, @ApplicationModuleTest, Documenter, @ModuleSlicing (Modulith 2.1 / Boot 4.1) |
 | `spring_graphql/` | 4 | Schema-first @QueryMapping/@MutationMapping/@SubscriptionMapping/@SchemaMapping, @BatchMapping + DataLoader (N+1), subscriptions (WebSocket/SSE), cursor pagination, error handling |
 | `spring_hateoas_rest_maturity/` | 4 | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/CollectionModel/Link, WebMvcLinkBuilder, assemblers, affordances), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail, API versioning |
 | `spring_grpc/` | 4 | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor + ordering, @GrpcExceptionHandler Status mapping, deadlines/cancellation, 4 streaming modes, Security + Micrometer tracing, gRPC vs REST |
-| `spring_session/` | 6 | SessionRepositoryFilter, Redis/JDBC/Hazelcast/Mongo backends, serialization, session fixation (changeSessionId), concurrent-session control, cookie vs header id, WebSession, stateless-JWT vs stateful tradeoff |
+| `spring_session/` | 6 | SessionRepositoryFilter, Redis and JDBC backends (Boot 4.0 dropped Hazelcast and MongoDB support), serialization, session fixation (changeSessionId), concurrent-session control, cookie vs header id, WebSession, stateless-JWT vs stateful tradeoff |
 | `spring_data_nosql/` | 5 | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
 | `database_migrations/` | 5 | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
 | `spring_websocket_stomp/` | 7 | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling/sticky sessions |
-| `spring_http_clients/` | 4 | RestTemplate vs WebClient vs RestClient (6.1) vs @HttpExchange, connection pooling, timeouts, error handling, MockRestServiceServer |
+| `spring_http_clients/` | 4 | RestTemplate vs WebClient vs RestClient vs @HttpExchange, connection pooling, timeouts, error handling, MockRestServiceServer, `InetAddressFilter` SSRF guard (Boot 4.1) |
 
-**Deep-dive sub-files** (group under parent module's game topic; NO separate `STUDY_ORDER` entry):
+**Deep-dive sub-files — 4 total** (group under parent module's game topic; NO separate `STUDY_ORDER` entry):
+- `spring_aop/pointcut_designators.md` — every pointcut designator, `javap`-backed proxy analysis, benchmarked matching cost.
+- `spring_cloud_patterns/gateway_server_webmvc.md` — the servlet Gateway flavour: route DSL, filter signature, threading model with virtual threads.
 - `spring_webflux/rsocket_reactive_messaging.md` — RSocket 4 interaction models, protocol-level backpressure (`REQUEST_N`), `@MessageMapping`/`RSocketRequester`, RSocket vs gRPC/WebSocket.
 - `request_handling/i18n_and_localization.md` — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, `LocaleContextHolder`, locale-aware validation + number/date formatting.
 
@@ -165,7 +168,8 @@ When covering a Spring feature, always note the version:
 - **Spring Boot 3.4+** — Structured logging (`ecs`/`gelf`/`logstash`), `spring.http.client.factory`, actuator access levels (`read-only`/`unrestricted`/`none`)
 - **Spring Boot 3.5+** — `@ServletRegistration`/`@FilterRegistration`, `env:` property imports, `WebClient` config properties, client-side SSL for service connections
 - **Spring Boot 4.0 / Spring Framework 7.0** — Jakarta EE 11 baseline (Servlet 6.1, Tomcat 11, JPA 3.2, Hibernate 7), JSpecify null-safety, first-class API versioning, `@Retryable`/`@ConcurrencyLimit`, `BeanRegistrar`, Jackson 3, Undertow support removed, `HttpHeaders` no longer a `MultiValueMap`
-- **Spring Boot 4.1+ (current)** — HTTP service client auto-configuration, `spring.mvc.apiversion.*` / `spring.webflux.apiversion.*`, `spring-boot-starter-opentelemetry`, Gradle 9; runs on Java 17–26 (JDK 25 recommended)
+- **Spring Boot 4.1+ (current)** — HTTP service client auto-configuration, `spring.mvc.apiversion.*` / `spring.webflux.apiversion.*`, `spring-boot-starter-opentelemetry`, native gRPC auto-configuration, automatic Micrometer context propagation to `@Async`, Gradle 9; runs on Java 17–26 (JDK 25 recommended). Ships Spring Framework 7.0.8, Spring Security 7.1.0, Spring Session 4.1.0, Spring Integration 7.1.0, Micrometer 1.17 / Tracing 1.7, Spring Data BOM 2026.0.0
+- **Spring Cloud versions by train, and the train supports a range of Boot generations.** The 2025.1 "Oakwood" train supports Spring Boot **4.0.x and 4.1.x**, the latter from **2025.1.2** onward (2026-06-11: "compatible with Spring Boot 4.0.7 and introduces compatibility for Spring Boot 4.1.0"). Each patch is *built against* one Boot patch — 2025.1.3 (2026-08-20) is based on Boot 4.0.8 — so `spring-cloud-dependencies` manages that version unless `spring-boot-dependencies` is imported **first** (in Maven the first BOM to manage an artifact wins). Going outside the train's supported generations is never a compile error; it surfaces at runtime as `NoSuchMethodError`. Note that the `spring-cloud-release` wiki's supported-versions table is stale — the compatibility matrix on `spring.io/projects/spring-cloud` is authoritative
 
 ## Q&A Minimums (Spring-specific)
 

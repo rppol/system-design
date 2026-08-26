@@ -78,6 +78,33 @@ are choices about *contract shape*, made at the same moment you choose class vs 
 - **`final` method**: cannot be overridden; JIT can inline it directly (devirtualization).
 - **`static` method**: always statically dispatched; cannot be overridden (only hidden).
 
+### 4.4 Compact Source Files and Instance Main Methods (JEP 512, Java 25)
+
+A `.java` file with no enclosing class declaration is a **compact source file** — the
+compiler synthesises an unnamed top-level class to hold whatever the file contains. Inside
+one, `main` no longer has to be `public`, `static`, or take `String[]`: a no-argument
+instance `void main()` is enough to launch. Where more than one candidate `main` exists, the
+launcher picks by a fixed order — it prefers a `main(String[])` over a no-arg `main()`, and a
+method declared directly in the class over one it inherited. The implicit class also
+automatically imports the `java.lang.IO` static methods (`IO.println`, `IO.print`,
+`IO.readln`) and implicitly does `import module java.base` (§6 of the
+[JPMS module](../java_platform_module_system/java_platform_module_system.md) covers what that
+pulls in), so a compact source file needs no boilerplate imports for everyday I/O:
+
+```java
+// Hello.java — a complete Java 25 program
+void main() {
+    IO.println("Hello, " + IO.readln("name? "));
+}
+```
+
+Run it directly with `java Hello.java` — no separate compile step; that launch capability is
+JEP 330 (Java 11) single-file source-code programs, and JEP 512 is what makes the combination
+worth using by removing the ceremony inside the file. This is a **teaching and scripting
+on-ramp, not a production style**: the synthesized class has no name, so it cannot be
+referenced from other code, cannot live in a package, and cannot be a library dependency. Once
+a program needs to be called *by* other code, it needs a real, named, packaged class.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -375,6 +402,75 @@ new Child();
 // Child constructor      (10. Child constructor body)
 ```
 
+### Flexible Constructor Bodies (JEP 513, Java 25)
+
+Java 25 changes what may happen *before* `super(...)`/`this(...)`, not the order above — the
+superclass part of the object still finishes building before any subclass instance
+initializer or field initializer runs. Before Java 25, `super(...)` or `this(...)` had to be
+the first statement in a constructor, full stop. Now a constructor body has two regions: the
+**prologue** (statements before the explicit `super(...)`/`this(...)` call) and the
+**epilogue** (everything after). The prologue may validate arguments, compute values, transform
+constructor arguments, and assign to fields of the class being constructed. It may **not**
+read or write an instance field or call an instance method through `this` — the compiler
+rejects any such reference as a "static context" error, because the object doesn't exist as
+its declared type yet until the superclass constructor returns. `this` itself may still be
+used to pass along as a value (e.g., inner-class construction plumbing) — the restriction is
+specifically on *reading state from* or *invoking behavior on* the not-yet-constructed object.
+
+This kills a long-standing wart: smuggling pre-`super()` validation into a `private static`
+helper method purely so it can run before the constructor chain starts.
+
+```java
+// BROKEN pre-25 idiom: validation had to be smuggled into a static helper
+class PositiveBigInteger extends BigInteger {
+    PositiveBigInteger(long value) {
+        super(verifyPositive(value));            // helper exists only to run code first
+    }
+    private static String verifyPositive(long v) {
+        if (v <= 0) throw new IllegalArgumentException("non-positive");
+        return Long.toString(v);
+    }
+}
+
+// Java 25 (JEP 513): the prologue says what it means
+class PositiveBigInteger extends BigInteger {
+    PositiveBigInteger(long value) {
+        if (value <= 0) throw new IllegalArgumentException("non-positive");
+        super(Long.toString(value));
+    }
+}
+```
+
+The more consequential case is a subclass field assigned in the prologue, because it directly
+fixes the classic "overridable method called from a constructor" bug (Effective Java Item 19):
+if a superclass constructor invokes a method the subclass overrides, and that override reads
+subclass state, pre-25 that state was always still at its default (`0`/`null`/`false`) because
+subclass field initializers run *after* the superclass constructor returns. Now the subclass
+can initialize the field the override needs in its own prologue, before calling `super(...)`,
+so by the time the superclass constructor invokes the override, the value it reads is real
+instead of the default:
+
+```java
+class Shape {
+    Shape() { draw(); }             // superclass constructor calls an overridable method
+    void draw() { }
+}
+
+class Circle extends Shape {
+    private final int radius;
+    Circle(int radius) {
+        this.radius = radius;       // prologue: assigning a field of THIS class is allowed
+        super();                    // draw() now sees the real radius, not 0
+    }
+    @Override void draw() { System.out.println("radius=" + radius); }
+}
+```
+
+What is unchanged: `super(...)` still runs to completion before any instance initializer or
+instance field initializer of the subclass executes, and the prologue still cannot touch
+inherited state through `this` — JEP 513 changes what you may compute and assign *before* the
+handoff to the superclass, not the handoff itself or the order that follows it.
+
 ### Access Modifier Edge Cases
 
 ```java
@@ -592,6 +688,21 @@ No — there is no way to do it, which is Effective Java Item 10's central resul
 **Short:** Use a record for a pure value carrier and sealed types to make a closed hierarchy exhaustively switchable.
 
 Use a `record` when the type exists only to carry values, and `sealed` when you want a hierarchy whose complete set of subtypes is known and enforced by the compiler. A record derives `equals`, `hashCode` and `toString` from its component list, so it removes exactly the boilerplate that the equals/hashCode contract keeps getting wrong; it is implicitly final, which also sidesteps the subclass-symmetry problem entirely. A `sealed` class or interface lists its subtypes with `permits`, and each subtype must declare itself `final`, `sealed` or `non-sealed` — closing the hierarchy is what lets a `switch` over the subtypes be exhaustive without a `default` arm, so adding a subtype becomes a compile error at every switch instead of a silent runtime fallthrough. Read the three modifiers as a scale of extension intent: `final` (nobody), `sealed` (only these), plain (anybody). Full mechanics live in [Java 9 to 21 Features](../java9_to_21_features/java9_to_21_features.md).
+
+**Q18: In Java 25, what may and may not appear in a constructor before the `super(...)`/`this(...)` call, and why is the restriction about `this` rather than about ordering?**
+**Short:** The prologue may validate, compute, and assign this class's own fields, but never read state through `this`.
+
+JEP 513 (Flexible Constructor Bodies) lets a constructor contain statements — the **prologue** — before its explicit `super(...)`/`this(...)` call: argument validation, local computation, and assignment to fields declared in the class being constructed are all legal there. What is still forbidden is any reference through `this` that *reads* instance state or *invokes* an instance method, which the compiler flags as a static-context error. The reason is not about statement order for its own sake — it's that the superclass portion of the object has not been built yet, so there is no valid instance to read from or dispatch on until `super(...)` returns. `super(...)` still runs to completion before any subclass instance initializer or field initializer executes; JEP 513 only widens what you may do while the handoff to the superclass hasn't happened yet.
+
+**Q19: Does JEP 513 make it safe to call an overridable method from a constructor?**
+**Short:** No — it lets a subclass pre-initialize its own state, but Effective Java's advice against it still holds.
+
+Not in general. JEP 513 lets a subclass assign its own fields in the prologue before calling `super(...)`, so when the superclass constructor invokes an overridden method, that particular subclass's fields are no longer at their default values — this fixes the specific `Shape`/`Circle` pattern in §6 above. But Effective Java Item 19's rule ("do not invoke an overridable method from a constructor") still stands, because the fix only reaches one level of subclassing. If a further subclass overrides the method again and relies on *its own* fields, those fields are still uninitialized at the moment the original superclass constructor runs — the prologue only lets the immediate subclass get ahead of the problem, it does not eliminate the underlying hazard that a constructor's `this` can escape to an override before the full object graph is built.
+
+**Q20: What does a compact source file actually compile to, and why would you not ship one?**
+**Short:** The compiler synthesizes an unnamed top-level class, which cannot be referenced, packaged, or reused as a library.
+
+A `.java` file with no `class`/`interface`/`enum`/`record` declaration is a compact source file (JEP 512): the compiler wraps its contents — including an instance `void main()` — in a synthesized, unnamed top-level class, and `java Hello.java` runs it without a separate compile step (the launch mechanism itself is JEP 330 from Java 11). It's a genuine teaching and scripting on-ramp — no `public static void main(String[] args)` boilerplate, no explicit imports for basic I/O since `IO.println`/`IO.readln` and `import module java.base` are implicit. It is not a production style: because the class has no name, nothing else can reference it, it cannot belong to a package, and it cannot be published or depended on as a library — the moment a program needs to be called by other code, it needs a real named class.
 
 ---
 

@@ -164,6 +164,8 @@ design_patterns_in_java
 performance_and_tuning
   performance_and_tuning.md  senior, principal
   jmx_and_management.md      senior
+  jvm_in_containers.md  senior, principal
+  jfr_and_production_diagnostics.md  senior
 java_memory_model
   java_memory_model.md  senior
 java_interview_patterns
@@ -188,6 +190,7 @@ jdbc_and_database
   jdbc_and_database.md  senior
 security_and_cryptography
   security_and_cryptography.md  principal
+  post_quantum_and_modern_jca.md  principal
 grpc_protobuf
   grpc_protobuf.md  principal
 microservices_patterns
@@ -201,6 +204,10 @@ case_studies
   design_di_container_java.md            principal
   design_event_bus.md                    principal
   design_circuit_breaker_java.md         principal
+java22_to_26_features
+  java22_to_26_features.md  senior, principal
+aot_startup_and_class_data_sharing
+  aot_startup_and_class_data_sharing.md  senior, principal
 -->
 ## Learning Paths
 
@@ -211,7 +218,7 @@ case_studies
 The complete curriculum in the order above — see [8-Phase Learning Path](#8-phase-learning-path). Use it for genuine depth: bytecode and the class-file format, Panama FFM, reactive programming, gRPC, networking internals, security/crypto, and the production/tooling modules. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (19 modules)
+### Senior Path (21 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -223,19 +230,21 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#8-ph
 | 6 | [java8_features](java8_features/java8_features.md) | module page only |
 | 8 | [java_streams](java_streams/java_streams.md) | module page only |
 | 10 | [java9_to_21_features](java9_to_21_features/java9_to_21_features.md) | module page only |
-| 12 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
-| 14 | [reference_types_and_cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | module page only |
-| 16 | [concurrency](concurrency/concurrency.md) | module page only |
-| 17 | [collections_internals](collections_internals/collections_internals.md) | module page only |
-| 18 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
-| 19 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | 2 files |
-| 20 | [java_memory_model](java_memory_model/java_memory_model.md) | module page only |
-| 21 | [java_interview_patterns](java_interview_patterns/java_interview_patterns.md) | module page only |
-| 22 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
-| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
-| 30 | [jdbc_and_database](jdbc_and_database/jdbc_and_database.md) | module page only |
+| 11 | [java22_to_26_features](java22_to_26_features/java22_to_26_features.md) | module page only |
+| 13 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
+| 15 | [reference_types_and_cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | module page only |
+| 16 | [aot_startup_and_class_data_sharing](aot_startup_and_class_data_sharing/aot_startup_and_class_data_sharing.md) | module page only |
+| 18 | [concurrency](concurrency/concurrency.md) | module page only |
+| 19 | [collections_internals](collections_internals/collections_internals.md) | module page only |
+| 20 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
+| 21 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | 4 files |
+| 22 | [java_memory_model](java_memory_model/java_memory_model.md) | module page only |
+| 23 | [java_interview_patterns](java_interview_patterns/java_interview_patterns.md) | module page only |
+| 24 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
+| 28 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
+| 32 | [jdbc_and_database](jdbc_and_database/jdbc_and_database.md) | module page only |
 
-**Not in this path** (14 of 33, Full Path only): `java_time_datetime`, `functional_programming`, `java_platform_module_system`, `bytecode_and_classfile`, `graalvm_native_image`, `logging`, `annotation_processing`, `build_tools_maven_gradle`, `foreign_function_and_memory_api`, `reactive_programming`, `networking_and_http_client`, `security_and_cryptography`, `grpc_protobuf`, `microservices_patterns`
+**Not in this path** (14 of 35, Full Path only): `java_time_datetime`, `functional_programming`, `java_platform_module_system`, `bytecode_and_classfile`, `graalvm_native_image`, `logging`, `annotation_processing`, `build_tools_maven_gradle`, `foreign_function_and_memory_api`, `reactive_programming`, `networking_and_http_client`, `security_and_cryptography`, `grpc_protobuf`, `microservices_patterns`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior Java interview** actually probes — the language semantics, the JVM "show depth" round, and the concurrency/collections cluster that appears in nearly every screen. Same learning order, a strict subset of the Full Path. Each group says why it earns senior time.
@@ -251,27 +260,29 @@ A ruthless cut to what a **senior Java interview** actually probes — the langu
 | Data Access | transaction isolation levels, HikariCP pool sizing, PreparedStatement, batch inserts |
 
 <!-- study-path-table principal -->
-### Principal Path (15 modules)
+### Principal Path (17 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 10 | [java9_to_21_features](java9_to_21_features/java9_to_21_features.md) | module page only |
-| 11 | [java_platform_module_system](java_platform_module_system/java_platform_module_system.md) | module page only |
-| 12 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
-| 15 | [graalvm_native_image](graalvm_native_image/graalvm_native_image.md) | module page only |
-| 18 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
-| 19 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | module page only |
-| 22 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
-| 23 | [logging](logging/logging.md) | module page only |
-| 24 | [annotation_processing](annotation_processing/annotation_processing.md) | module page only |
-| 25 | [build_tools_maven_gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | module page only |
-| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
-| 28 | [reactive_programming](reactive_programming/reactive_programming.md) | module page only |
-| 31 | [security_and_cryptography](security_and_cryptography/security_and_cryptography.md) | module page only |
-| 32 | [grpc_protobuf](grpc_protobuf/grpc_protobuf.md) | module page only |
-| 33 | [microservices_patterns](microservices_patterns/microservices_patterns.md) | module page only |
+| 11 | [java22_to_26_features](java22_to_26_features/java22_to_26_features.md) | module page only |
+| 12 | [java_platform_module_system](java_platform_module_system/java_platform_module_system.md) | module page only |
+| 13 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
+| 16 | [aot_startup_and_class_data_sharing](aot_startup_and_class_data_sharing/aot_startup_and_class_data_sharing.md) | module page only |
+| 17 | [graalvm_native_image](graalvm_native_image/graalvm_native_image.md) | module page only |
+| 20 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
+| 21 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | 2 files |
+| 24 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
+| 25 | [logging](logging/logging.md) | module page only |
+| 26 | [annotation_processing](annotation_processing/annotation_processing.md) | module page only |
+| 27 | [build_tools_maven_gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | module page only |
+| 28 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
+| 30 | [reactive_programming](reactive_programming/reactive_programming.md) | module page only |
+| 33 | [security_and_cryptography](security_and_cryptography/security_and_cryptography.md) | 2 files |
+| 34 | [grpc_protobuf](grpc_protobuf/grpc_protobuf.md) | module page only |
+| 35 | [microservices_patterns](microservices_patterns/microservices_patterns.md) | module page only |
 
-**Not in this path** (18 of 33, Full Path only): `core_language`, `strings_and_text`, `generics_and_type_system`, `exceptions_and_io`, `json_processing_jackson`, `java8_features`, `java_time_datetime`, `java_streams`, `functional_programming`, `bytecode_and_classfile`, `reference_types_and_cleaners`, `concurrency`, `collections_internals`, `java_memory_model`, `java_interview_patterns`, `foreign_function_and_memory_api`, `networking_and_http_client`, `jdbc_and_database`
+**Not in this path** (18 of 35, Full Path only): `core_language`, `strings_and_text`, `generics_and_type_system`, `exceptions_and_io`, `json_processing_jackson`, `java8_features`, `java_time_datetime`, `java_streams`, `functional_programming`, `bytecode_and_classfile`, `reference_types_and_cleaners`, `concurrency`, `collections_internals`, `java_memory_model`, `java_interview_patterns`, `foreign_function_and_memory_api`, `networking_and_http_client`, `jdbc_and_database`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the calls that shape a codebase for years: runtime and memory-model choices, the cost of an abstraction at scale, and how a platform team keeps a large service predictable. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -390,7 +401,7 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 | Switch Expressions | Java 14 | Java 17 (LTS) | High |
 | Pattern Matching switch | Java 21 | Java 21 (LTS) | Growing |
 | Virtual Threads (`Thread.ofVirtual()`) | Java 21 GA (JEP 444) | Java 21 (LTS) | Growing fast |
-| StructuredTaskScope | Java 21 preview (JEP 453); still preview through Java 26 (JEP 525) | none yet — preview only | Early adoption |
+| StructuredTaskScope | Java 21 preview (JEP 453); still preview through Java 26 (JEP 525) and Java 27 (JEP 533) | none yet — preview only | Early adoption |
 | ScopedValue | Java 21 preview (JEP 446); final in Java 25 (JEP 506) | Java 25 (LTS) | Growing |
 | Sequenced Collections | Java 21 | Java 21 (LTS) | Growing |
 | `synchronized` no longer pins virtual threads | Java 24 (JEP 491) | Java 25 (LTS) | Transparent (runtime change) |

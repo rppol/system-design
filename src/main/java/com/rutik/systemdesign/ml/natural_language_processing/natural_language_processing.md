@@ -588,8 +588,9 @@ import spacy
 from spacy.tokens import Doc
 from typing import List, Tuple
 
-# Load pre-trained model (en_core_web_lg 3.8: ~382MB, 514K 300d word vectors + NER)
-# en_core_web_sm: ~13MB, no vectors, faster
+# Load pre-trained model (en_core_web_lg 3.8.0: 382MB, 684,830 keys / 342,918
+# unique 300d word vectors + NER -- see Section 11 for the source and version)
+# en_core_web_sm 3.8.0: 12MB, no word vectors, faster
 nlp = spacy.load("en_core_web_lg")
 
 def extract_entities(text: str) -> List[Tuple[str, str, int, int]]:
@@ -761,7 +762,7 @@ def train_lda(
 
 **Developer-Q&A search (hybrid retrieval), illustrative:** BM25 over title+body indexes for exact keyword matching, combined with a Sentence-BERT bi-encoder for semantic similarity via FAISS, fused with RRF (k=60), then cross-encoder reranking of the top 20. The published finding this pattern rests on is qualitative and robust: BM25 and dense retrieval fail on different queries, so fusing them beats either alone, and reranking adds a further lift. Measure NDCG@10 and MRR@10 on your own corpus — the numbers do not transfer. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for implementation.
 
-**Support-ticket intent classification with DeBERTa-v3-base, illustrative:** A ticket router with 47 intent classes (billing, outage, feature request, etc.) replaces a LogisticRegression+TF-IDF baseline. DeBERTa-v3-base fine-tuned for 5 epochs (LR 2e-5, batch 32) on 80K labeled tickets, served via TorchServe with dynamic batching (max_batch_delay=50ms) on two A10G GPUs. The scenario metrics below are illustrative, not a published benchmark. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for fine-tuning details.
+**Support-ticket intent classification with DeBERTa-v3-base, illustrative:** A ticket router with 47 intent classes (billing, outage, feature request, etc.) replaces a LogisticRegression+TF-IDF baseline. DeBERTa-v3-base fine-tuned for 5 epochs (LR 2e-5, batch 32) on 80K labeled tickets, served via NVIDIA Triton with dynamic batching (max_queue_delay_microseconds=50000) on two A10G GPUs. The scenario metrics below are illustrative, not a published benchmark. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for fine-tuning details.
 
 ---
 
@@ -878,7 +879,7 @@ Dropping 300d to 100d is a straight 3x memory cut because the relationship is li
 
 | Tool | Use Case | Notes |
 |------|---------|-------|
-| spaCy | Tokenization, NER, POS tagging | Industrial-strength; en_core_web_lg ships 514K 300d static vectors |
+| spaCy | Tokenization, NER, POS tagging | Industrial-strength; en_core_web_lg ships 684,830 keys mapped to 342,918 unique 300d static vectors |
 | NLTK | Preprocessing, WordNet lemmatization, corpora | Research-oriented; slower than spaCy |
 | Gensim | Word2Vec, FastText, LDA, Doc2Vec | Best-in-class for word embeddings and topic models |
 | scikit-learn | TF-IDF, Naive Bayes, LogisticRegression, pipelines | Production ML pipelines |
@@ -886,6 +887,8 @@ Dropping 300d to 100d is a straight 3x memory cut because the relationship is li
 | HuggingFace Tokenizers | Fast BPE/WordPiece tokenization | Rust core; under 20 seconds to tokenize 1 GB of text on a server CPU |
 | fastText (Meta CLI) | Sub-word embeddings, fast text classification | Ships as a single binary; trains and classifies on CPU only |
 | Vowpal Wabbit | Online learning for text classification | Handles datasets that don't fit in RAM |
+
+Every spaCy package figure quoted in this module (`en_core_web_lg`'s size and vector count, `en_core_web_sm`'s size) was checked against the **`en_core_web_lg-3.8.0`/`en_core_web_sm-3.8.0`** release metadata published at [spacy.io/models/en](https://spacy.io/models/en) and the `explosion/spacy-models` GitHub releases (spaCy 3.8.x line, current as of August 2026). These numbers do move release to release — `en_core_web_lg`'s vector count in particular has shrunk across spaCy versions as Explosion re-pruned the vector table (an older, widely-quoted figure of "514K vectors" belongs to a spaCy 2.x-era release and is stale against 3.8). Re-check against your pinned spaCy version before quoting a package size or vector count.
 
 ---
 

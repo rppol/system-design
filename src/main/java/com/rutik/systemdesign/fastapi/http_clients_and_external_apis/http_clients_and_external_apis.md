@@ -21,7 +21,7 @@ This module covers:
 - Webhook receipt: HMAC signature verification and async dispatch
 - Testing: `respx` and `httpx.MockTransport`
 
-Cross-cutting dependencies: [`../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md)
+Cross-cutting dependencies: [`../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`](../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md)
 
 ---
 
@@ -99,9 +99,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     start{"inside an<br/>async def route?"} -->|"no"| reqs(["requests<br/>sync scripts only"])
-    start -->|"yes"| concurrency{"over 200 concurrent<br/>outbound calls, profiled?"}
+    start -->|"yes"| concurrency{"client proven the<br/>bottleneck by profiling?"}
     concurrency -->|"no (typical)"| httpxNode(["httpx<br/>default choice"])
-    concurrency -->|"yes"| aiohttpNode(["aiohttp<br/>~10-15% less overhead"])
+    concurrency -->|"yes"| aiohttpNode(["aiohttp<br/>lower per-request<br/>overhead"])
 
     class start,concurrency mathOp
     class reqs frozen
@@ -768,14 +768,17 @@ with increasing delays (30s, 120s, 3600s).
 |-----------|-------|---------|
 | Sync support | Yes | No |
 | HTTP/2 | Yes | No (planned) |
-| Throughput (async) | Good | ~10-15% better at >100 concurrent |
+| Throughput (async) | Good | Directionally better under very high concurrency; the gap is workload-specific, so measure your own |
 | Connection pool | `httpx.Limits` | `TCPConnector(limit=N)` |
 | Testing | `respx`, `MockTransport` | `aioresponses` |
-| HTTPX 1.0 stability | Stable | Stable |
+| Current release | 0.28.1 (pre-1.0, API stable in practice) | 3.x |
 | Ecosystem | Starlette, FastAPI native | Broader async ecosystem |
 
-**Recommendation:** Use `httpx` as the default. Switch to `aiohttp` only if profiling shows
-`httpx` is a bottleneck at >200 concurrent outbound connections per process.
+**Recommendation:** Use `httpx` as the default — it is what Starlette's `TestClient` and
+FastAPI's own docs build on, so one client library covers both production calls and tests.
+Switch to `aiohttp` only when profiling of *your* workload shows `httpx` is the bottleneck.
+Resist picking on a published benchmark: the two are close enough that connection-pool sizing,
+DNS caching and TLS session reuse move the number more than the library choice does.
 
 ### 8.2 tenacity vs Manual Retry
 
@@ -1116,15 +1119,19 @@ signature match the expected value, enabling a timing attack to reconstruct the 
 mismatch occurs, preventing timing side-channel attacks.
 
 **Q10: When would you choose aiohttp over httpx for a new service?**
-**Short:** Choose aiohttp over httpx once profiling shows it is the bottleneck above 200 concurrent connections.
+**Short:** Only when profiling your own workload shows the client is the bottleneck — default to httpx, which FastAPI and its TestClient already depend on.
 
-Choose `aiohttp` when profiling shows HTTP client throughput is the bottleneck at >200 concurrent
-outbound connections per process. `aiohttp` has ~10-15% lower per-request overhead because it
-avoids `httpx`'s HTTP/2 negotiation path and has a more direct integration with the event loop's
-`select`/`epoll` calls. Concrete signals: `aiohttp` benchmark at 500 concurrent fetches shows
-~18,000 rps vs `httpx` ~15,500 rps on the same hardware. For most services (<100 concurrent
-outbound calls), `httpx` is preferable because of its sync+async API parity, HTTP/2 support,
-and first-class FastAPI/Starlette integration.
+Default to `httpx` and switch only on evidence from your own profile. `httpx` is already a
+Starlette dependency and backs `TestClient`, so one library covers production calls and tests,
+and it gives you sync/async API parity plus HTTP/2. `aiohttp` carries somewhat less
+per-request overhead — it has no HTTP/2 negotiation path and a more direct event-loop
+integration — so it can pull ahead at very high outbound concurrency. Treat that as
+directional, not as a number: published comparisons disagree, they are usually run against a
+loopback server that exercises none of the TLS or DNS cost a real call pays, and the gap is
+workload-shaped. The honest answer in an interview is that connection-pool limits, DNS
+caching and TLS session reuse move throughput far more than the library choice does, so
+"measure it on your traffic" is the position to defend — reciting a percentage you have not
+reproduced is the trap here.
 
 **Q11: How does HTTP/2 multiplexing change connection pool sizing compared to HTTP/1.1?**
 **Short:** HTTP/2 multiplexes many streams per connection, letting max_connections shrink for equal concurrency.

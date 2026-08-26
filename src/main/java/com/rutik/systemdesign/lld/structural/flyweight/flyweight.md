@@ -259,7 +259,7 @@ That 32 B assumes HotSpot's default 12-byte object header with compressed oops, 
 default through JDK 26. Run with `-XX:+UseCompactObjectHeaders` (JEP 519, a product feature since
 JDK 25 but opt-in) and the header drops to 8 bytes, so the same `GlyphInstance` fits in 24 B and the
 extrinsic total falls to 240 MB (240.5 MB with the shared table) — an 85.1x reduction instead of
-63.9x. JEP 534 proposes making compact
+63.9x. JEP 534 makes compact
 headers the default in JDK 27, at which point 24 B becomes the number to quote.
 
 Result: 20.48GB collapses to 320.5MB — the difference between an OOM kill and a frame that fits

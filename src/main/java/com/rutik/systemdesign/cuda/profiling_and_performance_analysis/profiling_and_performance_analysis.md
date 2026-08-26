@@ -595,6 +595,74 @@ which lines of the CUDA C++ source correspond to the stalls or uncoalesced acces
 bars flagged — moving from "this kernel is 25% store-efficient" to "this specific store
 instruction on line 42 is the strided write" without manual bisection.
 
+### 6.9 Practical Metrics Reference — Naming the Numbers Behind the SOL Bars
+
+Everything above teaches the *loop* — profile, hypothesize, fix, re-measure — but a reader who
+has only ever seen "SOL Memory 92%" cannot answer "which counter told you that" if asked in an
+interview or a code review. This section names the actual `ncu` section sets and raw metrics
+so "the profiler says memory-bound" has a specific number attached to it.
+
+**Section sets worth knowing.** Each answers one triage question; `ncu --set full` collects
+all of them plus more, `ncu --section <name>` collects just one:
+
+| Section set | Question it answers |
+|---|---|
+| `SpeedOfLight` | Am I near the compute roof or the memory roof — the two SOL bars from §5 |
+| `Roofline` (Roofline Charts) | Where does this kernel land on the arithmetic-intensity plot from §6.7, plotted rather than computed by hand |
+| `MemoryWorkloadAnalysis` | Where in the memory hierarchy (L1/L2/DRAM) is traffic actually going, and how much of it is wasted |
+| `WarpStateStats` | Which specific reason is stalling warps that are not issuing |
+| `SchedulerStats` | How many eligible warps each scheduler had to pick from, per cycle |
+| `Occupancy` | What limited how many warps could be resident — registers, shared memory, or block size |
+| `ComputeWorkloadAnalysis` | Which compute pipe (FMA, ALU, Tensor Core) is doing the issuing, and at what rate |
+| `LaunchStats` | The grid/block/shared-memory configuration the kernel was actually launched with |
+| `SourceCounters` | Per-source-line stalls and sampled warp-stall reasons, for use with `-lineinfo` (§6.8) |
+
+Nsight Compute also ships a **dedicated hierarchical Tensor-Core roofline** as its own section
+(`SpeedOfLight_HierarchicalTensorRooflineChart`, collected with
+`ncu --section SpeedOfLight_HierarchicalTensorRooflineChart`), which plots achieved
+performance against nested ceilings for the Tensor Core pipe specifically rather than the
+device's general FMA roof — the right chart to read when a matmul-heavy kernel's ordinary
+roofline chart says "compute-bound" and the next question is whether it is bound by Tensor
+Cores or by the CUDA cores around them.
+
+**The metrics, grouped by the question they answer:**
+
+| Question | Metric | Reading |
+|---|---|---|
+| Is the memory pipe saturated? | `dram__throughput.avg.pct_of_peak_sustained_elapsed` | The SOL Memory bar itself — near 100% means HBM bandwidth is the binding resource |
+| How many bytes/sec is that, concretely? | `dram__bytes.sum.per_second` | The raw achieved HBM bandwidth, for comparing directly against the GPU's spec'd peak (e.g. H100 SXM ~3.35 TB/s) |
+| Is L1 catching repeat accesses? | `l1tex__t_sector_hit_rate.pct` | Low despite spatial locality in the code suggests thrashing, not an absence of reuse |
+| Is L2 catching what L1 misses? | `lts__t_sector_hit_rate.pct` | High L2 hit rate alongside low DRAM SOL means the working set fits in L2 — traffic is being absorbed before it ever reaches HBM |
+| Are enough warps resident to hide latency? | `sm__warps_active.avg.pct_of_peak_sustained_active` | Achieved occupancy — a capacity number, not a speed; see §6.6 on why higher is not always better |
+| Why aren't warps issuing? | `smsp__average_warps_issue_stalled_<reason>_per_issue_active.ratio` (the `WarpStateStats` family — `long_scoreboard`, `short_scoreboard`, `barrier`, `mio_throttle`, etc.) | Whichever reason dominates the histogram names the actual bottleneck: `long_scoreboard` = waiting on a global load, `barrier` = `__syncthreads` imbalance |
+| Are the ALUs actually busy issuing work? | `smsp__inst_executed.avg.per_cycle_active` | Achieved instructions-per-cycle at the sub-partition level — low IPC alongside low SOL Compute confirms the SM genuinely isn't issuing much |
+| Are Tensor Cores engaged, and at what precision? | `sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active` (FP16/BF16 — HMMA) and `sm__inst_executed_pipe_tensor_op_imma` (INT8 — IMMA) | Near 0% on a kernel expected to use Tensor Cores means it silently fell back to CUDA cores. On Hopper-class GPUs, FP8 operands are promoted to FP16 before the MMA instruction issues, so FP8 Tensor Core activity shows up in the HMMA counters rather than a separate FP8-specific metric |
+| Is this global load/store actually coalesced? | `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio` | 4.0 = a fully coalesced 128-byte transaction (32 threads, 4 sectors); a strided or uncoalesced access reads visibly higher — this is the single number that makes §6.6's "25% efficiency" concrete as a sectors-per-request count instead of a percentage |
+
+**Triage table — symptom to fix:**
+
+| Symptom | Read this metric | What the value means | Fix, and which module owns it |
+|---|---|---|---|
+| High DRAM SOL, low compute SOL | `dram__throughput.avg.pct_of_peak_sustained_elapsed` near the roof | Memory-bound — but confirm it isn't wasted bandwidth before concluding "already optimal" | Coalesce the access pattern — [`memory_coalescing_and_access_patterns`](../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) |
+| High DRAM SOL, sectors-per-request well above 4.0 on a global load | `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio` | The memory pipe is busy but most of the fetched bytes are wasted — the §6.6 88%-SOL/25%-efficiency case | Same as above — coalescing, not fewer bytes requested |
+| Both SOL bars low, `long_scoreboard` dominates the stall histogram | `smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio` | Warps are parked waiting on global memory latency with nothing else to hide it | Raise occupancy or restructure to expose more independent memory requests — [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) |
+| Both SOL bars low, `barrier` dominates the stall histogram | `smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio` | Warps in a block are waiting at `__syncthreads` for slower siblings — tiling or shared-memory access imbalance | Rebalance shared-memory access patterns — [`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) |
+| High compute SOL, low memory SOL, on a matmul-shaped kernel | `sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active` near 0% | Compute-bound and not using Tensor Cores — the arithmetic is going through CUDA cores instead | Route the matmul through Tensor Cores — see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
+| Achieved occupancy plateaued well below 100% with no throughput change | `sm__warps_active.avg.pct_of_peak_sustained_active` flat at 50-60% | A capacity ceiling that isn't actually costing throughput — see §6.6's warning against chasing occupancy for its own sake | Cross-check the SOL bars before touching launch configuration — [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) |
+
+**CUPTI, underneath all of it.** `ncu`, `nsys`, and `torch.profiler` are not three independent
+implementations — they are three different front ends over **CUPTI** (the CUDA Profiling
+Tools Interface), NVIDIA's library for instrumenting and collecting hardware counters and API
+traces from a CUDA application. `torch.profiler`'s CUDA activity tracking goes through CUPTI
+via PyTorch's Kineto integration, and Nsight Systems' CUDA trace capture is built on the same
+interface. Reach for CUPTI directly — rather than shelling out to `ncu`/`nsys` — only when
+none of the above front ends fit the job: custom in-process instrumentation baked into a
+long-running service, continuous low-overhead production profiling that can't pay `ncu`'s
+10-100x replay cost, or building a framework-level trace exporter the way PyTorch's own Kineto
+layer does. For a one-off investigation of "why is this kernel slow," `ncu` is that same
+interface with the analysis, SOL bars, and Guided Analysis rules already built on top of it —
+there is rarely a reason to talk to CUPTI directly instead.
+
 ---
 
 ## 7. Real-World Examples
@@ -869,6 +937,18 @@ In the `nsys` timeline, a transfer-bound pipeline shows large memcpy bars with t
 **Q: Why is it important to change only one thing between two profiling measurements?**
 **Short:** Bundling multiple changes together makes an observed improvement or regression impossible to attribute to any single change, breaking evidence-based optimization.
 If a fix bundles multiple changes (e.g. shared-memory tiling plus a larger block size plus vectorized loads) applied together, an observed improvement or regression cannot be attributed to any single change, which breaks the ability to build a reliable mental model of what actually helped. The profiling loop's discipline is one hypothesis, one fix, one re-measurement, repeated — anything else turns evidence-based optimization back into guesswork with extra steps.
+
+**Q: You have a kernel at 88% DRAM SOL. What exact metric confirms whether those bytes are useful, and what value means the access is fully coalesced?**
+**Short:** `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio` gives sectors fetched per global-load request, and exactly 4.0 means a fully coalesced 128-byte warp transaction.
+`l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio` reports the average number of 32-byte DRAM sectors fetched per global load instruction issued by a warp; a value of 4.0 is the minimum, meaning a single coalesced 128-byte transaction served all 32 threads with zero waste. A value visibly above 4.0 — say 16 — means the same load is costing four times the necessary traffic, which is how "88% DRAM SOL" and "only 25% of those bytes were useful" coexist as the same kernel: the SOL bar says the pipe is busy, this ratio says how much of that traffic was wasted.
+
+**Q: Why do Nsight Compute, Nsight Systems, and `torch.profiler` all report data that agrees with each other so closely, and what does that tell you about how they're built?**
+**Short:** All three are front ends over CUPTI, NVIDIA's shared library for CUDA hardware-counter and API-trace collection, so they draw from the same underlying instrumentation.
+They are not three independent measurement systems — `ncu`, `nsys`, and `torch.profiler` (via PyTorch's Kineto integration) are all built on top of **CUPTI** (the CUDA Profiling Tools Interface), the library NVIDIA ships for collecting hardware counters and CUDA API/kernel traces. Reach for CUPTI directly, instead of one of those front ends, only for custom in-process instrumentation, continuous production profiling that can't afford `ncu`'s replay overhead, or building a framework-level trace exporter — for a one-off "why is this kernel slow" investigation, `ncu` is the better tool because it is CUPTI with the SOL-bar analysis and Guided Analysis rules already built on top.
+
+**Q: Does Nsight Compute have a Tensor-Core-specific roofline, and when would you reach for it instead of the general roofline chart?**
+**Short:** Yes — the `SpeedOfLight_HierarchicalTensorRooflineChart` section plots nested ceilings for the Tensor Core pipe specifically, not the device's general FMA roof.
+Yes — `ncu --section SpeedOfLight_HierarchicalTensorRooflineChart` collects a hierarchical roofline built around the Tensor Core pipe's own ceilings rather than the SM's general FMA roof used by the default roofline chart. Reach for it when a matmul-heavy kernel already reads compute-bound on the ordinary roofline and the open question is *which* compute resource is the limiter — whether the kernel is actually saturating Tensor Cores or whether the surrounding CUDA-core instructions (index math, activation functions, type conversion) are the real bottleneck around a Tensor Core pipe sitting idle.
 
 ---
 

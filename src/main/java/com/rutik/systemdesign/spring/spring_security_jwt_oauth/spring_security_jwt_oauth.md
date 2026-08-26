@@ -58,6 +58,22 @@ Key insight: the power of JWT is also its biggest risk — once issued, a token 
 | Refresh Token | Renewing access tokens | N/A |
 | Device Code | CLI tools, smart TVs | No |
 
+**This table is the OAuth 2.1 shape.** OAuth 2.1 is the consolidation of OAuth 2.0
+plus its accumulated security BCPs into one document, and its headline changes are
+exactly what is and is not listed above: the **implicit grant** and the **resource
+owner password credentials (ROPC)** grant are removed, PKCE is required for
+authorization-code clients, redirect URIs must be compared by **exact string match**
+(no wildcards, no prefix matching), and bearer tokens must not travel in a query
+string. If your service already follows the table above, it is OAuth 2.1-shaped
+whether or not anyone has said the words.
+
+One caveat worth being precise about in an interview: **OAuth 2.1 is still an IETF
+draft, not an RFC.** As of August 2026 it is `draft-ietf-oauth-v2-1-15`, last updated
+2026-03-02, with an IESG state of "I-D Exists" and no assigned RFC number. It is
+widely treated as the de-facto target because its content is drawn from already-
+published BCPs such as RFC 9700, but "we are OAuth 2.1 compliant" is a statement about
+following a draft's guidance, not about conforming to a ratified standard.
+
 ### Token Storage Strategies
 
 | Strategy | XSS Risk | CSRF Risk | Recommendation |
@@ -463,6 +479,86 @@ public class RefreshTokenService {
 
 ---
 
+### DPoP: Sender-Constrained Access Tokens (RFC 9449)
+
+A bearer token has one property that defines its entire threat model: **whoever holds
+it can use it.** Steal it from a log, a proxy, a browser extension or an SSRF response
+and you are the user. DPoP — "OAuth 2.0 Demonstrating Proof of Possession", RFC 9449 —
+removes that property by binding the token to a key pair the client holds privately.
+
+**How the binding works.** The client generates a key pair and signs a short-lived
+**DPoP proof** JWT for every request. The authorization server records the SHA-256
+thumbprint of that public key in the access token itself: for a JWT access token it
+lands in the `jkt` member of the `cnf` (confirmation method) claim.
+
+```json
+{
+  "sub": "user@example.com",
+  "iss": "https://server.example.com",
+  "exp": 1562266216,
+  "cnf": { "jkt": "CQMknzRoZ5YUi7vS58jck1q8TmZT8wiIiXrCN1Ny4VU" }
+}
+```
+
+The proof accompanying a resource request carries `typ: "dpop+jwt"` and the public key
+in its `jwk` header, and claims that pin it to this exact call:
+
+```json
+{
+  "htm": "GET",
+  "htu": "https://resource.example.com/resource",
+  "ath": "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo",
+  "iat": 1746807138,
+  "jti": "3c2ee9bb-03ac-40cf-b812-00bfba341cee"
+}
+```
+
+`htm` and `htu` bind the proof to one HTTP method and URI, `ath` is the hash of the
+access token being presented, `jti` makes the proof replayable at most once, and `iat`
+bounds its lifetime.
+
+**What a resource server must do.** Spring Security's documentation is explicit that
+resource servers MUST be able to identify a DPoP-bound access token and verify the
+binding. In practice that is four checks: verify the proof JWT's signature; take the
+public key from the proof's `jwk` header; confirm the key bound into the access token
+(`cnf.jkt`) matches that key; and confirm the proof's `ath` claim hashes to the access
+token actually presented. Miss the third and the whole scheme is decorative — an
+attacker simply attaches their own proof to the stolen token.
+
+**Generating a proof on the client side** uses the ordinary Spring Security JWT
+encoder:
+
+```java
+NimbusJwtEncoder jwtEncoder = new NimbusJwtEncoder(jwkSource);
+
+JwsHeader jwsHeader = JwsHeader.with(SignatureAlgorithm.RS256)
+        .type("dpop+jwt")
+        .jwk(rsaKey.toPublicJWK().toJSONObject())
+        .build();
+
+JwtClaimsSet claims = JwtClaimsSet.builder()
+        .issuedAt(Instant.now())
+        .claim("htm", "GET")
+        .claim("htu", "https://resource.example.com/resource")
+        .claim("ath", sha256(accessToken))
+        .id(UUID.randomUUID().toString())
+        .build();
+
+Jwt proof = jwtEncoder.encode(JwtEncoderParameters.from(jwsHeader, claims));
+```
+
+**When it is worth it.** DPoP costs a signature per request on the client and a
+verification per request on the server, and it only helps if the private key is
+genuinely harder to steal than the token — which is true for a mobile app with a
+hardware keystore and much less true for a browser SPA holding the key in JavaScript.
+Use it for high-value APIs where token theft is the realistic attack (payments,
+admin APIs, anything an AI agent calls on a user's behalf); stay on bearer tokens with
+short expiry and rotation where the operational cost is not repaid. Mutual TLS is the
+other sender-constraining option and is stronger still, at the price of a certificate
+lifecycle you have to run.
+
+---
+
 ## 7. Real-World Examples
 
 **Keycloak as Authorization Server:** Large enterprise deployments run Keycloak. Spring Boot microservices configure `spring.security.oauth2.resourceserver.jwt.issuer-uri=https://keycloak.example.com/realms/myrealm`. Spring fetches the OIDC discovery document automatically, resolves the JWKS URI, and caches public keys. Key rotation is handled transparently — Keycloak publishes new keys alongside old ones for a grace period.
@@ -677,7 +773,11 @@ return Jwts.builder()
 | Keycloak | Open-source Authorization Server | Self-hosted; supports OIDC, SAML |
 | Auth0 / Okta | Managed Authorization Server | SaaS; Actions for custom claims |
 | Redis | Refresh token store, blacklist | Sub-millisecond revocation lookup |
-| Spring Authorization Server | Spring-native Authorization Server | The Spring project for issuing tokens; current GA line is 1.5.x |
+| Spring Authorization Server | Spring-native Authorization Server | Ships inside Spring Security since 7.0 — `org.springframework.security:spring-security-oauth2-authorization-server:7.1.x`; 1.5.x was the last standalone generation |
+| DPoP (RFC 9449) | Sender-constrained access tokens | Key thumbprint in `cnf.jkt`; proof JWT carries `htm`/`htu`/`ath`/`jti` |
+| `NimbusJwtEncoder` | Signing a DPoP proof client-side | Encodes the proof JWT from a `JwsHeader` and a `JwtClaimsSet` |
+| `JwsHeader` | DPoP proof header | `type("dpop+jwt")` plus the public `jwk` |
+| `JwtClaimsSet` | DPoP proof claims | `htm`, `htu`, `ath`, `jti`, `iat` |
 | jwt.io | Token debugging | Paste token to inspect header/payload |
 | OpenSSL | Generate RSA keypairs for RS256 | `openssl genrsa -out private.pem 2048` |
 
@@ -756,6 +856,21 @@ The Authorization Server authenticates the user and issues tokens, while the Res
 **Q: What are the exact steps Spring Security's OAuth2 Resource Server performs to validate an incoming JWT, and in what order?**
 **Short:** Signature verification runs first, then expiry and issuer checks, then any custom validators like audience.
 Signature verification runs first against the cached JWKS public key, then timestamp checks (`exp`, `nbf`), then issuer (`iss`), then any custom validators such as audience (`aud`). Signature verification comes first because there is no point evaluating claims on a token that could have been tampered with — a failed signature check short-circuits immediately. `JwtTimestampValidator` handles expiry, `JwtIssuerValidator` confirms the token came from the trusted Authorization Server, and any additional checks are composed on top via `DelegatingOAuth2TokenValidator`. The gotcha: replacing the default validator to add a custom check (instead of composing it with `JwtValidators.createDefaultWithIssuer(...)`) silently drops the exp/iss checks — exactly the mistake in Pitfall 2 of this module's case study.
+
+**Q: What does DPoP actually change about a stolen access token?**
+**Short:** It binds the token to a key pair the client holds, so a thief with the token but not the private key cannot use it.
+
+It removes the one property that makes a bearer token dangerous: that holding it is sufficient to use it. Under DPoP (RFC 9449) the client generates a key pair, and the authorization server records the SHA-256 thumbprint of the public key inside the access token — in the `jkt` member of the `cnf` confirmation claim for a JWT. Every request then carries a short-lived DPoP proof JWT (`typ: "dpop+jwt"`) whose `jwk` header holds the public key and whose claims pin it to this exact call: `htm` and `htu` fix the method and URI, `ath` hashes the access token being presented, and `jti` makes the proof single-use. An attacker who lifts the token from a log or a proxy now has an object they cannot present, because they cannot sign a matching proof. The resource server's job is four checks — verify the proof signature, extract the key from `jwk`, confirm it matches the token's `cnf.jkt`, and confirm `ath` hashes the token actually presented. Skipping the third check is the failure that makes the whole scheme decorative, since the attacker just attaches their own proof.
+
+**Q: When is DPoP not worth it?**
+**Short:** When the private key is no harder to steal than the token — a browser SPA holding the key in JavaScript gains little for a per-request signature.
+
+When the key is as stealable as the token it protects. DPoP costs a signature on every client request and a verification on every server request, and it buys security only to the extent that the private key is harder to exfiltrate than the access token was. A mobile app with a hardware-backed keystore gets a real win: the key cannot leave the device, so a stolen token is inert. A browser SPA holding the key in JavaScript gets much less — the same XSS that reaches the token usually reaches the key, and you have paid the per-request cost for a smaller improvement than the ceremony suggests. So use it where token theft is the realistic attack and the platform can protect a key: payment APIs, admin surfaces, and anything an autonomous agent calls on a user's behalf. Elsewhere, short access-token expiry plus refresh-token rotation is the cheaper control. Mutual TLS is the stronger sender-constraining option when you can run the certificate lifecycle; DPoP is the one that works without one.
+
+**Q: Is OAuth 2.1 a published standard, and what does it actually change?**
+**Short:** It is still an IETF draft, not an RFC; it removes implicit and ROPC, mandates PKCE, and requires exact-match redirect URIs.
+
+It is a draft — `draft-ietf-oauth-v2-1-15` as of August 2026, IESG state "I-D Exists", with no assigned RFC number — so "OAuth 2.1 compliant" means following a draft's guidance, not conforming to a ratified standard. That precision matters in an interview because the substance is nonetheless real: OAuth 2.1 consolidates OAuth 2.0 with the security best-current-practice work that followed it, and almost every clause is already published elsewhere, notably in RFC 9700. The concrete changes are the **removal of the implicit grant** and of **resource owner password credentials**, **PKCE required** for authorization-code clients rather than merely recommended for public ones, **exact string matching of redirect URIs** with no wildcards or prefix matching, and a prohibition on carrying bearer tokens in query strings. The practical test is simple: if your grant table lists only authorization code (with PKCE), client credentials, refresh token and device code, and your redirect-URI comparison is a string equality check, you are already there.
 
 ---
 

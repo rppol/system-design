@@ -3,7 +3,7 @@
 > How Spring Modulith lets you build a *modular monolith*: enforce module boundaries
 > at the package level, verify them with ArchUnit, decouple modules through
 > application events instead of direct calls, test one module in isolation, and
-> generate living documentation. Spring Modulith 1.x / Spring Boot 3.1+.
+> generate living documentation. Spring Modulith 2.1 / Spring Boot 4.1.
 
 ---
 
@@ -116,6 +116,50 @@ that mechanical enforcement is the whole point.
   dependencies), so a test is fast and scoped.
 - **Scenario API** — `Scenario` drives event-based flows: publish an event, await the
   resulting event/state.
+- **`@ModuleSlicing`** (2.1+) — the foundation annotation `@ApplicationModuleTest` is
+  itself built on; combine it directly with one of Boot's own slice-test annotations
+  when you want the module scoping without a full `@SpringBootTest` context (see below).
+
+### Combining module slicing with Boot's slice tests (`@ModuleSlicing`, 2.1+)
+
+`@ApplicationModuleTest` restricts component scanning to one module's package *and*
+boots the whole application via `@SpringBootTest` — every bean the module needs, JPA
+repositories included. Modulith 2.1 pulled the module-scoping half of that into its own
+annotation, `org.springframework.modulith.test.ModuleSlicing`, so it can be paired with
+one of Boot's own narrower slice-test annotations (`@DataJpaTest`, `@WebMvcTest`, ...)
+instead of always paying for a full context. `@ApplicationModuleTest` is now itself
+meta-annotated with `@ModuleSlicing` — it is a specialization of it (`@ModuleSlicing` +
+`@SpringBootTest`), not a parallel mechanism, and its `mode`/`verifyAutomatically`
+attributes are declared as `@AliasFor` onto `@ModuleSlicing`'s.
+
+| Combination | Vertical scope (which module) | Horizontal scope (which layer) |
+|-------------|-------------------------------|----------------------------------|
+| `@ApplicationModuleTest` | One module | Whole app (`@SpringBootTest`) |
+| `@ModuleSlicing` + `@DataJpaTest` | One module | Just the JPA slice — repositories and entities only |
+| `@ModuleSlicing` + `@WebMvcTest` | One module | Just the web slice |
+
+The Spring Modulith reference docs describe this directly: combine Modulith's
+*vertical* slicing (by module) with Boot's *horizontal* slicing (by layer) by putting
+`@ModuleSlicing` on a test that also carries a Boot slice-test annotation — see §6.6
+below for the example.
+
+### Reliable event externalization: async listener vs. true outbox (2.1+)
+
+Externalizing an `@Externalized` event to a broker (`spring-modulith-events-kafka`,
+`-amqp`, `-jms`, `-messaging`) was, through Modulith 2.0, always delivered by an
+**asynchronous transactional event listener** — durable in the sense that the Event
+Publication Registry guards it and can resubmit an incomplete publication, but not a
+true outbox implementation. Modulith 2.1 adds two engines that *are*:
+
+| Delivery mode | Starter | Durability model | Constraint |
+|----------------|---------|-------------------|------------|
+| Async listener (default) | none — built in | EPR-guarded async listener | Not a dedicated outbox table/job |
+| **Namastack Outbox** | `spring-modulith-starter-namastack` | A true outbox table, polled and drained by Namastack | Relational databases only, today |
+| **JobRunr Outbox** | `spring-modulith-starter-jobrunr` | A true outbox backed by JobRunr's own job storage | Requires JobRunr already provisioned |
+
+Both are activated the same way — add the starter, then flip one property — covered in
+§6.7 below. See §6.4 for the Event Publication Registry the default async-listener mode
+still relies on.
 
 ---
 
@@ -302,6 +346,72 @@ class InventoryModuleTests {
 The module boots without the rest of the app; the `Scenario` API drives the
 event-in → state-change-out flow that defines the module's behavior.
 
+### 6.6 Module slicing combined with Boot's own slice tests (`@ModuleSlicing`, 2.1+)
+
+```java
+package example.order;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.modulith.test.ModuleSlicing;
+
+@ModuleSlicing        // vertical: scan only the "order" module's package
+@DataJpaTest           // horizontal: only the JPA slice (repositories, entities)
+class OrderRepositoryIntegrationTests {
+
+    @Autowired OrderRepository repository;
+
+    @Test
+    void findsOrdersByStatus() {
+        // context carries only order's JPA repositories/entities plus a test
+        // DataSource -- no web layer, no other module, no full app context.
+    }
+}
+```
+
+`@ModuleSlicing` applies the same package restriction `@ApplicationModuleTest` applies
+(component scanning, auto-configuration, and entity scanning limited to the module's
+package) but leaves the *rest* of the test slice up to whatever Boot annotation you
+combine it with — here `@DataJpaTest` narrows it further to just the JPA
+infrastructure. This is strictly narrower and faster than `@ApplicationModuleTest`
+(which always brings up the whole `@SpringBootTest` context), at the cost of not
+having the module's other beans available — reach for it when you specifically want a
+Boot slice test scoped to one module, not a full module integration test.
+
+### 6.7 True outbox externalization: Namastack and JobRunr (2.1+)
+
+```xml
+<!-- pick ONE outbox engine; both activate the same way -->
+<dependency>
+    <groupId>org.springframework.modulith</groupId>
+    <artifactId>spring-modulith-starter-namastack</artifactId>  <!-- relational DBs only -->
+</dependency>
+<!-- or -->
+<dependency>
+    <groupId>org.springframework.modulith</groupId>
+    <artifactId>spring-modulith-starter-jobrunr</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  modulith:
+    events:
+      externalization:
+        mode: outbox   # delegate externalization to whichever outbox starter is on the classpath
+```
+
+With the starter present and `mode: outbox` set, `@Externalized` events stop being
+delivered by the default async transactional listener and are instead handed to the
+starter's own outbox engine (`NamastackOutboxEventRecorder` or
+`JobRunrEventExternalizer` internally) — a real outbox table or job store, not just an
+EPR-guarded async send. Namastack's outbox is currently relational-database-only;
+JobRunr's rides on whatever job storage you already run JobRunr against. Pick JobRunr
+if you already operate it for scheduling/background jobs, Namastack if you want a
+dedicated outbox table alongside your existing JPA datasource and no new
+infrastructure.
+
 ---
 
 ## 7. Real-World Examples
@@ -407,8 +517,11 @@ clean microservices anyway, so this order is rarely wasted work.
 | Core | `spring-modulith-core`, `ApplicationModules`, `@ApplicationModule`, `@NamedInterface` |
 | Verification | ArchUnit (under the hood), `ApplicationModules.verify()` |
 | Events | `@ApplicationModuleListener`, `ApplicationEventPublisher`, Spring events |
-| Reliable events | `spring-modulith-events-jpa` / `-jdbc` / `-mongodb`, event publication registry; `-kafka`/`-amqp` externalization |
+| Reliable events | `spring-modulith-events-jpa` / `-jdbc` / `-mongodb`, event publication registry; `-kafka`/`-amqp`/`-jms`/`-messaging` externalization |
+| True outbox externalization (2.1+) | `spring-modulith-starter-namastack` (relational databases only) |
+| True outbox externalization (2.1+) | `spring-modulith-starter-jobrunr` |
 | Testing | `spring-modulith-starter-test`, `@ApplicationModuleTest`, `Scenario` |
+| Module + Boot slice testing (2.1+) | `@ModuleSlicing` — combine with `@DataJpaTest`/`@WebMvcTest`/etc. for a module-scoped Boot slice test |
 | Documentation | `Documenter` (PlantUML/C4, module canvas), `spring-modulith-docs` |
 | Observability | `spring-modulith-observability` (per-module spans/metrics) |
 | Related | ArchUnit (standalone), jMolecules (DDD annotations), Spring Events module |
@@ -613,7 +726,7 @@ is still your responsibility, exactly as with a cross-service outbox.
 `@Autowired` each other's repositories, a "send confirmation email" call sat inline in
 the order-placement transaction, and every change risked breaking something unrelated.
 The team wanted microservice-like modularity but had neither the ops maturity nor the
-scaling need to actually distribute. They adopted Spring Modulith (Boot 3.2).
+scaling need to actually distribute. They adopted Spring Modulith (Boot 4.1).
 
 **Requirements.**
 - Stop cross-module access to internals; make violations fail the build.

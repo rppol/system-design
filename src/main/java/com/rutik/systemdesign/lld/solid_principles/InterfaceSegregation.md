@@ -538,4 +538,74 @@ A: DIP says depend on abstractions, not concretions. ISP ensures those abstracti
 
 ---
 
+**Q: In the Worker/RobotWorker example, which methods force RobotWorker into stub implementations, and why?**
+**Short:** eat(), sleep(), and manageTeam() — a robot cannot meaningfully fulfill any of the three.
+
+A: `RobotWorker` is forced to override `eat()`, `sleep()`, and `manageTeam()` even though a robot does none of those things, so each override becomes a stub that throws `UnsupportedOperationException`. The fat `Worker` interface assumed every worker eats, sleeps, and can manage a team, which is only true for the human case. Splitting into `Workable`, `Feedable`, `OfficeCapable`, `PhysicalCapable`, and `Manageable` lets `RobotWorker` implement only the roles it genuinely fulfills, with no stubs left over.
+
+---
+
+**Q: How does an ISP violation frequently create an LSP violation too?**
+**Short:** A forced stub that throws UnsupportedOperationException breaks the base interface's contract for callers.
+
+A: When a fat interface forces an implementor to stub out a method it can't support, the natural implementation is to throw `UnsupportedOperationException` — and that throw breaks the interface's contract for any caller who trusted that every implementor could handle every method. This is precisely the LSP violation pattern: a type that claims to implement an interface but cannot honor part of it. Segregating the interface so implementors only claim the roles they can fulfill removes both violations at once, since there's no longer a method to fake.
+
+---
+
+**Q: What's the fix pattern used in the Printer/MultifunctionPrinter enterprise example?**
+**Short:** Split the fat interface into Printer, Scanner, Fax, Stapler, and a DuplexPrinter that extends Printer.
+
+A: `MultifunctionPrinter` bundled `print`, `scan`, `fax`, `staple`, and `printDuplex` into one interface, forcing `BasicLaserPrinter` to stub four methods it can't support. The fix splits it into five focused interfaces — `Printer`, `Scanner`, `Fax`, `Stapler`, and `DuplexPrinter` (which extends `Printer`) — so `BasicLaserPrinter` implements only `Printer`, while `OfficeMFCPrinter` implements all five because it genuinely supports all five. The capability count must match on both sides of the refactor — dropping `staple()` on the way through would silently reintroduce the original problem from the other direction.
+
+---
+
+**Q: How does ISP make unit testing easier, per the UserReportService/UserReader example?**
+**Short:** Mocking a narrow UserReader interface needs stubbing two methods instead of the four on a combined read/write interface.
+
+A: `UserReportService` depends only on `UserReader` (`findById`, `findAll`), not on the combined `UserRepositoryImpl` that also implements `UserWriter` (`save`, `delete`). Testing `UserReportService` means mocking two methods instead of four, and the mock can't accidentally call a write method the test never intended to exercise. This is ISP's testability payoff: a client's test surface shrinks to exactly the interface it actually depends on.
+
+---
+
+**Q: What are two concrete code smells that indicate an interface has grown too big?**
+**Short:** Implementations riddled with UnsupportedOperationException or empty stubs, and mocks needing ten-plus do-nothing methods.
+
+A: The first smell is implementations with several `UnsupportedOperationException` throws or empty method bodies — evidence that some methods don't belong to every implementor's role. The second is a test that has to mock a large interface and fill in ten or more do-nothing stub methods just to exercise one code path. A third worth watching for: two different clients of the same interface sharing only one or two methods in common, which signals the interface is really two interfaces wearing one name.
+
+---
+
+**Q: When is it acceptable to keep a wider CRUD repository interface instead of segregating it?**
+**Short:** When create/read/update/delete are small, stable, and genuinely used together by essentially every caller.
+
+A: A `UserRepository` with `create/read/update/delete` is often fine even when some callers only ever read, because the coupling cost is minimal and the shape is well understood across the whole codebase. Segregating a 4-method interface into four single-method interfaces adds ceremony without a real testing or coupling benefit when every implementor genuinely supports all four operations. ISP earns its keep when methods serve *different* actors with *different* implementors — not merely when a particular caller happens not to use every method.
+
+---
+
+**Q: How does gRPC/Protobuf service design apply ISP at the HLD level?**
+**Short:** Each service defines only the RPCs it exposes rather than bundling every operation into one monolithic service.
+
+A: Protobuf service definitions follow ISP when each `service` block declares only the RPCs relevant to its own role, rather than one monolithic `.proto` file listing every operation the system supports. A client of a narrow service depends only on the RPCs it calls, instead of compiling against — and being coupled to changes in — operations it never invokes. This mirrors the `MultifunctionPrinter` fix: narrow, role-specific contracts instead of one contract serving every client.
+
+---
+
+**Q: What is the BFF (Backend for Frontend) pattern's relationship to ISP?**
+**Short:** A BFF exposes a tailored API per client type so each client depends only on the operations and data it needs.
+
+A: A BFF service exposes an API surface tailored to one client type — mobile, web, or a partner integration — rather than forcing every client through one general-purpose API that bundles operations and data shapes none of them fully need. Each BFF is effectively a segregated interface: the mobile BFF's contract changing doesn't ripple to the web BFF's clients. This is ISP applied to API surface design instead of Java interface design, with the same motivation — no client depends on what it doesn't use.
+
+---
+
+**Q: What's the risk of over-segregating interfaces?**
+**Short:** Interface explosion — one-method interfaces scattered everywhere adds noise without meaningful benefit.
+
+A: Splitting too aggressively produces "interface explosion" — dozens of one-method interfaces that add naming and navigation overhead without a corresponding decoupling win. With multiple interface inheritance in Java, class signatures implementing many tiny interfaces can also become verbose and harder to scan. The judgment call is the same one SRP requires at the class level: segregate along real actor boundaries, not down to the smallest possible unit.
+
+---
+
+**Q: Why might a `Lifecycle` interface with `start/stop/restart/pause/resume` violate ISP?**
+**Short:** Not every component supports restart or pause, forcing implementors into stub methods for capabilities they lack.
+
+A: Not every component that supports `start()`/`stop()` also supports `restart()` or `pause()`/`resume()` — a component with no meaningful paused state is forced to stub those methods, typically by throwing or silently doing nothing. The fix follows the same pattern as `Worker`/`Printer`: split into a minimal `Lifecycle` (`start`/`stop`) that every component implements, plus optional `Restartable` and `Pausable` interfaces that only the components genuinely supporting those capabilities implement. This keeps every implementor's method set exactly matched to what it can actually do.
+
+---
+
 **Interview Tip:** Always illustrate ISP with two examples — one structural (the `Worker`/`Robot` or `Printer`/`Fax` example) and one from enterprise Java (a large repository or service interface). Mention that ISP violations often produce LSP violations in the form of `UnsupportedOperationException` — connecting two principles in one answer signals depth.

@@ -552,7 +552,7 @@ A: Perfect transparency is the trap, because a network call differs from a local
 **HLD View — Where Proxy Appears in Distributed Systems**
 
 - **Service mesh sidecars** — Envoy and Linkerd proxies are the Proxy pattern at infrastructure scale: they intercept all inbound and outbound traffic for a service pod, adding retries, timeouts, mTLS, load balancing, and distributed tracing — completely transparent to the service code.
-- **Circuit breaker** — A circuit breaker wraps service calls as a Proxy: in CLOSED state it passes through, in OPEN state it fails fast, in HALF-OPEN state it probes recovery. Resilience4j and Hystrix implement this as a proxy layer.
+- **Circuit breaker** — A circuit breaker wraps service calls as a Proxy: in CLOSED state it passes through, in OPEN state it fails fast, in HALF-OPEN state it probes recovery. Resilience4j implements this as a proxy layer — Spring Cloud Circuit Breaker wires it in behind `@CircuitBreaker`, and a service mesh gives you the same state machine at the sidecar with no application code at all.
 - **CDN edge node** — A CDN edge is a caching proxy: clients connect to the edge address; the edge either serves cached content or delegates to the origin. The URL is identical — the client has no knowledge of the proxy layer.
 - **Spring AOP** — Spring's `@Transactional`, `@Cacheable`, and `@Async` annotations create JDK dynamic proxies or CGLIB subclass proxies that intercept method calls to add transaction management, caching, and async execution.
 

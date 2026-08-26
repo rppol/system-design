@@ -15,6 +15,12 @@ hook into the Java compiler: during compilation, `javac` discovers `Processor`
 implementations on the processor path and hands them the annotated program elements,
 in *rounds*, so they can read the source model and **generate new source files** (or
 emit diagnostics). The generated files are themselves compiled in subsequent rounds.
+Marking an element with `@Mapper` or `@GenerateBuilder` rather than naming it
+`generateXxx` or `testFoo` is the whole reason [Effective Java Item 39: "Prefer
+annotations to naming patterns"] exists — JUnit's move from a `testFoo` naming
+convention (3) to a `@Test` annotation (4) is Bloch's own historical case, and
+every processor in this module rests on the same premise: an annotation is
+machine-checkable and IDE-visible, a naming convention is neither.
 
 The key distinction a senior engineer must hold: this is **compile-time** metaprogramming, not runtime reflection. Reflection (`Class.forName`, `Method.invoke`,
 dynamic proxies) inspects and acts on types *while the program runs* — flexible but
@@ -279,7 +285,11 @@ public class BuilderProcessor extends AbstractProcessor {
 ```
 
 The raw string-writing above is illustrative; real processors use **JavaPoet** for
-type-safe generation:
+type-safe generation instead — building `.java` source by concatenating strings is
+exactly the case [Effective Java Item 62: "Avoid strings where other types are
+more appropriate"] warns about, and `TypeSpec`/`MethodSpec`/`ClassName` are the
+"other type" that gets imports, formatting, and type references right where a
+string template silently cannot:
 
 ```java
 MethodSpec build = MethodSpec.methodBuilder("build")
@@ -683,7 +693,12 @@ reflective mapper (`Field.setAccessible(true)` + `get`/`set` per field, cached b
 type). It worked, but: per-request mapping showed up in profiles as a measurable hot
 spot, cold-start was slow because the reflective caches warmed lazily, and an attempt
 to build a GraalVM native image failed with a cascade of missing-reflection errors on
-the DTO fields. The team migrated mapping to MapStruct (an annotation processor).
+the DTO fields. The team migrated mapping to MapStruct (an annotation processor) —
+a concrete, measured instance of [Effective Java Item 65: "Prefer interfaces to
+reflection"]: every cost Bloch attributes to `java.lang.reflect` (per-call overhead,
+lost static checking, code that is opaque to tooling) shows up below as a number,
+and generating plain code that calls the mapper interface's methods directly is
+the fix.
 
 **Requirements.**
 - Eliminate per-call reflection from the mapping layer.

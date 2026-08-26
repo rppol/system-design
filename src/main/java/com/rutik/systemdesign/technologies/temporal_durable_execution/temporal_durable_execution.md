@@ -736,7 +736,51 @@ The classic incident: a scale-down evicts half the fleet, every cached execution
 
 **Slot suppliers and resource-based tuning.** Modern SDKs let you replace fixed concurrency caps with a **resource-based tuner** that admits work while CPU and memory stay under a target. That is far better than a hand-picked `maxConcurrentActivityExecutionSize` for heterogeneous activity durations. Where you do set the fixed numbers, note they differ per SDK — check the pinned SDK's own documentation rather than assuming a shared default; the tuning surface is one of the biggest per-SDK differences in the product (§6.16).
 
-**Task Queue Priority and Fairness `[1.31 GA]`.** You can now attach a **priority key** to workflows and activities and get fair scheduling across keys on a single task queue. Before 1.31 the only tool was a separate task queue per tenant or per priority band, which meant a worker fleet per band. The new mechanism lets one fleet serve a shared queue while a noisy tenant cannot starve the others — the standard answer to "how do you stop one customer's 50,000-item backfill from delaying everyone else's checkout".
+### 6.8a Task Queue Priority and Fairness `[1.31 GA]` — one fleet instead of one fleet per band
+
+Before 1.31 the only lever was **a separate task queue per tenant or per priority band**, and since a worker polls a queue, that meant a worker fleet per band: idle capacity in every fleet, and a new fleet every time a tenant needed isolating. `[1.31]` moves both concerns into the queue itself, and they are two *different* mechanisms that are easy to conflate.
+
+**Priority is about which work matters. Fairness is about who is allowed to monopolise.** A `Priority` carries three fields:
+
+| Field | Type | Range | Default | What it does |
+|---|---|---|---|---|
+| `priority_key` | int | `[1, 5]` | `3` | Priority tier. **Lower is higher priority**, so `1` beats `5` |
+| `fairness_key` | string | — | `""` | Groups tasks into a *virtual queue* — normally a tenant id — so no one group monopolises the tier |
+| `fairness_weight` | float | `[0.001, 1000]` | `1.0` | Share of dispatches within the tier; `2.0` is dispatched twice as often as `1.0` |
+
+The layering is the part to get right: **fairness operates inside a priority tier, not across tiers.** Keys are round-robined proportional to their weights *within* a tier, so a `priority_key=1` task is not fairness-balanced against a `priority_key=5` task — priority decides first, fairness decides among equals.
+
+```go
+// on the workflow
+workflowOptions := client.StartWorkflowOptions{
+    Priority: temporal.Priority{PriorityKey: 1, FairnessKey: tenantID},
+}
+// on an activity, overriding what it would inherit
+ao := workflow.ActivityOptions{Priority: temporal.Priority{PriorityKey: 3}}
+```
+
+**Activities inherit, and the precedence order is where surprises come from** — highest wins:
+
+1. Task-queue-level fairness-weight overrides (`fairness_weight` only)
+2. Explicit values in the Activity options
+3. The calling **workflow's** priority
+4. The defaults — `priority_key=3`, `fairness_key=""`, `fairness_weight=1.0`
+
+So an activity started inside a high-priority workflow is high-priority **without you saying so**, which is usually what you want and is also how a background cleanup activity accidentally inherits checkout's priority. Set it explicitly on activities whose urgency differs from their caller's.
+
+**Rate limits are the other half, and they interact with weight.** Two settings, applied to the queue:
+
+```bash
+temporal task-queue config set \
+  --queue-rps-limit 500 \
+  --fairness-key-rps-limit-default 33.3
+```
+
+`--queue-rps-limit` caps the whole queue regardless of key. `--fairness-key-rps-limit-default` is **per key, and is then scaled by that key's fairness weight** — so a key at weight `2.0` against a default of `33.3` gets `66.6` rps, not `33.3`. That multiplication is the one people miss when they set a weight to prioritise a customer and then cannot explain why the rate limit did not hold.
+
+The standard question this answers — "how do you stop one customer's 50,000-item backfill from delaying everyone else's checkout" — now has a shape that does not involve provisioning anything: put the backfill at `priority_key=5` with the tenant as `fairness_key`, leave checkout at `1`, and run one fleet.
+
+The remaining reason to still split task queues is unchanged and worth saying: **priority and fairness schedule work, they do not isolate resources.** If the noisy workload needs different hardware, a different SDK version, different secrets, or a blast radius of its own, that is still a separate queue and a separate fleet.
 
 ### 6.9 Workers in depth
 
@@ -840,6 +884,12 @@ temporal worker deployment describe --deployment-name order-workers
 With **Pinned** behaviour, an execution stays on the version it started on for life. The consequence is worth stating loudly: **pinning long-running workflows makes most patching unnecessary.** You stop writing `GetVersion` branches and instead keep the old worker build running until its executions drain. The bill is operational (two or more worker builds alive at once, and a way to know when the old one is finally idle) rather than in the code.
 
 `[1.31 → removal in 1.32]` The legacy build-ID *sets* APIs are deprecated: `UpdateWorkerBuildIdCompatibility`, `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules`, `GetWorkerTaskReachability`. If your deploy tooling calls any of those, it breaks on the 1.32 upgrade.
+
+**Upgrade on Continue-as-New (public preview).** Pinned has one genuinely awkward case: an entity workflow that runs for months or years, or an AI-agent workflow that sleeps waiting for a human, never ends and therefore never picks up a new version — so "keep the old build alive until it drains" becomes "keep it alive forever". Upgrade-on-Continue-as-New lets a Pinned execution move to the current version **at its Continue-as-New boundary**, which is exactly the point at which its history resets and a replay divergence cannot occur. It is the answer for workflows that checkpoint by Continue-as-New anyway; it does nothing for a long execution that has no such boundary, and adding one purely to get the upgrade is a real design change, not a config flag.
+
+**The Temporal Worker Controller (Kubernetes operator, public preview)** automates the fleet side of all this, which is the part the CLI above leaves to you. Ramping with `set-ramping-version` is one API call; what it does *not* do is create the workers for the new build, keep the old builds running while their pinned executions drain, or delete them when it is safe. The controller does exactly that: it creates a **new versioned Kubernetes Deployment** per Deployment Version, drives the progressive ramp against the Temporal Service, and **sunsets old versions automatically once no executions remain pinned to them** — the dashboard-and-judgement step the §14 case study describes doing by hand. Horizontal Pod Autoscalers and PodDisruptionBudgets attach to the versioned Deployments, so each build scales on its own load rather than the fleet's.
+
+If you run Pinned versioning on Kubernetes, this is the operator to evaluate — the manual alternative is a bespoke controller that every team running Pinned eventually writes badly. Treat public preview as it reads, though: pin its version, and keep the manual `describe` procedure documented as the fallback.
 
 `[Go 1.47 / Java 1.37]` **`PreferredVersionProvider`** closes a subtler gap: it lets you deploy a new `GetVersion` call and roll out the *code* before activating its *behaviour*, so the marker and the branch are not forced to go live in the same deploy.
 
@@ -1645,6 +1695,7 @@ The .NET SDK (1.17.0), plus the Ruby and PHP SDKs, cover the same model with sma
 - **Temporal Cloud** — the vendor-hosted Service: no persistence fleet, no Elasticsearch, no upgrades, plus HA namespaces with managed multi-region failover, per-namespace export of closed histories, managed RBAC and SSO. Billed per Action plus storage GB-hours; your workers and your code stay yours.
 - **Temporal Nexus** — the cross-namespace, cross-team call boundary a child workflow cannot express: an Endpoint exposes named Operations that another namespace's workflows invoke like activities, with the implementation, workers and access control staying on the provider's side. Pre-release from 1.25, enabled by default with token-based routing and a reworked error model in 1.31.
 - **Temporal Schedules** — the first-class replacement for cron workflows: a resource you create, describe, pause, unpause, trigger and backfill, with overlap policies and jitter. Unlike an Airflow schedule it has no data interval — it starts an execution at a time, it does not hand it a partition.
+- **Temporal Worker Controller** — the open-source Kubernetes operator (public preview) that automates Pinned versioning on a fleet: one versioned Deployment per Deployment Version, progressive ramping driven against the Service, automatic sunsetting once nothing is pinned to an old version, and HPAs and PodDisruptionBudgets attached per version (§6.10).
 - **Temporal Worker Deployments** — the GA-since-1.31 versioning mechanism: a Deployment Version is a deployment name plus a build ID, with Pinned behaviour keeping an execution on its original version for life and AutoUpgrade moving it forward at the next workflow task, ramped with `set-ramping-version` and promoted with `set-current-version`.
 - **Temporal child workflows** — independently scheduled sub-executions with their own history, retention and visibility row, governed by a parent-close policy that defaults to TERMINATE and capped at 2,000 pending per parent.
 
@@ -1799,6 +1850,26 @@ The SDK's **time-skipping test environment** runs a real server whose clock jump
 **Q: What is Nexus, and what problem does it solve that a child workflow does not?**
 **Short:** Nexus is a cross-namespace, cross-team call boundary; a child workflow only works inside one namespace and one team's ownership.
 A child workflow lives in the parent's namespace, under the parent's ownership, retention and access control — fine within one team, useless across an organisational boundary. **Nexus** defines an Endpoint exposing named **Operations** that another namespace's workflows invoke much like an activity, while the implementation, the workers, the retention and the authorization stay entirely on the provider's side. That gives two teams a versioned contract with independent deploy cadences instead of shared internals. It was pre-release from 1.25 and is **enabled by default in 1.31** with token-based routing and a reworked error model, capped at 30 incomplete operations per execution. Inside one team's namespace a child workflow is still simpler and cheaper.
+
+**Q: One tenant's 50,000-item backfill is delaying everyone else's checkouts. What do you change in Temporal 1.31?**
+**Short:** Put the backfill at a lower priority_key with the tenant as fairness_key on the shared queue, instead of provisioning a second worker fleet.
+Before `[1.31]` the only answer was a separate task queue per tenant or per band, and since a worker polls a queue that meant a whole extra worker fleet with its own idle capacity. Now you attach a `Priority` instead: give the backfill `priority_key=5` and the tenant id as its `fairness_key`, leave checkout at `priority_key=1`, and run **one** fleet on the shared queue. Get the layering right, because it is the thing people invert — **fairness operates inside a priority tier, not across tiers**: priority decides first, and fairness round-robins keys proportional to `fairness_weight` only among tasks of equal priority. The reason to still split queues has not changed: priority and fairness *schedule* work, they do not *isolate resources*, so different hardware, a different SDK version, different secrets or a separate blast radius are still a separate fleet.
+
+**Q: You set a tenant's `fairness_weight` to 2.0 and their rate limit stopped behaving as configured. Why?**
+**Short:** The per-fairness-key rate limit is scaled by that key's fairness weight, so weight 2.0 against a 33.3 default gives 66.6 rps.
+Because `--fairness-key-rps-limit-default` is a *per-key* limit that is then **multiplied by the key's fairness weight**, not an absolute ceiling. At `--fairness-key-rps-limit-default 33.3`, a key at the default weight of `1.0` gets 33.3 rps and your weight-`2.0` tenant gets **66.6**. Raising the weight to prioritise them therefore raised their rate limit too, which is coherent once you see it and surprising every time you do not. The absolute ceiling you probably also wanted is `--queue-rps-limit`, which caps the whole queue regardless of key. Remember `fairness_weight` is clamped to `[0.001, 1000]`, so it is a share knob rather than an on/off switch.
+
+**Q: A background cleanup activity is running at checkout's priority. Nobody set that. How?**
+**Short:** Activities inherit the calling workflow's priority unless overridden, so an activity in a high-priority workflow is high-priority by default.
+It inherited it. The precedence order for an activity's `Priority` is, highest first: task-queue-level `fairness_weight` overrides, then explicit values in the Activity options, then **the calling workflow's priority**, then the defaults (`priority_key=3`, `fairness_key=""`, `fairness_weight=1.0`). So an activity started inside a `priority_key=1` workflow is `priority_key=1` without anyone writing it down — usually what you want, and exactly how a low-urgency cleanup step ends up competing with checkout. Set `Priority` explicitly in `ActivityOptions` for any activity whose urgency genuinely differs from its caller's, and treat the inherited case as the default you accepted rather than the one you chose.
+
+**Q: You run Pinned Worker Deployments on Kubernetes. What still has to be built by hand, and what now does it for you?**
+**Short:** Ramping is one API call, but creating, retaining and retiring per-version worker Deployments is fleet work the Temporal Worker Controller automates.
+`set-ramping-version` and `set-current-version` are single API calls, and they are the *easy* half. What Pinned actually costs is fleet lifecycle: creating workers for the new build, keeping every old build alive until its pinned executions drain, knowing when that has happened, and deleting it — the manual dashboard-and-judgement loop in §14. The **Temporal Worker Controller**, an open-source Kubernetes operator in public preview, does that: a versioned Deployment per Deployment Version, the progressive ramp driven against the Service, automatic sunsetting once nothing is pinned to an old version, and HPAs and PodDisruptionBudgets attached per version so each build scales on its own load. Evaluate it before writing your own, because every team running Pinned eventually writes a worse one — and treat public preview literally: pin its version and keep the manual `worker deployment describe` procedure as the documented fallback.
+
+**Q: An entity workflow has run for eight months and will never end. Pinned means its old worker build can never be retired. What do you do?**
+**Short:** Upgrade on Continue-as-New moves a Pinned execution to the current version at its Continue-as-New boundary, where a replay divergence cannot occur.
+This is Pinned's genuinely awkward case: "keep the old build alive until it drains" becomes "keep it alive forever" for entity workflows, months-long batch checkpointers, and AI-agent workflows sleeping on human input. **Upgrade on Continue-as-New** (public preview) lets such an execution move to the current Deployment Version **at its Continue-as-New boundary** — the one point where its history resets, so new code cannot diverge from a recorded past. That makes it the right answer for anything that already checkpoints by Continue-as-New. It does nothing for a long execution that has no such boundary, and introducing one purely to enable the upgrade is a real workflow redesign with its own state-handoff correctness questions, not a configuration change.
 
 ---
 

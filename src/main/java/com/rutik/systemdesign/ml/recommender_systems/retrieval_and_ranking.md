@@ -125,68 +125,7 @@ position.
 
 ### 5.3 LambdaMART Gradient Illustration
 
-```
-For user u with items [A, B, C, D] ranked by model:
-  Model rank:  [A=0.9, C=0.7, B=0.5, D=0.3]
-  True relevance: [A=high, B=high, C=low, D=low]
-
-Error: B (high relevance) should rank above C (low relevance)
-
-LambdaRank gradient for pair (B, C):
-  lambda_BC = |delta_NDCG(B, C)| * sigmoid(score_C - score_B)
-
-  delta_NDCG: how much does swapping B and C improve NDCG?
-  sigmoid term: confidence that B and C are mis-ranked
-
-  Large |delta_NDCG| + large sigmoid = large gradient correction
-  Items that matter most for NDCG get the largest corrections
-```
-
-**What this actually says.** "Fix the mis-orderings that would move the scoreboard the most, and fix them hardest where the model is least sure it got them right."
-
-The whole point is that not every mis-ranked pair is worth the same. Swapping positions 1 and 2 changes NDCG a lot; swapping positions 40 and 41 barely changes it at all. LambdaRank refuses to spend gradient on the second kind.
-
-| Symbol | What it is |
-|--------|------------|
-| `score_B`, `score_C` | The model's raw scores for the two items in the pair |
-| `delta_NDCG(B, C)` | How much NDCG would improve if you swapped these two in the ranked list |
-| `sigmoid(score_C - score_B)` | How confidently the model currently prefers C over B. Near `1.0` = badly mis-ranked |
-| `lambda_BC` | The gradient sent to this pair — the product of "how much it matters" and "how wrong we are" |
-| `NDCG` | Discounted Cumulative Gain divided by its ideal value. `1.0` = perfect ordering |
-
-**Walk one example.** Push the exact list above through the NDCG arithmetic. Relevance is
-`1` for high, `0` for low, and the rank discount is `1 / log2(position + 1)`:
-
-```
-  discounts       pos 1 = 1.0000   pos 2 = 0.6309   pos 3 = 0.5000   pos 4 = 0.4307
-
-  model order     A(rel 1)   C(rel 0)   B(rel 1)   D(rel 0)
-  DCG           = 1x1.0000 + 0x0.6309 + 1x0.5000 + 0x0.4307 = 1.5000
-
-  ideal order     A(rel 1)   B(rel 1)   C(rel 0)   D(rel 0)
-  IDCG          = 1x1.0000 + 1x0.6309 + 0x0.5000 + 0x0.4307 = 1.6309
-
-  NDCG now      = 1.5000 / 1.6309 = 0.9197
-  NDCG if swapped                 = 1.0000
-  delta_NDCG                      = 0.0803
-
-  sigmoid(score_C - score_B) = sigmoid(0.7 - 0.5) = sigmoid(0.2) = 0.5498
-
-  lambda_BC = 0.0803 x 0.5498 = 0.0441
-```
-
-Read the two factors separately. `0.0803` says "this swap is worth 8 points of NDCG" — a real
-but not catastrophic error. `0.5498` says "the model only mildly prefers C to B" — it is nearly
-a coin flip, so it is close to fixing itself. Multiply them and you get a modest correction. Now
-imagine the same pair sitting at positions 1 and 2 with scores `0.9` vs `0.1`: `delta_NDCG` would
-be larger *and* the sigmoid would be near `0.69`, so the gradient would be several times bigger.
-That multiplication is the entire difference between LambdaRank and plain RankNet.
-
-**Why the `|...|` around delta_NDCG.** The magnitude alone carries the "how much does this matter"
-signal; the *direction* of the correction is already supplied by which item is the more relevant
-one in the pair. Drop the absolute value and pairs that hurt NDCG and pairs that help it would
-partially cancel in the sum, and the model would stop learning the ordering at the top of the
-list — exactly the region NDCG cares about most.
+RankNet's pairwise cross-entropy loss treats every mis-ranked pair identically regardless of where in the list it sits; LambdaRank fixes that blind spot by scaling each pair's gradient by `|delta_NDCG|` — how much NDCG would improve if the pair were swapped — times a sigmoid confidence term, so a mis-ranking near the top of the list (where it actually moves the metric) gets a far larger correction than the same mis-ranking at position 40. LambdaMART then fits those same lambda gradients with gradient-boosted trees instead of a neural network. The full worked numeric example — computing `delta_NDCG` and the sigmoid term for one mis-ranked pair, and why the RankNet-vs-LambdaRank distinction hinges entirely on that multiplication — lives in [Information Retrieval and Search](../information_retrieval_and_search/information_retrieval_and_search.md) §6.6, along with the RankNet -> LambdaRank -> LambdaMART progression diagram this module builds on rather than re-deriving.
 
 ### 5.4 Learning-to-Rank Families — Pointwise vs Pairwise vs Listwise
 
@@ -248,54 +187,19 @@ flowchart LR
 
 ANN skips the 10M-item brute-force scan: the item vectors are clustered offline into
 `n_lists` centroids, and at query time only the `nprobe` closest cells are scanned —
-trading a few percent recall for a ~100x latency win.
+trading a few percent recall for a ~100x latency win. Brute force at `D = 256` is
+`10,000,000 x 256 x 2 = 5.12 billion` multiply-add operations for a single user request —
+roughly the ~2 seconds quoted in Section 3 — which is the whole reason this clustering trade
+is worth making.
 
-**Put simply.** "Instead of comparing the query to all 10 million items, compare it to a few
-thousand cluster centres, then only to the items inside the handful of clusters that won."
-
-The cost of an IVF query is not one number but a sum of two, and they pull in opposite
-directions as you turn `n_lists`:
-
-```
-  distance computations per query
-      = n_lists                    (find the nearest centroids)
-      + N x (nprobe / n_lists)     (scan the items inside those cells)
-```
-
-| Symbol | What it is |
-|--------|------------|
-| `N` | Catalog size — number of item vectors in the index. `10,000,000` here |
-| `n_lists` | How many Voronoi cells K-means carved the catalog into. Build-time choice |
-| `nprobe` | How many of those cells to actually scan at query time. Runtime knob |
-| `nprobe / n_lists` | The fraction of the catalog you touch. `32/256` = one eighth of everything |
-| `N / total` | Speedup over brute force. This is the number that buys you the latency budget |
-
-**Walk one example.** Same catalog (`N` = 10M, `D` = 256), same `nprobe = 32`, three different
-build-time `n_lists`:
-
-```
-                       centroid     items          total distance
-  n_lists   nprobe     compares     scanned        computations     speedup vs brute
-  ------------------------------------------------------------------------------------
-  brute        -              0    10,000,000        10,000,000            1.0x
-    256       32            256     1,250,000         1,250,256            8.0x
-   1024       32          1,024       312,500           313,524           31.9x
-   4096       32          4,096        78,125            82,221          121.6x
-```
-
-Brute force at `D = 256` is `10,000,000 x 256 x 2 = 5.12 billion` multiply-add operations for a
-single user request — roughly the ~2 seconds quoted in Section 3. The `n_lists = 4096` row does
-`82,221` distance computations instead, which is the ~100x win the caption refers to and the
-reason the Section 12 rule of thumb lands on `sqrt(N)` to `4*sqrt(N)` cells (`sqrt(10M)` = 3,162).
-
-**Why `n_lists` cannot just be raised forever.** The first term (`n_lists` centroid compares) is
-paid on *every* query and grows linearly, while the second term shrinks. Past the crossover the
-centroid scan itself becomes the bottleneck: at `n_lists = 100,000` with `nprobe = 32` you would
-pay 100,000 centroid compares to save down to 3,200 item compares — worse than the 4096 row.
-There is also a recall cost: more cells means fewer items per cell, so a fixed `nprobe` covers a
-smaller slice of the neighbourhood and true neighbours fall outside the probed cells. That is the
-failure mode described in Pitfall 5, and it is why `nprobe` is tuned against a recall curve rather
-than set by arithmetic alone.
+The full cost model — the two-term distance-computation formula, the `n_lists` build-time
+sweep showing why more clusters is not free (the centroid-scan term grows even as the
+item-scan term shrinks), and the `nprobe` recall/speedup sweep at fixed `n_lists` — lives in
+[Information Retrieval and Search](../information_retrieval_and_search/information_retrieval_and_search.md)
+§6.3, which this module's `ANNRetrieval` class (Section 6) builds an IVF index against
+without re-deriving the math. The Section 12 rule of thumb here (`n_lists` between `sqrt(N)`
+and `4*sqrt(N)`, `sqrt(10M)` = 3,162) and Pitfall 5's recall-collapse failure mode both follow
+directly from that cost model.
 
 ---
 
@@ -323,14 +227,15 @@ class FAISSConfig:
 
 
 class ANNRetrieval:
-    """Approximate Nearest Neighbor retrieval using FAISS IVF.
+    """Approximate Nearest Neighbor retrieval using FAISS IVF, wrapped with the
+    recommender-specific concerns generic FAISS usage doesn't need: filtering
+    already-interacted items and over-fetching to survive that filter.
 
-    IVF (Inverted File) index:
-    1. Training: K-means clusters all item vectors into n_lists centroids
-    2. Storage: each item assigned to nearest centroid
-    3. Search: for query vector, find nprobe nearest centroids,
-               search only items in those centroids
-    Tradeoff: nprobe=1 is fastest (low recall); nprobe=n_lists is exact (slow)
+    IVF (Inverted File) index: cluster item vectors into n_lists centroids at
+    train() time, then scan only the nprobe nearest centroids per query. See
+    ../information_retrieval_and_search/information_retrieval_and_search.md
+    §6.3 for the full nlist/nprobe cost model and recall/speedup derivation
+    this class builds an index against without re-deriving.
     """
 
     def __init__(self, cfg: FAISSConfig) -> None:

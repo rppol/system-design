@@ -22,11 +22,11 @@ This module covers the full performance investigation toolkit: JVM flags for GC 
 
 ## 3. Core Principles
 
-- **Measure before optimizing**: use profilers (async-profiler, JMH) to find the actual bottleneck, not guesses.
+- **Measure before optimizing**: use profilers (async-profiler, JMH) to find the actual bottleneck, not guesses — [Effective Java Item 67: "Optimize judiciously"]'s central rule, stated by Bloch as "measure performance before and after each attempted optimization."
 - **GC is not free**: every allocation puts pressure on GC; short-lived large objects in old gen cause major GC.
 - **False sharing**: two variables in the same 64-byte CPU cache line cause cache bouncing under concurrent writes — fix with padding.
 - **String concatenation in loops**: `str += part` in a loop creates a new `String` object every iteration — O(n²) for n concatenations.
-- **Autoboxing cost**: `Integer` instead of `int` in hot loops adds boxing/unboxing overhead and GC pressure.
+- **Autoboxing cost**: `Integer` instead of `int` in hot loops adds boxing/unboxing overhead and GC pressure — [Effective Java Item 61: "Prefer primitive types to boxed primitives"], whose own example is a program slowed to a crawl by one accidental `Long` declaration.
 - **Amortized vs worst-case**: ArrayList add is O(1) amortized but O(n) for the resize — pre-size for known capacities.
 
 ---
@@ -46,7 +46,7 @@ This module covers the full performance investigation toolkit: JVM flags for GC 
 | `-XX:+AlwaysPreTouch` | Pre-allocate all pages at startup; avoids page fault latency |
 | `-Xlog:gc*:file=gc.log:time,uptime:filecount=5,filesize=20m` | Structured GC logging |
 | `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/` | Auto heap dump on OOM |
-| `-Djdk.tracePinnedThreads=full` | Debug virtual thread pinning |
+| `-XX:StartFlightRecording=jdk.VirtualThreadPinned#enabled=true` | Debug virtual thread pinning |
 | `-XX:+PrintCompilation` | JIT compilation events |
 
 ### 4.2 Thread Pool Sizing Formulas
@@ -145,7 +145,7 @@ Dominator tree: shows which objects retain the most memory
 Leak Suspects report: objects growing unbounded, never released
 
 Steps:
-  1. jmap -dump:live,format=b,file=heap.hprof <pid>
+  1. jcmd <pid> GC.heap_dump filename=/tmp/heap.hprof   (older runbooks: jmap -dump:live,format=b,file=heap.hprof <pid>)
   2. Open in Eclipse MAT
   3. Run "Leak Suspects Report"
   4. Check dominator tree for unexpectedly large retained heap
@@ -577,7 +577,7 @@ A developer wrote a benchmark that computed a hash but didn't return or use the 
 A service used `intern()` extensively to deduplicate strings in a cache. Under load, all threads contended on the String pool's global lock. **Fix**: Use a `ConcurrentHashMap<String, String>` for manual deduplication — much lower contention.
 
 ### War Story 4: Object pooling hurting performance
-A team added an object pool for their DTO objects, believing they'd reduce GC pressure. The pool used synchronized access (lock contention) and the TLAB-allocated short-lived objects it replaced cost nearly nothing to GC anyway. Pool overhead exceeded benefit. **Fix**: Remove the pool; let the GC do its job; profile first.
+A team added an object pool for their DTO objects, believing they'd reduce GC pressure. The pool used synchronized access (lock contention) and the TLAB-allocated short-lived objects it replaced cost nearly nothing to GC anyway. Pool overhead exceeded benefit. **Fix**: Remove the pool; let the GC do its job; profile first. This is the exact trap [Effective Java Item 6: "Avoid creating unnecessary objects"] warns against in the other direction — Bloch calls out object pooling as a bad idea for anything but genuinely expensive objects, precisely because a modern generational GC already handles small, short-lived objects cheaply.
 
 ---
 
@@ -585,14 +585,16 @@ A team added an object pool for their DTO objects, believing they'd reduce GC pr
 
 | Tool | Purpose |
 |------|---------|
+| `jcmd` | The modern local-diagnostic umbrella — one scriptable command family, no open port needed: `jcmd <pid> GC.heap_dump filename=/tmp/heap.hprof` (heap dump), `jcmd <pid> Thread.print` (thread dump / deadlock detection), `jcmd <pid> GC.heap_info` (live GC stats), `jcmd <pid> VM.native_memory` (native memory tracking), `jcmd <pid> JFR.start` (start a recording). Run `jcmd <pid> help` to list what a given JVM build supports |
 | async-profiler | CPU/allocation/wall-clock flame graphs; production-safe |
 | JMH | Java Microbenchmark Harness; correct microbenchmarks |
 | Eclipse MAT | Heap dump analysis; dominator tree; leak suspects |
-| `jstack` | Thread dumps; deadlock detection |
-| `jstat -gcutil` | Live GC statistics |
-| `-Xlog:gc*` | Structured GC logging (Java 9+) |
+| Java Flight Recorder (JFR) | Low-overhead production profiling, driven via `jcmd JFR.start/dump/stop` |
 | VisualVM | Development-time monitoring (not production) |
-| Java Flight Recorder (JFR) | Low-overhead production profiling |
+| `-Xlog:gc*` | Structured GC logging (Java 9+) |
+| `jstack` | Thread dumps; deadlock detection — what older runbooks still call for; `jcmd <pid> Thread.print` is the modern equivalent |
+| `jstat -gcutil` | Live GC statistics — older runbooks; `jcmd <pid> GC.heap_info` is the modern equivalent |
+| `jmap` | Heap dumps and histograms — older runbooks; `jcmd <pid> GC.heap_dump` / `GC.class_histogram` are the modern equivalents |
 
 ---
 
@@ -611,7 +613,7 @@ False sharing: two independently-written variables share a 64-byte CPU cache lin
 **Q3: How would you diagnose a memory leak in production?**
 **Short:** Diagnose a leak by capturing a heap dump on OOM and tracing the suspect object's path to GC roots.
 
-(1) Observe: heap grows steadily on dashboards (JVM metrics); major GC frequency increases; OOM eventually. (2) Capture heap dump before OOM: configure `-XX:+HeapDumpOnOutOfMemoryError` or trigger with `jmap -dump:live,format=b,file=heap.hprof <pid>`. (3) Open in Eclipse MAT: run Leak Suspects Report; examine dominator tree for objects with unexpected retained heap. (4) Find GC root path: "Path to GC Roots" for the suspect object — reveals which field chains keep it alive. (5) Fix the holding reference (remove from static collection, call `threadLocal.remove()`, cancel event listener).
+(1) Observe: heap grows steadily on dashboards (JVM metrics); major GC frequency increases; OOM eventually. (2) Capture heap dump before OOM: configure `-XX:+HeapDumpOnOutOfMemoryError` or trigger one on demand with `jcmd <pid> GC.heap_dump filename=/tmp/heap.hprof` (older runbooks show `jmap -dump:live,format=b,file=heap.hprof <pid>` — same effect, `jcmd` is the maintained tool). (3) Open in Eclipse MAT: run Leak Suspects Report; examine dominator tree for objects with unexpected retained heap. (4) Find GC root path: "Path to GC Roots" for the suspect object — reveals which field chains keep it alive. (5) Fix the holding reference (remove from static collection, call `threadLocal.remove()`, cancel event listener).
 
 **Q4: What is JMH and why is it needed for microbenchmarks?**
 **Short:** JMH prevents dead-code elimination, JIT warmup skew, and cross-benchmark JIT contamination via forking.
@@ -621,7 +623,7 @@ JMH (Java Microbenchmark Harness, from OpenJDK) handles three problems that make
 **Q5: Why is String concatenation in a loop slow and what is the exact bytecode difference?**
 **Short:** `result += s` in a loop rebuilds a new StringBuilder and String every iteration, an O(n squared) cost.
 
-`result += s` inside a loop compiles to: `result = new StringBuilder(result).append(s).toString()`. Each iteration creates a `StringBuilder`, copies the existing string into it, appends the new string, and calls `toString()` which creates a new `String`. Total for n iterations: n `StringBuilder` objects + n `String` objects, each copying the accumulated string — O(n²) total bytes copied. The fix: one `StringBuilder` outside the loop, `append()` inside, `toString()` once — O(n) total. Java 9+ with `StringConcatFactory` optimizes simple non-loop cases but loop `+=` still has this cost.
+`result += s` inside a loop compiles to: `result = new StringBuilder(result).append(s).toString()`. Each iteration creates a `StringBuilder`, copies the existing string into it, appends the new string, and calls `toString()` which creates a new `String`. Total for n iterations: n `StringBuilder` objects + n `String` objects, each copying the accumulated string — O(n²) total bytes copied. The fix: one `StringBuilder` outside the loop, `append()` inside, `toString()` once — O(n) total. This is precisely [Effective Java Item 63: "Beware the performance of string concatenation"], which quantifies the same quadratic-vs-linear gap and gives the identical fix. Java 9+ with `StringConcatFactory` optimizes simple non-loop cases but loop `+=` still has this cost.
 
 **Q6: How does compact strings (Java 9) save memory?**
 **Short:** Compact Strings store LATIN-1-only text as byte[] instead of char[], roughly halving String heap use.
@@ -648,7 +650,7 @@ Before Java 9, every `String` was backed by a `char[]` (UTF-16: 2 bytes per char
 -Djava.awt.headless=true
 -Dfile.encoding=UTF-8
 ```
-For Java 21 with virtual threads, add: `-Djdk.tracePinnedThreads=full` during initial rollout to detect pinning issues.
+With virtual threads, record the `jdk.VirtualThreadPinned` JFR event during initial rollout to detect pinning issues — it reports both the pinning reason and the carrier identity. See [JFR and Production Diagnostics](jfr_and_production_diagnostics.md).
 
 **Q9: How do you read a GC log and identify a problematic pause?**
 **Short:** Read a GC log by separating routine young pauses from problematic full GCs and to-space-exhausted events.
@@ -719,9 +721,9 @@ A JVM safepoint is a global stop where all threads pause at "safe" positions (me
 
 ## 14. Case Study
 
-### Tuning a Financial Risk Engine: 45s -> 4s per Batch (Java 17 LTS)
+### Tuning a Financial Risk Engine: 45s -> 4s per Batch (Java 25 LTS)
 
-**Scenario.** A nightly Value-at-Risk (VaR) service revalues a portfolio of **10M positions** per batch. The original implementation took **45 seconds** per batch; with 600 batches across desks the nightly window blew past its SLA. Target hardware: 16-core x86-64, each core with a **32 KB L1 data cache** and **64-byte cache lines**, 32 GB heap on Java 17 with G1GC (`-XX:MaxGCPauseMillis=200`). After profiling-driven changes — JMH validation, struct-of-arrays layout, eliminating `BigDecimal` in the hot loop, and devirtualizing a megamorphic callsite — the batch dropped to **4 seconds**, a 10x improvement, with full-GC pauses gone.
+**Scenario.** A nightly Value-at-Risk (VaR) service revalues a portfolio of **10M positions** per batch. The original implementation took **45 seconds** per batch; with 600 batches across desks the nightly window blew past its SLA. Target hardware: 16-core x86-64, each core with a **32 KB L1 data cache** and **64-byte cache lines**, 32 GB heap on Java 25 with G1GC (`-XX:MaxGCPauseMillis=200`). After profiling-driven changes — JMH validation, struct-of-arrays layout, eliminating `BigDecimal` in the hot loop, and devirtualizing a megamorphic callsite — the batch dropped to **4 seconds**, a 10x improvement, with full-GC pauses gone.
 
 ```mermaid
 xychart-beta

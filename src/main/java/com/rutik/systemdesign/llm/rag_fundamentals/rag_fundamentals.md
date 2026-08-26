@@ -371,6 +371,56 @@ User: What is the capital of France?
 Assistant: Based on the provided context, Paris is the capital of France.
 ```
 
+### 4.6 Fine-Tuning the Generator for Retrieval Robustness — RAFT
+
+Everything above treats the generator as fixed and adapts the retrieval side. RAFT
+(Retrieval-Augmented Fine-Tuning; Zhang et al., 2024, arXiv 2403.10131) instead fine-tunes the
+generator itself so it reads retrieved context the way this specific pipeline actually presents
+it — oracle documents mixed in with distractors — rather than the way a base model happens to
+have learned to read prompts in general.
+
+**The training data.** Each example is `(question, a set of retrieved documents, a
+chain-of-thought answer that quotes the oracle verbatim)`. RAFT's own main experiments used one
+oracle document plus four distractor documents per example (`D* + 4D`), matching the retriever's
+top-k shape at test time. Critically, only a fraction of the examples keep the oracle in that
+document set:
+- **`P%` of examples**: oracle + distractors → answer (the model learns to *extract* from context)
+- **`(1-P)%` of examples**: distractors only, no oracle → answer (the model is forced to answer
+  from what it memorized during pre-training/fine-tuning, since the context cannot help)
+
+**The `P` hyperparameter — check the paper's own sweep before quoting a single number.** The
+intuitive assumption is `P = 100%` (always give the model the right document during training).
+RAFT's ablation found this is not the best setting: pulling some oracle documents out and
+training the model to answer anyway improved downstream RAG accuracy, but the *specific* optimal
+`P` varied by dataset — the paper reports the best value landing anywhere from 40% to 100%
+depending on the benchmark, with `P = 80%` called out as a representative strong setting rather
+than a universal constant. Treat `P` as something to sweep on your own eval set, not a value to
+hardcode from the paper.
+
+**Why the chain-of-thought, cited-quote answer format is load-bearing, not cosmetic.** RAFT
+generates each training answer with an explicit reasoning chain that quotes the supporting span
+from the oracle document (marked with `##begin_quote##` / `##end_quote##` in the paper's own
+data generation) before stating the final answer. This is not a formatting nicety: the paper's
+own ablation found that training on bare answers (no reasoning chain) caused the training loss to
+collapse rapidly and the model's accuracy to suffer, while the reasoning-chain format
+measurably improved it — +9.66 points on HotpotQA and +14.93 points on the HuggingFace
+(Gorilla APIBench) split when CoT was added back. Forcing the model to justify an answer from a
+specific quoted span is what teaches it to actually attend to the context rather than pattern-match
+straight to a memorized answer.
+
+**The tradeoff against plain RAG.** A frozen generator with retrieval bolted on stays portable —
+swap the retriever, change the corpus, point it at a new index, and the generator still works
+because it was never trained on any particular document set. RAFT gives up that portability: the
+fine-tuned model is now specialized to its training domain's document distribution and distractor
+shape, and a material change to the corpus or the retriever's top-k behavior means retraining, not
+just re-indexing. What it buys in exchange is measured, not assumed — RAFT's own benchmark showed
+its fine-tuned 7B model outperforming both a domain-fine-tuned model without retrieval-aware
+training and a general-purpose model with RAG bolted on, specifically on the in-domain,
+distractor-heavy setting RAFT trains for. Reach for RAFT when the corpus is stable and the
+domain is narrow enough to amortize a fine-tuning cycle (legal, medical, internal API
+documentation); stay with plain RAG plus a strong reranker when the corpus changes often or the
+domain is too broad to fit one fine-tuning run.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -824,6 +874,14 @@ End-to-end RAG evaluation requires measuring both retrieval quality and generati
 **Short:** Chunking splits whatever string the parser produced, so a scrambled multi-column PDF, an empty scanned page, or a flattened table poisons every downstream chunk regardless of size.
 Chunking operates on whatever string the parser produced, so a parse error is unrecoverable downstream. A born-digital PDF exposes positioned glyph runs with no reading order: extract naively from a two-column page and you get line 1 of column A, then line 1 of column B, then line 2 of column A — sentences that never existed, embedded as if they were real. A scanned page with no text layer extracts to an empty string and indexes silently as nothing. A flattened table concatenates its cells, so `Revenue 412 388` no longer says which figure belongs to which year, and the chunk retrieves fine while the model answers from the wrong column. Diagnose by reading 20 raw parser outputs before touching chunk size — if the text is scrambled, no overlap setting, semantic splitter or reranker will recover it. The fix is a layout-aware pipeline (layout detection for regions and reading order, a table-structure model for the cell grid) rather than a text extractor, and it costs real time: Docling's own report measures 633 ms/page for layout on x86 CPU and 1.74 s/table for TableFormer, so parsing becomes a cached batch stage keyed on document hash rather than part of the re-chunk loop.
 
+**Q: What is RAFT and how is it different from just fine-tuning a model on your documents?**
+**Short:** RAFT fine-tunes the generator on retrieved documents mixing an oracle with distractors, plus some examples with the oracle removed, so it learns to extract from context rather than only recall memorized facts.
+Plain domain fine-tuning (DSF) trains the model on `(question, answer)` pairs with no documents in context at all — it teaches answering style and injects some domain knowledge into the weights, but never teaches the model to *read* a retrieved document. RAFT (Zhang et al., 2024, arXiv 2403.10131) instead trains on `(question, retrieved documents, chain-of-thought answer)` triples that look exactly like what the pipeline serves at inference: one oracle document plus several distractors (the paper's main setup uses one oracle plus four distractors). A fraction of the training examples go further and remove the oracle entirely, leaving only distractors, forcing the model to either recognize the documents are unhelpful or fall back on what it already knows rather than confabulating from irrelevant context. The paper's own benchmark showed the resulting model beating both a domain-fine-tuned model with no RAG and a general-purpose model with RAG bolted on, on the in-domain, distractor-heavy setting RAFT is built for.
+
+**Q: RAFT has a hyperparameter P controlling how much of the training data keeps the oracle document. What does the paper's own ablation find, and what is the practical implication?**
+**Short:** The paper found always training with the oracle (P=100%) is not best; the optimal P varied by dataset from 40% to 100%, with P=80% called out as a strong representative setting.
+The intuitive assumption is that a model learning to extract from context should always see the correct document during training — `P = 100%`. RAFT's ablation contradicts this: removing the oracle from a portion of training examples and forcing the model to answer without it improved downstream RAG accuracy, but the best `P` was dataset-dependent, ranging from 40% to 100% across the benchmarks tested, with the paper highlighting `P = 80%` as a representative strong value rather than a universal optimum. The practical implication is to sweep `P` on your own eval set rather than hardcoding a number from the paper — and to remember that `P` is a training-time choice about which examples keep the oracle, distinct from `D`, the number of distractor documents included per example (four, in RAFT's own main setup).
+
 ---
 
 ## Component Deep-Dives
@@ -1074,7 +1132,7 @@ response = llm.complete(prompt)
              |
              v
   ┌──────────────────────────────────────────────────────────┐
-  │  LLM: Claude claude-sonnet-4-6                           │
+  │  LLM: Claude Sonnet 5                                    │
   │  System: "Answer ONLY from the provided context.         │
   │           If not in context, say 'I don't know.'"        │
   │  Context: 5 chunks + metadata (source, date, BU)         │
@@ -1399,7 +1457,7 @@ async def broken_generate_answer(query: str, context_chunks: list[str]) -> str:
     client = anthropic.AsyncAnthropic()
     context = "\n\n".join(context_chunks)
     resp = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=1024,
         messages=[{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
         # No system prompt — model uses training knowledge freely
@@ -1431,7 +1489,7 @@ async def fixed_generate_answer(
     )
 
     resp = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=1024,
         system=system_prompt,
         messages=[{

@@ -67,6 +67,25 @@ flowchart TD
 
 Spring makes this choice once per bean at proxy-creation time: no interface always forces CGLIB, and `proxyTargetClass=true` forces CGLIB even when an interface exists.
 
+### `@Proxyable` (Spring Framework 7+) — Per-Bean Override
+
+Spring Framework 7 adds `org.springframework.context.annotation.Proxyable` (`@since 7.0`, `@Target({TYPE, METHOD})`) to override the proxy type for one bean without touching the context-wide `proxyTargetClass` setting. Place it on a `@Component` class or a `@Bean` method:
+
+```java
+@Proxyable(ProxyType.TARGET_CLASS)   // force CGLIB for this bean only
+@Transactional
+@Component
+public class LedgerService {
+    public void post(Entry entry) { ... }
+}
+```
+
+`value(): ProxyType` takes one of three values: `INTERFACES` forces a JDK dynamic proxy, `TARGET_CLASS` forces CGLIB, and the default, `DEFAULT`, inherits whatever proxy type is globally configured for the context. `interfaces(): Class<?>[]` lets you narrow which interfaces a JDK proxy exposes, but it is only honoured when `value()` is **not** `TARGET_CLASS` — a CGLIB proxy subclasses the target directly and has no use for an interface list.
+
+`@Proxyable` overrides the proxy type; it does not create the need for one. A bean that nothing advises is never proxied at all, annotation or not — putting `@Proxyable` on a plain `@Service` with no `@Transactional`, no `@Cacheable`, and no matching `@Aspect` pointcut changes nothing. It only takes effect once the bean is already a proxy candidate for some other reason.
+
+The annotation exists because the two proxy defaults in play disagree: core Spring Framework still documents interface-based (JDK) proxying as its suggested default, while Spring Boot separately defaults `spring.aop.proxy-target-class=true` (CGLIB) on top of it. `@Proxyable` is the per-bean escape hatch from whichever default the running application inherits, so one bean can go against the grain — say, a JDK proxy inside an otherwise all-CGLIB Boot app — without flipping the global switch for every other advised bean.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -298,6 +317,38 @@ public class AppConfig { }
 // @SpringBootApplication -> @EnableAutoConfiguration ->
 // AopAutoConfiguration -> @EnableAspectJAutoProxy(proxyTargetClass=true)
 ```
+
+### `@Proxyable` Overriding a Boot Default Per Bean
+
+```java
+// Whole Boot app: proxyTargetClass=true by default -> CGLIB everywhere,
+// even for beans that implement an interface.
+public interface PricingApi {
+    BigDecimal quote(String sku);
+}
+
+@Service
+public class PricingService implements PricingApi {
+    @Cacheable("quotes")
+    public BigDecimal quote(String sku) { ... }
+}
+// getBean(PricingApi.class).getClass() -> PricingService$$SpringCGLIB$$0
+
+// A third-party integration hands this bean to a library that does a strict
+// getClass() == PricingService.class check, or serializes only via the
+// interface's own JDK-proxy-friendly mechanism. Forcing CGLIB breaks it.
+// FIX: opt this one bean back into an interface-only JDK proxy.
+@Proxyable(ProxyType.INTERFACES)
+@Service
+public class PricingService implements PricingApi {
+    @Cacheable("quotes")
+    public BigDecimal quote(String sku) { ... }
+}
+// getBean(PricingApi.class).getClass() -> jdk.proxy1.$Proxy37
+// Every other @Service in the same Boot app is still CGLIB-proxied as usual.
+```
+
+`@Proxyable` is read at the same proxy-creation point as `proxyTargetClass`, so `AopUtils.isJdkDynamicProxy(bean)` / `AopUtils.isCglibProxy(bean)` correctly reflect the per-bean override — nothing about detecting or unwrapping the proxy changes.
 
 ### Proxy Impact on equals/hashCode/instanceof
 
@@ -549,6 +600,11 @@ No: CGLIB proxies subclass the target and override methods, and neither static m
 **Short:** A CGLIB-proxied bean and a plain instance of the same class are never equal by default, breaking HashSet/HashMap lookups.
 
 A CGLIB-proxied bean and a plain instance of the same class are never `equal()` by default, because the proxy's runtime class differs from the original class. Unless the target overrides `equals()`/`hashCode()` based on business fields, comparisons fall back to identity semantics inherited through the generated subclass, so storing a proxied bean in a `HashSet`/`HashMap` and later probing it with a manually constructed instance silently misses. The fix is to compare by a stable identifier field or unwrap the proxy first with `AopUtils.getTargetClass()` / `AopTestUtils.getTargetObject()`, rather than relying on default object equality across proxied and non-proxied instances.
+
+**Q: What does `@Proxyable` do in Spring Framework 7, and how does it differ from setting `proxyTargetClass`?**
+**Short:** @Proxyable overrides the proxy type for one bean, while proxyTargetClass sets it context-wide for every advised bean.
+
+`@Proxyable` (`org.springframework.context.annotation.Proxyable`, since Framework 7.0, targeting a type or a `@Bean` method) takes a `ProxyType`: `INTERFACES` forces a JDK dynamic proxy, `TARGET_CLASS` forces CGLIB, and the default `DEFAULT` inherits whatever proxy type is globally configured. `proxyTargetClass` (via `@EnableAspectJAutoProxy`, `@EnableTransactionManagement`, or Boot's `spring.aop.proxy-target-class`) is a single context-wide switch that applies the same choice to every advised bean. `@Proxyable` is the per-bean escape hatch from that switch: core Spring Framework still documents interface-based (JDK) proxying as its suggested default, while Spring Boot separately defaults to CGLIB, so a bean needing the opposite of whatever its application defaults to no longer requires flipping the global setting. Like any other proxying mechanism it has no effect on its own — the bean must already be a proxy candidate (`@Transactional`, `@Cacheable`, a matching `@Aspect`, method security) or `@Proxyable` changes nothing.
 
 ---
 

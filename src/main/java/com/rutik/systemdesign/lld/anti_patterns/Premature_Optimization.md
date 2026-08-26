@@ -390,6 +390,68 @@ A high-frequency data ingestion service had its inner loop "optimized" over four
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What does "premature" actually mean in Premature Optimization — is all early optimization wrong?**
+**Short:** Premature means unmeasured, not early — Knuth explicitly says not to pass up the critical 3% of real bottlenecks.
+Knuth's full 1974 quote is: "We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%." The sentence is almost always quoted with the second half cut off, which reverses the advice — Knuth is not saying never optimize, he's saying find the measured 3% first and then do optimize it. "Premature" specifically means optimizing before measurement has identified a real bottleneck, not optimizing early in a project's timeline.
+
+**Q: In the `ProductSearchService` example, what was the actual bottleneck, and how much time was spent on things that weren't it?**
+**Short:** 94% of latency was a database round trip; the two-day custom-cache-and-bit-manipulation effort touched a path under 6% of latency.
+The refactored version's profiling comment states 94% of latency was `repository.findByQuery()` (a DB round trip), 4% was the relevance scoring loop, and 2% was everything else — meaning the hand-rolled LRU cache, manual string interning, bitwise bucket-size trick, and hand-rolled hash function collectively optimized code responsible for a small fraction of total latency, while the actual fix (an index on `products(name, description)`, tracked as DB-1042) was never addressed. The engineer spent two days optimizing the wrong thing entirely.
+
+**Q: What two production bugs did the "optimizations" in the violation example actually introduce?**
+**Short:** A thread-unsafe hand-rolled LRU cache, and a pre-allocated instance-field buffer reused unsafely across concurrent calls.
+The `LinkedHashMap` subclass implementing `removeEldestEntry()` has a non-thread-safe `size()` check that can let the cache grow unboundedly under concurrent load. Separately, `resultBuffer` is a pre-allocated `ArrayList` held as an instance field and reused across method calls under the mistaken belief that `ArrayList` allocation was expensive — under concurrent invocation, this causes results from one caller's search to bleed into another caller's results. Both bugs were introduced specifically by the optimization code, not by the underlying business logic.
+
+**Q: Why does `b.getRelevanceScore() - a.getRelevanceScore()` as a comparator have a hidden bug?**
+**Short:** Subtraction-based integer comparators can silently overflow for large score values, producing incorrect sort order.
+Subtracting two `int` values to build a comparator's return value is a well-known Java gotcha: if the scores are large enough, the subtraction can overflow the `int` range and produce a result with the wrong sign, causing the sort to silently misorder elements without throwing any exception. `Comparator.comparingInt()` avoids this because it compares the extracted keys directly rather than subtracting them. The "Integer Overflow Bug in Production" scenario shows this exact pattern surviving in a real recommendation engine for years, only manifesting once score ranges grew large enough to trigger it.
+
+**Q: What is the Three-Phase Mantra for avoiding premature optimization?**
+**Short:** Make it work, make it right, make it fast — in that order, with "fast" only after profiling proves a need.
+Phase one is making the code correct, readable, and simple. Phase two is making it well-tested and well-structured. Phase three — making it fast — comes only after profiling proves the code is actually too slow for its requirements, and it targets specifically the measured hotspot rather than the whole codebase. Skipping straight to phase three, as the violation example does, produces code that is neither correct in its edge cases nor demonstrably faster, since it was never benchmarked against the readable alternative.
+
+**Q: Why is "avoiding method calls due to overhead" a myth in modern Java specifically?**
+**Short:** The JIT compiler inlines hot method calls automatically, eliminating the overhead the belief assumes still exists.
+Modern JVMs use Just-In-Time compilation that identifies frequently-executed ("hot") methods and inlines their bodies directly into the caller at the machine-code level, eliminating the call overhead a naive mental model assumes is paid every time. Avoiding method extraction on the belief that "calls are slow" sacrifices readability for a cost the JIT compiler has already optimized away — this is listed explicitly among the code smells in this file as a case where the underlying belief simply doesn't hold in Java the way it might in an unoptimized interpreted language.
+
+**Q: What is the correct order of steps once you suspect a real performance problem?**
+**Short:** Profile under realistic load, confirm the bottleneck is measured, optimize only that hotspot, then verify with a benchmark before shipping.
+The evidence-driven loop is: write clear, simple, correct code; profile in production or under realistic load; identify the actual bottleneck from the profiler's output, not from intuition; optimize only the measured hotspot; and verify the optimization actually helps with a benchmark before merging. Any other order — guessing what's slow, hand-optimizing blindly, and merging without measuring — is exactly the shortcut path this file's diagram marks in red, and it's the path that produced all nine numbered "PREMATURE OPTIMIZATION" markers in the violation example.
+
+**Q: Why did replacing all stream operations with `parallelStream()` reduce throughput in the "Premature Parallel Stream" scenario?**
+**Short:** Batches of only ~50 items meant the fork-join pool's coordination overhead exceeded the actual work being parallelized.
+`parallelStream()` splits work across the JVM's common fork-join pool, which has real coordination and thread-contention costs — for small workloads (this scenario processed roughly 50 items per batch), that overhead can exceed the time saved by parallelizing the actual work, producing a net throughput loss. Because the team applied `parallelStream()` as a blanket policy on the belief "parallel is always faster" rather than measuring per-workload, throughput dropped 30% in production and took two weeks to diagnose and revert — parallelism is a tool with its own overhead, not a universal win.
+
+**Q: What is JMH, and why do ad-hoc `System.currentTimeMillis()` micro-benchmarks mislead?**
+**Short:** JMH properly accounts for JIT warm-up; naive timing loops measure the interpreter, not the steady-state optimized code.
+JMH (Java Microbenchmark Harness) is the standard tool for writing correct Java benchmarks because it handles JIT warm-up iterations, dead-code elimination prevention, and statistical measurement correctly — a naive benchmark that just times a loop with `System.currentTimeMillis()` captures a mix of interpreted execution and partially-optimized JIT compilation, producing numbers that don't reflect the code's actual steady-state performance in production. This file's warning-signs list explicitly calls out "micro-benchmarks written without JMH that produce misleading results due to JIT warm-up" as a smell in its own right.
+
+**Q: How does replacing a hand-rolled cache with Caffeine fix both the bug and the design problem at once?**
+**Short:** Caffeine is a battle-tested, thread-safe library, eliminating the concurrency bug while removing a custom artifact nobody has to maintain.
+The refactored version replaces the broken `LinkedHashMap` subclass with `Caffeine.newBuilder().maximumSize(1000).expireAfterWrite(5, TimeUnit.MINUTES).build()` — this is simultaneously the correctness fix (Caffeine is thread-safe by design, eliminating the race condition) and the maintainability fix (nobody on the team has to understand, document, or debug a custom cache implementation, since Caffeine has over a decade of battle-testing and community documentation behind it). This illustrates the general prevention strategy: prefer standard library or well-known third-party components over hand-rolled data structures by default.
+
+**Q: What did the "Billion-Dollar Micro-Optimization" scenario reveal about where engineering time actually went versus where the real gain was?**
+**Short:** Three weeks of hash-table micro-optimization saved 0.3 microseconds; a one-hour MTU config fix saved 40 microseconds.
+A trading firm spent three weeks hand-rolling an open-addressing hash table and eliminating hot-path allocations in their order matching engine, achieving a 0.3-microsecond-per-operation improvement. Meanwhile, a suboptimal network MTU setting was adding 40 microseconds of latency per message — a one-hour configuration fix. The three-week optimization project delivered roughly 0.75% of the benefit that the one-hour fix produced, because the team never profiled to confirm where the actual latency was concentrated before investing weeks of effort.
+
+**Q: How does premature caching create correctness bugs rather than just wasted effort, at the HLD level?**
+**Short:** Adding Redis before profiling proves DB latency is the bottleneck introduces cache invalidation complexity and consistency bugs.
+Unlike a purely wasted-effort optimization, premature caching is described as often causing subtle correctness issues that are harder to debug than the performance problem it was meant to solve — once a cache is in place, every write path must correctly invalidate or update it, and a missed invalidation path produces stale data that's served silently and incorrectly. The lesson mirrors the LLD-level advice: profile first, prove that database read latency is genuinely the measured bottleneck, and only then accept the invalidation-complexity cost that caching introduces.
+
+**Q: Why does the file's relevance-scoring bit-flag logic have a silent correctness bug on top of being unreadable?**
+**Short:** The description-match branch does `score |= 0`, a no-op, so description matches never actually contribute to the score.
+The bit-flag packing intends to combine exact-match, prefix-match, contains-match, and description-match signals into one score, but the description branch is written as `if (desc.contains(normalizedQuery)) score |= 0;` — bitwise-OR with zero is always a no-op, so this line does nothing regardless of whether the condition is true. The bug is a direct consequence of the optimization's unreadability: a straightforward `score += 1` would have made the same mistake immediately visible, while the bit-flag version hid it well enough that nobody caught it before the refactor rewrote it correctly as `if (description.contains(query)) score += 1;`.
+
+**Q: What review-time red flags does this file recommend for catching premature optimization before merge?**
+**Short:** Any bitwise trick or hand-rolled data structure without a cited benchmark, and any "faster" claim without measurement data.
+Reviewers should challenge any bitwise trick without a cited benchmark justifying it, any hand-rolled data structure substituted for a standard library equivalent without a profiling justification, any comment claiming something is "faster" with no measurement backing the claim, and any substitution of a standard library call with a custom implementation absent evidence the standard one was actually a bottleneck. These four checks map directly onto the nine numbered optimizations in the violation example — none of which cited a benchmark, because none of them were ever measured.
+
+**Q: Why does "optimized code looks impressive" create a false sense of performance confidence at the team level?**
+**Short:** When a system appears heavily optimized, teams deprioritize real investigation, letting actual bottlenecks like missing indexes go unaddressed.
+Once bit manipulation, custom caches, or other visibly "clever" code is merged, the presence of that complexity signals to the team that performance work has already happened, even when none of it was ever measured against the real bottleneck. This causes real problems — missing database indexes, N+1 queries, synchronous I/O on the main thread — to go unaddressed for longer, because attention that should go toward profiling gets absorbed by the assumption that the hard performance work is done. The `ProductSearchService` example is the direct illustration: nine numbered optimizations shipped while the actual missing index sat untouched.
+
 ## Quick Reference Summary
 
 | Dimension | Details |

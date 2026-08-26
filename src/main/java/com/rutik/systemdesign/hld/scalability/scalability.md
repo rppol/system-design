@@ -1,37 +1,6 @@
 # Scalability
 
-## Table of Contents
-1. [Concept Overview](#concept-overview)
-2. [Core Principles](#core-principles)
-3. [Types and Strategies](#types-and-strategies)
-4. [Architecture Diagrams](#architecture-diagrams)
-5. [How It Works](#how-it-works)
-6. [Real-World Examples](#real-world-examples)
-7. [Tradeoffs](#tradeoffs)
-8. [When to Use](#when-to-use)
-9. [When NOT to Use](#when-not-to-use)
-10. [Common Pitfalls](#common-pitfalls)
-11. [Technologies and Tools](#technologies-and-tools)
-12. [Interview Questions](#interview-questions)
-13. [Best Practices](#best-practices)
-14. [Metrics and Monitoring](#metrics-and-monitoring)
-15. [Case Study](#case-study)
-
----
-
-## Intuition
-
-> **One-line analogy**: Scalability is like a restaurant that can add more tables and waitstaff as customers increase, rather than making one waiter run faster.
-
-**Mental model**: Vertical scaling (bigger server) is like hiring a superhero waiter — there's a physical ceiling to how fast one person can work. Horizontal scaling (more servers) is like hiring more normal waiters — you can keep adding indefinitely, but now you need a host to route customers (load balancer) and a way to share information between waiters (distributed coordination). The goal: make the system stateless so any server can handle any request.
-
-**Why it matters**: Scalability is the difference between a startup app that crashes at 1000 users and a production system serving 1 billion users. The architectural decisions made early (stateless services, database replication, caching) determine how easily you can scale later.
-
-**Key insight**: The hardest part of scaling isn't adding more servers — it's managing shared state (databases, sessions, caches) as the system grows. Stateless application servers are trivial to scale; stateful databases are the bottleneck.
-
----
-
-## Concept Overview
+## 1. Concept Overview
 
 Scalability is the ability of a system to handle a growing amount of work by adding resources. A scalable system maintains acceptable performance levels as the load increases — whether that load is more users, more data, more transactions, or more geographic regions.
 
@@ -49,7 +18,19 @@ Scalability is not just about handling more traffic — it also encompasses data
 
 ---
 
-## Core Principles
+## 2. Intuition
+
+> **One-line analogy**: Scalability is like a restaurant that can add more tables and waitstaff as customers increase, rather than making one waiter run faster.
+
+**Mental model**: Vertical scaling (bigger server) is like hiring a superhero waiter — there's a physical ceiling to how fast one person can work. Horizontal scaling (more servers) is like hiring more normal waiters — you can keep adding indefinitely, but now you need a host to route customers (load balancer) and a way to share information between waiters (distributed coordination). The goal: make the system stateless so any server can handle any request.
+
+**Why it matters**: Scalability is the difference between a startup app that crashes at 1000 users and a production system serving 1 billion users. The architectural decisions made early (stateless services, database replication, caching) determine how easily you can scale later.
+
+**Key insight**: The hardest part of scaling isn't adding more servers — it's managing shared state (databases, sessions, caches) as the system grows. Stateless application servers are trivial to scale; stateful databases are the bottleneck.
+
+---
+
+## 3. Core Principles
 
 ### 1. Statelessness
 Each request contains all information needed to process it. No server-side session state means any server can handle any request, enabling horizontal scaling.
@@ -74,7 +55,7 @@ Provision resources dynamically in response to actual load rather than peak esti
 
 ---
 
-## Types and Strategies
+## 4. Types / Architectures / Strategies
 
 ### Vertical Scaling (Scale Up)
 Add more resources to a single machine — more CPU cores, RAM, or faster disks.
@@ -112,9 +93,109 @@ Automatically add or remove instances based on metrics:
 - Store uploaded files in object storage (S3), not local disk
 - Externalize all configuration (environment variables, config service)
 
+### Back-of-the-Envelope Capacity Estimation
+
+Every scaling decision on this page is downstream of an arithmetic question: *how much?* A
+design that cannot say how many servers, how many terabytes, and how many dollars is a
+diagram, not a design — and a 2026 interview grades cost and sizing explicitly rather than
+treating them as bonus points. The estimate does not have to be right. It has to be **fast,
+stated aloud, and within about 2x**, because its only job is to decide which architecture is
+even in scope.
+
+**Estimate four axes, always in this order.** Each falls out of the one before it:
+
+| Axis | Derived from | Decides |
+|---|---|---|
+| **QPS** | DAU x actions/user/day, converted to peak | Server count, connection-pool sizing, whether a cache is mandatory |
+| **Storage** | writes/day x bytes/write x retention x replication | Database choice, sharding, whether it fits on one machine |
+| **Bandwidth** | QPS x payload size | CDN necessity, egress cost, NIC saturation |
+| **Connections** | concurrent users x connections/user | Push vs. poll, load-balancer and gateway fleet size |
+
+**The four rules that keep the arithmetic honest.**
+
+1. **Peak, never average.** `avg QPS = daily_ops / 86,400` (round 86,400 to 100k and take the
+   error). Real traffic is not flat: apply a peak factor of **3x** for a consumer app with a
+   daily cycle, and 5-10x if the product has scheduled events (a match kickoff, a flash sale,
+   a daily reset). Sizing on average QPS is the single most common estimation error, and it
+   fails at exactly the moment anyone is watching.
+2. **Replication multiplies storage; it does not multiply QPS capacity for writes.** Three
+   replicas means **3x** the bytes on disk, and every write is applied three times. Read
+   capacity scales with replicas; write capacity does not.
+3. **Indexes are not free.** Budget **20-40%** on top of raw row bytes for secondary
+   indexes, and remember that every added index taxes every write.
+4. **Storage is meaningless without a retention window.** "1 TB/day" is not a number; "1
+   TB/day retained 90 days, then downsampled" is.
+
+**Worked example — a photo-sharing service at 10M DAU.**
+
+```
+Given: 10M DAU, 5 photo views/user/day, 0.2 uploads/user/day, 500 KB average photo,
+       3x replication, 1 year retention.
+
+READ QPS
+  10M DAU x 5 views/day        = 50M views/day
+  50M / 86,400 s               ~ 580 QPS average
+  x 3 peak factor              ~ 1,700 QPS peak     <- size the read tier for this
+
+WRITE QPS
+  10M DAU x 0.2 uploads/day    = 2M uploads/day
+  2M / 86,400                  ~ 23 QPS average
+  x 3                          ~ 70 QPS peak        <- trivially small; writes are not the problem
+
+STORAGE
+  2M uploads/day x 500 KB      = 1 TB/day raw
+  x 3 replication              = 3 TB/day
+  x 365 days                   ~ 1.1 PB/year        <- object storage, not a database
+
+BANDWIDTH (egress)
+  1,700 QPS x 500 KB           ~ 850 MB/s ~ 6.8 Gbps sustained
+  50M views/day x 500 KB       = 25 TB/day egress = 750 TB/month
+  at ~$0.085/GB cloud egress   ~ $64,000/month      <- a CDN is not an optimization here,
+                                                      it is the difference between viable
+                                                      and not
+SERVERS
+  1,700 QPS / 500 QPS per node ~ 4 nodes, x2 for headroom and AZ redundancy = 8
+```
+
+Four lines of arithmetic changed the design: writes are negligible, reads are large but
+cacheable, storage belongs in object storage rather than a database, and **egress is the
+dominant cost** — so the CDN and the cache-hit-rate target are the load-bearing decisions,
+not the application tier. That is what the estimate is for.
+
+**Re-size at 10x before you commit.** Multiply DAU by ten and re-read the four numbers:
+17,000 QPS, 11 PB/year, 68 Gbps, $640k/month egress. If an architecture survives the 10x
+pass with the same shape and only more instances of each box, it scales. If a box has to
+change *kind* — one Postgres becomes a sharded fleet, one region becomes many — that is
+where the interesting design work is, and naming it is worth more than the estimate itself.
+
+**Latency numbers worth memorizing.** Every capacity claim eventually reduces to "how long
+does this operation take". Carry one ladder, in orders of magnitude, and scale it to human
+time so the ratios stick:
+
+| Operation | Time | If 1 ns were 1 second |
+|---|---|---|
+| L1 cache reference | ~1 ns | 1 second |
+| Branch mispredict | ~3 ns | 3 seconds |
+| L2 cache reference | ~4 ns | 4 seconds |
+| Main memory reference | ~100 ns | 1.7 minutes |
+| Compress 1 KB (Snappy) | ~2 us | 33 minutes |
+| SSD random read | ~16 us | 4.4 hours |
+| Read 1 MB sequentially from memory | ~50 us | 14 hours |
+| Round trip within the same datacenter | ~500 us | 5.8 days |
+| Read 1 MB sequentially from SSD | ~1 ms | 11.6 days |
+| Disk seek (spinning) | ~2 ms | 23 days |
+| Read 1 MB sequentially from disk | ~5 ms | 58 days |
+| Round trip California to Netherlands | ~150 ms | 4.8 years |
+
+The two ratios that decide architectures: **memory is roughly 100x faster than SSD and
+10,000x faster than a cross-continent round trip**, which is why a cache hit and a cache miss
+are different products; and a **same-datacenter round trip is ~500 us**, which is why a
+request that makes 20 sequential service calls has already spent 10 ms before doing any work
+— the argument for parallel fan-out over a call chain.
+
 ---
 
-## Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Vertical vs Horizontal Scaling
 
@@ -239,7 +320,7 @@ The controller (orange) continuously watches incoming metric signals (teal) and,
 
 ---
 
-## How It Works
+## 6. How It Works — Detailed Mechanics
 
 ### Horizontal Scaling Mechanics
 
@@ -331,7 +412,7 @@ are short of nodes or short of independence.
 
 ---
 
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Netflix
 - Runs entirely on AWS, using horizontal scaling across hundreds of microservices
@@ -360,7 +441,7 @@ are short of nodes or short of independence.
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Aspect | Vertical Scaling | Horizontal Scaling |
 |--------|-----------------|-------------------|
@@ -386,7 +467,9 @@ are short of nodes or short of independence.
 
 ---
 
-## When to Use
+## 9. When to Use / When NOT to Use
+
+### When to Use
 
 - **Expecting 10x+ traffic growth** in the next 12-18 months
 - **Traffic is highly variable** (e.g., retail with Black Friday spikes)
@@ -398,7 +481,7 @@ are short of nodes or short of independence.
 
 ---
 
-## When NOT to Use
+### When NOT to Use
 
 - **Early-stage startup** with no proven traffic — over-engineering kills velocity
 - **Internal tool or low-traffic service** — YAGNI (You Ain't Gonna Need It)
@@ -409,7 +492,7 @@ are short of nodes or short of independence.
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 ### 1. Premature Optimization
 Designing for 100M users before you have 1,000. The "premature scalability" tax is real — it slows down feature development and adds complexity before it's needed.
@@ -435,9 +518,40 @@ Each application server opens N connections to the database. With 50 app servers
 ### 8. Synchronous Fanout
 Sending an email, updating analytics, and refreshing a cache all synchronously as part of a user request. Each dependency increases latency and failure risk. Move non-critical work to async queues.
 
+### 9. Sizing on Average QPS Instead of Peak
+
+*Broken:* "50M requests a day divided by 86,400 is 580 QPS, so four servers at 500 QPS each
+with one spare." The fleet is correctly sized for 3 a.m. and 40% short at 8 p.m., and the
+first thing that happens under real peak is that queues build, latency climbs, health checks
+start timing out, and the load balancer removes healthy nodes — turning a 40% shortfall into
+an outage.
+
+*Fix:* size for peak, and derive peak explicitly rather than assuming it. `peak = average x
+peak_factor`, with a peak factor of 3x for a normal consumer diurnal cycle and 5-10x when the
+product has scheduled events. Then add headroom for the AZ you are willing to lose: with
+three AZs, the surviving two must carry 100% of peak, so provision to 150% of peak, not 100%.
+For the 580 QPS example that is 1,700 QPS peak, ~4 nodes of capacity, provisioned as 8.
+
+### 10. Storage Estimates That Forget the Multipliers
+
+Raw row bytes are never the answer. A "100 GB of user data" estimate becomes ~450 GB in
+practice: **x3** for replication, **+20-40%** for secondary indexes, plus WAL and backup
+copies, and the number is meaningless anyway until a retention window is attached — "10 GB
+per day" without "kept for 2 years" does not size anything. Quote every storage figure as
+`raw x replication x (1 + index overhead) x retention`, and say the retention aloud.
+
+### 11. Ignoring Egress Cost Until the Bill Arrives
+
+Compute and storage are the numbers people estimate; **egress is usually the one that
+dominates** for any media-serving system. At roughly $0.085/GB, 750 TB of monthly cloud
+egress is about $64,000/month — often more than the entire application tier. This is why
+"add a CDN" is a capacity decision, not a latency optimization: moving the cache-hit rate
+from 80% to 95% cuts that bill by 75%. Estimate bandwidth as its own axis, in dollars, every
+time.
+
 ---
 
-## Technologies and Tools
+## 11. Technologies & Tools
 
 ### Application Scaling
 - **Kubernetes (k8s)** — Container orchestration with Horizontal Pod Autoscaler (HPA)
@@ -468,7 +582,7 @@ Sending an email, updating analytics, and refreshing a cache all synchronously a
 
 ---
 
-## Interview Questions
+## 12. Interview Questions with Answers
 
 **Q1: What is the difference between horizontal and vertical scaling?**
 **Short:** Vertical scaling upgrades one machine; horizontal scaling adds more machines with no hard upper bound.
@@ -555,9 +669,29 @@ Each architecture was the right one for its scale, and the bottleneck that force
 
 You entered the retrograde region of the Universal Scalability Law, where the cost of keeping nodes coherent grows faster than the capacity they add. Gunther's model, `C(N) = N / (1 + a(N-1) + b*N*(N-1))`, has two drag terms: contention `a` — work that must serialize, like a single write primary or a shared lock — which grows linearly with N, and coherency `b` — the cost of keeping N copies of state agreed, like cache invalidation chatter, gossip or cross-shard reads — which grows quadratically because every node may have to talk to every other one. With `a = 0.03` and `b = 0.0001`, throughput peaks at `N* = sqrt((1-a)/b) = 98.5` nodes at about 20.2x, and 200 nodes deliver 18.3x — measurably worse than 100 for twice the money. Set `b = 0` and the formula collapses to Amdahl's Law, which merely flattens at `1/a` (33x here); the turn-downward is what distributed coordination adds on top. The fix is never more nodes: shrink `a` by removing the serialization point and shrink `b` by partitioning so nodes do not need to agree, and fit both parameters from two or three real load tests before approving the next capacity purchase.
 
+**Q18: You are given "10 million daily active users" and nothing else — how do you get to a peak QPS number?**
+**Short:** Multiply DAU by actions per user per day, divide by 86,400 for average QPS, then multiply by a peak factor of about 3.
+
+Multiply DAU by an assumed actions-per-user-per-day, divide by 86,400 seconds, then apply a peak factor. For 10M DAU at 5 reads per user per day: 50M reads/day, divided by 86,400 gives roughly 580 QPS average, and a 3x peak factor gives about 1,700 QPS — the number you actually size for. Three things make or break this. State the actions-per-user assumption aloud, because it is the one number the interviewer may want to change and everything downstream moves with it. Use peak, never average: traffic follows a daily cycle, and a fleet sized for the mean is roughly 40% short at the evening peak, which is precisely when queueing turns a shortfall into an outage. And pick the peak factor from the product's shape — 3x for a normal consumer diurnal curve, 5-10x when there are scheduled events like a match kickoff, a flash sale, or a daily quest reset. Round aggressively while you do it (86,400 is 100k); a 15% arithmetic error changes nothing, and a 10x error changes the architecture.
+
+**Q19: How much storage does a 10M-DAU photo service need for a year, and what do people forget?**
+**Short:** About 1.1 PB, because raw bytes must be multiplied by replication and retention and then padded for index overhead.
+
+Roughly 1.1 PB, and the raw upload volume is only a third of it. Work it forward: 10M DAU at 0.2 uploads per user per day is 2M uploads/day; at 500 KB each that is 1 TB/day of raw bytes; three replicas make it 3 TB/day; over 365 days that is about 1.1 PB. The three things routinely forgotten are all multipliers rather than rounding errors — the **replication factor** (3x is the default assumption, and it multiplies bytes even though it does not multiply write capacity), **index and metadata overhead** (budget 20-40% on top of raw rows for anything stored in a database), and the **retention window**, without which a storage figure means nothing at all. Note what the number then tells you: a petabyte a year is not a database question, it is an object-storage question with a metadata index in front of it — so the estimate has already made an architectural decision before any boxes were drawn.
+
+**Q20: When is a 2x error in an estimate perfectly acceptable, and when is it disqualifying?**
+**Short:** A 2x error is fine when it does not change the architecture, and disqualifying when it moves you across a capability boundary.
+
+A 2x error is fine whenever both answers land on the same side of an architectural boundary, and fatal when they straddle one. The estimate exists to choose between designs, not to size a purchase order: 4 servers or 8 is a scaling-group parameter, so being 2x off costs nothing. But 200 GB versus 400 GB straddles nothing while 2 TB versus 20 TB decides single-node Postgres versus a sharded fleet, 500 GB versus 5 TB decides whether the working set fits in RAM, and 5 Gbps versus 50 Gbps decides whether a single region can serve the traffic at all. So the discipline is to notice which boundary you are near and tighten only that number — and to be conservative in the direction that is expensive to be wrong about, since under-provisioning storage is a migration and over-provisioning it is a line item. Order-of-magnitude errors are always disqualifying, which is why carrying units through every step and sanity-checking against a known scale ("this is claiming more photos per day than Instagram") matters more than precision.
+
+**Q21: You estimate 1,700 peak QPS and each node handles 500 QPS — how many nodes do you provision, and why not four?**
+**Short:** Provision eight, because capacity must survive losing an availability zone and must leave headroom above the knee of the latency curve.
+
+Eight, not four, and both extra factors are things a bare division hides. Start with the arithmetic: 1,700 / 500 is 3.4, so four nodes of raw capacity. Then apply failure headroom — if you run across three AZs and must survive losing one, the remaining two-thirds of the fleet has to carry 100% of peak, which means provisioning to roughly 150% of peak. Then apply utilization headroom: a queueing system's latency curve turns sharply upward as utilization approaches 100%, so the practical target is 60-70% utilization at peak, not 95%. Four nodes running at 85% during a normal peak have no room for a deployment, a GC pause, or a retry storm. Eight nodes gives about 4,000 QPS of capacity against 1,700 QPS of peak demand, survives an AZ loss, and leaves room for the traffic to be 50% larger than you guessed. Say the per-node 500 QPS aloud as an assumption too — it comes from a load test, and if you have not run one, it is a guess that everything above inherits.
+
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Measure before you optimize.** Profile first — identify the actual bottleneck before adding complexity.
 2. **Design for statelessness from day one.** Retrofitting statelessness is painful. Use external session stores from the start.
@@ -572,7 +706,7 @@ You entered the retrograde region of the Universal Scalability Law, where the co
 
 ---
 
-## Metrics and Monitoring
+### Metrics and Monitoring
 
 ### Application Metrics
 | Metric | Description | Alert Threshold |
@@ -608,7 +742,7 @@ You entered the retrograde region of the Universal Scalability Law, where the co
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement Scalability**
 
@@ -623,7 +757,7 @@ You entered the retrograde region of the Universal Scalability Law, where the co
 
 ---
 
-## Case Study: Scaling Discord's Real-Time Gateway to Millions of Concurrent Users
+## 14. Case Study: Scaling Discord's Real-Time Gateway to Millions of Concurrent Users
 
 > **How to read this case study.** The architecture and its rationale come from Discord's
 > public record: one Elixir/BEAM `GenServer` process per guild, session processes per

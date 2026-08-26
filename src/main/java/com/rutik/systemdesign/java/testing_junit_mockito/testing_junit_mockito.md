@@ -50,6 +50,7 @@ The architecture is three layers: JUnit Platform (the launcher and engine SPI), 
 | `@Disabled` | Skip a test with an optional reason |
 | `@ExtendWith` | Register extensions (e.g., MockitoExtension) |
 | `@TestInstance(PER_CLASS)` | One instance per class instead of per-method |
+| `@TempDir` | Injects a JUnit-managed temporary directory (parameter or field); deleted automatically after the test |
 
 ### 4.2 Parameterized Test Sources
 
@@ -71,6 +72,54 @@ The architecture is three layers: JUnit Platform (the launcher and engine SPI), 
 | **Stub** | Returns canned answers to calls | `when(repo.findById(1)).thenReturn(user)` |
 | **Spy** | Wraps a real object, records calls | Verify a real object's interactions |
 | **Mock** | Pre-programmed with expectations | Verify behavior AND stub responses |
+
+### 4.4 Test Suites — `junit-platform-suite`
+
+`@Suite` is not part of `junit-jupiter` — it ships in the separate `junit-platform-suite` artifact (`org.junit.platform:junit-platform-suite`, versioned with the rest of the JUnit 6.x platform), which is the first thing that trips people up: adding `@Suite` to a project that only has `junit-jupiter` on the classpath does not compile.
+
+| Annotation | Purpose |
+|-----------|---------|
+| `@Suite` | Marks a class as a test-suite entry point; running this class runs every test the selectors below resolve to |
+| `@SelectPackages("com.payflow.integration")` | Runs every test found under the given package(s) |
+| `@SelectClasses({OrderIT.class, PaymentIT.class})` | Runs an explicit list of test classes |
+| `@IncludeTags("integration")` | Filters the selection down to classes/methods carrying a matching `@Tag` |
+| `@ExcludeTags("slow")` | Inverse filter |
+
+```java
+@Suite
+@SuiteDisplayName("Integration Test Suite")
+@SelectPackages("com.payflow.integration")
+@IncludeTags("integration")
+class IntegrationTestSuite {
+    // no test methods of its own — running THIS class runs everything selected below it
+}
+```
+
+A suite still earns its place for grouping a genuinely *slow* class of tests — Testcontainers-backed integration tests, a full Spring context — behind one runnable entry point that a separate build profile or CI stage invokes on its own schedule. Where tags alone are better: filtering *within* one fast run (`@Tag("slow")` plus Surefire/Gradle's `<groups>`/`<excludedGroups>`) needs no suite at all, and most teams reaching for `@Suite` actually wanted a tag-based filter on the existing run, not a second entry point whose selector list has to be kept in sync with the test tree by hand.
+
+### 4.5 Architecture Fitness Testing — ArchUnit
+
+Layering rules and dependency direction ("no class in `..domain..` may depend on `..infrastructure..`") are invariants a design doc states and code review enforces inconsistently. ArchUnit (`com.tngtech.archunit:archunit-junit5`) turns them into a JUnit test that runs, and fails, on every build — which is why it belongs in a testing module rather than a design or build one: it is a real, executable test, just one whose subject is the codebase's shape instead of one class's behavior.
+
+```java
+@AnalyzeClasses(packages = "com.payflow", importOptions = ImportOption.DoNotIncludeTests.class)
+class ArchitectureTest {
+
+    @ArchTest
+    static final ArchRule domainDoesNotDependOnInfrastructure =
+        ArchRuleDefinition.noClasses()
+            .that().resideInAPackage("..domain..")
+            .should().dependOnClassesThat().resideInAPackage("..infrastructure..");
+
+    @ArchTest
+    static final ArchRule servicesAreNamedConsistently =
+        ArchRuleDefinition.classes()
+            .that().resideInAPackage("..service..")
+            .should().haveSimpleNameEndingWith("Service");
+}
+```
+
+`@AnalyzeClasses` performs a one-time bytecode scan of the target packages and hands the imported class graph to every `@ArchTest` field/method in the class. That scan is the honest cost of the feature: importing and analyzing a whole module's bytecode is measurably slower than an ordinary unit test, so most teams either put ArchUnit tests in their own source set (run once per CI build, not per commit) or tag them (`@Tag("architecture")`) and exclude them from the fast local loop, running them in the same CI stage as the integration suite rather than on every `mvn test`.
 
 ---
 
@@ -407,6 +456,46 @@ void expiredSubscription_returnsTrue() {
 // No mocking needed — just inject a fixed clock.
 ```
 
+### `@TempDir` — Replacing Hand-Rolled Temporary Files
+
+```java
+// BROKEN: hand-rolled temp file management
+@Test
+void exportsReportToDisk() throws IOException {
+    File tmp = File.createTempFile("report", ".csv");
+    tmp.deleteOnExit();                       // only runs on a NORMAL JVM exit
+    reportExporter.export(tmp);
+    assertTrue(tmp.length() > 0);
+    // if the test is killed by a CI timeout, the JVM crashes, or another test
+    // calls System.exit(), deleteOnExit() never fires and the file leaks forever
+}
+
+// FIXED: JUnit Jupiter owns the whole lifecycle
+@Test
+void exportsReportToDisk(@TempDir Path tempDir) throws IOException {
+    Path file = tempDir.resolve("report.csv");
+    reportExporter.export(file);
+    assertTrue(Files.size(file) > 0);
+    // JUnit deletes tempDir recursively after the method returns — pass, fail,
+    // or thrown exception — with no shutdown-hook race
+}
+
+// Field form: one directory per test instance (per-method by default, or
+// per-class with @TestInstance(PER_CLASS))
+@TempDir
+Path perTestDir;
+
+// Static field form: ONE directory for the whole class, ready before @BeforeAll
+@TempDir
+static Path perClassDir;
+
+// Override cleanup to inspect a failing test's files locally (default is ALWAYS)
+@TempDir(cleanup = CleanupMode.ON_SUCCESS)
+Path debuggableDir;
+```
+
+`@TempDir` removes two hand-rolled bugs, not one. `File.deleteOnExit()` registers a shutdown hook that only fires on *normal* JVM termination, so a killed CI job, a crashed JVM, or an unrelated `System.exit()` elsewhere in the run leaves the file on disk — thousands of orphaned files across CI history is a real "runner disk full" incident, not a hypothetical one. And a fixed, hand-picked path (`new File("/tmp/report.csv")`) shared across parallel test runs makes tests order- and concurrency-dependent, since two tests racing to write the same path corrupt each other; `@TempDir` allocates a fresh, uniquely-named directory per injection point, so parallel execution is safe by construction rather than by discipline.
+
 ### Strict Stubbing — What `MockitoExtension` Enforces
 
 `@ExtendWith(MockitoExtension.class)` runs at `Strictness.STRICT_STUBS`, which is not a style
@@ -474,6 +563,52 @@ and Mockito currently self-attaches one at runtime while warning that this will 
 in a future JDK — configure `mockito-core` as `-javaagent` in Surefire now rather than after
 the JDK removes dynamic attach.
 
+### Mutation Testing (PIT) — What Line Coverage Doesn't Tell You
+
+Line coverage answers "did this line execute during the suite," not "did any test check what it did." A suite can run every branch, see nothing fail because no assertion was written against that branch's output, and still report 90%+ coverage:
+
+```java
+// 100% line coverage on the discount branch, one real assertion
+int applyDiscount(int cents, boolean isPremium) {
+    if (isPremium) {
+        return cents - (cents / 10);   // this line runs in the test below...
+    }
+    return cents;
+}
+
+@Test
+void premiumGetsADiscount() {
+    assertTrue(applyDiscount(1000, true) < 1000);   // ...but never checks the AMOUNT
+}
+// passes unchanged even if the discount math becomes cents - 1, cents / 2, or 0
+```
+
+PIT (`org.pitest:pitest-maven`) answers the question line coverage can't. It recompiles the production code with small, mechanical **mutations** — flip a conditional (`<` to `<=`), swap an arithmetic operator (`+` to `-`), replace a method body with a constant, delete a call — and reruns the test suite against each mutant. A mutant the suite kills means some test's assertion actually depended on that exact behavior; a mutant that **survives** (every test still passes unmodified) marks a line the suite executes but never verifies — precisely the `cents / 10` line above, which no mutation of `/ 10` breaks the single `< 1000` assertion.
+
+```xml
+<plugin>
+    <groupId>org.pitest</groupId>
+    <artifactId>pitest-maven</artifactId>
+    <version>1.25.9</version>
+    <configuration>
+        <targetClasses><param>com.payflow.payments.*</param></targetClasses>
+        <targetTests><param>com.payflow.payments.*</param></targetTests>
+    </configuration>
+    <dependencies>
+        <!-- required to discover and run JUnit 5 tests; PIT's own engine predates JUnit 5 -->
+        <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>1.2.3</version>
+        </dependency>
+    </dependencies>
+</plugin>
+```
+
+Without `pitest-junit5-plugin`, PIT silently finds and mutates zero tests against a JUnit-5-only module instead of failing loudly — add it whenever the target module has no JUnit 4 tests left.
+
+Two objections explain why most teams run PIT nightly rather than as a PR gate, and both are legitimate rather than laziness. **Runtime**: a mutation run recompiles and reruns the suite once per surviving mutation candidate, so wall-clock time is a multiple — often 10-50x — of a plain test run; the practical fix is scoping `targetClasses` to the module under active work and scheduling the full run nightly or weekly instead of per-PR. **Equivalent mutants**: some mutations change the bytecode without ever changing observable behavior — a mutated line that's dead code, or a comparison where both branches produce the same result for every reachable input — and no test can ever kill one, so a permanent floor of "survived" noise is expected, not a bug in the run. Chasing a 100% mutation score is usually a sign of asserting trivia to kill a mutant rather than testing better behavior; watching the score's *trend* and investigating *new* survivors after a change is the useful signal, not treating the absolute number as a target.
+
 ---
 
 ## 7. Real-World Examples
@@ -537,7 +672,11 @@ A team tested a concurrent queue by creating threads in `@Test`, having them `ad
 | AssertJ | 3.27.x | Fluent assertions (`assertThat(list).hasSize(3).contains("a")`) |
 | Testcontainers | 2.x | Real Docker containers in integration tests |
 | Surefire plugin | 3.5.x | Maven plugin that discovers and runs tests |
-| Jacoco | — | Code coverage reporting |
+| Jacoco | — | Code coverage reporting (line/branch, not mutation) |
+| `junit-platform-suite` | 6.x (same version as Jupiter) | Separate artifact providing `@Suite`, `@SelectPackages`, `@SelectClasses`, `@IncludeTags` |
+| ArchUnit (`archunit-junit5`) | 1.5.x | Architecture-fitness tests — layering, naming, and dependency-direction rules enforced at build time |
+| PIT (`pitest-maven`) | 1.25.x | Mutation testing — measures whether tests verify behavior, not just execute it |
+| `pitest-junit5-plugin` | 1.2.x | Bridge letting PIT discover and run JUnit 5/Jupiter tests |
 | `@SpringBootTest` / `@MockitoBean` | Spring Boot | Spring context integration test with bean overrides; `@MockitoBean` is the only form — `@MockBean` was removed in Boot 4 |
 
 ---
@@ -641,6 +780,18 @@ Strict stubbing is `MockitoExtension`'s default (`Strictness.STRICT_STUBS`): a s
 **Q17: How do you mock a `final` class, a static method, or an object the code constructs itself?**
 **Short:** Mockito 5's inline mock maker lets mock(), mockStatic(), and mockConstruction() mock final classes, statics, and constructed objects directly.
 All three work with plain `mockito-core` 5.x, because the inline mock maker became the default in Mockito 5.0. `mock(FinalGateway.class)` needs no extra artifact and no `MockMaker` resource file; the separate `mockito-subclass` artifact now exists for the cases the inline maker cannot serve, chiefly GraalVM native image. Statics use `mockStatic(Util.class)` and constructors use `mockConstruction(Foo.class)`; both return a `Closeable` scope that must sit in a try-with-resources, because the mock is registered per thread and leaking it corrupts every later test in that JVM. Treat all three as escape hatches for code you cannot change — a `final` collaborator you own is better injected as an interface, and a static call is better wrapped behind one. One build concern: the inline maker needs a Java agent, and Mockito currently self-attaches one while warning that dynamic attach will be disallowed in a future JDK, so wire `mockito-core` in as a `-javaagent` in Surefire before that lands.
+
+**Q18: A service has 92% line coverage and still ships bugs — what does that number not tell you, and what measures the gap?**
+**Short:** Line coverage shows which lines ran, not which lines were actually verified by an assertion.
+Line coverage only proves a line executed during the suite; it says nothing about whether any assertion checked the result that line produced. A test can call a method, run every branch inside it, and assert something trivial or unrelated — coverage still reports 100% on code nothing meaningfully checks. Mutation testing (PIT) measures the gap directly: it changes the production code in small ways (flip a conditional, swap an operator, return a constant) and reruns the suite; if every test still passes, that mutant *survived*, meaning the line it changed was executed but never verified. A high line-coverage number paired with a low mutation score is the signature of a suite that runs code without testing it — the fix is adding assertions on the actual computed values, not adding more calls that merely invoke the method.
+
+**Q19: Why is `@TempDir` better than `File.createTempFile()` plus `deleteOnExit()`?**
+**Short:** deleteOnExit only fires on a normal JVM exit, so a killed test run leaks the file forever.
+`File.deleteOnExit()` registers a JVM shutdown hook that only runs on *normal* termination — a test killed by a CI timeout, a crashed JVM, or a `System.exit()` elsewhere in the run leaves the file on disk permanently, and thousands of orphaned files across CI history is a real "runner disk full" incident, not a hypothetical one. `@TempDir` hands JUnit Jupiter ownership of the entire lifecycle instead: it allocates a fresh, uniquely-named directory per injection point and deletes it recursively after the test method returns, whether it passed, failed, or threw, with no shutdown-hook race. It also removes a second hand-rolled bug: a fixed, shared temp path makes tests order- and concurrency-dependent, while `@TempDir`'s per-invocation uniqueness makes parallel test execution safe by construction rather than by discipline.
+
+**Q20: What class of bug does ArchUnit catch that no ordinary unit test can?**
+**Short:** ArchUnit catches structural violations — a domain class importing infrastructure — unit tests can't see.
+A unit test verifies one class's *behavior* in isolation; it has no visibility into whether that class violates a project-wide *structural* rule, such as a `..domain..` class importing `..infrastructure..`, a service class breaking a naming convention, or two modules forming a dependency cycle — none of that is observable from inside a single test's assertions, no matter how thorough the test is. ArchUnit (`archunit-junit5`) scans the compiled bytecode of an entire package tree and evaluates rules like `noClasses().that().resideInAPackage("..domain..").should().dependOnClassesThat().resideInAPackage("..infrastructure..")` against the whole graph, catching a layering violation the moment it's introduced instead of relying on a reviewer to notice an unrelated import three files deep. It is genuinely a test — it fails the build — but the invariant it checks is about the codebase's shape, not any one class's output.
 
 ---
 

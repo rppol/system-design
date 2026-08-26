@@ -14,6 +14,10 @@ Spring Cloud provides a curated suite of tools for building distributed systems 
 
 The version this module is written against is the **Spring Cloud 2025.1.0 "Oakwood"** release train, which builds on Spring Framework 7 / Spring Boot 4. Spring Cloud versions by *train*, not per-artifact, so the one coordinate that matters is `spring-cloud-dependencies` imported as a BOM — every starter below then goes in without a version, and the train guarantees they agree with each other and with your Boot version.
 
+**Mind what the train supports versus what it is built against — they are different numbers.** Oakwood's compatibility matrix lists Spring Boot **"4.0.x, 4.1.x (Starting with 2025.1.2)"**, so a Spring Cloud service on Boot 4.1 is supported: 2025.1.2 (2026-06-11) "is compatible with Spring Boot 4.0.7 and introduces compatibility for Spring Boot 4.1.0". What each patch is *built against* is a single Boot patch — 2025.1.3 (2026-08-20) is based on Boot 4.0.8 — and that is the version `spring-cloud-dependencies` will manage for you. So the real hazard is BOM ordering, not a version ceiling: in Maven the first BOM to manage an artifact wins, so import `spring-boot-dependencies` **before** `spring-cloud-dependencies` if you want 4.1.x, or you will silently run 4.0.8 while believing otherwise. Stepping outside the supported generations altogether is never a compile error — dependency versions resolve at build time and Java links dynamically — so it surfaces at runtime as `NoSuchMethodError` or a subtly different auto-configuration.
+
+**Check both official sources; they currently disagree.** The `spring-cloud-release` wiki's supported-versions table still lists Oakwood against Boot 4.0.x alone, while the compatibility matrix on the project page lists 4.0.x and 4.1.x. The wiki is the stale one. A team reading only the wiki concludes it is blocked from Boot 4.1 for a quarter it did not need to lose — so prefer the project page, and settle the question with an integration test that exercises your actual Gateway, LoadBalancer or Config-client paths rather than inferring support from a green build.
+
 This module covers the six pillars of production Spring Cloud deployments:
 
 1. **Spring Cloud Gateway** — API gateway; edge routing, filtering, rate limiting. Ships in two flavours: `gateway-server-webflux` (reactive, Netty) and `gateway-server-webmvc` (blocking, ideal with virtual threads). Every code sample in this module is the reactive flavour — for the servlet flavour's route DSL, filter signature and threading model, -> Deep dive: [gateway_server_webmvc.md](gateway_server_webmvc.md).
@@ -78,6 +82,71 @@ Key insight: reactive programming (WebFlux/Project Reactor) is not optional for 
 | Retry | GatewayFilter | Retry on specified status codes |
 | StripPrefix | GatewayFilter | Removes path prefix before forwarding |
 | GlobalFilter | Global | Applies to all routes (e.g., auth, logging) |
+
+### Framework 7 Core Resilience — `@Retryable` and `@ConcurrencyLimit`
+
+Spring Framework 7 moved the two simplest resilience primitives into the core
+framework, in `org.springframework.resilience.annotation`. Turn them on with
+`@EnableResilientMethods` on a `@Configuration` class (or register a
+`RetryAnnotationBeanPostProcessor` / `ConcurrencyLimitBeanPostProcessor` bean to
+enable them individually):
+
+```java
+@Configuration
+@EnableResilientMethods
+class ResilienceConfig {}
+
+@Service
+class NotificationService {
+
+    // At most 4 retries AFTER the initial call -> up to 5 total invocations.
+    // Exponential backoff: 100ms, 200ms, 400ms, 800ms, capped at 1000ms, +/- 10ms jitter.
+    @Retryable(includes = MessageDeliveryException.class,
+               maxRetries = 4, delay = 100, jitter = 10, multiplier = 2, maxDelay = 1000)
+    public void send(Notification n) { ... }
+
+    // Never more than 10 threads inside this method at once.
+    // @ConcurrencyLimit(1) turns it into an exclusive lock on the bean instance.
+    @ConcurrencyLimit(10)
+    public void publishToLegacyGateway(Payload p) { ... }
+}
+```
+
+The programmatic equivalent is `RetryTemplate`, configured from a `RetryPolicy`:
+
+```java
+var policy = RetryPolicy.builder()
+        .includes(MessageDeliveryException.class)
+        .maxRetries(4)
+        .delay(Duration.ofMillis(100))
+        .jitter(Duration.ofMillis(10))
+        .multiplier(2)
+        .maxDelay(Duration.ofSeconds(1))
+        .build();
+
+var template = new RetryTemplate(policy);
+template.invoke(() -> gateway.send(notification));   // rethrows the last original exception
+```
+
+`invoke()` propagates the last original exception; `execute()` wraps the history in a
+`RetryException`, whose `getExceptions()` and `getLastException()` give you every
+attempt — useful when you need to log what actually went wrong across five tries
+rather than only the last one. A `RetryListener` (composed via
+`CompositeRetryListener`) is the hook for metrics.
+
+**The name-collision trap.** Spring Retry also has a `@Retryable`, in a different
+package, with a *different attribute name for the same idea*: Spring Retry says
+`maxAttempts` and counts the initial call; Framework 7 says `maxRetries` and counts
+only the retries. So `@Retryable(maxAttempts = 3)` means three total invocations and
+`@Retryable(maxRetries = 3)` means four. An IDE auto-import picking the wrong
+`@Retryable` therefore compiles fine and quietly changes your retry budget. Pick one
+per codebase, and check the import when a retry count looks off by one.
+
+**When to use which.** Core `@Retryable` and `@ConcurrencyLimit` cover the common
+cases with no extra dependency, and are the right default for a single flaky
+dependency. Resilience4j remains the answer when you need a **circuit breaker**,
+sliding-window failure and slow-call rate thresholds, a rate limiter, a time limiter,
+or a thread-pool bulkhead — none of which the core annotations attempt.
 
 ### Resilience4j Patterns
 
@@ -951,6 +1020,12 @@ public class OrderService {
 | spring-cloud-starter-gateway-server-webflux | API Gateway (reactive, Netty) | Routes under `spring.cloud.gateway.server.webflux.*` |
 | spring-cloud-starter-gateway-server-webmvc | API Gateway (blocking, Servlet) | Same filters on Spring MVC; pairs well with virtual threads. -> Deep dive: [gateway_server_webmvc.md](gateway_server_webmvc.md) |
 | spring-cloud-starter-circuitbreaker-resilience4j | Circuit breaker, retry, rate limiter | The `CircuitBreaker` gateway filter needs this on the classpath |
+| `@Retryable` | Core declarative retry (`org.springframework.resilience.annotation`) | Framework 7, no extra dependency; enable with `@EnableResilientMethods`. `maxRetries` counts retries, unlike Spring Retry's `maxAttempts` |
+| `@ConcurrencyLimit` | Core concurrency cap on a method | `@ConcurrencyLimit(1)` acts as an exclusive lock on the bean instance |
+| `@EnableResilientMethods` | Enables both core resilience annotations | Or register `RetryAnnotationBeanPostProcessor` and `ConcurrencyLimitBeanPostProcessor` individually |
+| `RetryTemplate` | Programmatic core retry | `invoke()` rethrows the original exception, `execute()` wraps history in `RetryException` |
+| `RetryPolicy` | Builder for retry rules | `includes`, `excludes`, `maxRetries`, `delay`, `jitter`, `multiplier`, `maxDelay` |
+| `RetryListener` | Retry event hook for metrics | Compose several with `CompositeRetryListener` |
 | spring-cloud-starter-openfeign | Declarative HTTP client | Integrates with LoadBalancer and Resilience4j |
 | spring-cloud-starter-loadbalancer | Client-side load balancing | Resolves `lb://` URIs from any `DiscoveryClient` |
 | spring-cloud-starter-netflix-eureka-server | Service registry server | AP system; peer-to-peer replication |
@@ -1079,6 +1154,21 @@ Retrying a non-idempotent POST can create duplicate side effects, such as two or
 **Q: Why was Netflix Hystrix retired in favor of Resilience4j, and what changed architecturally?**
 **Short:** Hystrix entered maintenance mode in 2018; Resilience4j replaced it with lightweight, independently configurable decorators.
 Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replaced it as the actively maintained standard. Architecturally, Hystrix isolated every command in its own dedicated thread pool by default, giving strong isolation but adding thread-context-switch overhead and memory cost per command; Resilience4j defaults to a lightweight semaphore-based bulkhead and composes circuit breaker, retry, rate limiter, bulkhead, and time limiter as separate, independently configurable decorators instead of one monolithic command object. Resilience4j also builds directly on functional interfaces (`Supplier`, `CompletionStage`) and integrates natively with Micrometer for metrics, whereas Hystrix predates both. In practice Resilience4j is the only option: Hystrix never made the `javax` to `jakarta` transition, so there is no Spring Boot 3 or 4 support path and none is coming. Read it as a lifecycle lesson rather than a library comparison — a dependency that stops shipping releases does not fail on the day it is archived, it fails on the day a platform baseline moves underneath it, which is exactly what the Jakarta namespace change did.
+
+**Q: Framework 7 ships `@Retryable` in core and Spring Retry has one too — what actually goes wrong if you import the wrong one?**
+**Short:** Your retry budget silently changes by one, because core counts maxRetries after the first call while Spring Retry's maxAttempts includes it.
+
+Nothing fails to compile, which is the whole problem. The two annotations share a simple name across different packages — core's is `org.springframework.resilience.annotation.Retryable` — and they name the same idea differently: Spring Retry's `maxAttempts` counts total invocations, core's `maxRetries` counts only the retries after the initial call. So `maxAttempts = 3` gives three calls and `maxRetries = 3` gives four. An IDE auto-import that picks the wrong one leaves valid code with a quietly different retry budget, and on a slow downstream that off-by-one is the difference between a tolerable tail and a saturated pool. The core annotation also needs `@EnableResilientMethods` (or a `RetryAnnotationBeanPostProcessor` bean) to do anything at all, so the other failure mode is the reverse: the annotation is correct, nothing enables it, and the method silently never retries. Pick one library per codebase, and check the import first whenever a retry count looks off by one.
+
+**Q: Now that Framework 7 has `@Retryable` and `@ConcurrencyLimit`, when do you still need Resilience4j?**
+**Short:** Whenever you need a circuit breaker, rate limiter, time limiter, or thread-pool bulkhead — the core annotations only do retry and a concurrency cap.
+
+Keep Resilience4j for anything with state or a window. The core annotations are deliberately narrow: `@Retryable` re-invokes a failing method with backoff and jitter, and `@ConcurrencyLimit(n)` caps how many threads may be inside a method at once (with `n = 1` acting as an exclusive lock on the bean). Neither remembers anything between calls, so neither can implement a **circuit breaker** — which needs a sliding window of results, a failure-rate and slow-call-rate threshold, and CLOSED/OPEN/HALF_OPEN transitions. The same goes for a rate limiter, a time limiter, and a thread-pool bulkhead that genuinely hands the blocking call to another thread. The practical split: reach for core for a single flaky dependency where a retry and a concurrency cap are the whole answer, and it costs you no dependency at all; reach for Resilience4j the moment you need to stop calling a broken service rather than merely call it more carefully. They compose — a core `@ConcurrencyLimit` around a Resilience4j-wrapped call is perfectly reasonable — but pick per concern, not per project.
+
+**Q: What actually decides which Spring Boot version a Spring Cloud service runs?**
+**Short:** BOM import order, not the train. Oakwood supports Boot 4.0.x and 4.1.x from 2025.1.2, but each patch is built against one Boot patch and manages that version by default.
+
+BOM ordering, and people mistake it for a version ceiling. Spring Cloud is versioned as a *train*, and Oakwood's compatibility matrix lists Spring Boot "4.0.x, 4.1.x (Starting with 2025.1.2)" — so Boot 4.1 with Spring Cloud is supported, and the 2025.1.2 announcement says it "introduces compatibility for Spring Boot 4.1.0". What each patch is *built against* is one specific Boot patch: 2025.1.3 of 2026-08-20 is based on Boot 4.0.8. Since in Maven the first BOM to manage an artifact wins, importing `spring-cloud-dependencies` before `spring-boot-dependencies` silently gives you Boot 4.0.8, which is where the belief that the train "pins" you comes from. Declare the Boot BOM first to run 4.1.x. The genuinely dangerous move is going *outside* the supported generations, because that is never a compile error — versions resolve at build time and Java links dynamically — so it fails at runtime with `NoSuchMethodError` or a quietly changed auto-configuration. Verify the combination with an integration test through your real Gateway or Config-client paths, and note that the `spring-cloud-release` wiki's supported-versions table is stale where the project page's matrix is current.
 
 ---
 

@@ -378,7 +378,7 @@ Stdio: server is an npm/pip package that the Smithery CLI installs and configure
 
 **Q: What's signed servers and when will it be standard?**
 **Short:** Cryptographic package signing isn't part of the protocol yet; the registry only authenticates namespace ownership, not code integrity.
-Cryptographic signing of MCP server artifacts is still not part of the protocol as of the 2025-11-25 revision or the 2026-07-28 release candidate. The idea is that a publisher signs the package (Sigstore-style) and clients verify the signature on install, defeating tampered-package supply-chain attacks. What actually shipped instead is weaker: the official MCP Registry authenticates *namespaces* — reverse-DNS names like `io.github.acme/server` proven via a GitHub account, DNS record or HTTP challenge — and delegates artifact scanning to npm/PyPI/Docker Hub. Treat that as provenance for the name, not integrity for the code. Signing is not on the current roadmap's priority areas, so do not assume a date; version pinning remains the load-bearing control.
+Cryptographic signing of MCP server artifacts is still not part of the protocol as of the current `2026-07-28` revision, and it was not part of `2025-11-25` either. The idea is that a publisher signs the package (Sigstore-style) and clients verify the signature on install, defeating tampered-package supply-chain attacks. What actually shipped instead is weaker: the official MCP Registry authenticates *namespaces* — reverse-DNS names like `io.github.acme/server` proven via a GitHub account, DNS record or HTTP challenge — and delegates artifact scanning to npm/PyPI/Docker Hub. Treat that as provenance for the name, not integrity for the code. Signing is not on the current roadmap's priority areas, so do not assume a date; version pinning remains the load-bearing control.
 
 **Q: How do enterprises manage MCP server adoption?**
 **Short:** Run an internal registry with an approved-server allowlist, per-server security review, centralized OAuth, and audit logging of all calls.
@@ -398,7 +398,7 @@ No automatic self-update mechanism per spec. Updates happen via the package mana
 
 **Q: What's the lifecycle of an MCP server you've installed?**
 **Short:** Spawned or connected at session start, initialized, used for calls, then terminated or closed at shutdown -- typically one session long.
-(1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session.
+(1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session. This describes the still-widely-deployed `2025-11-25` revision; under the current `2026-07-28` revision step (2) disappears — there is no handshake or protocol-level session, and each request carries its own version and capabilities.
 
 **Q: How are MCP server bugs typically reported and fixed?**
 **Short:** Filed as GitHub issues against the server's repo, with security-critical bugs triaged and fixed faster than the long tail.

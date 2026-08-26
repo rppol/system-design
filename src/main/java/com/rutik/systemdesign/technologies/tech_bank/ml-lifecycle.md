@@ -1585,12 +1585,6 @@ caveats: it measures domain knowledge as much as perception, so a low score may 
 does not know the chemistry rather than cannot see the diagram; and being drawn from public
 exam material makes contamination plausible, with some questions answerable from text alone.
 
-### Most large tech companies
-**Short:** Not a technology: a table cell referring to the in-house ML platforms large tech companies build for themselves.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @3
-
 ### MTEB Leaderboard
 **Short:** Massive Text Embedding Benchmark leaderboard: compare embedding models by retrieval and other task scores.
 **Kind:** dataset
@@ -1835,6 +1829,16 @@ continuity is essentially its remaining value. Otherwise the limits are severe: 
 genre of 1989 newswire, licensed rather than open, and a language-modelling preprocessing that
 discards case, numbers and punctuation so its perplexity barely resembles modern language
 modelling. Universal Dependencies treebanks and modern web corpora are what current work uses.
+
+### PlanOut
+**Short:** Meta's open-sourced language for defining randomized online experiments as executable assignment scripts.
+**Kind:** tech
+**Lang:** python
+**Roles:** ml-lifecycle/evaluation-and-benchmarks @1
+
+An experiment is written as a short script that declares its randomized parameters, and the interpreter assigns a unit deterministically by hashing the unit id together with the experiment salt, so the same user resolves to the same variation on every request without storing an assignment table. Because the script is data rather than application code, the assignment logic is versioned, auditable and replayable, and nested or overlapping experiments compose by namespace instead of by hand-written branching.
+
+Reach for it as the reference design when building experimentation in-house rather than as a product to deploy: it is the canonical published example of the assignment layer, alongside Google's overlapping-experiment infrastructure and Airbnb's ERF. A team buying Optimizely, Statsig or Eppo gets this layer plus analysis and a UI, which is usually the better trade unless the assignment requirements are genuinely unusual.
 
 ### Prodigy
 **Short:** Scriptable human-in-the-loop annotation tool from the spaCy team, with built-in active-learning example ordering.

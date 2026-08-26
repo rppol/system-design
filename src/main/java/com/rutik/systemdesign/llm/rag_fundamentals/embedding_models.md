@@ -139,7 +139,7 @@ Truncated to 512d:   [d1, d2, d3, ..., d512]   → works well (MRL training)
 Truncated to 256d:   [d1, d2, d3, ..., d256]   → still reasonable
 Truncated to 64d:    [d1, d2, d3, ..., d64]    → lower quality but fast
 
-MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-2,
+MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-001,
             Cohere embed-v4.0, voyage-4-large, EmbeddingGemma, nomic-embed-text):
   Trained so first N dimensions are meaningful at any N
   Enables adaptive dimensionality: use 512d for fast retrieval,
@@ -309,7 +309,7 @@ Model                       Dim (MRL)          Context  MTEB v2 En  Use Case
 Qwen3-Embedding-8B          32-4096              32768  75.22       Open weights; board leader
 Qwen3-Embedding-4B          32-2560              32768  74.60       Open weights; mid-size
 Qwen3-Embedding-0.6B        32-1024              32768  70.70       Open weights; cheap to serve
-gemini-embedding-2          128-3072              8192  -           Managed; text/image/audio/PDF
+gemini-embedding-001        128-3072              8192  -           Managed; text/image/audio/PDF
 Cohere embed-v4.0           256/512/1024/1536   128000  -           Managed; multimodal, 128k ctx
 voyage-4-large              256/512/1024/2048    32000  -           Managed; retrieval-tuned
 google/embeddinggemma-300m  128-768               2048  -           On-device / edge, 300M params
@@ -323,6 +323,22 @@ newer open-weights models are instruction-conditioned: Qwen3-Embedding wants
 wants `"task: search result | query: {q}"` / `"title: none | text: {doc}"`, and
 nomic-embed-text-v2-moe wants `search_query:` / `search_document:`. Getting the prefix
 wrong costs measurable recall, exactly as it does with BGE.
+
+**Dated snapshot (2026-08) — re-check the live leaderboard before quoting any of this.**
+`gemini-embedding-001` currently tops the **MTEB Multilingual** leaderboard at 68.32 overall /
+67.71 retrieval, ahead of Qwen3-Embedding-8B's 70.58 on that same multilingual board — a
+different board from the MTEB v2 **English** 75.22 quoted for Qwen3-Embedding-8B above, so the
+two numbers are not the same measurement and neither ranks the other. On a general/English
+board, Cohere `embed-v4.0` scores 65.2, ahead of OpenAI `text-embedding-3-large` at 64.6 and
+BGE-M3 at 63.0. Qwen3-Embedding remains the leader among **open-weight** models on MTEB v2
+English, the 8B variant averaging roughly 75%. Voyage AI shipped the `voyage-4` family on
+2026-01-15 with a shared embedding space across the whole family — `voyage-4-large`,
+`voyage-4`, `voyage-4-lite`, and the open-weighted `voyage-4-nano` — so a pipeline can mix
+models per stage (large for indexing, lite for high-throughput queries, nano for local dev)
+without a compatibility break. **The number never safe to quote without its board and
+version**: MTEB v2 scores are not comparable to v1 scores, English and Multilingual boards
+rank differently, and the board reshuffles monthly — pull the live `mteb/results` dataset or
+leaderboard CSV before repeating any of these figures in production docs.
 
 Dimension considerations:
 ```
@@ -649,6 +665,31 @@ Fix: Build a domain-specific evaluation set: 50-200 (query, expected_chunk_ids) 
 Embedding 10,000 chunks one at a time via the OpenAI API (10,000 separate API calls) is 100× slower and more expensive than batching 100 per call.
 Fix: Batch up to 2048 inputs per OpenAI API call (or 256 per sentence-transformers batch for GPU memory management). Always batch for indexing.
 
+**7. Embedding queries and documents through the same code path on an asymmetric model**
+```python
+# BROKEN: BGE is trained asymmetrically, but both sides call the same bare encode()
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("BAAI/bge-base-en-v1.5")
+
+def embed(text: str):
+    return model.encode(text, normalize_embeddings=True)
+
+query_vec = embed("What is a myocardial infarction?")
+doc_vec = embed("A myocardial infarction, commonly called a heart attack, occurs when...")
+```
+BGE (and Qwen3-Embedding, EmbeddingGemma, nomic-embed-text-v2-moe) were trained with a query-only instruction prefix — for BGE, "Represent this sentence for searching relevant passages: ". A bare `.encode()` call on the query text skips that prefix, so the query vector is missing the signal that steers it toward document space. Nothing errors and nothing crashes; the query still returns *some* ranked list, so the regression is invisible without a labeled recall@10 eval — BAAI's own model card shows omitting the prefix measurably degrading retrieval on exactly this model.
+```python
+# FIXED: use the model's asymmetric prompt methods so the prefix can't drift
+query_vec = model.encode_query("What is a myocardial infarction?", normalize_embeddings=True)
+doc_vec = model.encode_document(
+    "A myocardial infarction, commonly called a heart attack, occurs when...",
+    normalize_embeddings=True,
+)
+```
+`encode_query()` / `encode_document()` pull the correct prefix from the model's own config (see 6.4), so the two call sites stay in sync even after swapping to a different instruction-conditioned model.
+Fix: Never call the bare `.encode()` on both queries and documents for an asymmetric model — use its documented query/document prompt names (or prepend the instruction string by hand) at both call sites, every time.
+
 ---
 
 ## 11. Technologies & Tools
@@ -658,7 +699,7 @@ Fix: Batch up to 2048 inputs per OpenAI API call (or 256 per sentence-transforme
 | **sentence-transformers** | Self-hosted embedding | Standard library; supports all major models |
 | **OpenAI Embeddings API** | Managed embedding | text-embedding-3-small/large; best managed option |
 | **Cohere Embed API** | Managed embedding | `embed-v4.0`; multimodal, 128k context, MRL dims |
-| **Gemini Embedding API** | Managed embedding | `gemini-embedding-2`; text, image, audio and PDF in one space |
+| **Gemini Embedding API** | Managed embedding | `gemini-embedding-001`; text, image, audio and PDF in one space; tops MTEB Multilingual |
 | **Voyage AI** | Managed embedding | `voyage-4-large` plus code/finance/law domain models |
 | **Qwen3-Embedding** | Open source models | 0.6B/4B/8B, 32k context, MRL; current MTEB leader |
 | **HuggingFace Inference API** | Managed + open source | Host any HuggingFace model via API |

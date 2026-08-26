@@ -71,7 +71,7 @@ most of.
 2. **Carrier threads are scarce**: default pool size = number of CPU cores. They must never be pinned for long.
 3. **Pinning is the primary gotcha**: a virtual thread that blocks while a **native frame** is on its stack — a JNI method or a Foreign Function & Memory downcall/upcall — cannot unmount. If all carriers are pinned, throughput collapses. `synchronized` and `Object.wait()` stopped pinning in Java 24 (JEP 491).
 4. **Structured concurrency = scope-bounded forking**: subtasks live and die within a scope; the parent cannot return before all children complete or are cancelled.
-5. **ScopedValue is inheritance-safe context**: unlike `ThreadLocal`, `ScopedValue` is immutable and auto-inherits to child tasks without risk of stale values in pooled threads.
+5. **ScopedValue is inheritance-safe context**: unlike `ThreadLocal`, `ScopedValue` is immutable and auto-inherits to child tasks without risk of stale values in pooled threads — precisely the kind of thread-safety property [Effective Java Item 82: "Document thread safety"] says an API must make explicit rather than leaving callers to infer from behavior.
 6. **Do not pool virtual threads**: creating 100,000 virtual threads is fine; pooling them defeats the purpose (pooling exists to limit expensive resources — virtual threads are not expensive).
 
 ---
@@ -109,7 +109,7 @@ flowchart TD
         J1 --> O1["if either fails:\ncancel other, throw FailedException"]
     end
 
-    subgraph SOS["open(Joiner.anySuccessfulOrThrow())"]
+    subgraph SOS["open(Joiner.anySuccessfulResultOrThrow())"]
         A2["fork A"] --> J2["join()"]
         B2["fork B"] --> J2
         J2 --> O2["when first succeeds:\ncancel other, return result"]
@@ -222,6 +222,17 @@ Future<Result> future = executor.submit(() -> callDatabase(query));
 // that defeats the purpose by throttling at the thread level.
 ```
 
+**A nuance worth stating explicitly.** [Effective Java Item 80: "Prefer executors,
+tasks, and streams to threads"] predates virtual threads by years, and
+`newVirtualThreadPerTaskExecutor()` honours its *spirit* — you still submit a
+`Runnable`/`Callable` to an `ExecutorService` rather than managing `Thread`
+objects yourself — while inverting the usual corollary the item is built on.
+Item 80's advice to route tasks through a *bounded* executor exists because
+platform threads are scarce and must be pooled; here the executor is unbounded
+by design, because virtual threads are the one kind of thread cheap enough that
+pooling them is the anti-pattern (Core Principle 6). The task-based programming
+model survives the migration; the assumption that threads need rationing does not.
+
 ### 6.2 The Pinning Problem
 
 A virtual thread pins its carrier when it blocks while a **native frame** sits on its stack —
@@ -307,6 +318,13 @@ carrier count — the number the ceiling collapsed to. Raising
 
 ### 6.3 StructuredTaskScope — Fan-out with Automatic Cancellation
 
+`StructuredTaskScope` is a concurrency utility in the sense [Effective Java Item
+81: "Prefer concurrency utilities to `wait` and `notify`"] means: fork/join and
+automatic cancellation replace hand-written coordination that would otherwise
+need a shared flag, a lock, and manual `wait`/`notify`/`notifyAll` calls to get
+right, with all the same subtle bugs (missed signals, lost wakeups) that made
+Item 81's advice necessary in the first place.
+
 ```java
 // Fetch three independent resources concurrently; fail fast if any fails.
 // StructuredTaskScope is a preview API: compile and run with --enable-preview.
@@ -329,15 +347,19 @@ Dashboard fetchDashboard(long userId) throws InterruptedException {
 
 The zero-argument `open()` covers the fan-out case with no joiner at all. Any other policy is
 a `Joiner` handed to `open(Joiner)`: `allSuccessfulOrThrow()` (a `List` of results in fork
-order), `awaitAllSuccessfulOrThrow()`, `awaitAll()`, `anySuccessfulOrThrow()`, and
+order), `awaitAllSuccessfulOrThrow()`, `awaitAll()`, `anySuccessfulResultOrThrow()`, and
 `allUntil(Predicate)` for a custom cancellation condition.
 
-### 6.4 Racing with `Joiner.anySuccessfulOrThrow()`
+### 6.4 Racing with `Joiner.anySuccessfulResultOrThrow()`
+
+> **Spelling depends on your JDK.** This is the **Java 25 LTS** name (JEP 505). JDK 26's
+> JEP 525 renamed it to `anySuccessfulOrThrow()`. It is a preview API, so a rename per
+> release is the contract — pin the JDK and budget the call-site edit at each upgrade.
 
 ```java
 // Race two CDN endpoints; return whichever responds first
 String fetchWithRace(String path) throws InterruptedException {
-    try (var scope = StructuredTaskScope.open(Joiner.<String>anySuccessfulOrThrow())) {
+    try (var scope = StructuredTaskScope.open(Joiner.<String>anySuccessfulResultOrThrow())) {
         scope.fork(() -> fetchFromCDN1(path));
         scope.fork(() -> fetchFromCDN2(path));
 
@@ -679,8 +701,8 @@ The JVM's I/O infrastructure intercepts blocking calls (socket reads, file reads
 **Short:** Unbounded virtual threads each holding a ThreadLocal can multiply memory use far beyond a bounded platform-thread pool's total.
 With platform thread pools (bounded, e.g., 200 threads), `ThreadLocal` state is bounded: at most 200 copies of each `ThreadLocal` value exist. With virtual threads (unbounded), 100,000 concurrent tasks × a 64 KB `ThreadLocal<byte[]>` = 6.4 GB of ThreadLocal data. Additionally, if virtual threads are ever pooled (accidentally or via a third-party wrapper), stale ThreadLocal values from one task leak into the next. The fix: use local variables for task-scoped state, and `ScopedValue` for inherited context. If `ThreadLocal` is unavoidable, call `remove()` explicitly before the virtual thread ends.
 
-**Q8: How does `Joiner.anySuccessfulOrThrow()` work and when is it useful?**
-**Short:** Joiner.anySuccessfulOrThrow() cancels a scope the instant one subtask succeeds and returns that result, implementing a race pattern.
+**Q8: How does `Joiner.anySuccessfulResultOrThrow()` work and when is it useful?**
+**Short:** Joiner.anySuccessfulResultOrThrow() cancels a scope the instant one subtask succeeds and returns that result, implementing a race pattern.
 It cancels the scope the moment the first subtask completes successfully, and `join()` returns that subtask's result directly. The losing forks are interrupted and terminate. This implements the "race" or "hedge" pattern: submit the same request to two or more backends, accept the fastest successful response, cancel the rest. Use cases: CDN failover, primary vs read-replica queries, A/B latency comparison. If every subtask fails, `join()` throws `FailedException` with one of the failures as its cause; if nothing was forked, `NoSuchElementException`. Unlike `CompletableFuture.anyOf()`, losers are guaranteed to be cancelled and no thread resources leak. Because the whole API is still preview, joiner names and signatures move between releases — build against one JDK feature release at a time and re-check the joiners when you upgrade.
 
 **Q9: Can virtual threads improve CPU-bound throughput?**
@@ -709,7 +731,7 @@ The recognisable shape is a service whose throughput flatlines at exactly `carri
 
 **Q15: How do you set a timeout on a `StructuredTaskScope`?**
 **Short:** A StructuredTaskScope timeout is set on the scope's configuration via withTimeout(), not on the join() call itself.
-The timeout belongs to the scope's configuration, not to the `join()` call. Open the scope with the three-argument `open(Joiner, UnaryOperator<Configuration>)` and set `withTimeout(Duration)`; the clock starts when the scope is opened, and if it expires before or during `join()` the scope is cancelled — every unfinished subtask is interrupted. What happens next is the joiner's decision, via its `onTimeout()` method. The default is to throw `TimeoutException`, which is what `allSuccessfulOrThrow()`, `awaitAll()` and `anySuccessfulOrThrow()` all do. `allUntil(Predicate)` overrides it to do nothing, so `join()` returns the full subtask list instead and the ones that did not finish are in state `UNAVAILABLE` — this is the shape to use when a partial result is still useful.
+The timeout belongs to the scope's configuration, not to the `join()` call. Open the scope with the three-argument `open(Joiner, UnaryOperator<Configuration>)` and set `withTimeout(Duration)`; the clock starts when the scope is opened, and if it expires before or during `join()` the scope is cancelled — every unfinished subtask is interrupted. What happens next is the joiner's decision, via its `onTimeout()` method. The default is to throw `TimeoutException`, which is what `allSuccessfulOrThrow()`, `awaitAll()` and `anySuccessfulResultOrThrow()` all do. `allUntil(Predicate)` overrides it to do nothing, so `join()` returns the full subtask list instead and the ones that did not finish are in state `UNAVAILABLE` — this is the shape to use when a partial result is still useful.
 
 ```java
 List<String> collectWithin(List<Callable<String>> tasks, Duration budget)
@@ -749,9 +771,9 @@ Use a `Semaphore` sized to the limit, and keep one virtual thread per task. Rest
 6. **Audit dependencies before migrating**: run the service under load with a default JFR recording, check `jdk.VirtualThreadPinned`, and confirm the JDBC driver, Redis client, and HTTP client are pure Java rather than JNI-backed.
 7. **Bound concurrency with a `Semaphore`**, never with a fixed thread pool — and never on top of a connection pool, which already is one.
 8. **Keep carrier pool size at default** (= CPU count); increase only if profiling confirms carrier thread starvation, not pinning.
-8. **Name virtual threads** for production observability: `Thread.ofVirtual().name("req-handler-", 0).start(task)` — thread names appear in stack traces and APM tools.
-9. **Set `UncaughtExceptionHandler`** on virtual threads used in fire-and-forget patterns to prevent silent exception swallowing.
-10. **Java 21 is the target**: virtual threads are GA; `StructuredTaskScope` and `ScopedValue` are in preview and API may change through Java 24/25.
+9. **Name virtual threads** for production observability: `Thread.ofVirtual().name("req-handler-", 0).start(task)` — thread names appear in stack traces and APM tools.
+10. **Set `UncaughtExceptionHandler`** on virtual threads used in fire-and-forget patterns to prevent silent exception swallowing.
+11. **Java 25 LTS is the target**: virtual threads are GA (JEP 444, Java 21) and `ScopedValue` is a final, non-preview API (JEP 506, Java 25) — ship both without a flag. `StructuredTaskScope` is the one piece still behind `--enable-preview`, and its API is still moving (JEP 505 in 25, JEP 525 in 26, JEP 533 in 27), so wrap it behind an interface of your own and expect one rename per release.
 
 ---
 

@@ -120,13 +120,69 @@ sequenceDiagram
 
 *Redis is the connection-routing table: every WebSocket lands on exactly one chat server, and a sender's server looks up that mapping before forwarding a message to the recipient's server.*
 
-```
-Redis key: conn:{userId}
-Value:     {serverId, socketId, connectedAt}
-TTL:       30 seconds (renewed by heartbeat every 10s)
+```bash
+# One entry per connected device. The chat server that owns the socket writes it,
+# renews it on every heartbeat, and deletes it on a clean disconnect.
+redis-cli HSET conn:u12345:d1 serverId chat-07 socketId 8f31ac connectedAt 1770000000
+redis-cli EXPIRE conn:u12345:d1 30          # heartbeat every 10s renews this
+
+# Multi-device: one user has several sockets, so the sender fans out to all of them.
+redis-cli SADD  devices:u12345 d1 d2 d3
+redis-cli EXPIRE devices:u12345 86400
+
+# Routing lookup on the send path.
+redis-cli SMEMBERS devices:u12345           # -> d1 d2 d3
+redis-cli HGET conn:u12345:d1 serverId      # -> chat-07  (empty = offline -> push)
 ```
 
-If TTL expires → user is considered offline → route to push notification.
+If the TTL expires the device is considered offline, so the message is queued durably and a
+push notification is sent instead. The 30-second TTL against a 10-second heartbeat is
+deliberate: it tolerates two lost heartbeats before declaring a device gone, which is what
+stops a single GC pause or a brief network blip from bouncing every user to the push path.
+
+**Broken, then fixed — the registry write that outlives its socket.** The obvious
+implementation registers the connection on connect and deletes it on disconnect:
+
+```java
+// BROKEN: a crashed chat server never runs onClose, so Redis keeps pointing at it.
+void onOpen(Session session, String userId, String deviceId) {
+    redis.hset("conn:" + userId + ":" + deviceId,
+               Map.of("serverId", SERVER_ID, "socketId", session.getId()));
+}
+void onClose(String userId, String deviceId) {
+    redis.del("conn:" + userId + ":" + deviceId);          // never runs on a hard crash
+}
+```
+
+If `chat-07` is OOM-killed, 800,000 registry entries still name it. Every sender then
+forwards to a dead server, the forward times out after (say) 5 seconds, and the send path's
+latency collapses while the messages are neither delivered nor queued.
+
+```java
+// FIXED: the registry entry is a lease, not a fact. It expires unless renewed.
+private static final int LEASE_SECONDS = 30;
+
+void onOpen(Session session, String userId, String deviceId) {
+    String key = "conn:" + userId + ":" + deviceId;
+    redis.hset(key, Map.of("serverId", SERVER_ID,
+                           "socketId", session.getId(),
+                           "connectedAt", String.valueOf(now())));
+    redis.expire(key, LEASE_SECONDS);
+}
+
+// Called from the heartbeat handler on every client ping (every ~10s).
+void onHeartbeat(String userId, String deviceId) {
+    redis.expire("conn:" + userId + ":" + deviceId, LEASE_SECONDS);
+}
+
+void onClose(String userId, String deviceId) {
+    redis.del("conn:" + userId + ":" + deviceId);          // fast path only
+}
+```
+
+Now a server crash self-heals in at most 30 seconds with no cleanup job, no distributed lock,
+and no cross-server coordination. This is the general shape: **any registry entry describing a
+live process must be a lease that the process renews, never a record it promises to delete.**
 
 ---
 
@@ -208,23 +264,46 @@ flowchart LR
 - This is enforced by the end-to-end encryption — server can't read messages anyway
 
 **Schema (Cassandra)**:
-```
-Table: messages
-  conversation_id: UUID      (partition key — hash of sender+receiver for 1:1)
-  message_id:      TIMEUUID  (clustering key — time-ordered within conversation)
-  sender_id:       UUID
-  content:         BLOB      (encrypted)
-  message_type:    TEXT      (TEXT, IMAGE, VIDEO, AUDIO, DOCUMENT)
-  media_url:       TEXT      (if media)
-  status:          TEXT      (SENT, DELIVERED, READ)
-  created_at:      TIMESTAMP
 
-Table: user_message_receipt
-  user_id:         UUID      (partition key)
-  message_id:      TIMEUUID
-  delivered_at:    TIMESTAMP
-  read_at:         TIMESTAMP
+```cql
+-- Undelivered messages, partitioned by conversation so a reconnecting device
+-- reads one contiguous slice. DESC clustering makes "newest first" a forward scan.
+CREATE TABLE messages (
+    conversation_id  uuid,          -- partition key: hash(min(a,b) || max(a,b)) for 1:1
+    message_id       timeuuid,      -- clustering key: time-ordered within conversation
+    sender_id        uuid,
+    ciphertext       blob,          -- server cannot read this (E2E, below)
+    message_type     text,          -- TEXT | IMAGE | VIDEO | AUDIO | DOCUMENT
+    media_url        text,
+    created_at       timestamp,
+    PRIMARY KEY ((conversation_id), message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC)
+  AND default_time_to_live = 2592000          -- 30d backstop; rows are deleted on delivery
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_unit': 'DAYS',
+                    'compaction_window_size': 1};
+
+-- Per-device delivery state. Partitioned by user so "what do I still owe this
+-- device?" is a single-partition read on reconnect.
+CREATE TABLE pending_delivery (
+    user_id          uuid,
+    device_id        uuid,
+    message_id       timeuuid,
+    conversation_id  uuid,
+    delivered_at     timestamp,
+    read_at          timestamp,
+    PRIMARY KEY ((user_id, device_id), message_id)
+) WITH CLUSTERING ORDER BY (message_id ASC);
 ```
+
+Three choices in that DDL carry the design. `TimeWindowCompactionStrategy` matches the
+workload — write once, read once, delete — so an expired day's SSTable is dropped whole
+instead of being merged repeatedly, which `SizeTieredCompactionStrategy` would do. The
+`default_time_to_live` is a backstop, not the delivery mechanism: rows are deleted when
+delivered, and the TTL only bounds the damage from a device that never returns. And
+`pending_delivery` is partitioned by `(user_id, device_id)` rather than by user, because
+multi-device means the same message is owed independently to each of a user's devices and
+each must be able to drain its own queue.
 
 **Why Cassandra?**
 - Write-heavy (65B writes/day)
@@ -280,16 +359,33 @@ Cons: 1024× write amplification per group message
 
 Each group has a `group_id` (server-assigned, 64-bit). Group metadata (name, avatar, description, admin list, settings) lives in Cassandra:
 
-```
+```cql
 CREATE TABLE groups (
-  group_id bigint PRIMARY KEY,
-  name text,
-  description text,
-  creator_id bigint,
-  created_at timestamp,
-  admin_ids set<bigint>,
-  member_ids set<bigint>,
-  settings map<text, text>
+    group_id     bigint PRIMARY KEY,
+    name         text,
+    description  text,
+    creator_id   bigint,
+    created_at   timestamp,
+    admin_ids    set<bigint>,
+    settings     map<text, text>
+);
+
+-- Membership is its own table, not a collection column on `groups`.
+-- A Cassandra collection is read and written whole, so a 1024-member
+-- set<bigint> would be rewritten on every join and leave.
+CREATE TABLE group_members (
+    group_id   bigint,
+    user_id    bigint,
+    role       text,          -- MEMBER | ADMIN
+    joined_at  timestamp,
+    PRIMARY KEY ((group_id), user_id)
+);
+
+-- Reverse index: "which groups is this user in?" on reconnect.
+CREATE TABLE user_groups (
+    user_id    bigint,
+    group_id   bigint,
+    PRIMARY KEY ((user_id), group_id)
 );
 ```
 
@@ -305,6 +401,75 @@ When Alice sends a message to a 1000-member group:
 5. With multi-device: 1000 members × avg 1.5 devices = ~1500 deliveries per message.
 
 **Bandwidth implication**: A 1024-member group sending 100 messages/day amplifies to 100K device-level deliveries. At population scale (1M active large groups), this is 100B device-deliveries/day from group fan-out alone.
+
+The fan-out worker is the piece of code this whole section rests on. It never touches
+plaintext, groups deliveries per destination chat server so 1,500 device deliveries become
+tens of forwards, and treats an offline device as a durable queue write plus one push rather
+than a failure:
+
+```java
+/** Fans one group ciphertext out to every member device. Never decrypts. */
+public final class GroupFanoutWorker {
+
+    private static final int BATCH = 500;
+
+    private final MemberRepository members;      // group_members table
+    private final ConnectionRegistry registry;   // the Redis leases above
+    private final ChatServerClient servers;      // server-to-server forwarding
+    private final PendingDeliveryStore pending;  // Cassandra pending_delivery
+    private final PushGateway push;              // APNs / FCM
+
+    /** Called once per group message, off the sender's request path. */
+    public void fanout(GroupMessage msg) {
+        // 1. Page the member list. Never load 1M members into memory for a broadcast group.
+        for (List<Long> page : members.pagedMemberIds(msg.groupId(), BATCH)) {
+
+            // 2. Resolve every member's devices to the chat server holding each socket.
+            //    One pipelined Redis round trip per page, not one per device.
+            Map<String, List<DeviceRef>> byServer = new HashMap<>();
+            List<DeviceRef> offline = new ArrayList<>();
+
+            for (DeviceRef device : registry.lookupDevices(page)) {
+                if (device.userId() == msg.senderId() && device.isSendingDevice()) {
+                    continue;                        // do not echo to the sender's own device
+                }
+                String server = device.serverId();   // null => lease expired => offline
+                if (server == null) {
+                    offline.add(device);
+                } else {
+                    byServer.computeIfAbsent(server, k -> new ArrayList<>()).add(device);
+                }
+            }
+
+            // 3. One forward per destination server, carrying many devices.
+            //    This is what turns ~1,500 deliveries into ~30 network calls.
+            byServer.forEach((server, devices) -> {
+                try {
+                    servers.forwardBatch(server, msg.ciphertext(), msg.messageId(), devices);
+                } catch (ServerUnreachableException e) {
+                    offline.addAll(devices);         // treat an unreachable peer as offline
+                }
+            });
+
+            // 4. Offline devices: durable queue first, then wake the device.
+            //    Order matters -- a push that arrives before the row exists shows an
+            //    empty chat, and the user has already spent the notification.
+            if (!offline.isEmpty()) {
+                pending.appendAll(msg, offline);
+                push.notifyAll(offline, msg.groupId());
+            }
+        }
+    }
+}
+```
+
+Three properties are worth defending out loud in an interview. The member list is **paged**,
+because a broadcast-style group is the case that turns a fan-out into an OOM. Deliveries are
+**grouped by destination server**, which is the difference between ~1,500 network calls and
+~30 — the same trick as batching in any fan-out, and the reason the forward path scales with
+*server count* rather than *member count*. And the durable write **precedes** the push
+notification, because the reverse order produces the worst possible user experience: a
+notification that opens an empty conversation.
 
 #### Sender Key Distribution
 

@@ -91,6 +91,35 @@ OAuth2 is fundamentally an *authorization* framework — it says nothing about *
 - **RBAC (Role-Based Access Control)** — permissions attached to roles (`admin`, `editor`, `viewer`); users assigned roles. Simple, auditable, but coarse — "can edit *any* document" vs. "can edit *their own* documents" requires either more roles or falls back to application code.
 - **ABAC (Attribute-Based Access Control)** — permissions are rules evaluated against attributes of the user, resource, and context (`allow if user.department == resource.department AND time.hour BETWEEN 9 AND 17`). More flexible, supports fine-grained and dynamic policies (multi-tenancy, time-based access), but harder to audit ("what can Alice do?" requires evaluating rules against every resource, not reading a role list).
 
+### 4.7 Passkeys — WebAuthn / FIDO2
+
+A **passkey** is a public-key credential bound to one origin, created and held by an authenticator (the phone's secure enclave, a laptop's TPM, or a hardware key), and unlocked by a local gesture — a fingerprint, a face, or the device PIN. The private key never leaves the authenticator and is never transmitted; the server stores only a public key and a credential ID. This is the primary consumer authentication story now, not a niche: the FIDO Alliance reported an estimated **5 billion passkeys in use** on World Passkey Day 2026, with 75% of surveyed people having enabled at least one and 68% of surveyed organizations deploying or piloting workforce passkeys.
+
+The standards stack has three layers, and interviews confuse them constantly:
+
+| Layer | What it is | Who implements it |
+|---|---|---|
+| **WebAuthn** (W3C) | The browser/JavaScript API — `navigator.credentials.create()` and `.get()` | Browsers and your relying-party (RP) code |
+| **CTAP2** (FIDO) | The wire protocol between the browser and an external authenticator over USB/NFC/BLE | OS and roaming authenticators |
+| **FIDO2** | The umbrella name for WebAuthn + CTAP2 together | The specification family |
+
+**Registration ceremony.** The RP sends a random `challenge`, its `rp.id` (a registrable domain such as `example.com`), and the user handle. The authenticator generates a fresh key pair scoped to that `rp.id`, and returns the credential ID, the public key, and a signed attestation object. The RP stores `(user_id, credential_id, public_key, sign_count, transports)`.
+
+**Authentication ceremony.** The RP sends a new random `challenge`. The authenticator signs `clientDataJSON` (which contains the challenge and the caller's true origin) plus `authenticatorData` with the private key. The RP verifies the signature against the stored public key, and — critically — that the origin in `clientDataJSON` matches its own.
+
+**Why this kills phishing, and why "MFA" does not.** A TOTP code or an SMS one-time password is a bearer secret: the user can be induced to read it aloud into a fake site, which replays it in real time. A passkey signature is bound to the origin the browser actually connected to. An attacker on `examp1e.com` cannot obtain a signature valid for `example.com`, because the authenticator will not produce one — there is no key registered for that origin, and the origin is inside the signed payload. Phishing resistance is a property of the protocol, not of user vigilance. Passkeys also remove the entire class of server-side credential-breach risk: a stolen public key is worthless.
+
+**The two flavours, and the design decision between them.**
+
+- **Synced passkeys** — the private key is backed up into the platform credential manager (iCloud Keychain, Google Password Manager, Windows Hello with a backing store) and syncs across the user's devices. This is what makes passkeys usable for consumers: losing a phone does not lock you out. The tradeoff is that the key's security now inherits the security of that cloud account, and the RP cannot prove which physical device holds it.
+- **Device-bound passkeys** — the key never leaves one authenticator, typically a hardware security key (YubiKey) or a platform authenticator with sync disabled by enterprise policy. Stronger assurance, but the RP must handle loss: enroll at least two, or keep a recovery path.
+
+The `backupEligible` / `backupState` flags in `authenticatorData` tell the RP which it is dealing with, so a bank can require a device-bound credential for high-value operations while accepting a synced one for sign-in.
+
+**What a design still has to solve.** Passkeys do not remove account recovery — they concentrate it. The recovery path (email link, support desk, identity re-verification) is now the weakest link, and an attacker will attack it rather than the credential. Also plan for: cross-device sign-in via **hybrid transport** (the QR code plus BLE proximity check that lets a phone authenticate a desktop session), the migration period where a password and a passkey coexist on the same account, and **discoverable credentials** (resident keys) if you want usernameless login, which cost authenticator storage and must be enumerable by `rp.id`.
+
+The signature counter (`sign_count`) is a cloning-detection hint, not a guarantee — synced passkeys generally report `0`, so a design that rejects a login on a non-incrementing counter will break for most consumer authenticators.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -248,6 +277,8 @@ SIGNATURE: RS256 (RSA + SHA256) signature over header+payload,
 3. `iss` (issuer) matches the expected Authorization Server.
 4. `aud` (audience) includes THIS service — prevents a token issued for `payment-service` being replayed against `order-service` ("token confusion").
 5. `alg` in the header matches an EXPECTED algorithm — never accept `alg: none` (§10).
+
+**RFC 8725 / BCP 225** (*JSON Web Token Best Current Practices*) is the normative source for these five checks, and it is worth naming by number in an interview. Its requirements: the verifier — not the token — decides the algorithm (either a fixed algorithm per key, or an explicit allowlist); `alg: none` and mixed symmetric/asymmetric acceptance are prohibited, which is exactly the algorithm-confusion attack in §10 War Story 1; every JWT must be validated for issuer and audience so a token minted for one service cannot be replayed at another; and the `typ` header should be used to distinguish token types so an ID token cannot be presented as an access token.
 
 ```mermaid
 flowchart LR
@@ -648,6 +679,7 @@ A database connection string, including a plaintext password, was committed to a
 | Service mesh / mTLS | Istio, Linkerd, Amazon VPC Lattice / ECS Service Connect | Automatic mTLS, workload identity, traffic policy |
 | Policy engines (ABAC) | Open Policy Agent (OPA), AWS Cedar | Externalized, declarative authorization rules |
 | Password hashing | bcrypt, scrypt, Argon2 | Argon2id is the current OWASP-recommended default |
+| Passkeys / WebAuthn (§4.7) | SimpleWebAuthn (Node), java-webauthn-server (Yubico), py_webauthn, webauthn4j; Passkey support is built into Auth0, Okta, Cognito, Entra ID and Keycloak | Server side is a challenge store plus signature verification — do not hand-roll it. Use the FIDO Alliance passkey UX guidelines for the enrollment prompt |
 
 > See [Spring Security Architecture](../../spring/spring_security_architecture/spring_security_architecture.md) and [Spring Security: JWT & OAuth2](../../spring/spring_security_jwt_oauth/spring_security_jwt_oauth.md) for filter-chain implementation details, and [Backend: Auth & Authorization Systems](../../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) and [Backend Security & OWASP](../../backend/backend_security_owasp/backend_security_owasp.md) for the full OWASP Top 10 treatment and production-grade implementation patterns.
 
@@ -734,6 +766,21 @@ A: A static API key is coarse-grained and long-lived, so a single leaked key gra
 **Short:** Refresh token rotation invalidates each token after one use, so a second use of the same token reveals a stolen token.
 
 A: Refresh token rotation issues a brand-new refresh token every time the old one is used to get a new access token, immediately invalidating the one that was just used. If an attacker has stolen a refresh token and uses it, and the legitimate user's device later tries to use that same now-invalidated token, the server detects two uses of a token that should only ever be used once and treats this as a compromise signal. On detecting reuse, the server revokes the entire token family — every refresh token descended from that original login — forcing full re-authentication rather than just blocking the one stolen token. This turns a stolen refresh token from a silent, long-lived liability into a detectable event, closing the gap that a non-rotating refresh token would leave open indefinitely.
+
+**Q17: Why are passkeys phishing-resistant when TOTP and SMS one-time codes are not?**
+**Short:** A passkey signature is cryptographically bound to the origin the browser connected to, so a lookalike site can never obtain a usable one.
+
+A: Because a passkey signature is bound to the origin, while a one-time code is just a bearer secret the user can be talked into handing over. With TOTP or SMS, an attacker running `examp1e.com` proxies the login in real time: the user reads the six digits into the fake page, the attacker replays them at the real site within the 30-second window, and the second factor has bought nothing. A passkey cannot be relayed this way. The authenticator only holds a key registered for `example.com`, and the origin the browser actually connected to is included in the `clientDataJSON` that gets signed — so the relying party detects a mismatch even if a signature is somehow produced. The practical consequence for a design: phishing resistance stops being a user-education problem and becomes a protocol property, which is why regulators and large platforms treat passkeys as a different assurance class from "MFA" generally. Note it does not remove the attack surface, it moves it — account recovery is now the softest path, so the recovery flow needs the same scrutiny the login flow used to get.
+
+**Q18: What exactly does a server store for a passkey, and what does that change about a credential-database breach?**
+**Short:** The server stores only a public key and credential ID, so a stolen passkey database contains nothing an attacker can authenticate with.
+
+A: Only a public key, a credential ID, the user handle, a signature counter, and the transports — no secret of any kind. The private key is generated inside the authenticator (secure enclave, TPM, or hardware key) and never leaves it, so there is nothing on the server that can be replayed, cracked offline, or credential-stuffed at another site. That is a categorical change from password hashes: an Argon2id hash still rewards an attacker with GPU time and a weak-password dictionary, and the recovered plaintext works everywhere the user reused it. A passkey breach yields public keys, which are useless. Design accordingly — you still need to protect the table for privacy and integrity reasons (an attacker who can *write* to it can enroll their own key, which is the real attack), but you no longer need the breach-response playbook of forced global password resets.
+
+**Q19: Should you use synced or device-bound passkeys, and how does the server tell them apart?**
+**Short:** Synced passkeys win on usability and device-bound on assurance; the backup-eligible and backup-state flags in authenticatorData tell them apart.
+
+A: Default to synced for consumer sign-in and require device-bound only where the assurance justifies the support cost. A synced passkey is backed up into the platform credential manager (iCloud Keychain, Google Password Manager) and follows the user across devices, which is what makes losing a phone survivable — without it, every lost device becomes an account-recovery ticket, and recovery is the weakest link. The cost is that the credential's security now inherits the security of that cloud account, and the relying party cannot prove which physical device holds the key. A device-bound passkey (a hardware key, or a platform authenticator with sync disabled by enterprise policy) gives you that proof, at the price of mandatory multi-enrollment. The server distinguishes them from the `backupEligible` (BE) and `backupState` (BS) bits in `authenticatorData`, so a bank can accept a synced credential for sign-in and demand a device-bound one to move money. One trap: do not gate logins on the signature counter incrementing — synced authenticators typically report `0` forever, so counter-based clone detection rejects legitimate users.
 
 ---
 

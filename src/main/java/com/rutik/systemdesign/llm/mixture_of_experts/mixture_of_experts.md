@@ -13,6 +13,8 @@ Key production numbers:
 | Mixtral 8x7B | 46.7B | 12.9B | 8 | 2 |
 | DeepSeek-V3 | 671B | 37B | 256 + 1 shared | 8 |
 | Qwen3-235B-A22B | 235B | 22B | 128 | 8 |
+| Llama 4 Scout | ~109B | 17B | 16 + 1 shared | 1 |
+| Llama 4 Maverick | ~400B | 17B | 128 + 1 shared | 1 |
 | Switch Transformer (Switch-C) | 1.571T | ~1.6B (derived) | 2048 | 1 |
 
 Every row above comes from a published model card or paper. Switch-C's active count is not
@@ -579,6 +581,10 @@ Second-hand reports have long claimed that some frontier closed models are spars
 
 314B total parameters, MoE with 8 experts and 2 selected per token (`num_experts=8`, `num_selected_experts=2` in xAI's released `run.py`), 64 layers, embedding size 6144, 48 query heads / 8 KV heads. Open-weights release under Apache 2.0. Architecture similar to Mixtral but with much larger individual experts.
 
+### Llama 4 Scout and Maverick — Meta (April 2025)
+
+Meta's current open-weight flagship, and both variants are MoE with alternating dense and MoE layers, top-1 routing, and a shared expert that always runs. Scout: 16 routed experts + 1 shared, 17B active of ~109B total, fits on a single high-end GPU, very long context (10M tokens advertised). Maverick: 128 routed experts + 1 shared, 17B active of ~400B total, flagship generalist. Released under the Llama 4 Community License (commercial use permitted below a 700M MAU threshold; not OSI open source). See [LLM Ecosystem and Landscape](../llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) for the full model-ladder context.
+
 ---
 
 ## 8. Tradeoffs
@@ -714,6 +720,8 @@ In vLLM this is `--enable-eplb` on top of `--enable-expert-parallel`, with `--ep
 - **SafeTensors** — HuggingFace format for Mixtral weights. 93.4GB bfloat16 for Mixtral 8x7B.
 
 - **AWQ**, **GPTQ** — post-training quantization for expert weights. Produce the checkpoints with `llm-compressor` (the vLLM project's compression library, which implements both AWQ and GPTQ) or GPTQModel; vLLM and TensorRT-LLM load the resulting quantized weights directly. INT4 quantization reduces Mixtral from ~93GB to ~23GB of weights (46.7B x 0.5 bytes) plus group scales, enabling 2x A100 serving instead of 4x.
+
+- **gpt-oss** — OpenAI's open-weight MoE model, shipped natively in MXFP4 (4.25 bits per parameter), quantizing the expert weights that carry 90%+ of its parameter count so `gpt-oss-120b` fits one 80GB GPU. See [Optimization and Quantization](../optimization_and_quantization/optimization_and_quantization.md) for the MXFP4 format mechanics.
 
 ### Monitoring
 

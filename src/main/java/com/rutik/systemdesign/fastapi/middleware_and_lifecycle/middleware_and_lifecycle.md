@@ -31,7 +31,7 @@ Key capabilities covered in this module:
 - Session middleware and CORS deep dive: preflight, `allow_origins`, `allow_credentials`
 - Exception handler ordering relative to middleware
 
-Python version: 3.11/3.12. FastAPI version: 0.93+. Starlette version: 0.20+.
+Python version: 3.13/3.14. FastAPI version: 0.93+. Starlette version: 1.x.
 
 Cross-references:
 - ASGI fundamentals: `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
@@ -115,7 +115,7 @@ async def timing_middleware(request: Request, call_next: Callable) -> Response:
     return response
 ```
 
-### 4.2 `BaseHTTPMiddleware` class [Starlette 0.12+]
+### 4.2 `BaseHTTPMiddleware` class
 
 Subclasses `starlette.middleware.base.BaseHTTPMiddleware` and overrides `dispatch`. Provides full
 access to `Request` and `Response` objects. Same double-buffering limitation as the decorator form
@@ -1003,13 +1003,30 @@ failing to do so prevents the lifespan startup/shutdown protocol from running.
 `BaseHTTPMiddleware` handles this automatically; pure ASGI middleware requires explicit type checking.
 
 **Q10: How do you test a FastAPI application that uses `lifespan` for startup?**
-**Short:** Enter httpx.AsyncClient as an async context manager to trigger lifespan startup and shutdown.
+**Short:** Use TestClient as a context manager, or wrap the app in LifespanManager for async tests — ASGITransport alone never runs lifespan.
 
-Use Starlette's `TestClient` or `httpx.AsyncClient` as an async context manager:
-`async with AsyncClient(app=app, base_url="http://test") as client:` — entering the context
-triggers lifespan startup; exiting triggers shutdown. For `pytest-asyncio`, use the
-`@pytest.fixture(scope="module")` pattern with `async with AsyncClient(...)` to share a single
-initialized app across all tests in a module, avoiding repeated startup/shutdown overhead.
+Use Starlette's `TestClient` as a context manager — `with TestClient(app) as client:` — which
+runs `lifespan.startup` on enter and `lifespan.shutdown` on exit. The trap is the async path:
+`httpx.AsyncClient` reaches the app through `ASGITransport`, which implements only the `http`
+scope and **never sends a lifespan event**, so every resource your `lifespan` created is still
+`None` inside the test. For an async test, drive the protocol yourself:
+
+```python
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
+async with LifespanManager(app) as manager:
+    async with AsyncClient(
+        transport=ASGITransport(app=manager.app), base_url="http://test"
+    ) as client:
+        ...
+```
+
+Pass `manager.app`, not `app` — the manager hands back a wrapped application, and using the
+bare one skips the startup you added the manager for. Scope the fixture at module or session
+level so a single initialized app is shared across tests, since paying startup and shutdown
+per test is the usual reason an async suite crawls. Note that `AsyncClient` has no `app=`
+parameter at all; passing one raises `TypeError`.
 
 **Q11: What is `Request.state` and what is its scope?**
 **Short:** Request.state is a per-request attribute bag created fresh each request and never shared.

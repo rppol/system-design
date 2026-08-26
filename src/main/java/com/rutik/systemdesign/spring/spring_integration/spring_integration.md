@@ -4,7 +4,7 @@
 > channels, endpoints, and the routing/transformation/aggregation primitives that
 > connect systems in-process and across protocols. How it works, when to reach for
 > it over plain `spring_messaging` (Kafka/RabbitMQ), and the Java DSL you write today.
-> Spring Integration 6.x / Spring Boot 3.x.
+> Spring Integration 7.1 / Spring Boot 4.1.
 
 ---
 
@@ -222,7 +222,7 @@ back-pressure behavior of the seam without touching either endpoint.
 
 ### 6.1 A flow with the Java DSL
 
-The modern way to define flows is `IntegrationFlow` beans (Spring Integration 6.x):
+The modern way to define flows is `IntegrationFlow` beans (Spring Integration 7.1):
 
 ```java
 @Configuration

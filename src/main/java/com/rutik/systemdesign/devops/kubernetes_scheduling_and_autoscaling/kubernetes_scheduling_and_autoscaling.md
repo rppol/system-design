@@ -1,5 +1,7 @@
 # Kubernetes Scheduling & Autoscaling
 
+> **Version anchor (2026-08-25).** **Kubernetes 1.36** (released 2026-04-22) is the current release; **1.35** (2025-12-17) is the prior minor. **In-place pod vertical scaling** reached GA in 1.35. **Pod-level resources** (`spec.resources`) have been Beta since 1.34, and **in-place vertical scaling for pod-level resources** graduated to Beta in 1.36 (`InPlacePodLevelResourcesVerticalScaling`, on by default) — two related but distinct features. **Dynamic Resource Allocation (DRA)** reached GA in 1.34 and its feature gate locked on (mandatory, non-optional) in 1.35. A new core **`Workload` API** (`scheduling.k8s.io/v1alpha2` as of 1.36, replacing the `v1alpha1` it launched with in 1.35) adds native gang scheduling behind the `GenericWorkload` feature gate — alpha, off by default, and considerably thinner than Kueue/Volcano.
+
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
 Scheduling decides *where* a Pod runs; autoscaling decides *how many* Pods and *how many* nodes exist. Together they determine whether your cluster is reliable (Pods land where they should, survive disruptions) and cost-efficient (you run the minimum capacity for the load). This module covers requests/limits/QoS, affinity/taints/topology, the three autoscalers (HPA, VPA, Cluster Autoscaler/Karpenter), KEDA event-driven scaling, and PodDisruptionBudgets.
@@ -75,6 +77,69 @@ Scheduling decides *where* a Pod runs; autoscaling decides *how many* Pods and *
 | topologySpreadConstraints | Even spread across zones/nodes |
 | Taints + tolerations | Reserve nodes for specific workloads |
 | PodDisruptionBudget | Limit simultaneous voluntary evictions |
+
+### Dynamic Resource Allocation (DRA) — the modern alternative to extended resources
+
+Before DRA, requesting a GPU meant an integer **extended resource** (`nvidia.com/gpu: 1`) — the scheduler could count them but couldn't express "a GPU with >=40GB and NVLink," couldn't let two Pods share a partitioned device, and needed a separate vendor device-plugin API. DRA (`resource.k8s.io/v1`, GA in 1.34, feature gate locked on in 1.35) replaces that with a claims-based model closer to how PersistentVolumes work for storage:
+
+| Object | Role |
+|--------|------|
+| `DeviceClass` | Cluster-scoped, admin-authored category of devices (e.g. "gpu") with CEL selection criteria |
+| `ResourceClaim` | Namespaced request for specific devices matching a `DeviceClass`; the unit the scheduler allocates against |
+| `ResourceClaimTemplate` | Per-Pod claim factory — referenced from `pod.spec.resourceClaims`; Kubernetes creates one `ResourceClaim` per Pod automatically |
+| `ResourceSlice` | Published by the device driver on each node, advertising which devices exist and their attributes (vendor, memory, NVLink topology) |
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata: {name: gpu}
+spec:
+  selectors: [{cel: {expression: "device.attributes['gpu.vendor'] == 'nvidia'"}}]
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata: {name: gpu-claim}
+spec:
+  spec:
+    devices:
+      requests: [{name: gpu, exactly: {deviceClassName: gpu}}]
+---
+apiVersion: v1
+kind: Pod
+spec:
+  resourceClaims: [{name: gpu, resourceClaimTemplateName: gpu-claim}]
+  containers:
+    - name: train
+      resources: {claims: [{name: gpu}]}   # no integer count -- the claim IS the request
+```
+
+**Allocation flow:** the device driver publishes `ResourceSlice` objects per node describing available devices; the scheduler's DRA plugin reads those slices, matches them against the `ResourceClaim`'s `DeviceClass` selector, and writes the chosen devices into `ResourceClaim.status.allocation` as it binds the Pod to a node; the kubelet then calls the driver's `NodePrepareResources` hook, which does the actual device setup (mounts, environment variables, driver-specific config) before the container starts. This is why DRA generalizes past GPUs to FPGAs, SR-IOV NICs, and any device a vendor writes a driver for — the scheduler never needs vendor-specific code, only the CEL-selector contract.
+
+**Where it fits scheduling:** DRA claims are filtered during the same scheduler cycle as node affinity and taints — a Pod with an unsatisfiable claim stays Pending exactly like one with an unsatisfiable affinity rule, and `kubectl describe pod` names the claim as the blocking reason (see Q12).
+
+### Gang scheduling — Kueue, Volcano, and the native `Workload` API
+
+The default scheduler places every Pod independently, which is wrong for a distributed training job or an MPI workload: if only 3 of 8 required workers can schedule, they sit consuming GPU nodes while waiting for the other 5, wasting the exact expensive capacity gang scheduling exists to protect. Two mature projects solve this today:
+
+| Scheduler | Model | Adds |
+|-----------|-------|------|
+| **Kueue** | Job-queueing controller layered on the default scheduler | Quotas, borrowing between teams, fair-share, priority, gang admission |
+| **Volcano** | Standalone batch scheduler (replaces the default scheduler for its Pods) | Queues, gang scheduling, HPC-style bin-packing, framework plugins (MPI, TensorFlow) |
+
+Kubernetes 1.35 added a thinner, native alternative: the core `Workload`/`PodGroup` API (`scheduling.k8s.io/v1alpha2` as of 1.36, replacing the `v1alpha1` it launched with), gated behind `GenericWorkload` on the API server and scheduler (plus `GangScheduling` on the scheduler) — alpha, off by default. A `Workload` declares a `podGroupTemplate` with a gang `minCount`; a Pod joins the group via `spec.schedulingGroup`:
+
+```yaml
+apiVersion: scheduling.k8s.io/v1alpha2
+kind: Workload
+metadata: {name: training-job}
+spec:
+  controllerRef: {apiGroup: batch, kind: Job, name: training-job}
+  podGroupTemplates:
+    - name: workers
+      schedulingPolicy: {gang: {minCount: 4}}   # schedulable only if 4 pods can run at once
+```
+
+This is deliberately thinner than Kueue or Volcano — it gives you the all-or-nothing placement primitive and nothing else: no quotas, no cross-team borrowing, no fair-share, no preemption policy beyond what the separate, also-alpha `WorkloadAwarePreemption` gate adds. Reach for the native `Workload` API only when all you need is "don't partially schedule this job"; reach for Kueue (the common default) or Volcano when you're running a shared cluster across teams and need quota enforcement and fair-share on top of gang semantics.
 
 ---
 
@@ -508,6 +573,9 @@ spec: {minAvailable: 2, selector: {matchLabels: {app: web}}}
 | Prometheus Adapter | Custom/external metrics for HPA |
 | Goldilocks | Surfaces VPA recommendations as dashboards |
 | `kubectl describe node` | allocatable vs requested, taints |
+| DRA (`resource.k8s.io`) + vendor kubelet plugins | Claims-based device allocation (GPU, FPGA, SR-IOV NICs) |
+| Kueue / Volcano | Job queueing, quotas, fair-share, gang scheduling |
+| `Workload`/`PodGroup` API (`scheduling.k8s.io/v1alpha2`) | Native, alpha, quota-free gang scheduling primitive |
 
 ---
 
@@ -563,7 +631,7 @@ A CPU limit causes CFS throttling: once a Pod uses its quota within a 100ms peri
 
 **Q13: How does VPA differ mechanically from HPA, and why shouldn't they scale the same metric on the same workload?**
 **Short:** VPA rewrites a Pod's own requests and limits from observed usage rather than changing replica count, and pairing it with HPA on the same metric makes both scalers fight.
-VPA right-sizes a Pod's requests/limits from observed historical usage and rewrites those numbers on the Pod itself, unlike HPA which just changes replica count. With `updateMode: InPlaceOrRecreate` the updater resizes a running Pod in place — in-place Pod vertical scaling is a stable, on-by-default Kubernetes feature — and only evicts when the change cannot be applied in place (a memory limit decrease below current usage is skipped rather than applied, and a resize never changes a Pod's QoS class); `updateMode: Recreate` always evicts. Note that a container whose `resizePolicy` for memory is `RestartContainer` restarts in place — the Pod itself is not rescheduled. If both HPA and VPA watch CPU on the same Deployment, they fight: VPA shrinks or grows the request while HPA is simultaneously computing utilization against that same moving target, producing scaling decisions that thrash instead of converging. The fix is to split responsibility — let VPA right-size CPU/memory requests while HPA scales on a different signal such as requests-per-second or queue depth, or run VPA in `Off` (recommendation-only) mode and apply its suggestions manually. Even with in-place resize, a VPA update can still fall back to eviction, so avoid tight VPA update loops on latency-sensitive or stateful workloads.
+VPA right-sizes a Pod's requests/limits from observed historical usage and rewrites those numbers on the Pod itself, unlike HPA which just changes replica count. With `updateMode: InPlaceOrRecreate` the updater resizes a running Pod in place — per-container in-place Pod vertical scaling reached GA in 1.35 and is on by default — and only evicts when the change cannot be applied in place (a memory limit decrease below current usage is skipped rather than applied, and a resize never changes a Pod's QoS class); `updateMode: Recreate` always evicts. Note that a container whose `resizePolicy` for memory is `RestartContainer` restarts in place — the Pod itself is not rescheduled. Don't conflate this with pod-level resources (`spec.resources`, Beta since 1.34), a separate feature that lets a Pod's containers share one aggregate CPU/memory budget instead of each declaring its own; in-place vertical scaling of that aggregate budget is its own feature, `InPlacePodLevelResourcesVerticalScaling`, which only reached Beta in 1.36. If both HPA and VPA watch CPU on the same Deployment, they fight: VPA shrinks or grows the request while HPA is simultaneously computing utilization against that same moving target, producing scaling decisions that thrash instead of converging. The fix is to split responsibility — let VPA right-size CPU/memory requests while HPA scales on a different signal such as requests-per-second or queue depth, or run VPA in `Off` (recommendation-only) mode and apply its suggestions manually. Even with in-place resize, a VPA update can still fall back to eviction, so avoid tight VPA update loops on latency-sensitive or stateful workloads.
 
 **Q14: What's the difference between a hard (`DoNotSchedule`) and soft (`ScheduleAnyway`) topology spread constraint?**
 **Short:** `DoNotSchedule` blocks placement outright once the configured skew would be exceeded, while `ScheduleAnyway` places the Pod anyway and only prefers better balance.
@@ -576,6 +644,10 @@ Node affinity constrains which nodes a Pod can land on based on node labels, whi
 **Q16: In the case study, why did over-requested resources double the node count even though real CPU utilization was only about 30%?**
 **Short:** The scheduler bin-packed nodes on requests three to four times larger than real usage, so Cluster Autoscaler kept adding nodes the Pods didn't actually need.
 The Deployment requested a full CPU and 2Gi of memory per Pod while actually using roughly 250m CPU and 600Mi, so the scheduler packed nodes as if they were nearly full when they were mostly idle. Because the scheduler bin-packs on requests rather than actual usage, each 1-CPU/2Gi request looked three to four times bigger than what the Pod really consumed, so Cluster Autoscaler kept launching new nodes to fit Pods that appeared to need far more than they did, roughly doubling the fleet to about 80 nodes for flat traffic. Right-sizing requests to measured usage (300m CPU / 768Mi) and switching to Karpenter's consolidation cut the fleet to about 40 nodes and raised average utilization from ~30% to ~60%, taking monthly compute cost from 2x baseline down to roughly 1.05x. Always validate requests against VPA-recommended or profiled real usage before trusting the autoscaler's node count to reflect actual demand.
+
+**Q17: How does Dynamic Resource Allocation (DRA) change how you request a GPU, compared to the old `nvidia.com/gpu: 1` extended-resource count?**
+**Short:** DRA replaces an opaque integer count with a `ResourceClaim` matched against real device attributes via a `DeviceClass`, so requests can express memory, topology, and sharing.
+An extended resource is just an integer the scheduler subtracts from node allocatable — it can say "this node has 2 GPUs left" but not which GPUs, how much memory they have, or whether two Pods can share one safely. DRA replaces that with a claims model: a `DeviceClass` defines a device category with CEL selection criteria, a Pod requests one via a `ResourceClaim` (usually generated per-Pod from a `ResourceClaimTemplate`), and the scheduler matches the claim against `ResourceSlice` objects that the device driver publishes per node, writing the winning devices into the claim's status as it binds the Pod. That lets a claim say "an NVIDIA GPU with at least 40GB," filter on NVLink topology, or request a fractional partition of a device — none of which an extended-resource count can express. Reach for DRA instead of extended resources whenever device selection depends on more than a bare count, which for GPU-serving workloads is nearly always.
 
 ---
 

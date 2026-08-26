@@ -45,6 +45,16 @@ In Python the two primary async clients are:
 
 ## 4. Types / Architectures / Strategies
 
+> **Scope.** `backend/` owns the protocol and the pattern; this module owns the FastAPI wiring.
+> The next three subsections are a working summary so the code below reads without a detour —
+> for the full treatment see
+> [event_driven_fundamentals](../../backend/event_driven_fundamentals/event_driven_fundamentals.md)
+> (delivery semantics, ordering), [kafka_deep_dive](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+> (partitions, rebalancing, transactions),
+> [rabbitmq_deep_dive](../../backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md) (exchanges, routing)
+> and [messaging_patterns](../../backend/messaging_patterns/messaging_patterns.md) (outbox, saga, DLQ).
+> From 4.4 onward everything is specific to running these inside an ASGI process.
+
 ### 4.1 Broker Topologies
 
 | Topology | Mechanism | Ordering | Fan-out | Use case |
@@ -480,6 +490,11 @@ async def create_order_fixed(order: dict, session: AsyncSession) -> dict:
 | Exactly-once | Transactional | No duplicates or loss | ~30–50 % lower | Financial, inventory |
 
 ### 8.2 Kafka vs RabbitMQ
+
+The broker-selection argument itself belongs to
+[kafka_deep_dive](../../backend/kafka_deep_dive/kafka_deep_dive.md) and
+[rabbitmq_deep_dive](../../backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md); this table is the
+short form you need to follow the `aiokafka` and `aio-pika` wiring in Section 6.
 
 | Dimension | Kafka | RabbitMQ |
 |-----------|-------|----------|

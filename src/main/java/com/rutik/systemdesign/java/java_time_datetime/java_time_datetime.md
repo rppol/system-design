@@ -28,7 +28,7 @@ Everything else in the API is built to bridge those two: `ZoneId` and `ZoneRules
 ## 3. Core Principles
 
 - **Two timelines, never mixed**: machine (`Instant`, UTC, epoch nanoseconds) vs human wall-clock (`LocalDate`/`LocalTime`/`LocalDateTime`, no zone). A `ZoneId` is the only bridge between them.
-- **Immutability**: every value is final and thread-safe; `plusDays(1)` returns a *new* object and never mutates the receiver (contrast the mutable `Calendar`).
+- **Immutability**: every value is final and thread-safe; `plusDays(1)` returns a *new* object and never mutates the receiver (contrast the mutable `Calendar`) — the exact discipline [Effective Java Item 17: "Minimize mutability"] prescribes, and the reason `java.time` exists at all: `Date`/`Calendar` were mutable, and that mutability was the defect being fixed.
 - **Fluent, self-describing types**: the type name states exactly which fields are present. `LocalDate` has no time; `Instant` has no zone; `ZonedDateTime` has everything.
 - **Domain-driven amounts**: `Duration` is time-based (seconds + nanos); `Period` is date-based (years/months/days). You pick the one that matches the unit the human cares about.
 - **Explicit resolution of ambiguity**: DST gaps and overlaps are resolved by documented rules, not silently — and you can override them (`withEarlierOffsetAtOverlap`).
@@ -396,6 +396,14 @@ Neither result is a bug; they answer different questions. The 23 hours is not `P
 
 ### Legacy conversions
 
+The moment `java.util.Date` crosses an API boundary is exactly the case [Effective
+Java Item 50: "Make defensive copies when needed"] warns about — a mutable object
+handed to or returned from a class can be mutated out from under it later, so a
+class holding onto a caller's `Date` must copy it in and out. `java.time`'s
+immutable types make that discipline unnecessary on the far side of the
+conversion: once you hold an `Instant`, no caller can mutate it later, so convert
+at the boundary and never store the mutable legacy type internally.
+
 ```java
 // java.util.Date  <-> Instant
 Date legacy = new Date();
@@ -438,7 +446,7 @@ var test  = new ReminderService(fixed);
 assert test.isDue(Instant.parse("2026-07-03T07:59:59Z"));    // reproducible
 ```
 
-`Clock.fixed(...)` always returns the same instant; `Clock.offset(base, dur)` shifts it; `Clock.tick(base, dur)` truncates its resolution. This is dependency injection applied to the wall clock.
+`Clock.fixed(...)` always returns the same instant; `Clock.offset(base, dur)` shifts it; `Clock.tick(base, dur)` truncates its resolution. This is dependency injection applied to the wall clock — [Effective Java Item 5: "Prefer dependency injection to hardwiring resources"] by name, with `Clock` standing in for the resource and `Clock.systemUTC()` vs `Clock.fixed(...)` standing in for the production/test factories a caller passes in.
 
 ### DST gap/overlap resolution in code
 

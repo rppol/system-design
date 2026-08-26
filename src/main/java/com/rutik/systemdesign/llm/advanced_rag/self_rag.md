@@ -384,6 +384,39 @@ Fix: Evaluate support token calibration on a labeled faithfulness test set. Cons
 Fine-tuning on the Self-RAG training corpus can reduce performance on general tasks not represented in training.
 Fix: Evaluate fine-tuned model on general benchmarks (MMLU, HellaSwag) alongside Self-RAG task benchmarks. Use PEFT (LoRA) fine-tuning rather than full fine-tuning to limit regression.
 
+**6. Substring matching on reflection tokens silently reclassifies them**
+A naive parser that checks `"Supported" in token` to detect `[Supported]` also matches `[Partially Supported]`, because the shorter label is a substring of the longer one:
+
+```python
+# BROKEN: substring check lets [Partially Supported] fall through as [Supported]
+def score_support(token: str) -> float:
+    if "No Support" in token:
+        return 0.0
+    if "Supported" in token:
+        return 1.0          # BUG: "[Partially Supported]" also contains "Supported"
+    return 0.5
+```
+
+Every `[Partially Supported]` sentence silently scores as full credit instead of half credit. Section 6's `C3` candidate (`S S S P S`, true `support_score = 0.9000`) would score a perfect `1.0000` under this bug, so a candidate that is genuinely only partially grounded on one sentence in five reads as fully grounded — and the more partially-supported sentences an answer has, the larger the inflation.
+Fix: match the exact bracketed label against a lookup table, and fail closed — raise, don't default — on anything unrecognized:
+
+```python
+# FIXED: exact-match lookup; unrecognized or missing tokens fail closed, not "supported"
+SUPPORT_SCORES = {
+    "[Supported]": 1.0,
+    "[Partially Supported]": 0.5,
+    "[No Support]": 0.0,
+}
+
+def score_support(token: str) -> float:
+    token = token.strip()
+    if token not in SUPPORT_SCORES:
+        raise ValueError(f"unrecognized reflection token: {token!r}")
+    return SUPPORT_SCORES[token]
+```
+
+The lookup table turns a silent 10-point score inflation into either the correct 0.5 or a loud failure on a malformed token — never a wrong number that looks like a right one.
+
 ---
 
 ## 11. Technologies & Tools

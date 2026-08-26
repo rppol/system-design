@@ -961,13 +961,21 @@ does not include `password_hash`, it is stripped automatically. Without `respons
 fields of the returned object are serialised, potentially leaking internal data.
 
 **Q4: What happens when you define a sync `def` route in FastAPI?**
-**Short:** FastAPI runs sync def routes in a thread pool executor so they don't block the event loop.
+**Short:** It is dispatched to anyio's thread pool via run_in_threadpool, which has a process-wide default of 40 tokens.
 
-FastAPI detects synchronous functions at startup and wraps them using
-`asyncio.get_event_loop().run_in_executor(None, ...)` (Starlette's `run_in_threadpool`). The
-route runs in the default `ThreadPoolExecutor` — by default up to `min(32, os.cpu_count() + 4)`
-threads. This means sync routes can make blocking calls safely without stalling the event loop,
-but they do consume thread pool capacity. Uvicorn's default is 40 worker threads for sync routes.
+FastAPI inspects the handler at startup and, if it is a plain `def`, dispatches it through
+Starlette's `run_in_threadpool`, which calls `anyio.to_thread.run_sync`. The bound is anyio's
+default `CapacityLimiter` of **40 tokens** — process-wide, shared by every sync route,
+sync dependency and `run_in_threadpool` call in the app, and **independent of CPU count**. So
+a sync route may block safely without stalling the event loop, but only 40 can be in flight at
+once; the 41st waits for a token while the event loop stays free.
+
+The number people usually reach for here, `min(32, os.cpu_count() + 4)`, is the default for
+`concurrent.futures.ThreadPoolExecutor` and is **not** the path a `def` handler takes — quoting
+it is the most common wrong answer to this question. Raise the real limit with
+`anyio.to_thread.current_default_thread_limiter().total_tokens = N` at startup, and remember
+that a sync route holding a token for 500 ms caps the endpoint at 80 requests/second no matter
+how many workers you run.
 
 **Q5: How does `BackgroundTasks` differ from `asyncio.create_task`?**
 **Short:** BackgroundTasks runs after the response is sent, while create_task starts immediately on the event loop.

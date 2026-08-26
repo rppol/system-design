@@ -219,6 +219,79 @@ in reverse, because it assumes perfectly sequential access with no fault seriali
 `cudaMemPrefetchAsync` wins because its cost is predictable and schedulable, not because
 it is always the smaller number.
 
+### 4.5 PCIe-Attached vs. Coherent (NVLink-C2C) Unified Memory
+
+Everything above describes the **PCIe-attached** case: host and device sit in genuinely
+separate physical memories, connected by an interconnect the page-fault machinery must
+cross explicitly. That is not the only physical shape Unified Memory runs on, and the
+difference between the two is not just bandwidth — it changes which access patterns are
+fast.
+
+**PCIe-attached UM** (a discrete GPU in a PCIe slot beside an x86/ARM host): host and
+device have separate physical DRAM and separate page tables. A device touch of a
+host-resident page raises the page fault described above, and the driver **migrates the
+whole page** — 4 KB, or up to 2 MB for a large page — across PCIe, then updates both page
+tables. Migration is the mechanism, so access granularity and locality dominate
+performance: touch one `float` in an unmigrated 4 KB page and the driver still moves all
+4,096 bytes. That is precisely why `cudaMemAdvise`/`cudaMemPrefetchAsync` exist above —
+they get ahead of that migration cost before it turns into a fault storm.
+
+**Coherent UM over NVLink-C2C** (Grace-Hopper GH200, Grace-Blackwell GB200): the CPU and
+GPU sit on the same module, connected by NVLink Chip-to-Chip — a hardware cache-coherent
+interconnect roughly an order of magnitude faster than PCIe. The CPU and GPU share **one
+physical address space**, so the GPU can read and write host memory **at cache-line
+granularity** (as small as 64 bytes) **with no page migration at all** — a scattered touch
+is a coherent remote read, not a fault.
+
+That inverts the tuning advice:
+
+| | PCIe-attached | Coherent (NVLink-C2C) |
+|---|---|---|
+| Address spaces | Separate; migration required | One; hardware cache-coherent |
+| Unit moved on a touch | Whole page (4 KB - 2 MB) | One cache line (as small as 64 B) |
+| Sparse/scattered access | Pathological — one whole page migrates per touched cache line | Merely a remote access — no migration at all |
+| Eager whole-array prefetch | A clear win — turns a fault storm into one scheduled copy | Can be wasted bandwidth — data that is never touched still moved |
+| Primary tuning knob | `cudaMemAdvise` / `cudaMemPrefetchAsync` | Usually unnecessary — coherence is already the fast path |
+
+State the consequence plainly: **the same Unified Memory source code is correct on both
+platforms and has different performance characteristics on each.** A tuning conclusion
+measured on a PCIe-attached GPU ("always prefetch the whole array before the kernel")
+is not transferable to a coherent Grace-Blackwell part, and the reverse holds too — a
+sparse-access kernel painstakingly tuned to dodge migration storms on PCIe has nothing
+left to fix on NVLink-C2C. Do not assume which platform you are on — read it:
+
+```cpp
+int pageableAccess = 0, concurrentManaged = 0;
+cudaDeviceGetAttribute(&pageableAccess,
+                        cudaDevAttrPageableMemoryAccessUsesHostPageTables, device);
+cudaDeviceGetAttribute(&concurrentManaged,
+                        cudaDevAttrConcurrentManagedAccess, device);
+// pageableAccess != 0 on a coherent platform: the GPU walks the SAME host
+// page tables the CPU does -- there is no separate device page table for
+// migration to populate in the first place.
+```
+
+### 4.6 The Virtual Memory Management (VMM) API
+
+Everything above allocates a fixed-size range up front. `cuMemCreate` /
+`cuMemAddressReserve` / `cuMemMap` / `cuMemSetAccess` are lower-level driver-API
+primitives that decouple **reserving virtual address space** from **backing it with
+physical memory** — the mechanism underneath a growable allocation:
+
+- `cuMemAddressReserve` reserves a large virtual address range up front (gigabytes), with
+  no physical memory committed yet — cheap, since it is address-space bookkeeping only.
+- `cuMemCreate` allocates a physical memory handle of a given size and location.
+- `cuMemMap` binds a physical handle into a subrange of the reserved virtual range, and
+  `cuMemSetAccess` grants a device (or the host) permission to touch it.
+
+The payoff: a data structure presents one **stable virtual pointer** for its entire
+lifetime while its **physical backing grows incrementally**, chunk by chunk, as the
+structure grows — no `realloc`-style copy-and-relocate, because the virtual address never
+moves. This is the mechanism a growable-tensor allocator or an LLM KV-cache uses to hand
+out a pointer once and keep extending it page by page as new tokens arrive, and it is also
+the mechanism `cudaMallocAsync`'s memory pools (§4.1) are built on underneath the
+stream-ordered allocation API.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -1018,6 +1091,46 @@ every CUDA API's `cudaError_t` return value and aborts with file/line context
 on failure, and wrapping "infallible" calls matters because a prior
 unchecked error can leave the CUDA context in a broken state that surfaces on
 the *next* call instead of the one that actually failed.
+
+**Q: Why does the same Unified Memory source code perform differently on a
+PCIe-attached GPU versus a Grace-Hopper (NVLink-C2C) system?**
+**Short:** PCIe-attached UM migrates whole pages on a device touch, while NVLink-C2C coherent UM serves touches at cache-line granularity with no migration.
+Because the two platforms back the same
+single-pointer abstraction with physically different mechanisms: a
+PCIe-attached GPU has a separate physical memory and page table, so a device
+touch of an unmigrated page triggers the whole-page (4 KB-2 MB) migration
+covered above; a Grace-Hopper/Grace-Blackwell system shares one physical
+address space with the CPU over hardware-coherent NVLink-C2C, so the GPU
+reads and writes host memory at cache-line granularity with no migration
+step at all — the source is identical, but the cost model underneath it is
+not.
+
+**Q: What replaces page migration on a Grace-Hopper/Grace-Blackwell system, and
+why does that invert the usual Unified Memory tuning advice?**
+**Short:** Hardware cache coherence over NVLink-C2C lets the GPU read host memory at cache-line granularity, so a scattered access pattern that was pathological on PCIe becomes cheap.
+Hardware cache coherence over
+NVLink-C2C replaces it: the GPU can touch host memory one cache line (as
+small as 64 bytes) at a time instead of faulting in a whole page. A sparse,
+scattered access pattern that would be pathological on a PCIe box — one
+entire 4 KB-2 MB page migrated per touched cache line — is merely a remote
+coherent read here, while an eager whole-array `cudaMemPrefetchAsync` that
+was a clear win on PCIe can now move bytes the kernel never touches. Read
+`cudaDevAttrPageableMemoryAccessUsesHostPageTables` before assuming either
+tuning conclusion transfers.
+
+**Q: What problem does the virtual memory management (VMM) API
+(`cuMemCreate`/`cuMemAddressReserve`/`cuMemMap`/`cuMemSetAccess`) solve that
+plain `cudaMalloc` cannot?**
+**Short:** VMM lets a data structure keep one stable virtual pointer while its physical backing grows incrementally, avoiding a realloc-style copy.
+`cudaMalloc` allocates a fixed-size range
+that cannot grow without a new allocation and a copy. VMM decouples
+reserving virtual address space (`cuMemAddressReserve`) from backing it with
+physical memory (`cuMemCreate` + `cuMemMap` + `cuMemSetAccess`), so a
+structure can present one stable virtual pointer for its entire lifetime
+while its physical backing grows incrementally, chunk by chunk — the
+mechanism a growable-tensor allocator or an LLM KV-cache uses to keep
+extending a buffer page by page, and the same mechanism `cudaMallocAsync`'s
+memory pools are built on underneath.
 
 ---
 

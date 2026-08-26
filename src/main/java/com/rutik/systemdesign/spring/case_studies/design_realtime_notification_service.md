@@ -10,6 +10,32 @@
 
 ---
 
+## Intuition
+
+Picture a stadium PA system where every seat has its own private earpiece, and the
+announcer's booth doesn't know which cable each earpiece is plugged into. The announcer just
+needs to say "seat 4F, your car is ready" into a system that finds the wire — even if the wire
+runs through a different room than the one the announcer is standing in. That is the whole
+shape of this problem: an event is produced somewhere, the connection that should receive it
+is held somewhere else (a random pod out of twenty), and the two need to find each other in
+under 100 ms without anyone remembering to wire them together by hand.
+
+The one-line mental model: **Kafka is the durable record of what happened; Redis Pub/Sub is
+the switchboard that finds who's listening right now; the WebSocket map is the last local
+hop.** Three different jobs, three different tools, and the design breaks if any one of them
+tries to do another's job — durability in Pub/Sub (it has none), routing in Kafka (technically
+possible, but §5 Decision 2 shows why it costs 17× more Redis-shaped traffic), or delivery
+guarantees in the WebSocket map (a closed socket is just gone, no retry).
+
+The recurring interview trap is forgetting that a WebSocket connection is *pod-local state*.
+Nothing about Spring, Kafka, or Redis makes that fact go away — it has to be designed around,
+which is why §4.4's subscription manager exists at all: a pod only subscribes to the Redis
+channels for users it is currently holding a socket open for, and unsubscribes the moment that
+socket closes. Get that lifecycle wrong and you either leak Redis subscriptions forever (§9
+Pitfall 4's cousin) or miss messages for users who reconnected to a different pod.
+
+---
+
 ## 1. Requirements Clarification
 
 ### Functional Requirements
@@ -314,6 +340,127 @@ Set `spring.threads.virtual.enabled=true` so a session blocked on a slow network
 virtual thread instead of holding a platform thread — 25,000 connections cost ~25,000 virtual
 threads rather than 25,000 platform threads (~25 GB of stack).
 
+### 4.7 SSE Fallback Controller
+
+```java
+@RestController
+public class SseController {
+
+    private final Map<String, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
+    private final NotificationRepository notificationRepo;
+
+    @GetMapping(value = "/notifications/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter stream(@AuthenticationPrincipal String userId) {
+        // No-arg constructor sets NO timeout of its own (§9 Pitfall 5) -- always set one
+        SseEmitter emitter = new SseEmitter(60_000L);
+
+        emitters.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+
+        emitter.onCompletion(() -> removeEmitter(userId, emitter));
+        emitter.onTimeout(() -> removeEmitter(userId, emitter));
+        emitter.onError(e -> removeEmitter(userId, emitter));
+
+        // Replay unread notifications immediately, same as the WebSocket path (§4.1)
+        notificationRepo.getUnread(userId, 50).forEach(n -> sendEvent(emitter, n));
+        return emitter;
+    }
+
+    public void deliverToUser(String userId, Notification notification) {
+        List<SseEmitter> userEmitters = emitters.get(userId);
+        if (userEmitters == null) return;
+        userEmitters.forEach(e -> sendEvent(e, notification));
+    }
+
+    private void sendEvent(SseEmitter emitter, Notification n) {
+        try {
+            emitter.send(SseEmitter.event().id(n.getId()).name("notification").data(toJson(n)));
+        } catch (IOException e) {
+            removeEmitter(n.getUserId(), emitter);
+        }
+    }
+
+    private void removeEmitter(String userId, SseEmitter emitter) {
+        List<SseEmitter> list = emitters.get(userId);
+        if (list != null) {
+            list.remove(emitter);
+            if (list.isEmpty()) emitters.remove(userId);
+        }
+    }
+}
+```
+
+`CopyOnWriteArrayList` is the right structure here — unlike §4.1's WebSocket session set, a
+user's SSE emitter list mutates rarely (one add per tab opened) and is iterated on every
+delivery, exactly the read-mostly profile `CopyOnWrite` is built for. That is a different
+access pattern from the WebSocket registry's reconnect-storm churn (§9 Pitfall 4), not a
+contradiction of it.
+
+### 4.8 Unread Count Service
+
+```java
+@Service
+public class UnreadCountService {
+
+    private final RedisTemplate<String, String> redisTemplate;
+
+    private String key(String userId) { return "unread:" + userId; }
+
+    public void increment(String userId) {
+        redisTemplate.opsForValue().increment(key(userId));
+    }
+
+    public void markRead(String userId, int count) {
+        // Never let the counter go negative -- a race between two devices acking
+        // the same batch must not push it below zero
+        redisTemplate.execute((RedisCallback<Long>) conn -> {
+            long current = Optional.ofNullable(conn.stringCommands().get(key(userId).getBytes()))
+                .map(b -> Long.parseLong(new String(b))).orElse(0L);
+            long next = Math.max(0, current - count);
+            conn.stringCommands().set(key(userId).getBytes(), String.valueOf(next).getBytes());
+            return next;
+        });
+    }
+
+    public long getCount(String userId) {
+        String value = redisTemplate.opsForValue().get(key(userId));
+        return value == null ? 0 : Long.parseLong(value);
+    }
+}
+```
+
+A plain `INCR`-then-read has a well-known race: two pods reading the count, both decrementing
+based on a stale read, and the final value overcounting. The `execute` block above uses a
+single Redis connection to read-then-write atomically from the client side; the more scalable
+fix at higher throughput is a Lua script (`EVAL`) so the read-modify-write happens inside Redis
+itself and survives concurrent callers without a client-side lock.
+
+### 4.9 Broken Pattern: Blocking Redis Publish on the Kafka Consumer Thread
+
+```java
+// BROKEN: no timeout, no circuit breaker, on the thread that also commits Kafka offsets
+@KafkaListener(topics = "notifications", concurrency = "4")
+public void handle_broken(ConsumerRecord<String, String> record) {
+    Notification n = Notification.from(parseEvent(record.value()));
+    notifRepo.save(n);
+    redisTemplate.convertAndSend("user:" + n.getUserId(), toJson(n));  // blocks here
+    // If Redis is slow or partially down, this call blocks the consumer thread.
+    // With manual offset commit, the offset never advances -- consumer lag grows
+    // unbounded and Kafka rebalances the partition away after max.poll.interval.ms.
+}
+```
+
+**Failure mode:** During a Redis maintenance window with elevated latency (200 ms instead of
+0.3 ms), all 4 consumer threads per pod spent their poll interval blocked on
+`convertAndSend()`. `max.poll.interval.ms` (30 s default) was exceeded, Kafka's consumer group
+coordinator declared the consumers dead and triggered a rebalance — which paused consumption
+entirely for the ~15 seconds the rebalance took, compounding the very lag it was reacting to.
+
+**Fix:** Wrap the Redis publish in a Resilience4j `TimeLimiter` (short timeout, e.g. 200 ms)
+and treat a publish failure as non-fatal — the notification is already durably in the ZSET
+(`notifRepo.save()` happened first), so a dropped Pub/Sub hint only delays delivery until the
+next reconnect; it does not lose the notification. Never let a best-effort delivery hint block
+the durable write path or the Kafka offset commit.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -391,6 +538,17 @@ automatic browser reconnection with `Last-Event-ID` replay for free — the reco
 that §4.1 hand-writes against the ZSET. This design keeps WebSocket as primary only because read
 receipts flow client-to-server; drop that one requirement and SSE removes the upgrade handshake, the
 proxy incompatibility, and the custom reconnect protocol in a single stroke.
+
+**Build vs. buy — PubNub, Ably, Pusher:** the managed alternative to this entire design is a
+hosted pub/sub-as-a-service product, which sells exactly the two-layer split above as an API
+call: publish to a channel, and the vendor handles connection scaling, geographic distribution,
+and presence. The tradeoff is the same one that shows up everywhere in this space — a managed
+service removes the WebSocket registry, the Redis Pub/Sub layer, and the reconnect/replay logic
+this file builds, at the cost of per-connection or per-message pricing and a dependency on the
+vendor's own fan-out architecture during an incident. Teams building notification delivery as a
+small piece of a larger product often reach for one of these rather than operating §3's
+architecture themselves; teams for whom real-time delivery *is* the product (chat apps, trading
+platforms, multiplayer games) tend to own it, the same way this design does.
 
 ---
 
@@ -482,6 +640,37 @@ Add Kafka consumer lag as an HPA custom metric for event-driven auto-scaling.
 
 ---
 
+### Runbook 5: STOMP/Redis Split-Brain After Network Partition
+
+**Symptom:** Some users report missing notifications while `notification.delivery.latency.p99`
+looks normal — the metric only measures deliveries that happened, so a partial partition is
+invisible to it. `websocket.sessions.map.size` summed across pods does not match
+`redis-cli PUBSUB NUMPAT` count of active channel patterns.
+
+**Diagnosis:**
+1. Check for a network partition between a subset of pods and the Redis cluster
+   (`redis-cli --latency` from each pod, not just one).
+2. Compare `sessions.map.size` (local, per pod) against the subscription count
+   (`subscriptionManager`'s `listeners` map size) — they should be equal by the invariant
+   Runbook 3 already tests. A pod that reconnected to Redis but did not re-subscribe existing
+   users breaks that invariant silently.
+3. Check Lettuce's reconnect log (`io.lettuce.core.protocol.ReconnectionHandler`) for repeated
+   reconnect attempts, which indicate the partition is intermittent rather than resolved.
+
+**Alert thresholds:** page when `abs(sessions_size - subscriptions_size) > 100` sustained for
+2 minutes on any pod; warn on Lettuce reconnect events exceeding 5/minute.
+
+**Mitigation:** Force a full re-subscribe on any Redis reconnect event rather than assuming
+existing subscriptions survived — Lettuce's connection object is the same Java object across a
+reconnect, but the underlying TCP session and therefore the server-side subscription state is
+not. Register a `RedisConnectionFactory` listener that calls
+`subscriptionManager.resubscribeAll(sessions.keySet())` on reconnect.
+
+**Rollback:** None needed — this is a runtime resync, not a deploy. If it recurs, the durable
+fix is the one above (resubscribe-on-reconnect), not a rollback.
+
+---
+
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Redis Pub/Sub Drop During Redis Restart (social platform, 2022)**
@@ -545,6 +734,32 @@ user session registry and close the response.
 
 ---
 
+**Pitfall 6: Kafka Message Key Omitted — Out-of-Order Delivery for the Same User (order tracking service, 2022)**
+The Kafka producer published order-status events keyed by `orderId` instead of `userId`, so a
+user's three status updates (`placed` → `shipped` → `delivered`) landed on three different
+partitions with no ordering guarantee between them. Under normal load they arrived in order by
+luck (partition assignment plus timing); under partition rebalancing during a broker restart,
+`delivered` was consumed and pushed to the user's browser 400 ms before `shipped`, and the UI
+briefly showed a status regression. Fix: partition by `userId`, not by the business entity's
+own ID — Kafka only guarantees order within a partition, and the ordering guarantee this
+design actually needs is per-user, not per-order (§7 already documents "partitioned by
+user_id"; this incident is what happens when a producer doesn't honor it).
+
+---
+
+**Pitfall 7: Notification Storm From a Retried Batch Job Mistaken for Real-Time Traffic (marketing platform, 2023)**
+A batch job re-sending a promotional notification to 2,000,000 users retried its entire run
+after a partial failure, without checking which users had already received it — doubling the
+Kafka publish volume to 100,000 events/sec for 40 minutes, well past the 50,000/s peak this
+design is sized for (§2). Consumer lag climbed to 4,000,000 messages; real-time order and
+payment notifications queued behind the promotional flood and were delayed up to 6 minutes.
+Fix: give bulk/batch notification producers a separate Kafka topic and consumer group from
+real-time events, so a marketing flood cannot starve the partitions real orders depend on;
+add idempotency keys to the batch job so a retry skips already-sent users instead of resending
+the whole run.
+
+---
+
 ## 10. Capacity Planning
 
 ### WebSocket Connection Capacity per Pod
@@ -579,6 +794,32 @@ Notification events:  50,000 msg/s × 1 KB = 50 MB/s producer throughput
 Partitions needed:    20 pods × 4 consumers = 80 partitions
 Retention: 50 MB/s × 86,400 s × 3 days = 12.96 TB (compressed to ~4 TB with LZ4)
 Kafka broker: 3 brokers × 4 TB storage = sufficient; m5.xlarge (3 Gbps network)
+```
+
+### Redis Connection Pool Sizing (Lettuce)
+
+```
+Lettuce uses a small number of multiplexed connections, not one per subscription --
+  a single connection can carry thousands of concurrent subscriptions
+Recommended: 1 shared connection for Pub/Sub (RedisMessageListenerContainer's own
+  connection) + a separate pool (default 8) for ZSET/HASH command traffic
+Command traffic: 50,000 events/s x (1 ZADD + 1 ZREMRANGEBYRANK + 1 EXPIRE + 1 INCR)
+  = 200,000 Redis ops/s from the write side alone
+A single-threaded Redis node processes ~100,000-200,000 simple ops/s -- this design is
+  at the edge of a single node's budget, which is why Redis Cluster (sharding by key
+  hash) is load-bearing here, not optional, at this traffic level
+```
+
+### JSON Serialization CPU Cost
+
+```
+Jackson serialize+deserialize a ~500-byte notification: ~15-20 microseconds per op
+  (typical JVM, POJO with 6-8 fields)
+Peak: 50,000 events/s x 2 (serialize on publish, deserialize on each of 1.2 deliveries)
+  = ~110,000 JSON ops/s x 18us = ~2 seconds of CPU-time per second
+  -> roughly 2 cores dedicated to JSON alone at peak, spread across 20 pods is
+  negligible per pod, but real enough to show up in a flame graph on an
+  under-provisioned pod
 ```
 
 ---
@@ -666,6 +907,53 @@ WebSocket is primary and SSE is a proxy-compatibility fallback.
 **Q: How would you implement read receipts (marking a notification as seen) in this architecture?**
 
 A: Read receipts are client-to-server messages, so WebSocket's bidirectionality is needed (SSE cannot handle this without a separate HTTP POST). The client sends `{"type":"ACK","notificationId":"<uuid>"}` as a WebSocket text message. The `NotificationWebSocketHandler.handleTextMessage()` parses the ACK, calls `notificationRepo.markRead(userId, notificationId)` which updates the ZSET member's metadata or a separate `read:<userId>` Redis set, and decrements the unread counter via `UnreadCountService`. On reconnect, the unread count is re-computed as `ZCARD notif:<userId>` minus `SCARD read:<userId>`. This avoids scanning all notifications to compute the badge count on every reconnect — both Redis operations are O(1).
+
+**Q: How do you guarantee per-user message ordering when Kafka partitions and Redis Pub/Sub are both in the delivery path?**
+Ordering is guaranteed only within a Kafka partition, so the producer must partition by
+`userId` (§7), never by an unrelated key like `orderId` (see §9 Pitfall 6 for what happens
+otherwise). Within one partition, a single consumer thread processes events in offset order,
+persists to the ZSET, then publishes to Redis. Redis Pub/Sub itself preserves publish order to
+a given channel's subscribers on a single connection, so end-to-end ordering holds as long as
+the partitioning key is right and a single pod's delivery path doesn't fan a user's events out
+across multiple threads.
+
+**Q: How would you extend this design to multiple regions?**
+Run the full stack (Kafka, Redis, notification pods) per region, with events routed to the
+region where the user's active connection lives — a global directory (a globally-replicated
+table or a Redis Cluster with cross-region replication) maps `userId` to region. Cross-region
+Redis Pub/Sub is not viable at WebSocket latency budgets (§1's 100 ms P99), so the fan-out
+layer stays region-local; only the durable Kafka event and the ZSET history need any
+cross-region consideration, and even those are usually kept region-local with the event source
+publishing to whichever region currently owns the user.
+
+**Q: How do you avoid dropping connections during a rolling deployment?**
+Kubernetes sends `SIGTERM` and starts a grace period before killing the pod. A `preStop` hook
+(referenced in the cross-cutting zero-downtime doc) sleeps briefly to let the load balancer
+stop routing new connections, while existing WebSocket sessions are given a chance to drain:
+the pod stops accepting new sessions but keeps serving existing ones until
+`terminationGracePeriodSeconds` elapses or they close naturally. Clients reconnect with
+jittered backoff (§9 Pitfall 3) to a different pod and replay unread notifications from the
+ZSET — the ZSET is what makes a mid-flight disconnect safe rather than lossy.
+
+**Q: Why does the design use a Redis ZSET rather than a dedicated notification database table (e.g., Postgres)?**
+Notification history here is a bounded, time-ordered, per-user list with a short TTL (7 days)
+and high write volume (every event writes) but low query complexity (fetch the last 50, mark
+some read) — exactly Redis's sweet spot, and a workload that would otherwise generate 50,000
+writes/sec of Postgres row churn for data nobody needs after a week. A relational table earns
+its cost when notifications need durable long-term storage, complex queries (search, joins to
+other entities), or transactional consistency with other business data — none of which apply
+here. If audit-grade permanent history were a requirement, the design would add a Postgres or
+data-warehouse sink fed from the same Kafka topic, in addition to the Redis ZSET, not instead
+of it.
+
+**Q: How would you test that a notification published from pod A reaches a user connected to pod B?**
+An integration test with `KafkaContainer` and `RedisContainer` (Testcontainers, per the
+cross-cutting test-strategy doc) starts two instances of the notification service in-process,
+opens a WebSocket client against instance B, publishes a Kafka event, and asserts the message
+arrives on B's WebSocket within a timeout. This exercises the real cross-pod path — Kafka
+consumer on A, Redis publish from A, Redis delivery to B's subscription, WebSocket send from B
+— rather than mocking any of the three systems, which is the only way to catch a bug like §9
+Pitfall 1 (subscriptions not re-registered after a Redis reconnect) before production.
 
 ---
 

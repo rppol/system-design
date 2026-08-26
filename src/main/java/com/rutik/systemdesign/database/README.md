@@ -37,10 +37,10 @@ Phase 7: Architecture & Selection
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| [Database Fundamentals](database_fundamentals/database_fundamentals.md) | Intermediate | 15 | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
-| [Storage Engines Internals](storage_engines_internals/storage_engines_internals.md) | Expert | 18 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
-| [Indexing Deep Dive](indexing_deep_dive/indexing_deep_dive.md) | Advanced | 18 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
-| [Concurrency Control & Locking](concurrency_control_and_locking/concurrency_control_and_locking.md) | Advanced | 15 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
+| [Database Fundamentals](database_fundamentals/database_fundamentals.md) | Intermediate | 16 | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
+| [Storage Engines Internals](storage_engines_internals/storage_engines_internals.md) | Expert | 17 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
+| [Indexing Deep Dive](indexing_deep_dive/indexing_deep_dive.md) | Advanced | 19 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
+| [Concurrency Control & Locking](concurrency_control_and_locking/concurrency_control_and_locking.md) | Advanced | 16 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
 
 ### Phase 2 — Relational Databases
 
@@ -48,56 +48,56 @@ Phase 7: Architecture & Selection
 |--------|-------|------|--------------|
 | [PostgreSQL Internals](postgresql_internals/postgresql_internals.md) | Expert | 18 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
 | [MySQL InnoDB Internals](mysql_innodb_internals/mysql_innodb_internals.md) | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
-| [SQL Query Optimization](sql_query_optimization/sql_query_optimization.md) | Advanced | 18 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
-| [Schema Design & Normalization](schema_design_and_normalization/schema_design_and_normalization.md) | Intermediate | 15 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — with 1 deep-dive sub-file ([surrogate vs natural keys](schema_design_and_normalization/surrogate_vs_natural_keys.md)) |
-| [Database Migrations (Zero Downtime)](database_migrations_zero_downtime/database_migrations_zero_downtime.md) | Intermediate | 12 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
+| [SQL Query Optimization](sql_query_optimization/sql_query_optimization.md) | Advanced | 16 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
+| [Schema Design & Normalization](schema_design_and_normalization/schema_design_and_normalization.md) | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — with 1 deep-dive sub-file ([surrogate vs natural keys](schema_design_and_normalization/surrogate_vs_natural_keys.md)) |
+| [Database Migrations (Zero Downtime)](database_migrations_zero_downtime/database_migrations_zero_downtime.md) | Intermediate | 16 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
 ### Phase 3 — NoSQL Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| [Document Databases](document_databases/document_databases.md) | Advanced | 15 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
+| [Document Databases](document_databases/document_databases.md) | Advanced | 17 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
 | [Key-Value Stores](key_value_stores/key_value_stores.md) | Expert | 17 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the category; product internals live in [Redis Internals](redis_internals/redis_internals.md) |
 | [Redis Internals](redis_internals/redis_internals.md) | Expert | 28 | SDS/listpack/quicklist/dict encodings, event loop and io-threads, eviction (LRU/LFU), fork + CoW, multi-part AOF, PSYNC, live resharding, locks and fencing, Redis 8 vs Valkey 9 |
-| [Wide-Column Databases](wide_column_databases/wide_column_databases.md) | Advanced | 15 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
-| [Search Engines](search_engines/search_engines.md) | Advanced | 15 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
+| [Wide-Column Databases](wide_column_databases/wide_column_databases.md) | Advanced | 22 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
+| [Search Engines](search_engines/search_engines.md) | Advanced | 16 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | [Elasticsearch Internals](elasticsearch_internals/elasticsearch_internals.md) | Expert | 38 | Lucene segment files, refresh/flush/merge triangle, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 one-byte norms, per-shard IDF and `dfs_query_then_fetch`, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ |
-| [Graph Databases](graph_databases/graph_databases.md) | Intermediate | 12 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
-| [Time-Series Databases](time_series_databases/time_series_databases.md) | Intermediate | 12 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
+| [Graph Databases](graph_databases/graph_databases.md) | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
+| [Time-Series Databases](time_series_databases/time_series_databases.md) | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 
 ### Phase 4 — Emerging Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| [Vector Databases](vector_databases/vector_databases.md) | Advanced | 15 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
+| [Vector Databases](vector_databases/vector_databases.md) | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | [NewSQL & Distributed SQL](newsql_and_distributed_sql/newsql_and_distributed_sql.md) | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
-| [In-Memory Databases](in_memory_databases/in_memory_databases.md) | Intermediate | 10 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| [In-Memory Databases](in_memory_databases/in_memory_databases.md) | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
 
 ### Phase 5 — Distributed Database Concepts
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| [Replication & High Availability](replication_and_high_availability/replication_and_high_availability.md) | Expert | 18 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
-| [Sharding & Partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | Expert | 18 | Consistent hashing, shard key selection, Vitess, hotspot, resharding |
-| [Distributed Transactions](distributed_transactions/distributed_transactions.md) | Expert | 18 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks |
-| [Consistency Models & Consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | Expert | 15 | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
-| [Database Caching Patterns](database_caching_patterns/database_caching_patterns.md) | Advanced | 15 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
+| [Replication & High Availability](replication_and_high_availability/replication_and_high_availability.md) | Expert | 17 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
+| [Sharding & Partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | Expert | 16 | Consistent hashing, shard key selection, Vitess, hotspot, resharding |
+| [Distributed Transactions](distributed_transactions/distributed_transactions.md) | Expert | 20 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks |
+| [Consistency Models & Consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | Expert | 16 | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
+| [Database Caching Patterns](database_caching_patterns/database_caching_patterns.md) | Advanced | 17 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
 
 ### Phase 6 — Production Operations
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| [Connection Pool Management](connection_pool_management/connection_pool_management.md) | Advanced | 15 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
-| [Database Performance Tuning](database_performance_tuning/database_performance_tuning.md) | Expert | 18 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
-| [Backup, Recovery & Disaster Recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | Intermediate | 12 | PITR, WAL-G, pg_basebackup, RPO/RTO, restore drills |
-| [Database Security & Compliance](database_security_and_compliance/database_security_and_compliance.md) | Intermediate | 12 | RLS, scram-sha-256, pgAudit, Vault, GDPR erasure, TDE |
+| [Connection Pool Management](connection_pool_management/connection_pool_management.md) | Advanced | 16 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
+| [Database Performance Tuning](database_performance_tuning/database_performance_tuning.md) | Expert | 16 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
+| [Backup, Recovery & Disaster Recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | Intermediate | 16 | PITR, WAL-G, pg_basebackup, RPO/RTO, restore drills |
+| [Database Security & Compliance](database_security_and_compliance/database_security_and_compliance.md) | Intermediate | 16 | RLS, scram-sha-256, pgAudit, Vault, GDPR erasure, TDE |
 
 ### Phase 7 — Architecture & Selection
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
 | [Database Selection Framework](database_selection_framework/database_selection_framework.md) | Expert | 18 | Selection matrix, benchmark traps, TCO, migration risk, vertical vs horizontal |
-| [Polyglot Persistence Patterns](polyglot_persistence_patterns/polyglot_persistence_patterns.md) | Advanced | 15 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
+| [Polyglot Persistence Patterns](polyglot_persistence_patterns/polyglot_persistence_patterns.md) | Advanced | 16 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
 
 ---
 
@@ -207,6 +207,12 @@ case_studies
   design_realtime_analytics_platform/design_realtime_analytics_platform.md        principal
   design_multitenant_saas_database/design_multitenant_saas_database.md            principal
   design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md  principal
+  design_global_multiregion_oltp/design_global_multiregion_oltp.md  principal
+  design_vector_search_platform/design_vector_search_platform.md  senior, principal
+analytical_databases_and_olap
+  analytical_databases_and_olap.md  senior, principal
+lakehouse_and_table_formats
+  lakehouse_and_table_formats.md  principal
 -->
 ## Learning Paths
 
@@ -217,7 +223,7 @@ This section is exhaustive by design — 31 modules spanning storage internals, 
 The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the emerging-database frontier (NewSQL, in-memory), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (21 modules)
+### Senior Path (22 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -234,16 +240,17 @@ The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phas
 | 12 | [redis_internals](redis_internals/redis_internals.md) | module page only |
 | 13 | [wide_column_databases](wide_column_databases/wide_column_databases.md) | module page only |
 | 15 | [elasticsearch_internals](elasticsearch_internals/elasticsearch_internals.md) | module page only |
-| 18 | [vector_databases](vector_databases/vector_databases.md) | module page only |
-| 21 | [replication_and_high_availability](replication_and_high_availability/replication_and_high_availability.md) | module page only |
-| 22 | [sharding_and_partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | module page only |
-| 23 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 24 | [consistency_models_and_consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | module page only |
-| 26 | [connection_pool_management](connection_pool_management/connection_pool_management.md) | module page only |
-| 27 | [database_performance_tuning](database_performance_tuning/database_performance_tuning.md) | module page only |
-| 28 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | module page only |
+| 18 | [analytical_databases_and_olap](analytical_databases_and_olap/analytical_databases_and_olap.md) | module page only |
+| 19 | [vector_databases](vector_databases/vector_databases.md) | module page only |
+| 23 | [replication_and_high_availability](replication_and_high_availability/replication_and_high_availability.md) | module page only |
+| 24 | [sharding_and_partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | module page only |
+| 25 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 26 | [consistency_models_and_consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | module page only |
+| 28 | [connection_pool_management](connection_pool_management/connection_pool_management.md) | module page only |
+| 29 | [database_performance_tuning](database_performance_tuning/database_performance_tuning.md) | module page only |
+| 30 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | module page only |
 
-**Not in this path** (10 of 31, Full Path only): `mysql_innodb_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `newsql_and_distributed_sql`, `in_memory_databases`, `database_caching_patterns`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`
+**Not in this path** (11 of 33, Full Path only): `mysql_innodb_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `newsql_and_distributed_sql`, `in_memory_databases`, `lakehouse_and_table_formats`, `database_caching_patterns`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior backend / database-heavy interview** actually probes: the storage-and-concurrency vocabulary everything else depends on, PostgreSQL as the default RDBMS, the two NoSQL stores and the vector-search topic that come up most, and the distributed-systems and selection-framework questions that close almost every round. Same learning order, a strict subset of the Full Path.
@@ -257,7 +264,7 @@ A ruthless cut to what a **senior backend / database-heavy interview** actually 
 | Caching & Selection | Cache-aside vs write-through, and the "which database, and why" decision framework, are what close almost every database interview |
 
 <!-- study-path-table principal -->
-### Principal Path (14 modules)
+### Principal Path (16 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -266,17 +273,19 @@ A ruthless cut to what a **senior backend / database-heavy interview** actually 
 | 9 | [database_migrations_zero_downtime](database_migrations_zero_downtime/database_migrations_zero_downtime.md) | module page only |
 | 13 | [wide_column_databases](wide_column_databases/wide_column_databases.md) | module page only |
 | 15 | [elasticsearch_internals](elasticsearch_internals/elasticsearch_internals.md) | module page only |
-| 19 | [newsql_and_distributed_sql](newsql_and_distributed_sql/newsql_and_distributed_sql.md) | module page only |
-| 21 | [replication_and_high_availability](replication_and_high_availability/replication_and_high_availability.md) | module page only |
-| 22 | [sharding_and_partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | module page only |
-| 23 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 24 | [consistency_models_and_consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | module page only |
-| 28 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | module page only |
-| 29 | [database_security_and_compliance](database_security_and_compliance/database_security_and_compliance.md) | module page only |
-| 30 | [database_selection_framework](database_selection_framework/database_selection_framework.md) | module page only |
-| 31 | [polyglot_persistence_patterns](polyglot_persistence_patterns/polyglot_persistence_patterns.md) | module page only |
+| 18 | [analytical_databases_and_olap](analytical_databases_and_olap/analytical_databases_and_olap.md) | module page only |
+| 20 | [newsql_and_distributed_sql](newsql_and_distributed_sql/newsql_and_distributed_sql.md) | module page only |
+| 22 | [lakehouse_and_table_formats](lakehouse_and_table_formats/lakehouse_and_table_formats.md) | module page only |
+| 23 | [replication_and_high_availability](replication_and_high_availability/replication_and_high_availability.md) | module page only |
+| 24 | [sharding_and_partitioning](sharding_and_partitioning/sharding_and_partitioning.md) | module page only |
+| 25 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 26 | [consistency_models_and_consensus](consistency_models_and_consensus/consistency_models_and_consensus.md) | module page only |
+| 30 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | module page only |
+| 31 | [database_security_and_compliance](database_security_and_compliance/database_security_and_compliance.md) | module page only |
+| 32 | [database_selection_framework](database_selection_framework/database_selection_framework.md) | module page only |
+| 33 | [polyglot_persistence_patterns](polyglot_persistence_patterns/polyglot_persistence_patterns.md) | module page only |
 
-**Not in this path** (17 of 31, Full Path only): `database_fundamentals`, `indexing_deep_dive`, `concurrency_control_and_locking`, `postgresql_internals`, `mysql_innodb_internals`, `sql_query_optimization`, `document_databases`, `key_value_stores`, `redis_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `vector_databases`, `in_memory_databases`, `database_caching_patterns`, `connection_pool_management`, `database_performance_tuning`
+**Not in this path** (17 of 33, Full Path only): `database_fundamentals`, `indexing_deep_dive`, `concurrency_control_and_locking`, `postgresql_internals`, `mysql_innodb_internals`, `sql_query_optimization`, `document_databases`, `key_value_stores`, `redis_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `vector_databases`, `in_memory_databases`, `database_caching_patterns`, `connection_pool_management`, `database_performance_tuning`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the decisions that outlive a schema: engine and topology selection, the migration path off a wrong choice, and the failure modes that only appear at production scale. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.

@@ -478,4 +478,74 @@ A: Behavioral subtyping means "is-a" in the sense of the behavior contract, not 
 
 ---
 
+**Q: What are the formal rules a subclass must satisfy to be a valid LSP substitution?**
+**Short:** Preconditions can't strengthen, postconditions can't weaken, invariants must hold, and mutations and exceptions must stay within the base contract.
+
+A: Five rules from Design by Contract: preconditions cannot be strengthened (the subclass can't require more from callers than the parent did); postconditions cannot be weakened (it must deliver at least what the parent promised); invariants must be preserved; the history constraint forbids mutations the base class's contract did not allow; and a subclass should not throw new exception types beyond what the base method already declares or its subtypes. Violating any one of these breaks substitutability even if the code compiles cleanly.
+
+---
+
+**Q: Give a concrete LSP violation involving strengthening a precondition.**
+**Short:** A PremiumBankAccount that rejects deposits under $100 strengthens BankAccount's "any positive amount" rule.
+
+A: `BankAccount.deposit()` accepts any amount greater than zero. `PremiumBankAccount` overrides `deposit()` to reject anything at or below $100 — a stricter precondition than the parent ever imposed. Code written against `BankAccount` that calls `account.deposit(5)`, valid per the base contract, now throws when given a `PremiumBankAccount`. The fix is to never require more from callers in an override than the base type promised to accept.
+
+---
+
+**Q: Give a concrete LSP violation involving weakening a postcondition.**
+**Short:** A FastDataProvider that skips sorting breaks SortedDataProvider's promise that getData() always returns sorted data.
+
+A: `SortedDataProvider.getData()` guarantees the returned list is always sorted. `FastDataProvider` overrides `getData()` to skip the sort "for performance," silently weakening that guarantee. A caller that relies on the sorted postcondition to run `Collections.binarySearch()` gets wrong results with no exception and no warning. The postcondition a base type promises must hold in every subtype, even when honoring it costs more.
+
+---
+
+**Q: Why can an override that compiles cleanly still violate LSP?**
+**Short:** Compiling only checks the method signature; LSP is about whether the runtime behavior still honors the caller's assumptions.
+
+A: The Java compiler only checks that an override's signature is compatible — return type, parameter types, checked exceptions. It says nothing about whether the new method's *behavior* still satisfies what callers assumed about the base type. `Square.setWidth()` compiles fine while silently also changing height, and a subclass throwing `UnsupportedOperationException` from an inherited method compiles fine while breaking every caller that could invoke it. LSP requires reasoning about the contract, not just the type signature.
+
+---
+
+**Q: Explain the Bird/Ostrich LSP violation and how you'd fix the hierarchy.**
+**Short:** Making Ostrich extend Bird and throw from fly() violates LSP; separate FlyingBird from Bird instead.
+
+A: If `Bird` declares a `fly()` method, making `Ostrich extends Bird` and throwing `UnsupportedOperationException` from its `fly()` override is an LSP violation — any code that treats an `Ostrich` as a `Bird` and calls `fly()` breaks at runtime. The fix is to separate the hierarchy: a `FlyingBird` subtype (or interface) declares `fly()`, while the base `Bird` type does not, so `Ostrich` can be a `Bird` without ever being asked to fly. This is the same shape as the ReadOnlyList/List problem — the fix is always to narrow the contract, not to fake compliance with an exception.
+
+---
+
+**Q: How does LSP treat checked exceptions differently from unchecked exceptions on an override?**
+**Short:** The compiler blocks a broadened checked exception on override, but an added unchecked exception compiles and can still violate LSP.
+
+A: Java's compiler enforces that an overriding method cannot declare a broader checked exception than the method it overrides, so that particular LSP violation is caught at compile time. Unchecked exceptions are not checked by the compiler at all — an override is free to throw a new `RuntimeException` subtype like `UnsupportedOperationException` that the base method never threw, and it compiles cleanly while still breaking every caller that didn't expect it. This is exactly why the `UnsupportedOperationException` pattern is such a common, compiler-invisible LSP violation.
+
+---
+
+**Q: Walk through the `ReadOnlyList extends ArrayList` example — what's wrong and what's the fix?**
+**Short:** Overriding add()/remove() to throw breaks List's contract; the fix is a narrower interface with no mutators.
+
+A: `ReadOnlyList` extends `ArrayList` and overrides `add()` and `remove()` to throw `UnsupportedOperationException`. Code written against the `List` interface — like a method that calls `list.add("DEFAULT")` — has no idea it might explode at runtime when handed a `ReadOnlyList`. The fix is composition instead of inheritance: define a separate `ReadableList` interface with only `get()`, `size()`, and `contains()`, so an `ImmutableList` implementing it never needs to throw, because the interface never promised mutation in the first place.
+
+---
+
+**Q: What does the "history constraint" mean in LSP's formal contract?**
+**Short:** A subclass must not introduce mutations to shared state that the base class's contract did not allow.
+
+A: The history constraint says a subclass's methods must not introduce state changes that the base class did not permit — for example, a read-only parent should not have a mutable subclass that unexpectedly modifies shared state. It's the least commonly cited of the five LSP rules but shows up whenever a subclass adds a setter or side effect the base type's contract implicitly forbade. Immutable base designs sidestep this rule entirely, since there is no mutable state left to violate.
+
+---
+
+**Q: How does service API versioning connect to LSP?**
+**Short:** A v2 endpoint should handle every request v1 could handle, or it breaks LSP-style backward compatibility for existing clients.
+
+A: A v2 API endpoint should be substitutable for v1 for every request that v1 could handle — same shape of LSP substitutability, applied to service contracts instead of class hierarchies. If v2 rejects a previously valid v1 request or changes the response's semantics, it breaks backward compatibility for every existing client, which is exactly the caller-assumption breakage LSP forbids at the class level. Container image rollouts have the same requirement: a new image must behave identically to the old one for every valid input, or the deployment itself is an LSP violation.
+
+---
+
+**Q: When is it pragmatic to knowingly bend LSP?**
+**Short:** Inside code you fully control, or when a framework's own subclassing constraints force a mild violation — document it either way.
+
+A: Two situations are reasonable: working within a framework that requires subclassing for extension, when the framework's own design has a mild LSP tension you didn't create; and internal code where you own every caller, so a knowing, contained violation can't surprise anyone outside your control. In both cases, document the violation explicitly rather than leaving it to be discovered the hard way. Sealed hierarchies (Java 17+) offer a cleaner alternative when the type set is intentionally closed — callers pattern-match exhaustively instead of relying on substitutability at all.
+
+---
+
 **Interview Tip:** The Rectangle/Square example is guaranteed to come up. Know it cold: the problem, why it violates LSP (broken postcondition), and two clean solutions (immutable design, shared interface without setters). Then be ready to give a second example from enterprise code — `ReadOnlyList extends ArrayList` throwing `UnsupportedOperationException` is equally well-known and more relatable to Java developers.

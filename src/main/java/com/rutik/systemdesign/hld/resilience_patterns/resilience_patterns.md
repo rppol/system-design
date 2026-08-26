@@ -142,6 +142,66 @@ Under genuine overload (not a downstream dependency problem — *this* service i
 - **Priority-based shedding** — classify requests (e.g., by user tier, request type, or whether they're on the critical path like checkout vs. non-critical like "recently viewed" widgets) and reject lower-priority requests first when a queue-depth or utilization threshold is crossed.
 - **Admission control at the edge** — the API Gateway or load balancer rejects requests (often with a `503` and a `Retry-After` header) before they even reach application servers, once a global concurrency limit is hit — protecting the application tier from ever seeing the overload at all.
 
+### 4.9 Cell-Based Architecture — Bulkheads at the Deployment Level
+
+Every pattern above bounds the blast radius of a *dependency*. Cell-based architecture bounds
+the blast radius of the **system itself**, and it is the canonical principal-level answer to
+"how do you stop one bad thing taking everything down".
+
+A **cell** is a complete, independent instance of the whole stack — its own compute, its own
+data store, its own cache — serving a fixed subset of users or tenants. Nothing crosses a cell
+boundary in the request path. It is §4.2's bulkhead applied one level up: instead of isolating
+thread pools inside one service, you isolate entire copies of the system from each other.
+
+**The arithmetic is the whole argument.** With `n` cells, a failure that would have taken
+everything down now takes down `1/n` of it. Ten cells turn a total outage into a 10% outage;
+what changes is not the probability of failure but its cost. And because a cell is small, it is
+also *testable* — you can size a cell so that one is a realistic load-test target and a
+deployment wave, which single-region monoliths never manage.
+
+**Shuffle sharding multiplies that further, and is the non-obvious part.** Assign each tenant
+not to one cell but to a random *pair* of cells. With 8 cells and 2 per tenant there are
+`C(8,2) = 28` distinct combinations, so two random tenants share their full pair with
+probability `1/28` — roughly 3.6%. A "poison" tenant that takes down both of its cells fully
+affects only the ~3.6% of peers holding the identical pair; every other tenant loses one of its
+two cells and, if the client retries against the other, keeps working. The isolation improves
+combinatorially with cell count while the infrastructure cost grows linearly, which is why AWS
+uses it for Route 53 and for API throttling.
+
+```
+  8 cells, 2 per tenant
+
+  tenant A -> {1, 4}        C(8,2) = 28 distinct pairs
+  tenant B -> {1, 7}        share cell 1 -> B degrades to one cell, still serving
+  tenant C -> {1, 4}        identical pair -> fully affected: 1 in 28 = 3.6%
+  tenant D -> {2, 6}        no overlap    -> completely unaffected
+
+  plain sharding, 8 shards:  a poison tenant takes out 1/8 = 12.5% of peers, fully
+  shuffle sharding, 8 cells: it fully takes out 1/28 = 3.6%, degrades some others
+```
+
+**Four decisions define a cell design.**
+
+1. **Cell size.** Large enough to be economical, small enough that losing one is survivable and that one cell can be load-tested end to end. Common practice is to cap a cell at a customer count or throughput you have actually tested to, then add cells rather than growing them.
+2. **Routing.** Something must map a request to its cell: a thin cell router (a lookup, deliberately kept dumber than the cells it fronts), DNS per cell, or a cell id embedded in the client's configuration. The router is the one shared component, so it must be far simpler and far more reliable than anything behind it.
+3. **Control plane vs. data plane separation.** The control plane (provisioning cells, changing the mapping) is allowed to be complex and occasionally unavailable. The data plane (serving requests inside a cell) must keep working when the control plane is down. Conflating them recreates the single point of failure the cells were meant to remove.
+4. **Deployment waves.** Deploy to one cell, bake, then a few, then the rest. A bad release now hits `1/n` of users and is caught before the wave completes — the operational payoff that makes cells worth their cost. The pipeline mechanics belong to [DevOps: Disaster Recovery and Resilience](../../devops/disaster_recovery_and_resilience/disaster_recovery_and_resilience.md); the cell boundary and routing belong here.
+
+**When a cell is overkill.** Single-region products under roughly 100k users, anything without a
+natural tenant or user partition, and any system where cross-cell queries are a core feature.
+The cost is real: `n` copies of every operational task, `n` dashboards, a router to keep
+correct, and the permanent discipline that no request may cross a cell.
+
+**Where it goes wrong.** The router becomes the new single point of failure (keep it dumb, and
+make its failure mode "route by a cached mapping"). Cross-cell chatter creeps back in and
+quietly recouples the cells. A "small" global table — a settings table, a feature-flag store —
+ends up in every request path and becomes a shared failure domain. And deployment waves skip
+the bake time under schedule pressure, which throws away the main benefit.
+
+Real deployments: **AWS** builds Route 53, S3, and DynamoDB this way and publishes a
+Well-Architected guide on it; **Slack** and **Salesforce** partition customers into independent
+pods or instances on the same principle.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -734,6 +794,8 @@ A `search-service` called an `inventory-availability-service` with a circuit bre
 | Cloud SDK retry behavior | **AWS SDK, GCP client libraries, Azure SDKs** | Modern versions implement exponential backoff + jitter (§6.2) by default for retryable errors (throttling, 5xx, connection errors) — usually configurable but rarely need tuning beyond defaults for typical workloads. |
 | .NET ecosystem | **Polly** | The .NET equivalent of Resilience4j — circuit breaker, retry, timeout, fallback, hedging and a concurrency limiter, composed as a *resilience pipeline* via `ResiliencePipelineBuilder`. The concurrency limiter is how bulkhead isolation is expressed: it is a thin layer over `System.Threading.RateLimiting`, and sits outermost in the pipeline so a full pool rejects before retry or breaker logic runs. |
 | Load shedding / admission control | **Envoy (circuit breakers + global rate limiting), API Gateway request quotas** | Often implemented at the edge/gateway layer rather than in application code, since the goal is to reject excess load before it consumes any application-tier resources. |
+| Chaos engineering | **AWS Fault Injection Service, Chaos Mesh and LitmusChaos (Kubernetes), Gremlin, Netflix Chaos Monkey / Simian Army (the original)** | The way you find out whether any of the above actually works. Inject latency, errors, instance termination, and network partitions against a steady-state hypothesis — see §13. |
+| JVM resilience library (China ecosystem) | **Alibaba Sentinel** | Flow control, concurrency limiting, circuit breaking and adaptive system-load protection, with a dashboard and dynamic rule push. Its distinguishing feature versus Resilience4j is **adaptive** shedding: rules can key off system load average, CPU, and inbound QPS rather than only per-call failure rates. Widely deployed in the Spring Cloud Alibaba and Dubbo ecosystems. |
 
 ---
 
@@ -824,6 +886,21 @@ A: Because a breaker's threshold must clear the dependency's normal baseline fai
 
 A: A retry budget — a client-wide cap on how much of your outbound traffic is allowed to be retries, rather than a per-call rule. At a 30% error rate with 3 attempts, every client is behaving correctly (correct backoff, correct jitter, breaker legitimately closed at 30% against a 50% threshold) and the dependency still sees roughly 60% more load than users generated; nothing in §6.1 or §6.2 bounds that ratio. The budget is a token bucket shared across all calls: retries spend tokens, successes replenish them, and when it empties the client stops retrying and returns the first error while first attempts continue untouched. gRPC ships this as `retryThrottling` (failed RPC costs 1 token, success adds `tokenRatio`, retries pause while `token_count <= maxTokens/2`) and the AWS SDK's `standard` mode as a 500-token retry quota that charges 14 for a transient retry and 5 for a throttling retry — asymmetric because a 5xx usually signals a service-wide problem that retrying will not fix. Ship it alongside the breaker rather than instead of it: a breaker is per-dependency and binary, a budget is client-wide and proportional, and only the budget catches a dependency that is failing for some tenants or shards while its aggregate failure rate never crosses any breaker's threshold.
 
+**Q18: What is cell-based architecture, and how is it different from just sharding?**
+**Short:** A cell is a complete independent copy of the whole stack serving a subset of users, so a failure is capped at 1/n rather than being global.
+
+A: A cell is a full, self-contained instance of the entire stack — compute, data store, cache — serving a fixed subset of users or tenants, with nothing crossing a cell boundary in the request path. Sharding partitions **data** while everything else stays shared: one application tier, one deployment, usually one control plane, so a bad release, a poisoned cache, or a control-plane bug still reaches everyone. Cells partition the **failure domain**, and the arithmetic is the whole point — with `n` cells, an outage that would have been total is now `1/n`. Ten cells turn a site-wide incident into a 10% incident. The secondary benefits are what make teams keep them: a cell is small enough to load-test end to end, and deployments roll cell by cell with a bake between waves, so a bad release is caught at 10% of users rather than 100%. The costs are equally concrete — `n` copies of every operational task, a routing layer that must be simpler and more reliable than everything behind it, and a hard rule that no request may cross a cell. Skip it for single-region products under roughly 100k users, or where there is no natural tenant partition. AWS builds Route 53, S3, and DynamoDB this way; Slack and Salesforce partition customers into pods on the same principle.
+
+**Q19: What is shuffle sharding, and why is it better than assigning each tenant to one cell?**
+**Short:** Shuffle sharding gives each tenant a random combination of cells, so the number of isolated failure groups grows combinatorially rather than linearly.
+
+A: Shuffle sharding assigns each tenant a random *combination* of cells rather than a single one, which turns the number of distinct failure groups from `n` into `C(n, k)`. With 8 cells and 2 per tenant there are `C(8,2) = 28` combinations, so two random tenants share both cells with probability 1/28 — about 3.6% — versus 12.5% with plain 8-way sharding. When one tenant goes poison and takes down both of its cells, only the ~3.6% holding the identical pair are fully affected; everyone else loses one of two cells and, provided the client retries against the other, keeps serving. That is the striking part: isolation improves **combinatorially** with cell count while infrastructure cost only grows linearly, so a modest number of cells buys a very large number of failure groups. Two conditions make it work, and both are worth stating: the client (or the router) must retry against the tenant's other cell, otherwise partial isolation buys nothing; and the assignment must be stable per tenant, since re-shuffling on every request would spread the poison everywhere. AWS uses exactly this for Route 53 name-server assignment and for request throttling.
+
+**Q20: You have circuit breakers, retries, timeouts and bulkheads configured — how do you know any of them work?**
+**Short:** You do not, until a chaos experiment exercises them; every unexercised resilience configuration is an untested hypothesis.
+
+A: You do not know, and that is the honest answer — every resilience configuration is a belief about what happens during a failure, and beliefs about failure are wrong by default. The timeout that was never exercised is often 30 seconds because nobody changed the client library default; the fallback path throws on a null nobody has hit; the breaker threshold has never met a real partial outage and flaps or never opens. Chaos engineering is the discipline of checking, and the method is four steps: define **steady state** as a business metric (checkout success rate, not CPU), hypothesise it holds through one specific failure, inject that failure at the smallest blast radius that can prove anything, and either confirm the hypothesis or discover the bug on your own terms. Start with exactly the failures the patterns claim to handle — add 500 ms of latency to one dependency and confirm your timeout fires before the client's, return errors and confirm the breaker opens and the degraded response actually renders, terminate an instance and confirm health checks drain it. Run experiments on a schedule with an automatic abort tied to the steady-state metric so the blast radius stays bounded. Tooling is AWS Fault Injection Service, Chaos Mesh or LitmusChaos on Kubernetes, or Gremlin; the practice began with Netflix's Chaos Monkey, and the depth is in [Backend: Chaos Engineering](../../backend/chaos_engineering/chaos_engineering.md).
+
 ---
 
 ## 13. Best Practices
@@ -844,7 +921,9 @@ A: A retry budget — a client-wide cap on how much of your outbound traffic is 
 
 **8. Treat synchronized client behavior — not just retries — as a jitter problem.** Periodic polling, scheduled cache refreshes, and cron-triggered batch jobs across a large fleet of clients can produce the same thundering-herd effect as un-jittered retries (§10, War Story 2); add randomized jitter to any periodic interval shared across many instances.
 
-**Cross-references:** [Backend: Fault Tolerance Patterns](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) (circuit breaker state machine and Resilience4j implementation in depth), [Spring: Resilience4j Patterns](../../spring/case_studies/cross_cutting/resilience4j_patterns.md) (annotation-driven circuit breaker/retry/bulkhead configuration), [Microservices](../microservices/microservices.md) (§6.1 Circuit Breaker in a service-mesh context, and §10 War Story 1 — the retry-storm scenario this module's War Story 2 complements from a design-tuning angle), [Rate Limiting](../rate_limiting/rate_limiting.md) (rate limiting as a defensive, outbound-facing resilience measure), [Distributed Transactions](../distributed_transactions/distributed_transactions.md) (§4.6 idempotency keys — the prerequisite for safe retries, and §10 War Story 2 — the duplicate-charge failure class this module's War Story 4 revisits from the retry-policy angle), [Load Balancing](../load_balancing/load_balancing.md) (health-check-driven failover and active-active/active-passive redundancy that complements, but is distinct from, the patterns in this module).
+**9. Validate every pattern on this page with chaos experiments — an untested circuit breaker is a hypothesis, not a control.** Each pattern here encodes a belief about what happens during a failure, and beliefs about failure are wrong by default: the timeout that was never exercised is 30 seconds because nobody changed the client default, the fallback path throws an exception nobody has seen, and the breaker's threshold has never met a real partial outage. Chaos engineering is the discipline of checking. The method is four steps — define **steady state** as a measurable business metric (checkout success rate, not CPU), hypothesise that it holds through a specific failure, inject that failure in production or a production-like environment at the smallest blast radius that can prove anything, and either confirm the hypothesis or you have found a bug that would otherwise have found you. Start with the failures this module already claims to handle: add 500 ms of latency to one dependency and confirm the timeout fires before the client's; return errors from a dependency and confirm the breaker opens and the degraded response renders; terminate one instance and confirm health checks drain it. Run experiments on a schedule with an automatic abort on the steady-state metric, so the blast radius is always bounded. The tooling and the operational programme — game days, blast-radius policy, running experiments continuously in production — are covered in [Backend: Chaos Engineering](../../backend/chaos_engineering/chaos_engineering.md); what belongs here is the rule that a resilience pattern is not finished until an experiment has exercised it.
+
+**Cross-references:** [Backend: Chaos Engineering](../../backend/chaos_engineering/chaos_engineering.md) (experiment design, game days, and production chaos programmes — how to validate everything in this module), [Backend: Fault Tolerance Patterns](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) (circuit breaker state machine and Resilience4j implementation in depth), [Spring: Resilience4j Patterns](../../spring/case_studies/cross_cutting/resilience4j_patterns.md) (annotation-driven circuit breaker/retry/bulkhead configuration), [Microservices](../microservices/microservices.md) (§6.1 Circuit Breaker in a service-mesh context, and §10 War Story 1 — the retry-storm scenario this module's War Story 2 complements from a design-tuning angle), [Rate Limiting](../rate_limiting/rate_limiting.md) (rate limiting as a defensive, outbound-facing resilience measure), [Distributed Transactions](../distributed_transactions/distributed_transactions.md) (§4.6 idempotency keys — the prerequisite for safe retries, and §10 War Story 2 — the duplicate-charge failure class this module's War Story 4 revisits from the retry-policy angle), [Load Balancing](../load_balancing/load_balancing.md) (health-check-driven failover and active-active/active-passive redundancy that complements, but is distinct from, the patterns in this module).
 
 ---
 

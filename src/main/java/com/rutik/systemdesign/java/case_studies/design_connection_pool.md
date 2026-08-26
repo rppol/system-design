@@ -171,6 +171,13 @@ Client usage:
 4. **Release**: `conn.close()` calls `pool.release(this)`; connection pushed back onto `available`; any waiting thread is unparked by the queue.
 5. **Health check**: background executor drains `available` every 30 s; calls `isValid(2)` on each; replaces dead connections; requeues live ones.
 
+Step 3 is the one this design's caller population changes the shape of, not the pool. On a
+fixed-size platform-thread container, the number of threads that can simultaneously be
+parked in step 3 is bounded by the container's own thread count. On
+`Executors.newVirtualThreadPerTaskExecutor()`, that bound disappears — the `ArrayBlockingQueue`
+park queue in step 3 can hold as many waiting virtual threads as there are in-flight
+requests, which is exactly the scenario worked out with real numbers in §5 and §10.
+
 ---
 
 ## 4. Component Deep Dives
@@ -481,11 +488,25 @@ try (PooledConnection conn = pool.acquire()) {
 
 **Throughput vs fairness**: `fair=true` is far more expensive than it looks. Measured on an 8-core machine at 100 threads doing borrow+release, `ArrayBlockingQueue(fair=true)` managed ~170k ops/sec while the same queue with `fair=false` did ~54M and `ConcurrentLinkedDeque` ~9M — a ~300× gap, not the modest penalty usually assumed. Fairness forces a strict FIFO handoff: every release must wake a specific parked thread and wait for it to be scheduled, so each operation costs a context switch instead of an uncontended lock acquire. That cost is worth paying only when starvation is a real risk (a shared multi-tenant pool where one tenant could monopolise connections). For a single-tenant pool, `fair=false` plus a borrow-timeout is the better trade: barging is possible but the timeout bounds the worst case, and you keep two orders of magnitude of throughput. Re-measure on your own hardware before choosing — these ratios are machine-specific, though the ordering is not.
 
+**Virtual threads and pool sizing**: virtual threads do not change the pool size — they remove the thing that was hiding a wrong one. On platform threads, the pool-size mistake was an accident of coupling: a 200-thread Tomcat container caps concurrent borrowers at 200, so a pool misconfigured at 500 never actually opens more than 200 sockets, and the sizing error stays invisible. Swap in `Executors.newVirtualThreadPerTaskExecutor()` and that ceiling is gone — 20,000 in-flight requests means 20,000 threads calling `acquire()` at once, with nothing upstream bounding that count. The formula from §2/§10 is unchanged: a connection is still a server-side database backend costing ~5–10 MB of its RAM, and the database still executes only as many queries in parallel as it has cores and disks. What changes is that every sizing error the thread pool used to hide now surfaces at once — a pool sized to "however many requests we happen to see" rather than `(DB_core_count × 2) + effective_spindle_count` used to fail quietly (idle connections, wasted DB RAM); on virtual threads it fails loudly (thousands of borrowers queued on `available.poll`, or a pool oversized enough to overwhelm the database's process-scheduling limit from §10).
+
+The mistake to name and avoid: **"virtual threads are cheap, so I can afford more connections."** Virtual threads are cheap — a parked one costs a few hundred bytes of heap for its continuation, so 10,000 of them waiting in `acquire()` is fine. A database backend process is not cheap, and there is no version of Loom that changes what one connection costs the database.
+
+One more consequence worth stating explicitly: the pool is now the *only* bounded resource on this path (see [Backpressure & Bounded Resources](cross_cutting/backpressure_and_bounded_resources.md) for the general form of "which structure is currently the queue"). Do not add a `Semaphore(N)` in front of `acquire()` "to be safe" — that is two queues doing one job, and the semaphore's wait time is what shows up in a trace while the pool's own `pool.acquire.time` metric goes quiet, so an operator watching the pool dashboard sees nothing wrong while requests are actually queuing upstream of it.
+
 ---
 
 ## 6. Real-World Implementations
 
 **HikariCP** (the standard): uses `ConcurrentBag` — each borrowing thread keeps a thread-local list of the connections it recently used, so the common borrow path touches no shared structure at all; a `CopyOnWriteArrayList` holds the full set for stealing, and a `SynchronousQueue` hands a released connection directly to a waiting borrower. The design goal is not raw ops/sec but *avoiding the handoff cost* measured above — the thread-local hit skips both the lock and the context switch. Adds clock-move detection (handles VM pause / NTP jumps resetting `System.nanoTime()`), keepalive pings, and `minimumIdle` housekeeping. HikariCP is what this custom pool evolves into at production scale.
+
+What specifically makes HikariCP the default over its predecessors is three separable design choices, each targeting a cost this custom pool's `ArrayBlockingQueue` design still pays:
+
+- **Bytecode-level delegate generation.** `Connection`, `Statement`, and `ResultSet` wrappers are not hand-written proxy classes with reflective dispatch; HikariCP's build generates them via Javassist (`JavassistProxyFactory`), producing a real compiled `invoke` call instead of a JDK dynamic-proxy's reflective one. It costs nothing at runtime because the code generation happens at build time, not on every call.
+- **`ConcurrentBag` instead of a blocking queue.** This design's `ArrayBlockingQueue` forces every borrow through one shared structure regardless of which thread last used which connection; `ConcurrentBag`'s thread-local fast path means a thread that keeps reusing "its" connections touches no shared state and no lock at all — the queue-benchmark numbers in §5 (`fair=false` at ~54M ops/s) are the *ceiling* a shared-queue design can reach, and `ConcurrentBag` is faster still because the common case skips the shared structure entirely.
+- **`FastList` instead of `ArrayList`** for tracking a `Statement`'s open resources: it skips bounds-checking on `get()` and removes from the tail first, which is the common case when resources close in the order they were opened — a nanoseconds-per-call saving that compounds at HikariCP's target of tens of millions of operations per second.
+
+**Apache DBCP2** (Commons DBCP, built on Commons Pool 2's `GenericObjectPool`): configuration-correct and stable, but `synchronized`-based internally rather than lock-free, and it shows under load — independent benchmarks report HikariCP acquiring a connection in roughly 150 ns against DBCP2's pool topping out around 5,000 transactions/sec on the same hardware in a stress test, a gap of the same shape as the `fair=true` vs `fair=false` queue result in §5 (a monitor-per-operation design against a mostly-lock-free one). DBCP2's `PoolableConnectionFactory` / `ConnectionFactory` / `ObjectPool` setup is also more moving parts to misconfigure than HikariCP's single `HikariConfig`. Retained in legacy Spring/Tomcat stacks predating HikariCP's adoption as the Spring Boot default; not a reason to choose it for a new service.
 
 **c3p0**: uses `synchronized` throughout — significantly slower than HikariCP. Notable for its `testConnectionOnCheckout` option, which maps to validate-on-borrow above. Largely superseded by HikariCP.
 
@@ -532,10 +553,17 @@ registry.counter("pool.acquire.timeout", Tags.of("pool", name));   // inc on nul
 registry.timer("pool.acquire.time",   Tags.of("pool", name));      // measure borrow latency
 ```
 
-Alert thresholds:
+Alert thresholds (platform-thread callers — a bounded number of concurrent borrowers):
 - `pool.size.available < 2` for > 60 s → pool starving; raise borrow timeout alarm
 - `pool.acquire.timeout > 1/min` → SLA risk; investigate N+1 / leak
 - `pool.size.active == pool.size.total` for > 5 min → pool exhausted
+
+**If callers run on `Executors.newVirtualThreadPerTaskExecutor()`, drop the queue-depth-shaped
+alerts above.** `pool.size.active == pool.size.total` is the *normal* state under load once
+nothing upstream caps concurrent borrowers (see War story 3 in §9) — it stops distinguishing
+"busy" from "broken." Alert on `pool.acquire.timeout > 1/min` (unchanged; still means a real
+borrow failed) and add p99 of `pool.acquire.time` approaching `connectionTimeout` (e.g., p99
+at 80% of the configured timeout) as the early-warning signal that used to be `available < 2`.
 
 ### b) Observability: distributed trace span
 
@@ -690,6 +718,46 @@ try (PooledConnection conn = pool.acquire(50, MILLISECONDS);
 
 ---
 
+### War story 3 — a virtual-thread migration turns a healthy metric into 4,000 false pages
+
+**Scenario**: payments service migrates its request-handling threads from a 200-thread Tomcat pool to `Executors.newVirtualThreadPerTaskExecutor()`. The connection pool is untouched and correctly sized at 9 per instance (§10). The alert, written for the platform-thread era, was `pool.threadsAwaitingConnection > 20 for 60s -> page`.
+
+Before migration, `getThreadsAwaitingConnection()` sat at 0–3 under normal peak load, because the 200-thread container never admitted more concurrent work than the pool could mostly satisfy — the alert's "20" threshold was a real exhaustion signal.
+
+After migration, peak load put roughly 20,000 requests in flight against the same 9-connection pool. `getThreadsAwaitingConnection()` sat at approximately **19,991, continuously**, during ordinary, successful peak traffic — every request beyond the 9 being actively served is, correctly, waiting its turn. The old alert fired continuously: **~4,000 pages in the first hour** after rollout, paging on-call for a service that was working exactly as designed.
+
+**Fix**: retire the queue-depth alert for virtual-thread services entirely — a large `threadsAwaitingConnection` number is the normal steady state now, not an anomaly. Replace it with two signals that still mean something: (1) `pool.acquire.timeout` count > 0/min — a borrower actually failed to get a connection within `connectionTimeout`; and (2) acquire-latency p99 approaching the configured `connectionTimeout` (e.g., p99 at 220 ms against a 250 ms timeout — close to the cliff even before any timeout has fired). Both signal real or imminent user-facing failure; queue depth on virtual threads signals only load, which the pool's own bounded size is already handling correctly.
+
+**Root cause**: an alert threshold tuned for a world where the thread pool silently capped concurrency, ported unchanged into a world where nothing does.
+**Impact**: no real outage — a purely operational cost of ~4,000 unnecessary pages before the alert was retired.
+
+---
+
+### War story 4 — a driver's native client pins virtual threads under load, but only under load
+
+**Scenario**: a service migrates to virtual threads and the connection pool is JDBC-driven with a third-party driver that wraps a native (JNI) client library rather than a pure-Java socket implementation. Local testing at low concurrency shows nothing wrong.
+
+**Symptom**: under production load, request latency degrades in a way that does not correlate with `pool.size.active` or DB CPU — the pool looks healthy, the database looks healthy, and yet throughput collapses well below the expected `pool_size / query_latency` ceiling from §2.
+
+**Diagnosis**: on the Java 25 baseline, `synchronized` and `Object.wait()` no longer pin a virtual thread to its carrier (JEP 491, Java 24) — the one remaining pinning cause is a native stack frame, which happens when a virtual thread calls into JNI-backed native code. A driver whose connection-acquire or query-execute path crosses into a native client library pins the carrier for the duration of that call; enough concurrent borrowers doing this simultaneously exhausts the (small, fixed) carrier-thread pool, and every other virtual thread in the process — not just the ones touching the database — stalls waiting for a carrier.
+
+**The check that actually answers this**: not the driver's reputation or documentation, but a load test with a JFR recording, looking for `jdk.VirtualThreadPinned` events during real concurrent load:
+
+```bash
+java -XX:StartFlightRecording=filename=loadtest.jfr,settings=profile -jar service.jar
+# under load, then:
+jfr print --events jdk.VirtualThreadPinned loadtest.jfr
+# each event's stack trace names the pinning frame; on Java 24+ the event's
+# pinnedReason field reads NATIVE_METHOD when a native frame is the cause
+```
+
+Pure-Java drivers — the PostgreSQL JDBC driver, MySQL Connector/J, the Microsoft SQL Server JDBC driver — implement their socket I/O in Java and do not pin. A driver sitting on top of a native client library (some Oracle client configurations, certain proprietary drivers bridging to a C client SDK) does. Confirm empirically per driver and per version rather than assuming — the same vendor can ship a pure-Java driver for one database and a JNI-backed one for another.
+
+**Root cause**: a native frame beneath a JDBC call, invisible from the pool's own metrics because the pinning happens inside the driver, not inside `acquire()`.
+**Impact**: throughput ceiling roughly halved under peak concurrency until the pinning driver was replaced with a pure-Java alternative; found only because the load test specifically instrumented `jdk.VirtualThreadPinned`, not because any pool metric pointed at it.
+
+---
+
 ### Failure scenarios summary
 
 | Component | Failure | Symptom | Recovery | Time-to-Recovery |
@@ -755,6 +823,34 @@ PgBouncer server: t3.small (2 vCPU, 2 GB RAM) handles 10,000 logical connections
 Monthly cost delta: ~$15/month (t3.small) saves ~$800/month in RDS class upgrades
 ```
 
+### Worked example: platform threads vs virtual threads at the same pool size
+
+The pool size does not move between these two columns — only what used to hide a wrong one does:
+
+```
+                                Platform threads (200-thread    Virtual threads
+                                Tomcat container)               (per-task executor)
+Concurrent in-flight requests: 2,000                            20,000
+Concurrent DB borrowers possible:   min(2,000, 200) = 200       min(20,000, ∞) = 20,000
+Pool size (unchanged, from      9                                9
+  the sizing formula above):
+getThreadsAwaitingConnection    ~191 (200 admitted − 9 served)  ~19,991 (20,000 − 9 served)
+  at steady state:
+Borrower cost while waiting:    1 OS thread, ~1 MB native stack 1 continuation, ~a few hundred
+                                 each                             bytes of heap each
+Aggregate waiting-thread cost:  ~191 MB                          ~4–8 MB
+
+If the pool were misconfigured at 300 instead of 9:
+  Platform threads: never opens more than 200 connections —      Virtual threads: opens all 300
+    the 200-thread cap silently absorbs the sizing mistake.        immediately — the database sees
+                                                                     300 backend processes it was
+                                                                     never asked to handle.
+```
+
+The waiting-thread cost column is why "just queue on virtual threads" is safe and cheap — the
+danger was never in letting 19,991 virtual threads wait, it is in believing that safety
+extends to the pool size itself.
+
 ---
 
 ## 11. Interview Discussion Points
@@ -794,3 +890,12 @@ In-flight requests holding connections to the dead primary get `SQLException` (T
 
 **Q: When would you replace this custom pool with HikariCP in production?**
 Immediately for any production workload beyond embedded/testing use. HikariCP's `ConcurrentBag` gives each borrowing thread a thread-local list of recently-used connections, so the common borrow neither takes a lock nor pays the FIFO handoff that makes `ArrayBlockingQueue(fair=true)` ~300× slower than the unfair variant (see §5). It also handles clock-move detection (VM pause resets `System.nanoTime()`), keepalive pings, `minimumIdle` housekeeping, and configurable leak detection with stack traces — all production edge cases this custom pool leaves unhandled.
+
+**Q: You migrate request handling to `Executors.newVirtualThreadPerTaskExecutor()`. Should the connection pool grow?**
+No — the formula that sizes the pool never referenced the thread pool; it references the database's core and disk count (`(DB_core_count × 2) + effective_spindle_count`). What changes is that the platform-thread container (e.g., 200 Tomcat threads) is no longer capping how many borrowers can exist at once, so a pool that was oversized relative to the database used to be masked by that cap and now is not. Growing the pool to match the new, much larger number of concurrent virtual threads is the exact mistake to avoid: "virtual threads are cheap" does not make a database backend process cheap, and a pool oversized for the DB's real parallelism just moves the bottleneck from "requests wait for a connection" to "the database thrashes under too many concurrent backends" (§10).
+
+**Q: Why does `getThreadsAwaitingConnection()` jumping into the thousands not necessarily mean the pool is exhausted, once virtual threads are involved?**
+Because on virtual threads, waiting for a bounded resource is the cheap and correct steady state, not a symptom. With 20,000 in-flight requests against a pool of 9, roughly 19,991 virtual threads are waiting at any instant purely as a function of arithmetic — each costs a few hundred bytes of heap for its parked continuation, not an OS thread. The signal that something is actually wrong is `pool.acquire.timeout` incrementing (a borrower failed to get a connection within `connectionTimeout`) or acquire-latency p99 approaching that timeout — queue *depth* alone, which was a meaningful exhaustion signal under platform threads, stops being one once nothing upstream bounds how many borrowers can queue at once.
+
+**Q: A service is on virtual threads and connection-heavy request latency degrades under load in a way pool and DB metrics can't explain. What do you check?**
+Carrier-thread pinning from a native stack frame inside the JDBC driver. Since JEP 491 (Java 24), `synchronized` and `Object.wait()` no longer pin a virtual thread — the remaining cause is a call that crosses into native (JNI-backed) code, which some driver implementations do beneath `getConnection()` or query execution. Confirm with a load test recording JFR and grepping for `jdk.VirtualThreadPinned` events (the `pinnedReason` field reads `NATIVE_METHOD` on Java 24+); do not trust a driver's reputation or its "supports virtual threads" marketing claim without this check, since pure-Java drivers (PostgreSQL JDBC, MySQL Connector/J) are fine and drivers with a native client underneath are not, and the difference is invisible from the pool's own metrics.

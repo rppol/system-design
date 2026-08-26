@@ -78,6 +78,60 @@ Think of a hypermedia API as **a website built for machines**. When you browse a
 | URI | `/api/v2/orders` | Most visible, cache-friendly; "un-RESTful" (version in resource identity) |
 | Header | `X-API-Version: 2` | Clean URLs; invisible in browser/logs, harder to cache |
 | Media type (content negotiation) | `Accept: application/vnd.acme.v2+json` | Most REST-purist; complex tooling, easy to get wrong |
+| Query parameter | `/api/orders?version=2` | Trivial to test by hand; pollutes the cache key and every log line |
+
+**Spring Framework 7 makes versioning first-class, so you no longer hand-roll any of
+these.** Pick the resolution strategy once in the MVC config, then declare the version
+on the mapping:
+
+```java
+@Configuration
+class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void configureApiVersioning(ApiVersionConfigurer configurer) {
+        configurer.useRequestHeader("API-Version");   // or a path segment, query param, or media-type parameter
+    }
+}
+
+@RestController
+@RequestMapping("/orders/{id}")
+class OrderController {
+
+    @GetMapping                        // matches any version; a more specific match wins
+    Order get() { ... }
+
+    @GetMapping(version = "1.1")       // exactly 1.1
+    OrderV1_1 getV1_1() { ... }
+
+    @GetMapping(version = "1.2+")      // 1.2 and every supported version above it
+    OrderV1_2 getV1_2() { ... }
+}
+```
+
+Three things about that snippet carry the whole design. **`"1.2+"` is a baseline, not a
+fixed version** — it keeps matching as you add 1.3 and 1.4, so you write a new handler
+only when the contract actually changes rather than once per release. **A mapping with
+no `version` matches anything** but is superseded by any more specific match, which is
+what lets you introduce versioning to an existing controller without touching the
+endpoints that have not diverged. And **an unsupported version raises
+`NotAcceptableApiVersionException`, which becomes a 400** — a real, uniform rejection
+instead of the silent fall-through to the wrong handler that hand-rolled header
+versioning usually produces.
+
+Beyond `useRequestHeader`, the version can be resolved from a request parameter, a path
+segment, or a media-type parameter, and the configurer accepts a custom
+`ApiVersionResolver` and `ApiVersionParser` when your scheme is unusual. An
+`ApiVersionDeprecationHandler` is the hook for telling clients a version is going away
+— which is the part teams normally forget until the day they want to remove one. Spring
+Boot surfaces the same configuration as properties under `spring.mvc.apiversion.*` (and
+`spring.webflux.apiversion.*` on the reactive stack).
+
+**What this does not solve.** Versioning the *URI* still changes the resource's
+identity, so a hypermedia API that hands out links has to decide whether those links
+carry a version. First-class versioning pushes you towards the honest answer: keep the
+URI stable, version the representation, and let the `Link` you emit stay valid across
+versions. That is the same argument as Level 3 in the maturity model — if the client
+follows links rather than constructing URLs, a version bump stops being a URL migration.
 
 ---
 
@@ -536,6 +590,16 @@ Traverson is Spring HATEOAS's Java client for navigating a HAL API by following 
 **Q: Does adding HATEOAS change your status codes or verbs?**
 **Short:** No, HATEOAS sits on top of Level 2 and only adds links without changing HTTP semantics.
 No — HATEOAS sits on top of Level 2, so you still return 201 on create, 200 on read, 404 on missing, 409 on conflict, and use GET/POST/PUT/PATCH/DELETE correctly. HATEOAS only adds the `_links` (and optionally HAL-FORMS `_templates`) to the body; it does not replace correct HTTP semantics. A broken Level 2 API does not become correct by bolting links onto it.
+
+**Q: How does Spring Framework 7's first-class API versioning differ from hand-rolling a version header?**
+**Short:** The version is a mapping attribute, so routing, baseline matching and a 400 on an unsupported version are handled by the framework.
+
+Hand-rolled versioning puts the version in your code: a filter or an `@RequestMapping(headers = ...)` condition, a branch inside the controller, and an unsupported version that silently falls through to whichever handler happened to match. Framework 7 makes the version part of the mapping itself — `@GetMapping(version = "1.1")` — with one place to configure how it is resolved, `configureApiVersioning(configurer -> configurer.useRequestHeader("API-Version"))`, or a path segment, query parameter or media-type parameter instead. Three behaviours come with it that hand-rolled code rarely gets right. `"1.2+"` is a **baseline** match, so a handler keeps serving 1.3 and 1.4 without a new mapping and you write a handler only when the contract genuinely changes. A mapping with **no** `version` matches anything but loses to a more specific match, so you can adopt versioning on an existing controller incrementally. And an unsupported version raises `NotAcceptableApiVersionException`, which becomes a **400** — a uniform, debuggable rejection rather than a wrong response. Spring Boot exposes the same configuration as `spring.mvc.apiversion.*` properties.
+
+**Q: If a hypermedia API versions its URIs, what breaks — and what does Level 3 suggest instead?**
+**Short:** Versioning the URI changes the resource's identity, so every emitted link must be versioned too; Level 3 argues for versioning the representation instead.
+
+A URI is the resource's identity, so `/api/v2/orders/42` is, strictly, a different resource from `/api/v1/orders/42` — and in a hypermedia API that has a concrete cost: every `Link` you emit now has to carry the right version, every assembler needs to know which version it is rendering for, and a client that bookmarked a v1 link is stranded when v1 retires. That is the tension between URI versioning and Richardson Level 3. The alternative the model points at is to keep the URI stable and version the **representation** — resolve the version from a header or media-type parameter, let `@RequestMapping(version = ...)` route to the right handler, and emit links that stay valid across versions. A client that follows links rather than constructing URLs then experiences a version bump as a change in payload shape, not as a URL migration. The practical middle ground most teams land on is URI versioning for genuinely breaking redesigns, where a clean break is honest, and representation versioning for the incremental field-level changes that make up almost all real API evolution.
 
 ---
 

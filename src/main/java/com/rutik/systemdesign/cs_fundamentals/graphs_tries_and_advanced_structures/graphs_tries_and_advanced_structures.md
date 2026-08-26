@@ -2,13 +2,20 @@
 
 ## 1. Concept Overview
 
-This module covers the data structures that appear in the hardest tier of coding interviews: **graphs** (for modelling relationships), **tries** (for prefix/string search), **union-find / DSU** (for connectivity), **segment trees** (for range queries with updates), **Fenwick trees / BITs** (for prefix sums), and **Bloom filters** (for probabilistic membership).
+### Prerequisite Knowledge
+
+This module assumes familiarity with:
+- BFS/DFS traversal mechanics → covered in [Graph and String Algorithms](../graph_and_string_algorithms/graph_and_string_algorithms.md)
+- Tree concepts → [Trees and Binary Search Trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md)
+- Recursion → [Recursion and Problem Solving Patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)
+
+This module covers the data structures that appear in the hardest tier of coding interviews: **graphs** (for modelling relationships), **tries** (for prefix/string search), **union-find / DSU** (for connectivity), **segment trees** (for range queries with updates), **Fenwick trees / BITs** (for prefix sums), and **Bloom filters and other probabilistic sketches** (for space-bounded approximate membership, frequency, and cardinality).
 
 Each structure addresses a class of problems that simpler structures cannot handle efficiently. Recognising which structure fits the problem shape is the skill these questions test.
 
 ---
 
-## Intuition
+## 2. Intuition
 
 A graph is a city road network — intersections are nodes, roads are edges. A trie is an autocomplete index — each character is a node, each root-to-leaf path is a word. Union-Find is a connectivity checker — "are these two nodes in the same component?" in near-O(1). A segment tree is a ledger with branch totals — update one account, re-query any range in O(log n). A Bloom filter is a bouncer's list — it may say "yes, seen that" about something it has never seen, but it never says "no" about something it really has seen (false positives possible, false negatives impossible).
 
@@ -18,7 +25,7 @@ A graph is a city road network — intersections are nodes, roads are edges. A t
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 **Graph terminology:**
 - **Node (vertex):** entity. **Edge:** relationship. **Directed (digraph):** edges have direction. **Undirected:** bidirectional.
@@ -36,7 +43,7 @@ A graph is a city road network — intersections are nodes, roads are edges. A t
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
 ### Graph Representations
 
@@ -73,9 +80,27 @@ Adjacency list is the default for sparse graphs (most real graphs). Adjacency ma
 | Segment tree | O(n) | O(log n) | O(log n) | O(log n) + lazy |
 | Sparse table | O(n log n) | — (static) | O(1) for idempotent ops | — |
 
+### Probabilistic (Sketch) Structures
+
+The exact structures above answer their question with certainty and pay for it in memory.
+A **sketch** structure trades that certainty for a fixed, sublinear memory budget: it answers
+with a *bounded, quantifiable* error instead. The **Bloom filter** is the family's entry
+point and the one this module keeps — a bit array of `m` bits plus `k` hash functions, where
+insert sets `k` bits and query checks that all `k` are set, so "definitely absent" is certain
+and "present" is only probable. That one-sided error (false positives possible, false
+negatives impossible) is the shape the whole family shares.
+
+The rest of the family — counting, cuckoo and quotient filters, Count-Min Sketch,
+HyperLogLog, MinHash/SimHash and LSH, t-digest, reservoir sampling, consistent and
+rendezvous hashing — together with the sizing formulas, the error bounds, the mergeability
+rules and the space/error comparison table, lives in
+[probabilistic_and_streaming_structures](../probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md).
+That module owns the *math*; their *deployment* — Bloom filters inside a caching layer,
+consistent hashing inside a sharding scheme — belongs to [`hld/`](../../hld/README.md).
+
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Adjacency List vs Matrix for graph {0→1, 0→2, 1→2, 2→0}
 
@@ -443,7 +468,7 @@ prefix(r) - prefix(l-1)`; minimum has no inverse, which is why range-min needs a
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ```python
 from __future__ import annotations
@@ -698,7 +723,7 @@ class FenwickTree:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Graph — social networks:** Facebook's friend graph is an adjacency list (V ≈ 3B nodes, E ≈ 500B edges). BFS from a user finds friends-of-friends (6 degrees of separation). Stored in distributed form (Tao, FlockDB).
 
@@ -730,9 +755,17 @@ A Bloom filter needs ~1.25 GB to answer "have I seen this URL?" for 1 billion UR
 
 **Bloom filter — CDN and cache layers:** Akamai and Cloudflare use Bloom filters as a pre-filter before expensive cache lookups. A false positive wastes one cache check; a false negative is impossible, so correctness is maintained.
 
+**Bloom filter — LSM-tree storage engines:** Cassandra and RocksDB attach one Bloom filter per SSTable. Before reading a candidate SSTable off disk, the engine checks the filter first — a "definitely not present" answer skips a disk seek entirely, which is the dominant cost in an LSM read path with dozens of SSTables per key range. This is the deployment side of the guarantee this module derives; see `hld/` for the caching-layer treatment.
+
+**HyperLogLog — Redis cardinality counting:** Redis's `PFADD key element` and `PFCOUNT key` implement HyperLogLog directly, advertised at "≤ 0.81% standard error using 12 KB of memory" for any cardinality — the exact `m = 16,384` figure computed above. Used for unique-visitor counts, distinct-search-term counts, and similar high-cardinality approximate counting where an exact `SADD`/`SCARD` set would grow unboundedly with the number of distinct elements.
+
+**Cuckoo filter — Chrome Safe Browsing:** Chrome's Safe Browsing client-side check historically used Bloom-filter-family structures (the project has also evaluated cuckoo filters) to test a URL against a compact local list of known-bad hash prefixes before making a full server-side check — the same one-sided-error, pre-filter role as the CDN example above, but for a security block-list instead of a cache.
+
+**MinHash — near-duplicate web-page detection:** Search engine crawlers use MinHash (classically as part of Broder's shingling pipeline) to flag near-duplicate pages — two pages are compared not by their full text but by the estimated Jaccard similarity of their shingle sets, so mirrored or lightly-templated pages can be de-duplicated in an index without an O(n^2) pairwise text comparison.
+
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 ### Graph representation choice
 
@@ -767,7 +800,7 @@ Rule: Use Fenwick for prefix sums (simpler). Use Segment tree when you need rang
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 The five structures in this module answer different questions; matching problem shape to structure is the skill being tested.
 
@@ -834,15 +867,6 @@ Solid arrows lead to the recommended structure for that problem shape; dotted ar
 - Use as a probabilistic set membership check when false positives are tolerable and false negatives are unacceptable
 - Use for large-scale pre-filtering (URLs, cache keys) to avoid expensive lookups
 - Do NOT use when you need exact membership, need to delete elements (standard Bloom can't), or need to enumerate members
-
----
-
-## 9. Prerequisite Knowledge
-
-This module assumes familiarity with:
-- BFS/DFS traversal mechanics → covered in [Graph and String Algorithms](../graph_and_string_algorithms/graph_and_string_algorithms.md)
-- Tree concepts → [Trees and Binary Search Trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md)
-- Recursion → [Recursion and Problem Solving Patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)
 
 ---
 
@@ -989,6 +1013,7 @@ class FenwickFixed:
             self.tree[i] += delta
             i += i & (-i)
 ```
+
 
 ---
 
@@ -1221,6 +1246,7 @@ if __name__ == "__main__":
 - [Graph and String Algorithms](../graph_and_string_algorithms/graph_and_string_algorithms.md) — BFS/DFS, Dijkstra, Bellman-Ford, topo sort algorithms (this module covers data structures; that covers algorithms)
 - [Trees and Binary Search Trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md) — segment trees extend BST concepts; B+trees bridge to graph-like index structures
 - [Sorting and Searching](../sorting_and_searching/sorting_and_searching.md) — Kruskal's MST requires edge sorting; binary search on Fenwick/segment tree queries
+- [Probabilistic and Streaming Data Structures](../probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) — the rest of the sketch family this module only introduces: sizing formulas and error bounds for Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, and consistent + rendezvous hashing
 - [HLD Caching Patterns](../../hld/README.md) — Bloom filters in distributed caching layers (Redis Bloom, Cassandra row-level Bloom filter)
 - [Database Indexing Deep Dive](../../database/indexing_deep_dive/indexing_deep_dive.md) — B+tree index structure; Bloom filters in RocksDB/LevelDB to skip SSTable reads
 - [Python Collections and Data Structures](../../python/collections_and_data_structures/collections_and_data_structures.md) — `heapq` with Dijkstra, `defaultdict` for adjacency lists

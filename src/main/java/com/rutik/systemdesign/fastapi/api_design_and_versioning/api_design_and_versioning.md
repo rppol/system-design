@@ -617,6 +617,50 @@ async def list_users_v2():
     ...
 ```
 
+### 6.7 OpenAPI 3.1 vs 3.0, and why your generator may not care
+
+FastAPI emits **OpenAPI 3.1.0** by default, and has since 0.99.0 — the release that also
+introduced `summary` on a path operation, which is a 3.1-only field. This matters more than a
+version number usually does, because 3.1 is the release that made OpenAPI a **strict superset of
+JSON Schema 2020-12**. In 3.0, OpenAPI's schema dialect was a near-miss subset, so Pydantic
+models had to be down-converted on the way out: `null` was expressed as the non-standard
+`nullable: true`, `examples` was the singular `example`, and constructs like `oneOf` alongside a
+type array had no faithful encoding. Under 3.1 the schema FastAPI generates is the schema
+Pydantic produced, so `int | None` round-trips as `{"type": ["integer", "null"]}` rather than
+being flattened.
+
+The practical trap is downstream. A client generator, API gateway, or documentation portal that
+only parses 3.0 will either reject `openapi.json` outright or silently mis-model every nullable
+field, and the failure surfaces in generated client code rather than in your service. Check the
+consumer before assuming the default is fine. When one genuinely cannot be upgraded, pin the
+emitted version rather than hand-editing the document:
+
+```python
+from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
+
+app = FastAPI(title="MyService API", version="2.1.0")
+
+
+def custom_openapi() -> dict:
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version="3.0.3",   # down-level for a 3.0-only consumer
+        routes=app.routes,
+    )
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
+```
+
+Treat that as a compatibility shim with an owner and an end date, not a default. Down-levelling
+re-introduces exactly the `nullable`/`example` lossiness described above, so the generated
+clients are less accurate than the ones 3.1 would have produced.
+
 Generating a Python SDK from the spec:
 
 ```bash
@@ -626,6 +670,10 @@ pip install openapi-python-client
 # Generate from running server
 openapi-python-client generate --url http://localhost:8000/openapi.json
 ```
+
+Pin the spec version in CI and diff `openapi.json` on every build. A schema change that breaks a
+client is a breaking API change even when no route signature moved, and diffing the generated
+document is the only place it is visible before a consumer's build goes red.
 
 ---
 
@@ -1016,6 +1064,21 @@ client-supplied column name lets an attacker inject arbitrary SQL through a craf
 Because FastAPI validates the enum before the handler runs, an invalid value fails with a 422 and
 never reaches `getattr(Post, filters.sort.value)`. Never string-format user input directly into a
 SQL clause, even for something that looks like a harmless column name.
+
+**Q17: Your FastAPI service's `openapi.json` is rejected by a partner's client generator. What is the likely cause?**
+**Short:** FastAPI emits OpenAPI 3.1 by default and many generators only parse 3.0, so the spec is rejected or nullable fields are mis-modelled.
+FastAPI has emitted **OpenAPI 3.1.0** by default since 0.99.0, and a generator, gateway or docs
+portal that only parses 3.0 will either reject the document or, worse, silently mis-model it. The
+underlying change is that 3.1 made OpenAPI a strict superset of JSON Schema 2020-12, so the schema
+FastAPI ships is the one Pydantic produced — `int | None` round-trips as
+`{"type": ["integer", "null"]}` instead of being flattened to the 3.0-only `nullable: true`, and
+`examples` is a list rather than the singular `example`. The silent failure mode is the dangerous
+one: the partner's build goes green and their generated client models every optional field
+wrongly. Fix it at the consumer if you can; if you genuinely cannot, down-level with
+`get_openapi(..., openapi_version="3.0.3")` and treat that as a shim with an owner and an end
+date, because it re-introduces exactly the lossiness 3.1 removed. Diff `openapi.json` in CI
+either way — a schema change that breaks a client is a breaking API change even when no route
+signature moved.
 
 ---
 

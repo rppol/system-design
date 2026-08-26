@@ -606,7 +606,7 @@ A RAG system deployed with an empty or sparse knowledge base generates low-confi
 |---|---|---|---|
 | Nuance DAX Copilot | Healthcare | Ambient clinical documentation | Deployed in 30%+ of US health systems; Microsoft |
 | Med-PaLM 2 | Healthcare | Clinical Q&A and documentation | Google; 85%+ USMLE; available via Cloud Healthcare API |
-| Epic + AI | Healthcare | EHR-integrated AI documentation | Ambient notes, patient messaging drafts |
+| Epic | Healthcare | EHR-integrated AI documentation | Ambient notes, patient messaging drafts, generated in the chart the clinician signs |
 | Harvey AI | Legal | Contract review, legal research, drafting | Used by Allen & Overy, PwC Legal; on-premise option |
 | Casetext CoCounsel | Legal | Legal research over Westlaw | Acquired by Thomson Reuters |
 | Thomson Reuters AI | Legal | Integrated Westlaw + Practical Law AI | Research + drafting + analysis |

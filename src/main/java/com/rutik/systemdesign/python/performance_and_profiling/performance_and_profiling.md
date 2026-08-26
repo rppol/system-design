@@ -6,7 +6,7 @@
 
 Performance profiling in Python is the practice of measuring where a program spends its time and memory, then applying targeted optimizations to the identified hot paths. The toolchain spans multiple granularities: process-level sampling (`py-spy`), function-level call counting (`cProfile`), line-by-line timing (`line_profiler`), memory allocation tracking (`memory_profiler`, `tracemalloc`), and bytecode inspection (`dis`).
 
-CPython 3.11 introduced the specializing adaptive interpreter — a significant architectural change that makes the interpreter observe frequently-executed bytecode paths and rewrite them to faster, type-specific variants at runtime. This alone delivered ~25% throughput improvement over Python 3.10 on the pyperformance benchmark suite, with hot numeric loops seeing 2-3x speedups. CPython 3.13 introduced an experimental JIT compiler (still opt-in at build time) that compiles traces to native machine code [3.13].
+CPython 3.11 introduced the specializing adaptive interpreter — a significant architectural change that makes the interpreter observe frequently-executed bytecode paths and rewrite them to faster, type-specific variants at runtime. This alone delivered ~25% throughput improvement over Python 3.10 on the pyperformance benchmark suite, with hot numeric loops seeing 2-3x speedups. CPython 3.13 introduced an experimental JIT compiler under PEP 744, and CPython 3.14 shipped binary releases of it. The JIT uses copy-and-patch: instead of running a full optimizing compiler backend, it stitches together small pre-compiled machine-code templates — one per bytecode instruction — and patches in the operands at compile time, which is why it compiles fast but only wins modestly (there is no official speedup percentage for the 3.14 JIT, and it was often observed to be slower than the plain interpreter depending on the build's C compiler). CPython 3.14 separately introduced an experimental tail-calling interpreter (`--with-tail-call-interp`, requires Clang 19+), with an official geomean of 3-5% over an equivalent build without the flag.
 
 Beyond the interpreter itself, Python code performance depends heavily on data structure choice, algorithmic complexity, loop structure, attribute access patterns, and whether the hot path can be offloaded to compiled code via NumPy vectorization, Cython, mypyc, cffi, or C extensions.
 
@@ -251,12 +251,17 @@ Examples of specializations:
 | `BINARY_OP`      | `BINARY_OP_ADD_INT`              | both operands are `int`               |
 | `COMPARE_OP`     | `COMPARE_OP_INT`                 | both operands are `int`               |
 
-Pyperformance benchmark results (CPython team, normalized to 3.10 = 100):
+CPython does not publish a single cumulative pyperformance-vs-3.10 geomean covering every release since 3.11 — only the 3.11 figure below is an official "vs 3.10" number. Later interpreter changes are each benchmarked against their *own* stated baseline, and mixing them into one normalized index would misrepresent what was actually measured:
 
-- Python 3.10: 100
-- Python 3.11: ~125 (+25%)
-- Python 3.12: ~130 (+30% vs 3.10)
-- Python 3.13 (JIT preview): ~133 [3.13]
+| Change | Measured result | Baseline it was measured against |
+|---|---|---|
+| 3.11 specializing adaptive interpreter | ~25% faster (range 10-60%; hot int loops 2-3x) | Python 3.10, official CPython pyperformance figure |
+| 3.14 tail-call interpreter (`--with-tail-call-interp`) | ~3-5% geomean faster | a Clang-19 build of 3.14 *without* the flag — not vs 3.10 |
+| 3.14 copy-and-patch JIT (PEP 744) | No official percentage published | often slower than the plain interpreter, depending on the build compiler |
+| 3.15 JIT (not yet final) | ~8-9% geomean faster | the standard 3.15 interpreter, x86-64 Linux |
+| 3.15 JIT (not yet final) | ~12-13% geomean faster | the 3.15 *tail-calling* interpreter, AArch64 macOS — not vs the standard interpreter |
+
+Individual 3.15 JIT benchmarks range from roughly 15% slower to over 100% faster depending on the workload; the 3.15 whatsnew document marks all of these JIT numbers as not yet final.
 
 Hot numeric loops comparing ints can be 2-3x faster in 3.11 vs 3.10 because `BINARY_OP_ADD_INT` inlines the C-level integer addition and skips the generic `PyObject_Add` dispatch.
 
@@ -531,6 +536,49 @@ GC note: `timeit` disables garbage collection during timing by default (`gc.disa
 timeit.timeit(stmt, setup="import gc; gc.enable()", number=10_000)
 ```
 
+### 6.8 `sys.monitoring` [3.12] — the Modern Low-Overhead Hook
+
+Before PEP 669, every instrumentation tool (coverage, debuggers, tracers) had to choose between `sys.settrace` (a single global trace function, invoked on nearly every line, opcode-interpreter overhead measured around 2000% for typical debugger use) and `sys.setprofile` (call/return only, still 1.5-3x). `sys.monitoring`, added in Python 3.12, replaces both with an event-based API that lets a tool subscribe only to the specific events it needs — line, call, jump, exception, and others — and CPython dispatches them through the same specializing interpreter machinery rather than forcing a full de-optimization of every frame. Coverage tools and debuggers have moved to it because the overhead is around 5% instead of orders of magnitude:
+
+```python
+import sys
+
+PYTHON_LINE = sys.monitoring.events.LINE
+TOOL_ID = sys.monitoring.PROFILER_ID
+
+def on_line(code, line_number):
+    print(f"{code.co_filename}:{line_number}")
+
+sys.monitoring.use_tool_id(TOOL_ID, "my-tracer")
+sys.monitoring.register_callback(TOOL_ID, PYTHON_LINE, on_line)
+sys.monitoring.set_events(TOOL_ID, PYTHON_LINE)
+
+# ... run the code you want to observe ...
+
+sys.monitoring.set_events(TOOL_ID, sys.monitoring.events.NO_EVENTS)
+sys.monitoring.free_tool_id(TOOL_ID)
+```
+
+Reach for `sys.monitoring` directly when building a custom tracer, coverage tool, or debugger-style instrumentation; `sys.settrace`/`sys.setprofile` remain what `cProfile` and `line_profiler` are built on today, but any new low-overhead instrumentation should target the `sys.monitoring` API rather than the classic trace functions.
+
+### 6.9 PEP 799 — the `profiling` Package and Tachyon `[3.15]`
+
+Python 3.15 adds a new stdlib `profiling` package with two submodules: `profiling.tracing` (a deterministic profiler, successor to the role `cProfile` plays today) and `profiling.sampling`, whose sampling profiler is code-named **Tachyon**. Tachyon can attach to an already-running process by PID — the same production-safe workflow `py-spy` popularized — and it explicitly supports free-threaded builds, sampling multiple threads without the GIL serializing what it observes. It ships alongside, not instead of, `py-spy`: `py-spy` remains a separate Rust tool with a mature flamegraph/SVG output; `profiling.sampling` is the stdlib's own answer to the same job.
+
+The existing `profile` module (the pure-Python profiler that predates `cProfile`) has a published removal lifecycle: it starts raising `DeprecationWarning` in Python 3.15, every use of it warns starting in 3.16, and it is removed in 3.17. `cProfile` is unaffected — this lifecycle only retires the older, pure-Python `profile` module.
+
+### 6.10 The C/Native Extension Boundary
+
+When profiling points at Python-level overhead that a pure-Python fix cannot close, the next lever is compiled code — but which kind, and at what cost, is itself a decision worth making deliberately rather than reflexively:
+
+- **PyO3 + maturin** is the modern path for writing a Python extension in Rust; `maturin build` produces an installable wheel directly from a `Cargo.toml` project. `pydantic-core`, `ruff`, `uv`, and `tiktoken` are all Rust extensions built this way.
+- **Cython** and **mypyc** (Section 6.6) stay the Python-source-compatible options — you keep writing Python (with optional Cython type annotations, or plain mypy-annotated code for mypyc) rather than learning a second language.
+- **`Py_LIMITED_API`** restricts an extension to CPython's Stable ABI. A wheel built against it is tagged `abi3` and installs unmodified across CPython minor versions — one wheel for 3.10 through 3.14 instead of one per minor version.
+- On a free-threaded build, an extension must opt in explicitly: declaring `Py_mod_gil = Py_MOD_GIL_NOT_USED` in the module definition tells the free-threaded interpreter the extension is safe without the GIL. An extension that does **not** declare this re-enables the GIL for the *entire process* the moment it is imported (with a `RuntimeWarning`) — one unaudited native dependency silently cancels the entire benefit of a free-threaded build (see `../the_gil_and_free_threading/the_gil_and_free_threading.md`).
+- **PEP 803** defines `abi3t`, a Stable ABI variant for free-threaded builds (`PyObject` becomes opaque under it), with the wheel tag convention `abi3.abi3t` for a single wheel that supports both the normal and free-threaded Stable ABI.
+
+**The honest senior point:** most "rewrite it in Rust/Cython" wins people report are mostly algorithmic — a linear scan replacing a quadratic one, or a single allocation replacing thousands, ported at the same time as the language change gets credited to the language change. Profile first, confirm the bottleneck really is per-object Python bytecode overhead rather than an avoidable algorithmic cost, and only then decide the native-extension boundary is worth its build-chain, packaging, and ABI complexity.
+
 ---
 
 ## 7. Real-World Examples
@@ -722,6 +770,21 @@ print(f"Best: {min(times)*1000:.2f}ms")
 
 After profiling reveals a hot function, developers sometimes optimize a secondary loop within it rather than the primary one. Always check `tottime` vs `cumtime` — optimize the function with highest `tottime`.
 
+### Pitfall 6: A benchmark that measured the compiler, not the change
+
+CPython 3.14's tail-call interpreter (`--with-tail-call-interp`) was widely reported with a 9-15% speedup figure before release. That number was wrong. Nelson Elhage's investigation showed the reported gain was primarily an accidental workaround for a regression in LLVM 19's tail-duplication limits — the "tail-call" build happened to route around a code-generation regression that also affected the *baseline* build it was compared against, so most of the measured gap was the regression, not the optimization. Against a properly corrected baseline (a Clang-19 build with the regression's effect controlled for), the real gain from the tail-call interpreter is 1-5%, consistent with the official 3-5% geomean CPython eventually published.
+
+```python
+# BROKEN: benchmark methodology, not code — comparing two builds where only one
+# happens to dodge an unrelated compiler regression, then attributing the whole
+# gap to the feature flag under test
+# baseline build:      clang-19, --without-tail-call-interp   (hits the regression)
+# treatment build:      clang-19, --with-tail-call-interp      (happens to route around it)
+# "9-15% faster!" -- mostly measuring the regression, not the interpreter change
+```
+
+The lesson generalizes past this one flag: when a benchmark compares two builds that differ by more than the single variable under test — here, a compiler regression present in one code path and not the other — the measured delta is not attributable to the change you think you are testing. Always benchmark against a baseline built with the exact same toolchain and toolchain version, and be suspicious of a result that is dramatically larger than the mechanism plausibly explains.
+
 ---
 
 ## 11. Technologies & Tools
@@ -734,6 +797,7 @@ After profiling reveals a hot function, developers sometimes optimize a secondar
 | `memory_profiler` | Line (memory)    | 5-10x      | No              | No           | Annotated source + MB     |
 | `tracemalloc`     | Allocation site  | 2-3x       | Careful         | No           | Snapshot diff / top allocs|
 | `VizTracer`       | Function + args  | 1-2x       | No              | Yes (JSON)   | Chrome trace viewer       |
+| `scalene`         | Line (CPU/GPU/mem) | Low     | Careful         | Yes (HTML)   | CPU-vs-native time split + memory |
 
 **What it means.** "The Overhead column is a multiplier on wall-clock time, not a percentage added to
 it — `3x` means a request that took 100 ms now takes 300 ms while the profiler is attached." Read as
@@ -880,6 +944,22 @@ Python strings are immutable. Each `s += fragment` allocates a new string object
 **Short:** memray traces every allocation, including inside C extensions, letting it attribute memory that memory_profiler's RSS deltas miss.
 
 `memray` traces every memory allocation, including allocations made inside C extensions, and renders the results as an interactive flamegraph. `memory_profiler` only reports line-by-line RSS deltas measured from the OS, which misses allocations freed within the same line and cannot attribute memory to a call stack inside a C extension like NumPy or a database driver. `memray`, built by Bloomberg, hooks the allocator itself, so it shows exactly which Python and native call stack is responsible for each byte allocated. Use `memray` when investigating a leak involving third-party C extensions; `memory_profiler` remains adequate for quick pure-Python line-level checks.
+
+**Q17: How does the CPython 3.14 JIT deliver a speedup, and why is that speedup modest rather than dramatic?**
+**Short:** The JIT stitches together pre-compiled machine-code templates per bytecode instead of running a full optimizer, so it compiles fast but wins little.
+CPython's JIT (PEP 744, experimental in 3.13, shipping binary releases in 3.14) uses a technique called copy-and-patch: for each bytecode instruction it has a small pre-compiled machine-code template, and at compile time it stitches the relevant templates together and patches in the actual operands, rather than running a traditional optimizing compiler backend that analyzes and rewrites the whole trace. That is fast to compile — there is no expensive optimization pass — but it also means the JIT does not perform the cross-instruction optimizations (register allocation across a whole trace, inlining, dead-code elimination) that give tracing JITs like PyPy's their large wins. There is no official speedup percentage for the 3.14 JIT, and it was observed to be slower than the plain interpreter in some builds depending on the compiler used, which is why it shipped as an opt-in, still-experimental feature rather than the default.
+
+**Q18: When should you reach for `sys.monitoring` instead of `sys.settrace`, and what does it cost you to keep using `sys.settrace`?**
+**Short:** sys.monitoring costs roughly 5% overhead against sys.settrace's roughly 2000% for typical debugger-style instrumentation.
+`sys.settrace` installs a single global trace function that CPython calls on nearly every line, forcing every frame in the interpreter out of its specialized fast paths for as long as tracing is active — measured overhead for typical debugger use is around 2000%. `sys.monitoring` (PEP 669, added in 3.12) replaces this with an event-subscription API: a tool registers only for the specific events it needs (line, call, exception, and others) and CPython dispatches them without forcing a blanket de-optimization, bringing overhead down to roughly 5%. Reach for `sys.monitoring` directly whenever you are building new instrumentation — a custom tracer, coverage tool, or debugger; `sys.settrace` remains the mechanism `line_profiler` is built on today, but any new tool should target `sys.monitoring`.
+
+**Q19: What went wrong with the original 9-15% benchmark for CPython 3.14's tail-call interpreter, and what is the real number?**
+**Short:** The 9-15% figure mostly measured an unrelated LLVM 19 compiler regression instead of the tail-call interpreter itself; the real gain is 1-5%.
+The widely-quoted 9-15% figure compared a build with `--with-tail-call-interp` against a baseline build without it, but the baseline happened to trigger a code-generation regression in LLVM 19's tail-duplication limits that the tail-call build incidentally avoided — so most of the measured gap was the compiler regression, not the interpreter change under test. Nelson Elhage traced this down; against a baseline that controls for the regression, the real gain is 1-5%, which lines up with CPython's own published geomean of 3-5% versus a same-compiler baseline. The general lesson: a benchmark comparing two builds is only valid if the builds differ by exactly the one variable you intend to measure.
+
+**Q20: When is dropping down to a native extension (Rust, Cython, a hand-written C extension) the wrong answer to a performance problem?**
+**Short:** It is wrong before profiling confirms the bottleneck is genuine per-object Python overhead rather than an algorithmic or I/O cost a native rewrite cannot fix.
+Crossing the native-extension boundary is the wrong move whenever the actual bottleneck is algorithmic complexity, unnecessary I/O, or a data-structure choice — a native rewrite of an O(n^2) algorithm is still O(n^2), just with a smaller constant, and profiling nearly always finds one of these first (Section 8's Amdahl's Law walkthrough is why "profile first" pays off disproportionately here). It is also the wrong move when a large fraction of a reported "native rewrite" win was actually a simultaneous algorithmic fix credited to the language change, which is common enough in "we rewrote it in Rust" reports that the honest response is to ask what else changed in the same commit. Reach for PyO3/Cython/mypyc only after `cProfile` or `py-spy` confirms real CPU time in per-object Python bytecode overhead that a pure-Python restructuring cannot remove, and weigh that gain against the ongoing cost of a compiled-artifact build chain, cross-platform wheels, and (on a free-threaded build) auditing the extension for `Py_mod_gil` support.
 
 ---
 

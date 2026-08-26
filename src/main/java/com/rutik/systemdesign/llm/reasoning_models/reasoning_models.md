@@ -164,6 +164,56 @@ Same PRM, same two chains, and the aggregator flips the winner. Chain A does bet
 
 The 0.4287 row is the point: the product collapses toward the weakest factor, which is the behaviour you want from a verifier. Drop `min`/`product` in favour of `mean` and you get the classic PRM failure mode — best-of-N reranking that confidently selects chains containing one silent invalid step, precisely the chains an ORM would have caught.
 
+**Where the step labels come from.** Everything above assumes you *have* a PRM. Training one is the
+harder half, because a PRM needs a label per reasoning step and nothing in a normal dataset carries
+one. There are two established routes, and they fail in opposite directions.
+
+```
+Human step annotation  ——  Lightman et al. 2023, "Let's Verify Step by Step"
+  Annotators label every step of a model-generated solution as
+  positive / negative / neutral. Released as PRM800K: ~800k step
+  labels over MATH problems.
+  Finding: process supervision beats outcome supervision on MATH,
+  even holding the generator fixed.
+  Cost: human hours per step. Does not scale past one dataset.
+
+Monte-Carlo auto-annotation  ——  Math-Shepherd (Wang et al., arXiv 2312.08935)
+  No annotators at all. A "completer" policy takes the question plus
+  the first t steps as a prefix, samples k independent rollouts from
+  that point, and compares each rollout's final answer to the gold one.
+  Step t's label = the fraction of those k rollouts that landed correct.
+  Quality check: 160 auto-labels hand-graded at 86% agreement.
+  Result: Mistral-7B  GSM8K 77.9% -> 84.1%,  MATH 28.6% -> 33.0%,
+  beating PPO trained against an ORM on the same setup.
+```
+
+**The gotcha that decides whether you can use MC labels at all.** A Monte-Carlo label is a *value
+estimate* — "how often does this prefix reach the right answer" — not a *correctness judgement*.
+Those come apart in both directions. A step that is logically invalid but easy to recover from
+scores high, because the completer routes around it. A step that is perfectly valid but leads into
+a genuinely hard remainder scores low, because the completer fails downstream for reasons that have
+nothing to do with step t. So an MC-trained PRM learns *promise*, and a human-trained PRM learns
+*validity*. If your downstream use is search guidance (MCTS, beam pruning) promise is exactly what
+you want; if it is verification — proving a chain contains no invalid inference — promise is the
+wrong signal and the `min` aggregator above will not save you.
+
+MC annotation also requires a **verifiable gold answer**, which is why every PRM result in the
+literature is on math and code and almost none on open-ended reasoning.
+
+**Budget the annotation before you commit to it.** The rollout cost is multiplicative:
+
+```
+  k rollouts/step  x  T steps/solution  x  N problems  =  total completer generations
+
+  k=8, T=6, N=50,000   ->  2,400,000 generations
+  k=4, T=6, N=50,000   ->  1,200,000 generations   <- halving k halves the bill
+```
+
+Small `k` makes each label noisy (with `k=4` a step's label can only take five distinct values);
+large `k` makes the dataset unaffordable. The usual compromise is a small `k` over many problems
+rather than a large `k` over few, because PRM training tolerates label noise better than it
+tolerates narrow coverage.
+
 ### 4.4 Self-Consistency
 
 Generate multiple reasoning chains and vote:
@@ -813,6 +863,14 @@ A: Self-consistency generates N reasoning chains (N=10-40) and takes the majorit
 **Q: How do process reward models enable best-of-N reranking, and how is that different from self-consistency?**
 **Short:** PRM reranking scores each chain's reasoning steps to pick the best process rather than just the most common answer, and can prune partial chains early unlike voting.
 A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temperature > 0, then score each chain using a PRM that evaluates each intermediate step. Select the chain with the highest average step score, or the highest minimum step score (weakest-link selection). This is more powerful than self-consistency majority voting because: (1) it can distinguish between chains that all reach the same answer — it picks the one with the best reasoning process; (2) it can identify when a chain reaches the right answer via a flawed shortcut; (3) PRM reranking scales better — the PRM is a forward pass only (no generation), so scoring 50 candidates is cheap. Self-consistency requires all chains to generate until EOS; PRM reranking can score partial chains early and prune. Practical tradeoff: PRM reranking requires a trained PRM model; self-consistency works with any generation.
+
+**Q: How do you get step-level labels to train a process reward model?**
+**Short:** Either humans annotate each step, as in PRM800K, or a completer policy samples k rollouts from each prefix and labels the step by how often they reach the gold answer.
+A: There are two routes, and they produce different signals. Human step annotation is what OpenAI did for "Let's Verify Step by Step" (Lightman et al., 2023), releasing PRM800K — roughly 800,000 step labels over MATH problems, each step marked positive, negative or neutral; the paper's headline result is that process supervision beats outcome supervision even with the generator held fixed. Monte-Carlo auto-annotation, introduced by Math-Shepherd (Wang et al., arXiv 2312.08935), removes annotators entirely: a "completer" policy takes the question plus the first t steps as a prefix, samples k independent rollouts from that point, and labels step t with the fraction of rollouts whose final answer matches the gold one. Hand-grading 160 of those auto-labels showed 86% agreement, and training on them lifted Mistral-7B from 77.9% to 84.1% on GSM8K and from 28.6% to 33.0% on MATH, beating PPO against an outcome reward model on the same setup. The cost is multiplicative — k rollouts per step times T steps per solution times N problems, so k=8, T=6, N=50,000 is 2.4 million completer generations. Budget with a small k over many problems rather than a large k over few, since PRM training tolerates label noise better than narrow coverage, and note that MC annotation needs a verifiable gold answer, which is why nearly every published PRM is a math or code PRM.
+
+**Q: Why can a Monte-Carlo-trained PRM be the wrong verifier even when its labels are accurate?**
+**Short:** A Monte-Carlo label measures how often a prefix reaches the right answer, so it scores promise rather than validity and rewards invalid-but-recoverable steps.
+A: Because a Monte-Carlo label is a value estimate, not a correctness judgement — it answers "how often does this prefix reach the right answer", which is a different question from "is this step valid". The two come apart in both directions: a logically invalid step that is easy to recover from scores high, because the completer simply routes around it, while a perfectly valid step that leads into a hard remainder scores low, because the completer fails downstream for reasons unrelated to that step. So an MC-trained PRM learns promise and a human-annotated PRM learns validity. That distinction determines the use: for search guidance — MCTS node scoring, beam pruning, deciding which branch to expand — promise is exactly the right signal and MC labels are both cheaper and better matched. For verification, where the claim is that a chain contains no invalid inference, promise is the wrong signal, and switching the aggregator to `min` does not rescue it because the underlying per-step score was never measuring validity. Pick the labelling method from the downstream use, and if you need both, train two models rather than one.
 
 ---
 

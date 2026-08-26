@@ -166,6 +166,91 @@ last, no-qualifier branch of — this diagram is the programmer's side of the ch
 (which qualifier to write), the §5 diagram is the compiler's side (register vs.
 local for what's left unqualified).
 
+### 4.9 The Ladder: Getting Bytes From Global Into Shared Memory
+
+Every space above is presented as a place data *lives*; this subsection is about the three
+different ways a kernel author actually *moves* bytes from Global Memory (§4.4) into Shared
+Memory (§4.3) — a ladder that gets more hardware-driven, and costs less of the SM's own
+machinery, as compute capability rises.
+
+**Rung 1 — synchronous staging (what `shared_example` in §6.1 already does).** Every thread
+issues an ordinary global load into a register, then stores that register to `__shared__`
+memory — two separate instructions, a register held hostage for the full ~400-800 cycle
+round trip, and the warp stalls on the load before it can even issue the store.
+
+**Rung 2 — `cp.async` (Ampere, `sm_80`+).** A direct global-to-shared copy instruction that
+never touches the register file at all. Exposed in C++ as `cuda::memcpy_async` (or
+`cooperative_groups::memcpy_async`). The win is threefold: no register is held hostage for
+the load's latency, the warp issues the copy and immediately moves on instead of stalling,
+and because issuing costs almost nothing, a kernel can software-pipeline several tiles of
+copies ahead of where the compute currently is. Completion is tracked at the PTX level with
+`cp.async.commit_group` / `cp.async.wait_group<N>`, or at the C++ level with a
+`cuda::pipeline` (mechanics in §6.7) or a `cuda::barrier` — the `arrive()`/`wait(token)`
+semantics are covered end-to-end in
+[synchronization_and_atomics §6.6](../synchronization_and_atomics/synchronization_and_atomics.md);
+this module does not re-teach them, only how the copy path feeds them.
+
+**Rung 3 — TMA, the Tensor Memory Accelerator (Hopper, `sm_90`+).** TMA is not "`cp.async`
+but faster" — it changes *what* gets described and *who* issues it:
+
+- It copies a **multidimensional tile**, not a byte range. The tile is described by a
+  **tensor map** (`CUtensorMap`), a 128-byte opaque descriptor built once on the **host**
+  with `cuTensorMapEncodeTiled()`, recording the tensor's base pointer, element dtype, rank,
+  global dimensions and strides, box (tile) dimensions, element strides, and swizzle mode.
+- It is **single-threaded by design**: one elected thread (`if (threadIdx.x == 0)`) issues
+  the copy for the *entire* thread block, unlike `cp.async` where all 32 lanes of a warp
+  each issue their own slice. This is why a producer warp dedicated to nothing but TMA
+  issues (see
+  [warp_level_primitives_and_cooperative_groups §6.9](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md))
+  costs almost no registers.
+- The **hardware computes every address**, including zero-filling any part of a boundary
+  tile that falls outside the tensor's bounds — removing an entire class of manual
+  bounds-check code a tiled kernel would otherwise carry.
+- Completion is signaled directly to an **`mbarrier`** by the copy hardware itself, not by
+  the issuing thread — a producer/consumer decoupling `__syncthreads()` structurally cannot
+  express (barrier and phase-parity mechanics: link above).
+- The PTX instruction is
+  `cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes` —
+  recognize this in a SASS/PTX dump as "TMA moved a tile and told an mbarrier."
+- The descriptor must reach the kernel as a `const __grid_constant__ CUtensorMap`
+  parameter — see the BROKEN → FIX pair in §6.7.
+
+| | Rung 1 — register-staged | Rung 2 — `cp.async` | Rung 3 — TMA |
+|---|---|---|---|
+| Who issues | Every thread, its own element | Every thread, its own slice | One elected thread, the whole tile |
+| Registers held per copy | 1+ per thread, for the full load latency | None — bypasses the register file | None — one thread, no per-lane state |
+| Address computation | Software, per thread | Software, per thread | Hardware, from the `CUtensorMap` descriptor |
+| Completion signal | Register write completing (compiler-ordered) | `cp.async.wait_group<N>` / `cuda::pipeline` | Hardware writes to an `mbarrier` |
+| Boundary handling | Manual per-thread bounds check | Manual per-thread bounds check | Hardware zero-fill of out-of-bounds tile region |
+| Minimum architecture | Any (`sm_20`+) | Ampere (`sm_80`+) | Hopper (`sm_90`+) |
+
+```
+   RUNG 1 -- SYNCHRONOUS STAGING (every thread, through a register)
+
+     global memory --load--> [register, 1/thread] --store--> shared memory
+        ~400-800 cyc                                             ~20-30 cyc
+     warp STALLS on the load; register held for the whole round trip
+
+   RUNG 2 -- cp.async (Ampere sm_80+, every thread issues its own slice)
+
+     global memory ------------ cp.async ------------------> shared memory
+        no register round trip; warp issues the copy and moves on
+     completion: cp.async.wait_group<N>  or  cuda::pipeline consumer_wait()
+
+   RUNG 3 -- TMA (Hopper sm_90+, ONE thread issues the whole tile)
+
+     global memory --cp.async.bulk.tensor--> shared memory
+        addresses computed by hardware from a CUtensorMap descriptor
+                                |
+                                v
+                       mbarrier .complete_tx
+              (hardware signals completion -- no thread reports "done")
+```
+
+Each rung down removes one more piece of software machinery from the copy's critical path —
+first the register, then the per-thread address computation — until, at TMA, a single
+instruction issued by a single thread moves an entire tile and reports its own completion.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -670,6 +755,153 @@ Since CUDA 4.0 (all GPUs used in this section support it), host memory and every
 - UVA is the addressing prerequisite that peer-to-peer (P2P) direct GPU-to-GPU access and Unified Memory (`cudaMallocManaged`, covered fully in `../memory_management_and_data_transfer/`) are both built on top of.
 - UVA unifies the *address space*, not the *hardware*: a UVA-resolved global-memory access is still ~400-800 cycles; UVA never makes global memory fast, it only makes the pointer arithmetic uniform.
 
+### 6.7 Asynchronous Copies Into Shared Memory: `cp.async`, `cuda::pipeline`, and TMA
+
+**`cp.async` with `cuda::pipeline` — a double-buffered tile load.** While the consumer
+computes on stage `s`, the producer's copy for stage `s + 1` is already in flight; this is
+what "the warp issues and moves on" (Rung 2, §4.9) buys in practice:
+
+```cpp
+#include <cuda/pipeline>
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
+
+// Double-buffered tile load: 2 stages deep. Each iteration issues the NEXT
+// tile's copy before consuming the PREVIOUS tile that finished loading.
+__global__ void pipelinedTileCopy(const float* __restrict__ src, float* dst, int n) {
+    constexpr int STAGES = 2;
+    constexpr int TILE   = 256;
+    __shared__ float tile[STAGES][TILE];
+
+    auto block = cg::this_thread_block();
+    auto pipe  = cuda::make_pipeline();   // cuda::pipeline<cuda::thread_scope_block>
+    int numTiles = n / TILE;
+
+    for (int t = 0; t < numTiles + STAGES - 1; ++t) {
+        // PRODUCE: issue tile t's copy into its stage slot, if one remains.
+        if (t < numTiles) {
+            pipe.producer_acquire();
+            cuda::memcpy_async(block, tile[t % STAGES], src + t * TILE,
+                                sizeof(float) * TILE, pipe);
+            pipe.producer_commit();          // -> cp.async.commit_group underneath
+        }
+
+        // CONSUME: the tile issued STAGES-1 iterations ago has had time to land.
+        int consumeTile = t - (STAGES - 1);
+        if (consumeTile >= 0) {
+            pipe.consumer_wait();            // -> cp.async.wait_group<N> underneath
+            float v = tile[consumeTile % STAGES][threadIdx.x];   // real work on v here
+            pipe.consumer_release();
+        }
+    }
+}
+```
+
+`producer_acquire`/`producer_commit` bracket the copy issue; `consumer_wait`/
+`consumer_release` bracket the compute that depends on it — the pipeline object tracks which
+stage is which so the same 2 (or N) shared-memory buffers can be reused round-robin without
+the producer ever overwriting a stage the consumer hasn't finished reading.
+
+**TMA — host-side descriptor, device-side single-thread issue.** Production kernels almost
+never hand-write the inline PTX below — CUTLASS/CuTe and `cuda::experimental` wrap it — but
+recognizing this shape, and the instruction name, is what turns a Hopper SASS dump from
+noise into a readable pipeline:
+
+```cpp
+// HOST: build the 128-byte opaque tensor map once (not per-launch, if the
+// tensor's shape is stable) -- this bakes in dtype, global shape/strides,
+// the tile (box) shape TMA will fetch, and how out-of-bounds tiles behave.
+CUtensorMap tensorMap{};
+uint64_t globalDim[2]      = { (uint64_t)cols, (uint64_t)rows };      // {inner, outer}
+uint64_t globalStrides[1]  = { (uint64_t)cols * sizeof(float) };      // row stride, bytes
+uint32_t boxDim[2]         = { TILE_COLS, TILE_ROWS };                 // tile TMA delivers
+uint32_t elementStrides[2] = { 1, 1 };
+
+cuTensorMapEncodeTiled(
+    &tensorMap, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, /*rank=*/2,
+    d_globalTensor, globalDim, globalStrides, boxDim, elementStrides,
+    CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+    CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_OOB_FILL_ZERO);
+// tensorMap now travels into the kernel as a `const __grid_constant__` value
+// parameter -- see the BROKEN / FIX pair below for why it cannot be a
+// pointer into ordinary __device__ memory.
+```
+
+```cpp
+// DEVICE: one elected thread issues the whole block's tile copy; every
+// other thread just waits on the same shared mbarrier.
+__global__ void tmaTileLoad(const __grid_constant__ CUtensorMap tensorMap,
+                             float* out, int tileX, int tileY) {
+    __shared__ float smemTile[TILE_ROWS][TILE_COLS];
+    __shared__ cuda::barrier<cuda::thread_scope_block> mbar;
+
+    if (threadIdx.x == 0) {
+        init(&mbar, /*expected arrivals=*/1);
+        // Tell the barrier to expect this many BYTES from the pending
+        // transaction, matching the PTX instruction's .complete_tx::bytes
+        // qualifier -- full arrive/wait/phase-parity mechanics are in
+        // synchronization_and_atomics §6.6, not repeated here.
+        cuda::device::barrier_arrive_tx(mbar, 1, sizeof(smemTile));
+
+        // The PTX instruction a profiler or SASS dump shows for this copy:
+        //   cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+            :
+            : "r"(__cvta_generic_to_shared(smemTile)), "l"(&tensorMap),
+              "r"(tileX), "r"(tileY), "r"(__cvta_generic_to_shared(&mbar))
+            : "memory");
+    }
+    __syncthreads();
+    mbar.arrive_and_wait();      // every thread blocks until the tile has landed
+    // ... compute on smemTile ...
+}
+```
+
+**BROKEN — a `CUtensorMap` read through an ordinary global-memory pointer:**
+
+```cpp
+// BROKEN: the descriptor lives in __device__ global memory; the kernel
+// reads it through a plain pointer instead of receiving it by value.
+__device__ CUtensorMap g_tensorMap;   // built on host, then cudaMemcpyToSymbol'd here
+
+__global__ void tmaTileLoadBroken(float* out, int tileX, int tileY) {
+    if (threadIdx.x == 0) {
+        // TMA's tensor-map operand is specified to be read through the
+        // constant/parameter-space path a __grid_constant__ argument gets --
+        // NOT an arbitrary global-memory address. This compiles, often
+        // "works" in isolated testing, and then corrupts tiles or hangs
+        // under concurrent launches that race to update g_tensorMap.
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+            :: "r"(smemAddr), "l"(&g_tensorMap), "r"(tileX), "r"(tileY),
+               "r"(mbarAddr) : "memory");
+    }
+}
+```
+
+**FIX — the descriptor travels by value as a `__grid_constant__` parameter:**
+
+```cpp
+// FIX: the compiler places a __grid_constant__ parameter in the fast
+// constant/parameter space the TMA unit is actually specified to read
+// from, and the host builds a fresh descriptor whenever the tensor's
+// shape changes rather than mutating one shared __device__ copy.
+__global__ void tmaTileLoadFixed(const __grid_constant__ CUtensorMap tensorMap,
+                                  float* out, int tileX, int tileY) {
+    if (threadIdx.x == 0) {
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+            :: "r"(smemAddr), "l"(&tensorMap), "r"(tileX), "r"(tileY),
+               "r"(mbarAddr) : "memory");
+    }
+}
+// launch: tmaTileLoadFixed<<<grid, block>>>(tensorMap, out, tileX, tileY);
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -944,6 +1176,18 @@ Because a load-count reduction is an upper bound on the speedup, not a predictio
 **Q: Why can shared memory still be slow even though its raw latency (~20-30 cycles) is an order of magnitude better than global memory?**
 **Short:** Shared memory is split into 32 banks, and when warp threads hit different addresses in the same bank the accesses serialize, eroding its latency advantage.
 Because shared memory is organized into 32 banks, and when multiple threads in a warp hit different addresses in the *same* bank, those accesses serialize instead of completing in parallel. A bank conflict can erase most of the latency advantage shared memory otherwise provides — the full bank layout, conflict patterns, and padding fix are covered in `../shared_memory_and_bank_conflicts/`.
+
+**Q: What three costs does `cp.async` avoid that the synchronous, register-staged global-to-shared copy pays?**
+**Short:** cp.async skips the register round trip, lets the warp issue and move on instead of stalling, and enables software pipelining several tiles deep.
+Rung 1 (synchronous staging) issues a global load into a register, stalling the warp for the ~400-800 cycle latency, then stores that register to shared memory — the register is held hostage for the whole round trip. `cp.async` (Ampere, `sm_80`+) copies directly from global to shared memory without ever touching the register file: no register is held for the latency, the warp issues the copy and moves on to other work immediately, and because issuing is nearly free, a kernel can queue several tiles' worth of copies ahead of where the compute currently is — the software-pipelining pattern in §6.7's double-buffered loop.
+
+**Q: Why does TMA elect a single thread to issue a tile copy that `cp.async` issues from every thread in the warp, and what does that save?**
+**Short:** TMA describes the whole tile via a hardware-read CUtensorMap descriptor, so one thread issuing it costs almost no registers or per-lane address math.
+Because TMA's unit of work is a whole multidimensional tile described by a `CUtensorMap` descriptor, not a per-lane byte range — the hardware computes every lane's address from that descriptor, so there is nothing left for the other 31 threads in the warp to compute or issue. Electing one thread (`if (threadIdx.x == 0)`) to issue the copy means the operation costs almost no registers and consumes almost no per-lane state, which is exactly why a producer warp can be dedicated to nothing but TMA issues at near-zero occupancy cost — see the warp-specialization pattern in `../warp_level_primitives_and_cooperative_groups/`.
+
+**Q: What is a `CUtensorMap`, and why does reading it through an ordinary `__device__` global-memory pointer risk corruption instead of a compile error?**
+**Short:** CUtensorMap is a 128-byte tensor descriptor the TMA hardware is specified to read through constant/parameter space, not an arbitrary global address.
+It is a 128-byte opaque descriptor, built on the host with `cuTensorMapEncodeTiled()`, recording a tensor's base pointer, dtype, global shape/strides, tile (box) shape, element strides, and swizzle mode. TMA hardware is specified to read this descriptor through the constant/parameter-space path a `const __grid_constant__` kernel parameter gets — not through an arbitrary global-memory address. Passing it via a plain `__device__` global pointer compiles and can "work" in isolated testing, then silently corrupts tiles or hangs under concurrent kernel launches racing to update the shared symbol; the fix is to build the descriptor host-side and pass it into the kernel by value as `const __grid_constant__ CUtensorMap`.
 
 ---
 

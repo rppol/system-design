@@ -4,24 +4,6 @@ A comprehensive, one-stop reference for mastering **general-purpose GPU programm
 
 > **No runtime application** — all content is Markdown with executable-shaped CUDA C++, PTX, and Python (CuPy / Numba / Triton / PyTorch) code blocks. Concepts are shown in CUDA C++ and Python side-by-side where both teach; in C++ alone where the concept is inherently C++ (WMMA, PTX, `__launch_bounds__`); in Python alone where inherently Python (Triton, CuPy).
 
-> **PARKED — to be done later (owner-set 2026-07-29).** This section is out of scope for the
-> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
-> re-opens it. **Parked, not cancelled**: the content is untouched and still ships in the
-> game. Paused: **14 of 19 audit units** and **427 Q&As awaiting one-line MCQ summaries**.
->
-> **Partly audited — read this before resuming.** Five modules were genuinely audited and
-> committed (`b223d21`): `cuda_memory_model_and_hierarchy`,
-> `cuda_programming_model_and_kernels`, `debugging_correctness_and_numerics`,
-> `gpu_computing_foundations`, `gpu_hardware_architecture`. Five more —
-> `memory_coalescing_and_access_patterns`, `memory_management_and_data_transfer`,
-> `occupancy_and_launch_configuration`, `parallel_patterns_reduction_scan_histogram`,
-> `profiling_and_performance_analysis` — carry an **interrupted partial batch** (`2fca64f`).
-> Those edits are real corrections, but the agent was stopped mid-section and never produced
-> a verdict record, so **those five must be re-audited from the top**. Treat that commit as a
-> partial improvement, never as an audited result.
->
-> Scope table: root `CLAUDE.md` -> "Deferred / To Be Planned".
-
 ---
 
 ## Intuition
@@ -88,7 +70,7 @@ This section is deliberately scoped to the **kernel author's** view of the GPU a
 | 15 | [cuda_graphs](cuda_graphs/cuda_graphs.md) | 4 — Advanced Execution | Advanced | Graph capture, instantiate, launch-overhead reduction, graph update, when it wins |
 | 16 | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md) | 4 — Advanced Execution | Advanced | P2P, NVLink/NVSwitch, GPUDirect, device selection, NCCL collectives, data/model decomposition |
 | 17 | [dynamic_parallelism_and_advanced_kernels](dynamic_parallelism_and_advanced_kernels/dynamic_parallelism_and_advanced_kernels.md) | 4 — Advanced Execution | Advanced | Device-side launch, nested parallelism, persistent kernels, producer-consumer, when it helps vs hurts |
-| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | 5 — Libraries & Tensor Cores | Advanced | WMMA/`mma`, FP16/BF16/TF32/FP8, matrix fragments, loss scaling, cuBLAS/cuDNN TC paths, when TC engages |
+| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | 5 — Libraries & Tensor Cores | Advanced | WMMA/`mma`, `wgmma`/`tcgen05` + Tensor Memory, FP16/BF16/TF32/FP8, block-scaled NVFP4, loss scaling, cuBLAS/cuDNN TC paths |
 | 19 | [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md) | 5 — Libraries & Tensor Cores | Intermediate | cuBLAS, cuDNN, CUTLASS, cuFFT, cuSPARSE, cuRAND, Thrust; library-vs-custom-kernel; CUTLASS templating |
 | 20 | [python_gpu_ecosystem](python_gpu_ecosystem/python_gpu_ecosystem.md) | 5 — Libraries & Tensor Cores | Intermediate | CuPy, Numba CUDA, PyCUDA, PyTorch custom CUDA/C++ extensions, `torch.compile`/Inductor, DLPack |
 | 21 | [triton_and_kernel_dsls](triton_and_kernel_dsls/triton_and_kernel_dsls.md) | 5 — Libraries & Tensor Cores | Advanced | Triton programming model, block-level abstraction, autotuning, Triton vs CUDA C++, where Triton wins/loses |
@@ -228,10 +210,12 @@ warp_level_primitives_and_cooperative_groups
   warp_level_primitives_and_cooperative_groups.md  senior
 streams_events_and_concurrency
   streams_events_and_concurrency.md  senior
+  green_contexts_and_sm_partitioning.md  senior
 cuda_graphs
   cuda_graphs.md  -
 multi_gpu_programming_and_nccl
-  multi_gpu_programming_and_nccl.md  -
+  multi_gpu_programming_and_nccl.md  senior
+  device_initiated_communication.md  senior
 dynamic_parallelism_and_advanced_kernels
   dynamic_parallelism_and_advanced_kernels.md  -
 tensor_cores_and_mixed_precision
@@ -255,6 +239,8 @@ case_studies
   optimize_llm_inference_kernels.md         -
   optimize_matrix_multiplication_kernel.md  -
   port_a_cpu_pipeline_to_gpu.md             -
+  write_a_blackwell_gemm_with_cute_dsl.md  -
+  optimize_moe_expert_parallel_dispatch.md  -
 -->
 ## Learning Paths
 
@@ -265,7 +251,7 @@ This section is exhaustive by design — 24 modules from the SIMT model and GPU 
 The complete curriculum in the order above — see [6-Phase Learning Path](#4-6-phase-learning-path). Use it for genuine mastery: foundations, core CUDA, the full performance-engineering phase, advanced execution (graphs, multi-GPU, dynamic parallelism), the complete library and Python/Triton ecosystem, and the portability survey. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (16 modules)
+### Senior Path (17 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -281,12 +267,13 @@ The complete curriculum in the order above — see [6-Phase Learning Path](#4-6-
 | 11 | [synchronization_and_atomics](synchronization_and_atomics/synchronization_and_atomics.md) | module page only |
 | 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) | module page only |
 | 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) | module page only |
-| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md) | module page only |
+| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md) | 2 files |
+| 16 | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md) | 2 files |
 | 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | module page only |
 | 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md) | module page only |
 | 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) | module page only |
 
-**Not in this path** (8 of 24, Full Path only): `cuda_toolkit_and_compilation`, `cuda_graphs`, `multi_gpu_programming_and_nccl`, `dynamic_parallelism_and_advanced_kernels`, `cuda_math_and_dnn_libraries`, `python_gpu_ecosystem`, `triton_and_kernel_dsls`, `gpu_portability_hip_sycl_and_beyond`
+**Not in this path** (7 of 24, Full Path only): `cuda_toolkit_and_compilation`, `cuda_graphs`, `dynamic_parallelism_and_advanced_kernels`, `cuda_math_and_dnn_libraries`, `python_gpu_ecosystem`, `triton_and_kernel_dsls`, `gpu_portability_hip_sycl_and_beyond`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior GPU / CUDA / ML-infra interview** actually probes, anchored on the performance-engineering core. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time. This subset is kept in sync with `game/app.js` (`STUDY_PATHS.cuda.interview`) — same modules, same order.
@@ -357,9 +344,10 @@ Worked examples target recent NVIDIA data-center GPUs; this is the quick referen
 | Ampere | A100, RTX 30xx | 8.0 / 8.6 | 3rd-gen Tensor Cores + TF32 + BF16; async copy (`cp.async`); 40 MB L2; MIG |
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
 | Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory |
-| Blackwell | B100/B200, GB200 | 10.0 | 5th-gen Tensor Cores + FP4/FP6; 2nd-gen Transformer Engine; larger NVLink domains |
+| Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; NVLink 5 at 1.8 TB/s bidirectional per GPU |
+| Rubin | VR200, Vera Rubin NVL72 | not yet published | 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
 
-Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced global access moves data in **128-byte** transactions (32 threads × 4 bytes); shared memory has **32 banks** of 4 bytes; the register file is **64K 32-bit registers per SM** (256 KB); max **1024 threads/block**; a stall on global memory is **~400-800 cycles**; HBM3 bandwidth is **~3 TB/s** on H100.
+Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced global access moves data in **128-byte** transactions (32 threads × 4 bytes); shared memory has **32 banks** of 4 bytes; the register file is **64K 32-bit registers per SM** (256 KB); max **1024 threads/block**; a stall on global memory is **~400-800 cycles**; HBM3 bandwidth is **~3.35 TB/s** on H100 SXM5.
 
 ---
 
@@ -402,7 +390,7 @@ Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE.** All 24 modules + 6 principal case studies + 5 cross-cutting primitives authored (2026-07-07). `game/extract.py` yields 425 CUDA MCQs across all 24 modules; `game/app.js` wiring (`SECTION_LABELS`/`STUDY_ORDER`/`STUDY_PATHS`) and root `README.md`/`CLAUDE.md` registration are in place. No NEXT UP pointer remains. Future additions should follow the "Adding a New CUDA Module" steps in `CLAUDE.md` and flip new rows below.
+> **BUILD COMPLETE.** All 24 modules + 6 principal case studies + 5 cross-cutting primitives authored (2026-07-07). `game/extract.py` yields 427 CUDA MCQs across all 24 modules; `game/app.js` wiring (`SECTION_LABELS`/`STUDY_ORDER`/`STUDY_PATHS`) and root `README.md`/`CLAUDE.md` registration are in place. No NEXT UP pointer remains. Future additions should follow the "Adding a New CUDA Module" steps in `CLAUDE.md` and flip new rows below.
 >
 > Authoring convention reminder for future chunks: follow the Conventions Reminder below; flip each new file `pending` → `done` on completion.
 
@@ -486,7 +474,7 @@ MODULE TEMPLATE — 14-section canonical scheme (matches the rest of the repo):
   ## 14. Case Study   (scenario + diagram + real kernel + BROKEN/FIX + metrics + Discussion Qs)
 
 QUALITY BAR:
-  - 700-1000 lines per module README
+  - 950-1300 lines per module page (`<module>/<module>.md` — there is no README below a section root)
   - Q&A minimum per the tables above (18 for: memory_coalescing_and_access_patterns,
     shared_memory_and_bank_conflicts, occupancy_and_launch_configuration,
     tensor_cores_and_mixed_precision, profiling_and_performance_analysis; 15 elsewhere)

@@ -19,14 +19,34 @@ The global AI regulatory landscape is maturing rapidly. Multiple overlapping fra
 | China Generative AI Regulations (2023) | China | Aug 2023 | Algorithm filing, training data sourcing requirements |
 | UK AI Approach (DSIT guidance) | UK | Ongoing | Pro-innovation; sector-specific guidance, not comprehensive law |
 | EU Digital Markets Act (DMA) | EU | 2023-2024 | Applies to AI recommendation algorithms used by gatekeepers |
+| US State AI Laws (Colorado SB 26-189) | Colorado, USA | Jan 2027 | Disclosure-and-rights framework for automated decision-making technology (ADMT); replaced the EU-style, risk-tiered SB 24-205 in May 2026 before that law ever took effect |
 
 **Critical extra-territorial reality**: A US company deploying AI systems to EU residents faces both US EO 14110 and EU AI Act obligations simultaneously. The EU AI Act replicates GDPR's extra-territorial model — jurisdiction follows the user, not the company.
 
-**Enforcement timeline**:
-- Feb 2025: Prohibited AI practices bans took effect (EU AI Act)
-- Aug 2025: GPAI model obligations apply
-- Aug 2026: High-risk AI system obligations fully apply; EU database for high-risk systems goes live
-- Aug 2027: High-risk AI systems integrated into existing regulated products
+**Enforcement timeline** (as amended by the Digital Omnibus on AI, Regulation (EU) 2026/1744, in force since 27 July 2026):
+- Feb 2025: Prohibited AI practices bans took effect (EU AI Act); Art. 4 AI-literacy duty applies to providers and deployers regardless of risk tier
+- Aug 2025: GPAI model obligations apply; the voluntary GPAI Code of Practice is published as a compliance path
+- Aug 2026: Art. 50 transparency obligations apply (AI-interaction disclosure, deepfake and AI-generated-content labeling); the Commission/AI Office gain GPAI enforcement powers (investigations, fines) — the Digital Omnibus defers the high-risk Annex III conformity/database deadline originally set for this date to Dec 2027
+- Dec 2026: two Omnibus-specific dates land together. The **new Art. 5 prohibition** on AI systems for generating child sexual abuse material and non-consensual intimate imagery ("nudification" tools) starts to apply; and the **four-month grace period on Art. 50(2)** — machine-readable marking of synthetic audio, image, video and text — expires for providers whose systems were already on the market on 2 August 2026
+- Dec 2027: High-risk AI systems in Annex III (stand-alone: hiring, credit scoring, biometric ID, etc.) must complete conformity assessment and register in the EU database before deployment
+- Aug 2028: High-risk AI systems embedded in already-regulated products (Annex I) must comply
+
+**Two Omnibus changes that are easy to miss, because they cut the opposite way to the deferral.**
+The Omnibus is usually summarised as "the high-risk deadlines slipped", which is true and
+incomplete — it also *added* an obligation and *narrowly relaxed* another:
+
+- **A new prohibited practice.** Art. 5 now covers AI systems built to generate CSAM or
+  non-consensual intimate imagery, in three distinct configurations: placing such a system on the EU
+  market **with the purpose** of generating that content; placing one on the market **without
+  reasonable safety measures** to prevent that generation; and a **deployer using** one for that
+  purpose. The middle limb is the one that catches ordinary image-generation vendors — it is a
+  safety-measures duty on a general-purpose product, not merely a ban on a purpose-built tool.
+  Applies from **2 December 2026**.
+- **Art. 50(2) did not move for new systems, but existing ones got four months.** The
+  machine-readable marking duty still applies from **2 August 2026** in general; providers of
+  synthetic-content systems **already on the market** at that date have until **2 December 2026**,
+  and the grace covers Art. 50(2) only — not the rest of Art. 50. So "Art. 50 did not move" is the
+  right headline and the wrong compliance answer if your system predates August 2026.
 
 ---
 
@@ -68,7 +88,7 @@ The global AI regulatory landscape is maturing rapidly. Multiple overlapping fra
 
 | Risk Tier | Examples | Core Requirements |
 |-----------|----------|------------------|
-| Unacceptable (Banned) | Government social scoring systems; real-time biometric surveillance in public spaces (narrow law enforcement exceptions); subliminal manipulation; exploitation of vulnerabilities; emotion recognition in workplace/education (with narrow exceptions) | Prohibited. Cannot deploy under any circumstances. |
+| Unacceptable (Banned) | Government social scoring systems; real-time biometric surveillance in public spaces (narrow law enforcement exceptions); subliminal manipulation; exploitation of vulnerabilities; emotion recognition in workplace/education (with narrow exceptions); generation of CSAM or non-consensual intimate imagery (added by the Digital Omnibus, applies from Dec 2026 — including placing a system on the market without reasonable safety measures against it) | Prohibited. Cannot deploy under any circumstances. |
 | High Risk | Employment screening; credit scoring; biometric identification; educational assessment; critical infrastructure AI; law enforcement tools; border control AI; justice administration AI | Conformity assessment; tamper-resistant logging; human oversight mechanism; accuracy/robustness/cybersecurity requirements; CE marking; EU database registration; post-market monitoring |
 | Limited Risk | Chatbots (must disclose AI nature); deepfake generators (must label outputs); emotion recognition systems outside banned contexts | Transparency obligations only — disclose AI nature to user |
 | Minimal Risk | Spam filters; AI in video games; recommendation systems not meeting high-risk criteria | No specific EU AI Act obligations |
@@ -83,6 +103,8 @@ The global AI regulatory landscape is maturing rapidly. Multiple overlapping fra
 6. Law enforcement (crime prediction, polygraphs, evidence evaluation)
 7. Migration, asylum, border control
 8. Administration of justice and democratic processes
+
+**GPAI Code of Practice**: The Commission published a voluntary General-Purpose AI Code of Practice (10 July 2025), developed through a multistakeholder process, that GPAI model providers can sign to demonstrate compliance with the Act's transparency, copyright, and (for systemic-risk models) safety-and-security obligations — the Commission and the AI Board have confirmed that adherence creates a presumption of conformity with the underlying legal obligations. It has three chapters: **Transparency** (meeting the Art. 53(1)(a)-(b) and Annex XI/XII documentation duties toward downstream providers and the EU AI Office), **Copyright** (a policy for complying with EU copyright law, including respecting rights reservations), and **Safety and Security** (the most extensive chapter, binding only on models designated systemic risk). Signing is voluntary, not mandatory — a provider can demonstrate compliance by other means — but most major model providers signed rather than build and defend an independent compliance case.
 
 ### 4.2 GDPR + AI — Key Obligations
 
@@ -119,6 +141,8 @@ Required before processing when: systematic and extensive profiling with signifi
 - FTC: unfair/deceptive practice authority applies to AI systems making false or misleading claims
 - CFPB: adverse action notice requirements when AI is used in credit decisions
 - EEOC: disparate impact theory applies to AI-based hiring tools under Title VII
+
+**US State AI Laws — Colorado as the bellwether**: With no comprehensive federal AI statute, state law fills the gap, and Colorado is the case to know. SB 24-205 ("Colorado AI Act") was signed in 2024 as an EU-AI-Act-style, risk-tiered framework — annual impact assessments, broad algorithmic-discrimination duties on deployers — but it never took effect as written. The legislature postponed it twice (originally 1 Feb 2026, then to 30 Jun 2026), a federal court stayed enforcement in April 2026 amid a constitutional challenge, and on 14 May 2026 Governor Polis signed SB 26-189, which repeals SB 24-205 outright and replaces it with a narrower framework built around "automated decision-making technology" (ADMT) rather than "high-risk AI system": developer-to-deployer technical disclosure, and a consumer notification within 30 days of an adverse ADMT-driven outcome, with no standalone annual impact-assessment mandate. SB 26-189 takes effect 1 January 2027, contingent on the state Attorney General completing rulemaking. The lesson generalizes beyond Colorado: a state AI bill's framework at introduction is not a reliable predictor of what actually takes effect.
 
 ### 4.4 NIST AI Risk Management Framework (AI RMF 1.0)
 
@@ -195,7 +219,7 @@ flowchart TD
     OTHER["Other jurisdictions\nUS EO 14110 · FTC/EEOC"]
     RISK{"EU AI Act\nrisk tier?"}
     BANNED["BANNED\nStop — cannot deploy\n(social scoring, real-time biometrics,\nsubliminal manipulation)"]
-    HIGH["High Risk (Annex III)\nconformity assessment · QMS docs\ndata governance · 6-month logging\nhuman oversight · CE marking\nregister in EU AI Act database by Aug 2026"]
+    HIGH["High Risk (Annex III)\nconformity assessment · QMS docs\ndata governance · 6-month logging\nhuman oversight · CE marking\nregister in EU AI Act database by Dec 2027"]
     GPAI["GPAI Model (any general-purpose model)\ntransparency report · copyright policy\nSystemic risk (> 10^25 FLOPs):\nadversarial testing · EU AI Office reporting\ncybersecurity for weights"]
     LTD["Limited Risk\n(chatbot, deepfake, emotion recognition)\ndisclose AI nature at first interaction\nlabel AI-generated content"]
     MIN["Minimal Risk\nno specific obligations — deploy"]
@@ -332,7 +356,7 @@ Minimum contents:
 - Declaration of conformity
 
 **Step 5: EU AI Act Database Registration**
-From August 2026, high-risk AI systems must be registered before deployment in the EU market. Registration is public (deployers) or partially restricted (law enforcement). Registration fields include: system name, intended purpose, risk management measures, conformity assessment summary.
+From 2 December 2027, high-risk AI systems in Annex III must be registered before deployment in the EU market — the Digital Omnibus (Regulation (EU) 2026/1744, in force since 27 July 2026) deferred this deadline, and the parallel Annex I deadline (to 2 August 2028), from the original 2 August 2026 date. Registration is public (deployers) or partially restricted (law enforcement). Registration fields include: system name, intended purpose, risk management measures, conformity assessment summary.
 
 **Step 6: CE Marking**
 For AI systems that are products placed on the EU market: CE marking required. For pure software services: registration suffices.
@@ -394,7 +418,7 @@ HUMAN OVERSIGHT
 EU AI ACT CLASSIFICATION
   Risk tier:  HIGH RISK (Annex III, Category 4 — employment)
   Conformity assessment: Internal, completed 2024-02-28
-  EU database registration: Pending (registration opens Aug 2026)
+  EU database registration: Pending (Annex III deadline 2 Dec 2027, per Digital Omnibus deferral)
   GDPR Art. 22: Compliant — human review step satisfies "not solely automated"
 
 LIMITATIONS
@@ -776,18 +800,23 @@ The EU Digital Markets Act (DMA) required Apple to open its iOS ecosystem to alt
 
 ---
 
-### EU AI Act First Wave — Insurance Sector (2026)
+### EU AI Act Compliance — Insurance Sector (2026-2027)
 
-Insurance companies using AI for underwriting decisions (premium calculation, risk assessment, claims processing) fall under Annex III, Category 5 (access to essential private services and public services — insurance qualifies in many interpretations).
+Insurance companies using AI for underwriting decisions (premium calculation, risk assessment, claims processing) fall under Annex III, Category 5 (access to essential private services and public services — insurance qualifies in many interpretations). The Digital Omnibus (Regulation (EU) 2026/1744, in force since 27 July 2026) turned the original August 2026 cliff into a staged programme.
 
-**What insurers are building now**:
+**Already live, since 2 August 2026, unaffected by the Annex III deferral**:
+- Art. 50 transparency: chatbot-style claims and sales interactions must disclose they are AI; AI-generated or AI-manipulated content used in claims processing must be labeled
+- Art. 4 AI-literacy (live since Feb 2025): underwriting and claims staff need documented, role-appropriate AI-literacy training — a single onboarding video does not satisfy it
+- GPAI enforcement powers: the AI Office can now investigate and fine the foundation-model vendors underwriting models are built on
+
+**What insurers are building for the Annex III deadline**:
 - Model cards for every AI underwriting component
 - Bias audits across protected characteristics (age, gender, disability, health)
 - Explainability for premium determinations (SHAP-based factor disclosure)
 - Human review queues for borderline cases
 - Technical documentation packages for conformity assessment
 
-**Timeline pressure**: EU AI Act database registration opens August 2026. Insurers that have not completed conformity assessment by then cannot register and therefore cannot deploy new AI underwriting systems in the EU market.
+**Timeline**: the Digital Omnibus deferred the Annex III conformity-assessment and EU-database-registration deadline from 2 August 2026 to 2 December 2027 (Annex I follows to 2 August 2028). Art. 50 and Art. 4 did not move, so the programme is now staged rather than a single scramble: transparency and literacy compliance first (already due), full conformity assessment and database registration second (due Dec 2027). One caveat before an insurer treats transparency as closed: the Art. 50(2) machine-readable marking duty carries a four-month grace to 2 December 2026 for systems that were already on the market on 2 August 2026, and that same date is when the new Art. 5 prohibition on CSAM and non-consensual-intimate-imagery generation begins to apply — so December 2026 is a real milestone in this plan, not a quiet gap between August 2026 and December 2027.
 
 ---
 
@@ -1058,9 +1087,21 @@ A GPAI (General Purpose AI) model is trained on broad data for general capabilit
 **Short:** Open-source GPAI models under 10^25 FLOPs get reduced EU AI Act obligations, but systemic-risk open-source models above that threshold get no exemption.
 The EU AI Act provides reduced obligations for providers of open-source GPAI models that are not systemic risk (i.e., trained on ≤10^25 FLOPs). Open-source GPAI providers must: publish training data summary (but not full training data corpus); comply with EU copyright law. They are exempt from: the full technical documentation requirements; downstream deployer instructions requirements. Systemic risk open-source GPAI (>10^25 FLOPs) receives no exemption — Llama models at this scale face the full systemic risk regime. Note: "open-source" in EU AI Act means weights are publicly available; it does not mean training data must be open.
 
+**Q: What is the EU AI Act's GPAI Code of Practice, and is signing it mandatory?**
+**Short:** The GPAI Code of Practice is a voluntary Commission-published code that gives signing providers a presumption of conformity with GPAI obligations.
+The General-Purpose AI Code of Practice is a voluntary code the European Commission published on 10 July 2025, developed through a multistakeholder process, to help GPAI model providers demonstrate compliance with the EU AI Act's transparency, copyright, and (for systemic-risk models) safety-and-security obligations. It has three chapters: Transparency (documentation flowing to downstream providers and the EU AI Office), Copyright (a policy for complying with EU copyright law), and Safety and Security (the most extensive chapter, binding only on systemic-risk models). Signing is not legally mandatory — a provider may demonstrate compliance by other means — but the Commission and AI Board have confirmed that adherence creates a presumption of conformity with the underlying legal obligations, so most major providers signed rather than build and defend an alternative compliance case.
+
+**Q: Your company doesn't sign the GPAI Code of Practice. What happens?**
+**Short:** Not signing is legal but shifts the burden: you must independently prove compliance with the same GPAI obligations the Code presumes.
+Not signing the Code is not itself a violation — the underlying legal obligations come from the EU AI Act, not the Code. But the Code exists precisely because the Act's GPAI obligations (training data transparency, copyright policy, and for systemic-risk models, adversarial testing and incident reporting) are open-ended enough that regulators wanted a concrete, pre-approved way to satisfy them. A provider that declines to sign must demonstrate compliance through its own documented measures and carries the burden of proving those measures meet the Act's requirements if the AI Office investigates — since 2 August 2026 the AI Office has held real investigation and fine authority (up to €15M or 3% of global turnover) over GPAI providers. In practice, most frontier-model providers signed rather than accept that burden.
+
+**Q: What does Colorado's AI law require, and how does it differ from the EU AI Act model?**
+**Short:** Colorado repealed its EU-style high-risk AI Act and replaced it with a narrower ADMT disclosure-and-rights law effective January 2027.
+Colorado's original SB 24-205 ("Colorado AI Act") copied the EU AI Act's risk-tiered structure — annual impact assessments, broad algorithmic-discrimination duties on deployers — but it was postponed twice, stayed by a federal court amid a constitutional challenge, and ultimately repealed. Governor Polis signed SB 26-189 on 14 May 2026, replacing it with a narrower framework regulating "automated decision-making technology" (ADMT): developers must disclose technical information to deployers, and deployers must notify consumers within 30 days of an adverse decision substantially driven by ADMT — there is no standalone annual impact-assessment mandate. SB 26-189 takes effect 1 January 2027, pending the Attorney General's rulemaking. The practical lesson: unlike the EU AI Act's single binding text, US state AI law is unsettled — a state's headline bill can be narrowed or replaced before it ever takes effect.
+
 **Q: What are the prohibited AI practices under the EU AI Act?**
-**Short:** The EU AI Act bans six practices outright, including subliminal manipulation and real-time public biometric ID, with fines up to 7% of turnover.
-Six categories of AI systems are banned outright (effective February 2025): (1) subliminal manipulation techniques that affect behavior beyond conscious awareness causing harm; (2) exploitation of vulnerabilities (age, disability, social situation) to distort behavior causing harm; (3) biometric categorization of individuals by sensitive characteristics (race, political opinions, religion, sexual orientation) from publicly accessible images; (4) social scoring by public authorities based on social behavior or personal characteristics; (5) real-time remote biometric identification in publicly accessible spaces for law enforcement (narrow exceptions for missing children, specific terrorism threats); (6) AI-based inference of emotions in workplace and educational settings (narrow exceptions for medical/safety purposes). Violation: up to €35M or 7% of global annual turnover.
+**Short:** The EU AI Act bans seven practices outright, six from February 2025 plus CSAM and non-consensual-intimate-imagery generation added by the Digital Omnibus from December 2026.
+Seven categories of AI systems are banned outright. Six took effect in February 2025: (1) subliminal manipulation techniques that affect behavior beyond conscious awareness causing harm; (2) exploitation of vulnerabilities (age, disability, social situation) to distort behavior causing harm; (3) biometric categorization of individuals by sensitive characteristics (race, political opinions, religion, sexual orientation) from publicly accessible images; (4) social scoring by public authorities based on social behavior or personal characteristics; (5) real-time remote biometric identification in publicly accessible spaces for law enforcement (narrow exceptions for missing children, specific terrorism threats); (6) AI-based inference of emotions in workplace and educational settings (narrow exceptions for medical/safety purposes). The seventh was added to Art. 5 by the Digital Omnibus (Regulation (EU) 2026/1744) and applies from 2 December 2026: AI systems for generating child sexual abuse material or non-consensual intimate imagery, prohibited in three configurations — placing such a system on the EU market with that purpose, placing one on the market without reasonable safety measures to prevent that generation, and a deployer using one for that purpose. Note the middle limb, which is the one that reaches ordinary image-generation vendors: it imposes a safety-measures duty on a general-purpose product rather than banning only purpose-built tools, so "we did not build a nudifier" is not by itself a defence. Violation of any prohibited practice: up to €35M or 7% of global annual turnover.
 
 **Q: What is a DPIA and when is one required for an AI system?**
 **Short:** A DPIA is a GDPR Art. 35 assessment of an AI system's impact on individuals, mandatory before deployment for high-risk or large-scale profiling.
@@ -1279,7 +1320,7 @@ EU AI ACT CLASSIFICATION
   Risk tier:        HIGH RISK — Annex III, Category 4 (employment)
   Conformity:       Internal conformity assessment completed 2024-02-28
                     Assessment file: compliance/conformity_2024_02.pdf
-  EU DB status:     Pending registration (database opens Aug 2026)
+  EU DB status:     Pending registration (Annex III deadline 2 Dec 2027, per Digital Omnibus deferral)
   GDPR Art. 22:     Compliant — human review step confirmed by legal review
 
 INTENDED USE

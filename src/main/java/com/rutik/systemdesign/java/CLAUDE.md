@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 33 Modules
+## Module List — 35 Modules
 
 | Module Directory | Topic |
 |-----------------|-------|
@@ -13,6 +13,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `java8_features/` | Lambdas, Streams overview, Optional, Collectors, Date/Time, primitive streams |
 | `java_streams/` | Stream API deep dive — all ops, internals, parallel, Spliterator |
 | `java9_to_21_features/` | Records, Sealed classes, Virtual threads, Pattern matching, JPMS |
+| `java22_to_26_features/` | Module imports, compact source files, flexible constructors, Gatherers, Class-File API, compact object headers |
 | `jvm_internals/` | GC algorithms, JIT, memory barriers, safepoints, class loading |
 | `concurrency/` | synchronized, volatile, ThreadPool, CAS, AQS, LockSupport, CompletableFuture |
 | `collections_internals/` | HashMap, ArrayList, LinkedHashMap, NavigableMap, Spliterator internals |
@@ -24,11 +25,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `design_patterns_in_java/` | GoF patterns (Creational, Structural, Behavioral), concurrency patterns |
 | `testing_junit_mockito/` | JUnit 5, Mockito, test doubles, AAA pattern, parameterized tests |
 | `java_memory_model/` | Happens-before rules, memory barriers, safe publication, DRF |
-| `networking_and_http_client/` | HttpClient (Java 11), NIO Selector, Reactor pattern, HTTP/2 |
+| `networking_and_http_client/` | HttpClient (Java 11), NIO Selector, Reactor pattern, HTTP/2, HTTP/3 over QUIC (JEP 517, Java 26 — opt-in via `Version.HTTP_3`, HTTP/2 still the default) |
 | `jdbc_and_database/` | PreparedStatement, HikariCP, transaction isolation, batch inserts |
 | `strings_and_text/` | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat (JEP 280), StringBuilder, text blocks (JEP 378), Unicode correctness |
-| `structured_concurrency_and_loom/` | Virtual threads (JEP 444, Java 21 GA), carrier threads, `synchronized` no longer pins (JEP 491, Java 24), remaining native-frame pinning, StructuredTaskScope (JEP 525, preview in Java 26), ScopedValue (JEP 506, final in Java 25), Continuation internals |
-| `foreign_function_and_memory_api/` | Panama: Arena, MemorySegment, MemoryLayout, VarHandle, Linker (JEP 454), downcall/upcall handles, jextract, replacing Unsafe/JNI, Java 22 GA |
+| `structured_concurrency_and_loom/` | Virtual threads (JEP 444, Java 21 GA), carrier threads, `synchronized` no longer pins (JEP 491, Java 24), remaining native-frame pinning, StructuredTaskScope (preview since Java 21, JEP 525 in Java 26, JEP 533 in Java 27), ScopedValue (JEP 506, final in Java 25), Continuation internals |
+| `foreign_function_and_memory_api/` | Panama: Arena, MemorySegment, MemoryLayout, VarHandle, Linker (JEP 454), downcall/upcall handles, jextract, replacing Unsafe/JNI, Java 22 GA; native-access policy (JEP 472 — `--enable-native-access`, `--illegal-native-access=warn` default since Java 24) |
 | `reactive_programming/` | Reactor Flux/Mono, Reactive Streams/Flow, cold vs hot, flatMap/concatMap/switchMap, backpressure strategies, Schedulers (subscribeOn vs publishOn), Reactor Context, RxJava 3, StepVerifier |
 | `microservices_patterns/` | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead (thread-pool vs semaphore) |
 | `grpc_protobuf/` | Protobuf wire format (varint/tag) + schema evolution + reserved, 4 RPC modes, blocking/async/future stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport |
@@ -40,6 +41,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `logging/` | SLF4J facade + bindings, Logback/Log4j2, parameterized logging, MDC across threads/pools/virtual-threads, async appenders (Disruptor), structured JSON, Log4Shell (CVE-2021-44228) |
 | `java_platform_module_system/` | JPMS: module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink |
 | `reference_types_and_cleaners/` | Strong/Soft/Weak/Phantom references, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks |
+| `aot_startup_and_class_data_sharing/` | CDS/AppCDS/dynamic archives, the AOT cache, training runs, silent fallback |
 | `graalvm_native_image/` | GraalVM native-image AOT, closed-world reachability, reflection/resource/proxy metadata, build-time vs runtime init |
 | `build_tools_maven_gradle/` | Maven (lifecycle, dependency mediation, BOM, shade) + Gradle (task graph, build cache, version catalogs), dependency hell |
 
@@ -51,7 +53,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 33 modules = "8-Phase Learning Path") plus
+`README.md` documents the **Full Path** (all 35 modules = "8-Phase Learning Path") plus
 two curated tiers: **Senior** (19 modules) and **Principal** (15). They are different
 cuts, not nested depths — senior is the craft (write it, profile it, debug the 3am
 deadlock), principal is the judgment (which runtime at what cost, migration, what you

@@ -2,7 +2,7 @@
 
 Section root: `src/main/java/com/rutik/systemdesign/devops/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
-Build manifest / status tracker: `README.md` §8 — check NEXT UP pointer and per-file status before starting a new module.
+Build manifest / status tracker: `README.md` §8 — per-file status table. The build is complete through Chunk 11 and no NEXT UP pointer remains.
 
 ## Scope — unparked 2026-08-04; the factual audit is COMPLETE
 
@@ -87,10 +87,12 @@ Backfill status (2026-07-16): the floor backlog is fully cleared — every modul
 one curated tier: **Senior** (22 modules). **This section has no Principal tier and needs
 none** — no module declares one, `check_wiring()` skips the tier when the markers declare
 zero modules for it, and adding a Principal heading with no members is a false alarm, not
-a gap to close. Membership is declared ONCE per module, in a `<!-- study-paths -->` block
-in that module's own page (`<module>.md`) naming the files each tier takes; listing a tier joins it,
-omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never
-declared — it comes from `STUDY_ORDER.devops` in `game/app.js`, so a tier is an ordered
+a gap to close. Membership is declared ONCE for the whole section, in the
+`<!-- study-paths -->` block in THIS SECTION'S `README.md` — never in a module page; see the
+HARD RULE at the bottom of this file. The block lists every module, every file that module
+owns, and every case study, each tagged with the tiers it belongs to (`-` = Full path only);
+listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must
+carry every tier the module is in. Order is never declared — it comes from `STUDY_ORDER.devops` in `game/app.js`, so a tier is an ordered
 subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks
 the markers and emits the gitignored `questions/paths.json`, which the game fetches at
 boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` /
@@ -118,13 +120,13 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 
 | File | When Relevant |
 |------|--------------|
-| `kubernetes_production_hardening/` | Any case study deploying to Kubernetes |
-| `terraform_state_at_scale/` | Any case study using infrastructure as code |
-| `prometheus_cardinality_and_scale/` | Any observability case study |
-| `slo_error_budget_math/` | Any case study with SRE/reliability requirements |
-| `supply_chain_security_pipeline/` | Any CI/CD case study |
-| `multi_cluster_networking/` | Any multi-region or multi-cluster case study |
-| `gpu_node_lifecycle/` | Any ML platform or GPU infrastructure case study |
+| `kubernetes_production_hardening.md` | Any case study deploying to Kubernetes |
+| `terraform_state_at_scale.md` | Any case study using infrastructure as code |
+| `prometheus_cardinality_and_scale.md` | Any observability case study |
+| `slo_error_budget_math.md` | Any case study with SRE/reliability requirements |
+| `supply_chain_security_pipeline.md` | Any CI/CD case study |
+| `multi_cluster_networking.md` | Any multi-region or multi-cluster case study |
+| `gpu_node_lifecycle.md` | Any ML platform or GPU infrastructure case study |
 
 ---
 
@@ -143,16 +145,27 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 
 - Code in realistic YAML / HCL / Dockerfile / Bash / PromQL / Rego / Go
 - AWS-default with GCP/Azure in comparison tables
-- Concrete numbers everywhere; at least 1 BROKEN→FIX block in §10 and §14
-- No emojis; ASCII diagrams only
+- Concrete numbers everywhere; at least 1 BROKEN→FIX block in §10 and §14. **Verify every
+  number before writing it** — the audit's largest class was wrong numbers in modules nobody
+  suspected, and they are invisible to a "is this still current" reading.
+- Version-sensitive claims carry a **dated version anchor** blockquote under the H1. Pattern:
+  `observability_tracing_and_otel/opentelemetry_deep_dive.md` line 3. This is the most
+  version-exposed section in the repo; the anchor is what makes the next audit cheap.
+- **Mermaid is the default diagram form** (repo appeal-first policy, owner-set 2026-07-02):
+  One-Dark `classDef` on every node, `flowchart LR` default, rounded shapes, short labels
+  wrapped with `<br/>`. Validate anything you touch with
+  `node scripts/check_render.mjs <file>` — a fence that fails to parse exits
+  `build_diagrams.mjs` with 1 and takes the Pages deploy red. ASCII remains only for
+  constraint grids, alignment-critical layout maps, and vector geometry.
+- No emojis (`✓`/`✗`, never `✅`/`❌`)
 
 ## Build Manifest
 
-See `README.md` §8 for the authoritative per-file `pending`/`done` status table and NEXT UP pointer.
+See `README.md` §8 for the authoritative per-file status table. Every file is `done`; there is no NEXT UP pointer.
 
-On finishing a module/chunk:
-1. Flip status to `done` in `README.md` §8
-2. Advance NEXT UP pointer
+On adding a module/sub-file/case study:
+1. Add a row with status `done` in `README.md` §8
+2. Add the file's line to the `<!-- study-paths -->` block in `README.md` **in the same commit**
 3. Update `case_studies/case_studies.md` + root `README.md` + this CLAUDE.md if applicable
 
 ## Adding a New DevOps Module

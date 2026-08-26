@@ -712,6 +712,221 @@ to satisfy every caller — which `dependencyManagement`/`constraints` then
 makes deterministic and permanent, instead of leaving it to whichever rule
 the build tool happens to apply.
 
+### 6.10 Maven 4 (still RC) and mvnd: the daemon available today
+
+Maven 4 has not reached general availability. The newest Maven 4 artifact is
+`4.0.0-rc-6` (released 2026-07-30) — still a release candidate after several
+years of development; the GA line remains Maven 3.9.x (newest `3.9.16`,
+2026-05-17), with a `3.10.0-rc-1` also out. Know what Maven 4 changes and why
+it has taken this long — do not treat it as shipped, and do not write a
+migration plan for a tool nobody runs in production yet.
+
+**The problem Maven 4 exists to fix.** The POM has always served two
+audiences at once: the *build* (plugin configuration, profiles, source
+directories) and the *consumers* who depend on the published artifact
+(coordinates, dependencies, licenses). Because Maven Central, IDEs, and every
+other build tool all read that same file, the POM schema has been frozen
+since 2004 — any change risked breaking the whole ecosystem at once.
+
+**Consumer POM vs. build POM.** Maven 4 splits the two audiences apart. The
+**build POM** — what lives in source control — can use a new model version,
+`4.1.0`, with new elements. At build time, Maven generates a stripped,
+flattened **consumer POM** — no parent references (fully resolved inline), no
+plugin configuration, BOM imports flattened into the dependency list, managed
+dependencies kept only if actually used — and deploys *that* to Maven
+Central, still at model version `4.0.0` for ecosystem compatibility. Existing
+tooling never has to understand `4.1.0`; only your own build does. Consumer
+POM generation is opt-in (`maven.consumer.pom.flatten=true`), so nothing
+changes for a project that never sets it.
+
+**What `4.1.0` makes possible.** Full built-in `${revision}` support — Maven
+3.5 could only do this with the separate Flatten Maven Plugin; Maven 4 needs
+no plugin, and any property name works, set via `-Drevision=x.y.z`, a
+`.mvn/maven.config` entry, or a root-POM property. **Parent inference**: a
+`4.1.0` child POM can omit `<groupId>`/`<artifactId>`/`<version>` from
+`<parent>` and just write `<parent><relativePath>..</relativePath></parent>`
+(or the shorthand `<parent/>`) — Maven reads the parent directory's `pom.xml`
+to fill in the rest, closing an improvement request open since 2005
+(`MNG-624`). Subprojects (Maven 4's renamed `<modules>`) can be
+auto-discovered from subdirectories containing a `pom.xml` instead of listed
+by hand.
+
+**Reactor and validation changes that will surface latent bugs.** `mvn verify
+-r` (`--resume`) now correctly resumes a failed multi-module build and
+rebuilds only what's actually needed — `--also-make` on resume was broken by
+`MNG-6863` since Maven 3; `deployAtEnd` now defaults to `true`, so a
+partially-failed reactor can no longer leave some subprojects deployed and
+others not. Maven 4 also warns — for the first time — when a build relies on
+an unpinned plugin's default version from the Super POM, because the Super
+POM's own defaults moved forward; a project that never pinned
+`maven-compiler-plugin` can build with a materially different plugin after
+upgrading Maven even though nothing in its own POM changed. A new
+`--fail-on-severity`/`-fos` flag turns a chosen log-level (e.g. `WARN`) into a
+hard build failure, and the long-deprecated Plexus Container dependency
+injection is finally removed, so any plugin still built against it now fails
+outright instead of quietly degrading.
+
+**`mvnd` — the win available today.** The Maven Daemon (latest `1.0.6`,
+2026-05-30, built on Maven 3.9.16 core) keeps a long-lived JVM around between
+invocations instead of starting a fresh one for every `mvn` command — the
+build classloader, resolved plugin classes, and JIT-warmed hot paths all stay
+in memory. Repeat, incremental local builds on a warm daemon are
+meaningfully faster than the same build under plain `mvn`, because most of
+what plain `mvn` pays for on every invocation is JVM bootstrap and class
+loading, not actual work. Be honest about the shape of the win: **the first
+build is not faster** — a cold daemon still pays JVM startup, still resolves
+plugins for the first time, and gets no benefit from a warm classloader that
+does not exist yet. The operational cost is real too: a daemon can keep
+serving a *stale* build against an old plugin version or a build-script edit
+that hasn't been picked up, which looks exactly like "my fix isn't taking
+effect." `mvnd --status` lists live daemons and their versions; `mvnd --stop`
+kills them — reaching for `--stop` before debugging a suspicious build result
+is the standard first move.
+
+### 6.11 Gradle's configuration cache vs. the build cache
+
+These are two different caches for two different phases, and conflating them
+is the most common misunderstanding of Gradle performance work. §6.7's
+**build cache** reuses a task's *output* — the result of actually running
+`compileJava`, keyed by a hash of that task's declared inputs. The
+**configuration cache** instead reuses the *configuration phase itself* — the
+work of evaluating every `settings.gradle.kts`/`build.gradle.kts`, applying
+every plugin, and building the task graph, which §6.7 already established
+runs on *every single invocation*, even one that hits the build cache for
+every task. On a large multi-project build (hundreds of subprojects, each
+applying several plugins), that configuration-phase cost can dominate the
+wall-clock time of an otherwise fully-cached incremental build — which is why
+the configuration cache is usually the bigger, more noticeable win of the
+two: it removes a fixed floor that sat underneath every build regardless of
+how good the build cache's hit rate already was.
+
+**Current default status (Gradle 9.7.1, verified against Gradle's own docs).**
+The configuration cache is **not** enabled by default in the Gradle 9 line —
+it remains opt-in via `org.gradle.configuration-cache=true` in
+`gradle.properties` (or the `--configuration-cache` flag). Gradle's own
+documentation calls it "the preferred mode of execution" since 9.0.0 and
+states plainly that it "will be enabled by default in Gradle 10." A project
+freshly scaffolded with `gradle init` already gets it enabled; every existing
+project has to opt in itself.
+
+**The constraint that makes adoption real work.** The configuration cache
+serializes the task graph once and replays it on later invocations *without
+re-running the configuration phase at all* — so nothing inside a task's
+*execution* (its actions, `doFirst`/`doLast`, `@TaskAction`) is allowed to
+read mutable state that was not captured into that serialized graph.
+`System.getenv()` called inside a task action, a captured `Project` reference
+used at execution time, and `Task.getProject()` — one of the APIs Gradle's
+own docs list as disallowed at execution time — are all violations, because
+each one can return a different answer on the replay than it did when the
+graph was built, and the configuration cache has no way to notice.
+
+**Broken → fixed.**
+
+```kotlin
+// BROKEN — reaches for Project at execution time; invalidates the configuration cache
+abstract class StampTask : DefaultTask() {
+    @TaskAction
+    fun run() {
+        val version = project.version.toString()          // Project read during execution
+        File(project.buildDir, "stamp.txt").writeText(version)
+    }
+}
+```
+
+```kotlin
+// FIXED — the value is resolved once, at configuration time, into a declared @Input
+abstract class StampTask : DefaultTask() {
+    @get:Input
+    abstract val version: Property<String>
+
+    @get:OutputFile
+    abstract val outputFile: RegularFileProperty
+
+    @TaskAction
+    fun run() {
+        outputFile.get().asFile.writeText(version.get())  // only declared inputs, no Project
+    }
+}
+
+tasks.register<StampTask>("stamp") {
+    version.set(project.version.toString())                // resolved at configuration time
+    outputFile.set(layout.buildDirectory.file("stamp.txt"))
+}
+```
+
+The fix is the whole migration in miniature: every place a task reached
+sideways into `project`, an environment variable, or the system clock during
+execution becomes a `@Input`/`@InputFile` property wired once, while the
+build script is still being evaluated. That is also exactly the discipline
+the build cache already required (§6.7) — the configuration cache just
+extends it one phase earlier.
+
+### 6.12 SBOM generation: CycloneDX and SPDX
+
+**Why this is table stakes now, not optional.** Supply-chain attestation
+requirements (SLSA-style provenance, government procurement rules requiring
+an SBOM at delivery) increasingly gate whether an artifact can ship at all.
+The concrete forcing event was Log4Shell (`CVE-2021-44228`, December 2021):
+for most organizations, "which of our services actually ship `log4j-core`,
+and which version" was unanswerable in the hours that mattered, because
+nothing had ever recorded the resolved dependency graph as data. An SBOM is
+that record, generated automatically instead of reconstructed under
+incident-response pressure.
+
+**CycloneDX.** `org.cyclonedx:cyclonedx-maven-plugin:2.9.3` (verified against
+the project's GitHub releases, published 2026-07-31) and the Gradle plugin id
+`org.cyclonedx.bom` version `3.4.1` (verified 2026-08-11) both walk the
+already-resolved dependency graph and emit a CycloneDX document — schema
+`1.6` by default, both XML and JSON unless `outputFormat` is narrowed — bound
+to the `makeAggregateBom`/`makeBom` goals (Maven) or the `cyclonedxBom` task
+(Gradle). **SPDX** is the other widely-required format;
+`org.spdx:spdx-maven-plugin` (latest `1.0.4`, verified 2026-06-30) produces an
+SPDX document from the same kind of resolved graph via `mvn
+spdx:createSPDX`. The two formats overlap but are not interchangeable — a
+shop that must satisfy both a CycloneDX-consuming scanner and an
+SPDX-consuming procurement pipeline runs both plugins in the same build
+rather than converting one format into the other after the fact.
+
+**What an SBOM actually contains.** Every component the build *actually
+resolved onto the classpath* — direct and transitive — with its package URL,
+version, declared license (where available), and a hash, not merely what the
+POM/build script declares by hand. That is the entire value: it reflects
+mediation's real output (§6.3, §6.8), not the developer's intent.
+
+**Where it belongs in the pipeline: generated at build time, not inferred
+later from an image.** Bind SBOM generation to the same phase that produces
+the packaged artifact (`package` in Maven, wired into `build` in Gradle) and
+attach the SBOM as a build artifact alongside the jar/image — immutable, tied
+to that specific build. Do not regenerate it later by scanning the built
+container image. A build-time SBOM is read directly off the dependency graph
+the build tool already resolved — it is ground truth. An image scan is an
+*inference* working backward from binary signatures on disk: it can miss a
+statically-linked or renamed artifact, misattribute a vendored copy, and it
+never has the exact PURL/version the build already had for free. Generate
+once, attach immutably, and let every downstream stage (image scan, deploy
+gate) consume that SBOM rather than re-derive a lossier one.
+
+### 6.13 Publishing to Maven Central: the Central Portal replaced OSSRH
+
+OSSRH (`oss.sonatype.org`) is not a fallback path any more. Verified against
+Sonatype's own documentation (`central.sonatype.org/pages/ossrh-eol/`): OSSRH
+reached end-of-life and was shut down on **June 30, 2025** — the same
+retirement date as the Nexus Repository Manager 2 instance it ran on. Any
+release job still pointed at `oss.sonatype.org` is targeting a service that
+no longer exists.
+
+Publishing now goes through the **Central Portal** at
+`central.sonatype.com`; existing OSSRH accounts and namespaces were migrated
+automatically, and the same username/password logs in. A team with an
+existing OSSRH-based release job has two paths: the fast one is the **OSSRH
+Staging API Service**, a compatibility layer that translates the legacy
+Nexus 2 staging calls to the Portal API — often just an endpoint URL change
+plus a new Portal user token, with the existing plugin left in place. The
+durable fix is migrating to Sonatype's own
+`org.sonatype.central:central-publishing-maven-plugin` (Sonatype's own publish
+guide currently documents `0.9.0`), which talks to the Portal API natively
+and needs no legacy compatibility shim at all.
+
 ---
 
 ## 7. Real-World Examples
@@ -874,6 +1089,9 @@ one side of the conflicting graph at all (§6.5, §14).
 | Remote build cache | Gradle Enterprise / Develocity build cache |
 | Reproducibility | Maven Reproducible Builds (`project.build.outputTimestamp`), Gradle `preserveFileTimestamps`/`reproducibleFileOrder` |
 | Module-path tooling | `jdeps`, `jlink` (see [Java 9-21 Features](../java9_to_21_features/java9_to_21_features.md)) |
+| Local build daemon | Maven Daemon (`mvnd`) (§6.10) |
+| SBOM generation | `cyclonedx-maven-plugin`, Gradle `org.cyclonedx.bom`, `spdx-maven-plugin` (§6.12) |
+| Publishing to Maven Central | Central Portal (`central.sonatype.com`), `central-publishing-maven-plugin`, OSSRH Staging API Service (compatibility only) (§6.13) |
 
 ---
 
@@ -1116,6 +1334,63 @@ simply trusts whatever is already installed in `~/.m2`. Use `mvn -pl <module>
 -am install` to build a subset together with its current in-reactor
 dependencies, instead of trusting the local repository cache.
 
+**Q: What's the difference between Gradle's configuration cache and its build cache, and which one matters more on a 200-module incremental build?**
+**Short:** The build cache reuses task outputs; the configuration cache reuses the configuration phase itself, which dominates a large build.
+
+The build cache stores a task's *outputs* keyed by a hash of its declared
+inputs (§6.7); the configuration cache instead stores the *result of the
+configuration phase* — the fully evaluated build scripts and task graph — so
+Gradle can skip re-evaluating every `build.gradle.kts` and re-applying every
+plugin on the next invocation. On a 200-module project, evaluating that many
+build scripts and wiring that large a task graph can itself take longer than
+the actual incremental execution work, so caching the configuration phase
+removes a fixed floor that sits under every single build regardless of how
+good the build cache's hit rate already is. It remains opt-in on Gradle 9.x
+(`org.gradle.configuration-cache=true`); Gradle's own docs say it becomes
+the default in Gradle 10.
+
+**Q: Enabling Gradle's configuration cache immediately breaks the build. What class of code is almost always the cause, and what's the fix?**
+**Short:** Task actions reading mutable state like Project or environment variables at execution time instead of via declared @Input properties.
+
+It's almost always a task action reaching sideways for state that was never
+captured into the serialized task graph — `System.getenv()` called inside a
+`@TaskAction`, a `Task` holding onto `project` and calling `project.getX()`
+during execution, or `Task.getProject()` itself, all of which Gradle's own
+docs list as disallowed at execution time. The fix is always the same shape:
+resolve the value once at configuration time and wire it into a
+`@Input`/`@InputFile` property the task declares, then read only that
+property inside the task action — see the broken → fixed `StampTask` example
+in §6.11.
+
+**Q: What does `mvnd` actually speed up, what doesn't it speed up, and what's its characteristic failure mode?**
+**Short:** It speeds up repeat warm builds via a persistent JVM; the first build is not faster, and a stale daemon can serve old state.
+
+`mvnd` keeps a long-lived JVM, build classloader, and JIT-warmed hot paths
+alive between invocations, so a repeat, incremental local build on a warm
+daemon is meaningfully faster than the same build under plain `mvn`, which
+pays JVM startup and class-loading cost on every single invocation. It does
+not speed up the first build — a cold daemon pays exactly the same startup
+and dependency-resolution cost plain `mvn` would. Its characteristic failure
+mode is a stale daemon serving output built against an old plugin version or
+a build-script edit it hasn't picked up, which looks like "my fix isn't
+taking effect"; `mvnd --status` lists live daemons and `mvnd --stop` kills
+them, and that is the standard first troubleshooting step.
+
+**Q: What is an SBOM, where in the pipeline should it be generated, and why not by scanning the final container image?**
+**Short:** Generate it at build time from the resolved dependency graph — an image scan only infers that graph after the fact.
+
+An SBOM (Software Bill of Materials) is a machine-readable inventory of
+every component actually resolved into a build — package URLs, versions,
+licenses, hashes — in a format like CycloneDX or SPDX (§6.12). It belongs at
+build time, generated from the dependency graph the build tool already
+resolved and bound to the packaging phase (e.g. `cyclonedx:makeAggregateBom`),
+then attached immutably alongside the built artifact. Scanning the finished
+container image instead only *infers* that same graph from binary signatures
+on disk — it can miss a statically-linked or renamed dependency and never
+recovers the exact PURL/version the build already had for free, making it a
+strictly lossier, after-the-fact reconstruction of information the build
+already produced directly.
+
 ---
 
 ## 13. Best Practices
@@ -1145,6 +1420,21 @@ dependencies, instead of trusting the local repository cache.
 - **Enable Gradle's build cache** (local at minimum, remote for CI shared
   across agents) and track its hit rate as a build-health signal, not a
   one-time setup step.
+- **Adopt the configuration cache deliberately, not by flipping a flag.**
+  Audit custom tasks for `project`/environment reads inside execution
+  (§6.11) before setting `org.gradle.configuration-cache=true` — it is still
+  opt-in on Gradle 9.x, and Gradle 10 will turn it on by default whether a
+  project is ready or not.
+- **Generate an SBOM (CycloneDX and/or SPDX) at build time**, bound to the
+  same phase that produces the packaged artifact, and treat it as an
+  immutable build output — never reconstruct one later by scanning a
+  container image (§6.12).
+- **Use `mvnd` for local development loops**, not as a substitute for a
+  cold CI build, and reach for `mvnd --stop` first when a build inexplicably
+  ignores a fix (§6.10).
+- **Point every Maven Central release job at the Central Portal**
+  (`central.sonatype.com`), never `oss.sonatype.org` — OSSRH has been shut
+  down since June 30, 2025 (§6.13).
 
 ---
 

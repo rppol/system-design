@@ -346,6 +346,66 @@ System.out.println(margherita);
 
 > It guarantees consistency across related products. If you ask a Windows factory for a button and a checkbox, you're guaranteed to get Windows-style versions of both — they'll look and feel consistent. Without it, you might accidentally mix a Mac button with a Windows checkbox.
 
+**Q: All three patterns hide object construction — what's the fastest question to pick between them in an interview?**
+**Short:** Ask how many products and how many steps: one product/one step is Factory Method, a family is Abstract Factory, many steps is Builder.
+
+Factory Method answers "I need one object, but the exact class varies" — a single method call, single product. Abstract Factory answers "I need several related objects that must be consistent with each other" — still one call per product, but coordinated across a family. Builder answers "I need one complex object assembled across many steps" — the product count is one, but the construction is spread over multiple calls. Counting products and counting construction steps resolves the choice faster than reasoning about class diagrams.
+
+**Q: Why does the Key Differences table list "Consistency guarantee: None" for Factory Method but "Products from same family fit together" for Abstract Factory?**
+**Short:** Factory Method produces one independent product with nothing to be inconsistent with; Abstract Factory's whole job is cross-product consistency.
+
+A single `ConcreteCreator.createProduct()` call has no sibling products in the same operation to be consistent WITH — there's nothing to guarantee. `AbstractFactory.createButton()` and `createFactory.createCheckbox()` called on the SAME concrete factory instance are guaranteed to belong to the same family (both Windows-style or both Mac-style) precisely because one factory object is responsible for the whole set — that cross-product guarantee is the entire reason Abstract Factory exists over calling several independent Factory Methods.
+
+**Q: What does it mean structurally that Abstract Factory is "often a collection of Factory Methods behind an interface"?**
+**Short:** Each createX() method on an AbstractFactory is itself a Factory Method; Abstract Factory just groups several of them under one object.
+
+`WinFactory.createButton()` and `WinFactory.createCheckbox()` are each, individually, ordinary Factory Methods — a single method that returns a family-consistent concrete type. What makes the whole thing an Abstract Factory rather than two unrelated Factory Methods is that both methods live on the same factory interface and the same concrete implementation, so swapping `WinFactory` for `MacFactory` swaps every product in the family simultaneously. This is why the file states Abstract Factory implementations "internally use Factory Methods to create each product type."
+
+**Q: Why is the Director in Builder described as optional, and what does skipping it cost you?**
+**Short:** The Director just encapsulates common build recipes; skipping it means the client calls builder steps directly and owns the sequencing.
+
+`Director.construct(builder)` exists purely to capture a reusable sequence of builder calls — "always build a house this way" — so multiple clients don't duplicate that sequencing logic. Calling `builder.buildPartA()` then `buildPartB()` then `getResult()` directly from client code works exactly the same functionally; you simply lose the reuse of a named, shared construction recipe, and each call site must independently get the step order right. This is why the Common Confusion Points note "You can call builder methods directly from the client — the Director just encapsulates common recipes."
+
+**Q: Per the "rule of thumb" in this file, at what constructor parameter count should you start considering Builder?**
+**Short:** Consider Builder once a constructor would need more than three or four parameters.
+
+The stated rule of thumb is explicit: "if a constructor would need more than 3-4 parameters, consider Builder." Below that threshold, a plain constructor or a small set of overloaded constructors stays perfectly readable; above it, telescoping constructors (`new Pizza(size, cheese, peppers, olives, ...)`) become error-prone because callers can easily transpose same-typed arguments. Builder's named `buildX()` calls make each parameter's purpose explicit at the call site, which is what actually fixes the readability problem, not just the parameter count itself.
+
+**Q: Why can't Factory Method (in any variant) prevent invalid intermediate object states the way Builder can?**
+**Short:** Factory Method returns a fully-formed object in one call, so there's no intermediate state to validate between steps.
+
+A Factory Method's `createProduct()` either returns a complete, valid object or it doesn't return at all — there's no window during which the object exists in a partially configured state that needs guarding. Builder, by contrast, builds incrementally across multiple calls (`buildPartA()`, `buildPartB()`, `getResult()`), which creates real intermediate states — and lets each step validate what's been configured so far before allowing the next step or the final `build()` to proceed. This incremental-validation capability is unique to Builder among the three patterns.
+
+**Q: How would Abstract Factory prevent the specific bug of a Mac button appearing next to a Windows checkbox?**
+**Short:** By making both calls route through the SAME concrete factory instance, so both products necessarily come from the same family.
+
+If a client held two separate factories — one for buttons, one for checkboxes — nothing would stop it from accidentally instantiating `WinButton` and `MacCheckbox` side by side. Abstract Factory closes that gap structurally: the client depends on exactly one `AbstractFactory` reference (say, injected as `WinFactory`), and every product it requests — `createButton()`, `createCheckbox()` — necessarily comes from that same concrete implementation, making a mismatched pair a compile-time impossibility rather than a runtime bug to catch.
+
+**Q: Why does adding a new product type to an existing Abstract Factory family cost more than adding a new family?**
+**Short:** A new product type requires editing EVERY existing concrete factory; a new family only requires ONE new concrete factory class.
+
+Introducing a new family — say, a `LinuxFactory` — means writing exactly one new class implementing the existing `AbstractFactory` interface, with no changes to `WinFactory` or `MacFactory`. Introducing a new PRODUCT TYPE — say, `createScrollbar()` — means adding that method to the `AbstractFactory` interface itself, which then requires every existing concrete factory (`WinFactory`, `MacFactory`, and any others) to implement it. This is the structural inversion the broader `DecisionFlowchart.md` file calls out as a classic interview question: Abstract Factory makes adding families cheap and adding product types expensive.
+
+**Q: What's the practical difference in testability between a class built with Abstract Factory versus one built with Builder?**
+**Short:** Abstract Factory testing swaps in a fake factory for a whole family; Builder testing constructs test objects directly via a fluent chain.
+
+Testing code that depends on an `AbstractFactory` typically means injecting a test double implementing the same interface, so the whole family of products returned during the test is controlled at once — useful when you need consistent fake widgets across a UI test. Testing Builder-constructed objects is usually simpler: you call the builder's fluent methods directly with whatever combination of optional fields the test case needs (`Pizza.builder().size(LARGE).build()`), with no factory injection or family consistency concern at all.
+
+**Q: Why would a database query builder (e.g., a fluent SQL query API) be classified as Builder rather than Factory Method?**
+**Short:** A query builder assembles one complex object across many chained method calls, exactly matching Builder's step-by-step construction.
+
+Constructing a SQL query with `.select("*").from("users").where("age > 18").orderBy("name")` mirrors the `DocumentBuilder`'s `.setTitle().addSection().build()` chain exactly — each call configures one optional part of a single complex object (the query), and the final call materializes it. Factory Method has no equivalent notion of incremental configuration; it would only apply if the choice being made was "which KIND of query object class to instantiate," not "how to progressively assemble one query's clauses."
+
+**Q: How does the file's guidance distinguish "you don't know the exact class to create" (Factory Method) from "you need a whole family of classes" (Abstract Factory)?**
+**Short:** Factory Method varies which ONE class gets created; Abstract Factory varies which SET of related classes gets created together.
+
+Factory Method's guidance is "you don't know upfront what class needs to be created" — singular, one product whose concrete type is decided by a subclass. Abstract Factory's guidance is "you need to create families of related or dependent objects that must be used together" — plural, a coordinated set. The word "family" is the load-bearing distinction: if swapping implementations means swapping ONE class, it's Factory Method; if it means swapping an entire coordinated SET, it's Abstract Factory.
+
+**Q: Why might mixing Builder with Abstract Factory make sense for a document generation system?**
+**Short:** Abstract Factory picks which family of document components to use; Builder assembles one document from those components step by step.
+
+A `DocumentFactory.createBuilder(DocumentType.PDF)` (shown in the related `PatternCombinations.md` file) uses a factory to select which concrete `DocumentBuilder` implementation to hand back — PDF, Word, or HTML — and then the returned builder is used fluently (`.setTitle().addSection().build()`) to assemble one specific document. This combination lets the family-selection concern (which document format) and the incremental-assembly concern (which sections, in what order) stay cleanly separated, each handled by the pattern actually suited to it.
+
 ---
 
 ## Summary Decision Tree

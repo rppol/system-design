@@ -12,6 +12,31 @@
 
 ---
 
+## Intuition
+
+Think of the authorization server as a notary's office, not a bank vault. A notary does not
+hold your money or your identity documents — it verifies who you are once, then stamps a
+document that anyone can check against the notary's public seal without calling the notary
+back. That stamped document is the JWT: self-contained, independently verifiable, and only as
+trustworthy as the seal (the signing key) behind it.
+
+The one-line mental model: **the authorization server trades a one-time proof of identity for
+a time-limited, independently-verifiable credential.** Everything else in this design — PKCE,
+refresh rotation, JWKS rollover — exists to answer one question: what happens if that
+credential, or the process of getting it, is stolen? PKCE closes the gap between "who asked
+for the code" and "who redeems it." Refresh rotation turns a stolen refresh token into a
+tripwire instead of a permanent key. JWKS rollover lets the notary change its seal without
+invalidating every document already stamped with the old one.
+
+The recurring interview trap is treating this as "just JWT plus a login form." The actual hard
+problems are all about the *seams*: the seam between authorization code issuance and
+redemption (PKCE), the seam between one refresh and the next (rotation and reuse detection),
+and the seam between one signing key and the next (dual-key JWKS). Each seam is a window where
+a legitimate flow and an attack look identical until the server checks the one extra piece of
+proof that only the legitimate party could have.
+
+---
+
 ## 1. Requirements Clarification
 
 ### Functional Requirements
@@ -310,6 +335,75 @@ public class ResourceServerConfig {
 }
 ```
 
+### 4.7 DPoP: Sender-Constraining Access Tokens
+
+A bearer JWT is exactly what its name says — whoever holds it can use it. Steal one from a
+browser's memory, a proxy log, or an XSS payload, and it works from anywhere until it expires.
+DPoP (RFC 9449, "OAuth 2.0 Demonstrating Proof of Possession") closes that gap by binding the
+token to a private key the client holds. Spring Security's resource-server support recognizes
+a DPoP-bound access token and verifies the binding against the DPoP proof presented alongside
+it; for a JWT, the bound key's thumbprint travels in the `jkt` member of the `cnf`
+(confirmation) claim.
+
+Client-side, the proof is a short-lived JWT signed by the client's own key, built with the
+same Nimbus primitives Spring Authorization Server already depends on:
+
+```java
+public String createDpopProof(String htm, String htu, ECKey clientKey) throws JOSEException {
+    JwsHeader header = JwsHeader.with(SignatureAlgorithm.ES256)
+        .type("dpop+jwt")
+        .jwk(clientKey.toPublicJWK())
+        .build();
+
+    JwtClaimsSet claims = JwtClaimsSet.builder()
+        .claim("htm", htm)                        // HTTP method, e.g. "POST"
+        .claim("htu", htu)                         // HTTP URI, no query string
+        .issuedAt(Instant.now())
+        .id(UUID.randomUUID().toString())          // jti -- proof replay protection
+        .build();
+
+    NimbusJwtEncoder encoder = new NimbusJwtEncoder(new ImmutableJWKSet<>(new JWKSet(clientKey)));
+    return encoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
+}
+```
+
+The client sends this as a `DPoP` request header alongside `Authorization: DPoP <token>` (note:
+`DPoP`, not `Bearer`). The resource server verifies three things independently: the proof's
+signature against the embedded `jwk`, the proof's `htm`/`htu` against the actual request, and
+the proof key's thumbprint against the `cnf.jkt` claim baked into the access token at
+issuance. An attacker who steals only the access token — without also stealing the client's
+private key — cannot produce a valid proof, and the request is rejected.
+
+**Where this earns its complexity:** DPoP is a real cost — every request needs a fresh proof,
+and the client must safeguard a private key, which is exactly the key-management problem mTLS
+also has. It is worth it for high-value flows — payment initiation, admin APIs — not for every
+token in the system. Bearer tokens with a short TTL remain the right default for low-risk,
+high-volume traffic.
+
+### 4.8 Broken Pattern: Substring Redirect URI Matching
+
+```java
+// BROKEN: treats redirect_uri as a prefix/substring match instead of exact match
+public boolean isValidRedirectUri(String registered, String requested) {
+    return requested.startsWith(registered);
+    // registered: "https://app.example.com/callback"
+    // requested:  "https://app.example.com/callback.attacker-controlled.io/"
+    // startsWith() returns true -- the attacker's URI is accepted
+}
+```
+
+**Failure mode:** An attacker crafts a redirect URI that textually starts with the registered
+one and gets the authorization code redirected to a server they control. Because the code is
+bound to a `code_challenge` (§4.1), PKCE stops the attacker from *redeeming* the code without
+the verifier — but only if PKCE is enforced (§9 Pitfall 5 is what happens when it is not), and
+the leaked code itself is already a disclosure the client did not intend.
+
+**Fix:** OAuth 2.1 (and Spring Authorization Server's `RegisteredClient.redirectUri()`)
+requires **exact string matching** against the registered redirect URI — no prefix, wildcard,
+or pattern matching. Register every redirect URI a client legitimately uses, including each
+environment (`https://app.example.com/callback`, `https://staging.example.com/callback` as
+two separate registrations), rather than trying to express them with a pattern.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -390,6 +484,15 @@ product with its own database, upgrade cadence and operational surface. Choose S
 Server when identity already lives somewhere else and you need to mint tokens against it; choose
 Keycloak when you need the identity system itself.
 
+**AWS Cognito, Auth0, Okta:** the hosted end of the same spectrum Keycloak sits on — a managed
+authorization server plus user directory, MFA, and social-login federation, reachable over a
+tenant-specific domain instead of a self-hosted deployment. The tradeoff mirrors Keycloak vs.
+Spring Authorization Server one level up the stack: a hosted IdP removes operational surface
+(patching, scaling, key management) at the cost of a per-monthly-active-user pricing model and
+less control over exactly what claims land in the token. Teams already committed to a given
+cloud provider frequently choose the matching hosted IdP for that reason alone — it is one
+fewer system to run, not necessarily the best-fit token shape.
+
 **OAuth 2.1** remains an IETF draft (`draft-ietf-oauth-v2-1`) rather than a published RFC, but the
 substantive changes are already settled and already implemented by the major providers: PKCE
 required for all clients, the implicit and password grants removed, and exact string matching on
@@ -402,7 +505,7 @@ redirect URIs. Building to it today is not early adoption; it is what §4.1's
 
 | Technology | Role | Notes |
 |------------|------|-------|
-| Spring Authorization Server 7.1 | OAuth2 / OIDC server | Versioned with Spring Security 7.1 / Spring Boot 4.1; successor to the retired Spring Security OAuth2 |
+| Spring Authorization Server 7.1 | OAuth2 / OIDC server | `org.springframework.security:spring-security-oauth2-authorization-server`, versioned in lockstep with Spring Security 7.1 / Spring Boot 4.1 since the standalone project folded into Spring Security at 7.0; successor to the retired Spring Security OAuth2 |
 | Nimbus JOSE+JWT | JWT encoding / JWKS | Bundled with Spring Authorization Server; handles RS256, ES256, PS256 |
 | Spring Security 7.1 | Resource server filter chain | `oauth2ResourceServer()` DSL; JWKS auto-fetch + 5-min cache |
 | Redis (Lettuce) | Authorization code + consent store | Hand-written `OAuth2AuthorizationService`, adapted from the project's Redis sample |
@@ -487,6 +590,37 @@ Use `@ConfigurationProperties` bound to `SPRING_SECURITY_OAUTH2_CLIENT_*` enviro
 
 ---
 
+### Runbook 5: Token Endpoint Latency Degradation (P99 > 200 ms)
+
+**Symptom:** `token.issuance.latency.p99` (Micrometer timer around the `/oauth2/token`
+handler) crosses the 50 ms budget from §1 and keeps climbing; `http.server.requests` for
+`uri="/oauth2/token"` shows elevated `duration_sum`.
+
+**Diagnosis:**
+1. Check the authorization service backend first — it is on the hot path for every grant.
+   `JdbcOAuth2AuthorizationService` writes: query `pg_stat_statements` for the
+   `oauth2_authorization` table; a missing index on `state` or `authorization_code_value`
+   turns every lookup into a sequential scan once the table passes a few hundred thousand rows.
+2. Check signing throughput: `jvm.threads.states{state="runnable"}` pinned near core count
+   during token issuance suggests CPU-bound signing, not I/O — unlikely at 139 req/s (§10) but
+   worth ruling out after a client migrates to RSA-2048 from EC P-256 without warning.
+3. Check connection pool exhaustion: HikariCP's `hikaricp.connections.pending` > 0 means
+   requests are queueing for a database connection, not for the database itself.
+
+**Alert thresholds:** page on `token.issuance.latency.p99 > 150ms for 5m` (3× the SLO budget,
+enough to filter transient GC blips); warn on `> 75ms for 10m`.
+
+**Mitigation:** Scale the authorization-server pod count (stateless for signing; state lives in
+Redis/JDBC per §4.5-4.6) or raise the HikariCP pool (`maximum-pool-size`, default 10) if
+`hikaricp.connections.pending` is the signal. Add the missing index if `pg_stat_statements`
+points at a sequential scan.
+
+**Rollback:** If the degradation follows a deploy (new token customizer, new claim lookup), roll
+back the authorization-server deployment to the previous image tag; the Redis/JDBC-backed state
+means rollback loses no in-flight tokens.
+
+---
+
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Clock Skew Beyond the Default Tolerance (financial SaaS, 2022)**
@@ -545,6 +679,35 @@ Fix: enable `requireProofKey(true)` on all clients; mandated by OAuth 2.1 for al
 
 ---
 
+**Pitfall 6: Redirect URI Substring Match Shipped to Production (fintech startup, 2023)**
+A hand-rolled `RegisteredClientRepository` reimplemented redirect URI validation with
+`startsWith()` instead of using Spring Authorization Server's built-in exact-match list (the
+broken pattern in §4.8, found nearly verbatim in the codebase). The registered URI was
+`https://app.example.com/callback`; a bug-bounty researcher demonstrated that
+`https://app.example.com/callback.attacker-controlled.io/` passed the check — it textually
+starts with the registered string — and redirected a live authorization code to a server they
+controlled. PKCE was enabled, so the code alone was not redeemable, but the disclosure was
+still reportable and the fix was still urgent: a future client without PKCE enforced would have
+been fully exploitable. Fix: replace the custom repository with `RegisteredClient.builder()
+.redirectUri(...)` — Spring Authorization Server validates the registered set with exact
+string equality, no override needed.
+
+---
+
+**Pitfall 7: Client Credentials Token Not Cached — Self-Inflicted Rate Limiting (internal platform, 2022)**
+A newly onboarded machine-to-machine client called `/oauth2/token` with
+`grant_type=client_credentials` on every outbound API call instead of caching the 5-minute
+token until near-expiry. At 200 req/s of business traffic, that meant 200 token requests/s
+against an authorization server sized for 139 req/s peak (§2) — nearly 1.5× the provisioned
+capacity, and almost entirely wasted work re-signing tokens that were still valid. HikariCP
+connection pool saturation on the authorization server's JDBC-backed authorization service
+pushed token issuance latency to 400 ms P99, degrading login for unrelated users sharing the
+same authorization server. Fix: client-side token caching keyed by `client_id` + `scope`,
+refreshed at 80% of TTL (4 minutes for a 5-minute token), enforced as a standard wrapper
+(`RestClient` interceptor) for every internal M2M client rather than left to each team.
+
+---
+
 ## 10. Capacity Planning
 
 ### Token Signing Throughput
@@ -571,6 +734,32 @@ Active refresh tokens: 300,000 (100k users × 3 sessions)
 Refreshes:             1,200,000/day / 1,440 min = 833/min = 13.9/s at steady state
 Each rotation:         1 read + 1 delete + 1 insert = ~42 ops/s
 Postgres IOPS:         well under 100 — the refresh-token store is never the bottleneck
+```
+
+### DPoP Proof Verification Overhead
+
+```
+ES256 signature verification: ~0.1 ms per proof (same cost as JWT verification)
+DPoP-protected endpoints add one proof verification per request, on top of the
+  existing JWT verification -> roughly 2x the crypto cost per request
+At 139 req/s peak, even fully DPoP-protected traffic needs 139 x 0.2ms = 28ms of
+  CPU-time per second -- under 3% of one core; DPoP's cost is operational
+  (key management, proof replay tracking), not computational
+```
+
+### HikariCP Pool Sizing for the Authorization Service
+
+```
+Formula (HikariCP's own sizing guidance): pool_size = Tn x (Cm - 1) + 1
+  where Tn = threads that can concurrently need a connection,
+        Cm = average connections used per transaction
+Token issuance holds one connection for one transaction (read authorization,
+  delete/rotate, insert) -> Cm = 1
+At 139 req/s and a ~5 ms average DB round-trip, concurrent in-flight requests
+  ~= 139 x 0.005 = 0.7 -- rounds up to a handful of threads under load bursts
+Pool size 10 (Spring Boot's default) covers this with more than 10x headroom;
+  do not raise it speculatively -- an oversized pool just moves the bottleneck
+  to Postgres's own connection limit
 ```
 
 ---
@@ -661,6 +850,51 @@ The issued access token contains `client_id` as `sub` and the granted `scope`. I
 Server, register the client with `AuthorizationGrantType.CLIENT_CREDENTIALS` and the allowed scopes.
 Resource servers verify the token the same way (JWKS-based JWT verification). Use short-lived tokens
 (5 minutes); services should cache tokens until near-expiry and request a fresh one before expiry.
+
+**Q: What is DPoP and how does it differ from a bearer token?**
+DPoP (Demonstrating Proof of Possession, RFC 9449) sender-constrains an access token to a
+private key the client holds, instead of the bearer model where anyone holding the token
+string can use it. The client signs a short-lived proof JWT per request containing the HTTP
+method and URI; the resource server verifies the proof's signature and checks the proof key's
+thumbprint against the `cnf.jkt` claim embedded in the access token at issuance. Stealing a
+DPoP-bound token without also stealing the private key is useless — the attacker cannot
+produce a valid proof. The cost is real: every request needs a fresh signed proof and the
+client must protect a private key, so it is reserved for high-value flows, not applied
+universally.
+
+**Q: How do you prevent an open-redirect vulnerability in the authorization code flow?**
+Validate `redirect_uri` with exact string equality against the client's registered URI list —
+never prefix, substring, or wildcard matching (§4.8's broken pattern shows exactly how a naive
+`startsWith()` check is bypassed). Spring Authorization Server's `RegisteredClient.redirectUri()`
+builder enforces this by default; a custom `RegisteredClientRepository` that reimplements
+matching is the usual way this regresses. Register every environment's callback URI explicitly
+rather than trying to express them with a pattern.
+
+**Q: What is the device authorization grant and when would you use it?**
+The device authorization grant (RFC 8628) is for input-constrained devices — smart TVs, CLI
+tools, IoT devices — that cannot host a browser redirect. The device displays a short user
+code and a URL; the user completes the authorization flow on a second device (phone, laptop)
+while the original device polls the token endpoint until the user approves. It avoids asking
+users to type a client secret or navigate a full OAuth redirect on a device with no keyboard.
+Spring Authorization Server supports it as `AuthorizationGrantType.DEVICE_CODE`.
+
+**Q: When would you use token introspection instead of local JWT verification?**
+Token introspection (`/oauth2/introspect`, RFC 7662) is for opaque tokens, or for cases where
+the resource server needs to know about revocation the token's own expiry cannot express —
+introspection asks the authorization server "is this token still valid right now" on every
+request. It trades the latency and availability cost of a network call (§5 Decision 1) for
+immediate revocation. For this design's JWT access tokens, introspection is unnecessary
+overhead; the 15-minute TTL is the accepted revocation-latency tradeoff instead. Introspection
+still matters for the refresh token endpoint and for any opaque-token client integration.
+
+**Q: How would you rate-limit the token endpoint to prevent credential-stuffing or brute-force attacks against `client_credentials`?**
+Rate limit per `client_id` (or per source IP for unauthenticated attempts) ahead of the
+authorization server — a gateway-level token bucket (Spring Cloud Gateway + Resilience4j, or
+an API gateway's built-in limiter) is the right layer, because the authorization server itself
+should not be doing security bookkeeping that belongs to infrastructure. Track failed
+`client_secret` validation attempts separately from successful grants; lock out a `client_id`
+after a threshold of consecutive failures rather than rate-limiting all traffic uniformly,
+which would let an attacker degrade service for legitimate clients as a side effect.
 
 ---
 

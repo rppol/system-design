@@ -422,11 +422,36 @@ class ReactiveOrderApiTest {
 
 ### Testcontainers — Real PostgreSQL
 
+Reach for `@ServiceConnection` first. It reads the container and contributes every
+connection property Boot needs — URL, username, password, and the properties the
+migration tool reads — so there is nothing to keep in step by hand:
+
 ```java
 @Testcontainers
 @SpringBootTest
 @ActiveProfiles("integration")
 class OrderRepositoryContainerTest {
+
+    @Container
+    @ServiceConnection                       // Boot derives every connection property
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
+
+    @Autowired
+    private OrderRepository orderRepository;
+}
+```
+
+`@DynamicPropertySource` is the escape hatch for what `@ServiceConnection` cannot know
+— a property that is not a connection detail, or a container with no
+`ConnectionDetails` support. Its cost is that the property list is hand-maintained: the
+example below wires four properties, and the day someone adds a fifth to production
+config the test silently keeps using the old value.
+
+```java
+@Testcontainers
+@SpringBootTest
+@ActiveProfiles("integration")
+class OrderRepositoryDynamicPropsTest {
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine")
@@ -834,6 +859,9 @@ class OrderServiceTest {
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | spring-boot-test | Core Boot test support | @SpringBootTest, test slices, TestRestTemplate |
+| `RestTestClient` | Fluent HTTP test client for the servlet stack | Framework 7's non-reactive `WebTestClient`; no reactive dependency needed |
+| `@AutoConfigureMockMvc` | Adds MockMvc to a `@SpringBootTest` | **Required** in Boot 4 — `@SpringBootTest` alone no longer provides MockMvc |
+| `@ServiceConnection` | Wires a Testcontainer's connection details into the context | Replaces hand-maintained `@DynamicPropertySource` for supported containers |
 | spring-test | MVC test, context management, bean overrides | MockMvc, @Sql, @DirtiesContext, @MockitoBean, @MockitoSpyBean |
 | JUnit 6 (Jupiter) | Test runner | @Test, @ParameterizedTest, @BeforeEach, @ExtendWith |
 | Mockito | Mocking and verification | @Mock, @Spy, BDDMockito; the inline mock maker is the default since 5.0, so `final` classes mock with plain mockito-core |
@@ -912,6 +940,21 @@ A static @Container field is started once before any test in the class runs and 
 **Q: How do you use @WithMockUser and @WithSecurityContext in security tests?**
 **Short:** @WithMockUser injects a preset authenticated principal; @WithSecurityContext builds a custom SecurityContext.
 @WithMockUser populates the Spring Security SecurityContext with a UsernamePasswordAuthenticationToken containing the specified username, password, and roles before the test method executes. The roles are automatically prefixed with ROLE_ (so roles="USER" creates ROLE_USER). Use it to test secured endpoints in @WebMvcTest without an actual authentication flow. @WithSecurityContext is lower-level — you implement a WithSecurityContextFactory that builds a SecurityContext from a custom annotation. Use @WithSecurityContext when you need non-standard authentication types (OAuth2 tokens, JWT claims, multi-tenant principal objects) that @WithMockUser cannot express.
+
+**Q: Why does an existing `@SpringBootTest` suddenly fail to inject MockMvc on Spring Boot 4?**
+**Short:** Boot 4 stopped auto-providing MockMvc from @SpringBootTest; you must add @AutoConfigureMockMvc explicitly.
+
+Because `@SpringBootTest` no longer provides any MockMvc support on its own — the migration guide is explicit about it — so a test class that was injecting `MockMvc` on Boot 3 gets a context that has no such bean. The fix is one annotation: add `@AutoConfigureMockMvc` alongside `@SpringBootTest`. The reason it is worth calling out rather than filing as a papercut is the failure's shape: it is an injection failure across potentially hundreds of test classes at once, arriving in the same upgrade as JSpecify compile errors and package relocations, so it reads as part of a much larger breakage than it is. The sibling change is that `@SpringBootTest` also no longer hands you a `TestRestTemplate` implicitly, and the same one-annotation logic applies. Test slices such as `@WebMvcTest` are unaffected — they always configured MockMvc deliberately, which is exactly the explicitness Boot 4 is generalising.
+
+**Q: What is `RestTestClient` and when would you use it over `WebTestClient` or `TestRestTemplate`?**
+**Short:** RestTestClient is Framework 7's non-reactive WebTestClient — the same fluent API for a servlet app without dragging in a reactive dependency.
+
+`RestTestClient` gives the servlet stack `WebTestClient`'s fluent, chained assertion style without the reactive machinery underneath. Before it existed, testing a Spring MVC endpoint over real HTTP meant either `TestRestTemplate`, whose API is the older imperative one and whose assertions read as a pile of `assertThat` calls on a `ResponseEntity`, or pulling `WebTestClient` and therefore Reactor into a project with no other reactive code just to get the nicer API. `RestTestClient` removes that trade. Keep `WebTestClient` for genuinely reactive applications, where it also tests the reactive pipeline; keep `TestRestTemplate` only where an existing suite already uses it and there is no reason to churn. For new servlet-stack HTTP tests on Framework 7, `RestTestClient` is the default. It sits alongside `MockMvc` rather than replacing it — `MockMvc` still tests the dispatcher without a server, `RestTestClient` tests over a real port.
+
+**Q: When should `@ServiceConnection` replace `@DynamicPropertySource`, and when can it not?**
+**Short:** Use @ServiceConnection for any supported container — it derives every connection property, where @DynamicPropertySource is a hand-maintained list that silently drifts.
+
+Use `@ServiceConnection` whenever the container supports it, which covers the common ones — Postgres, MySQL, Redis, Kafka, Mongo. It reads the running container and contributes every connection detail Boot needs, so the test has no property list to maintain. `@DynamicPropertySource` is the older mechanism and its cost is precisely that hand-maintained list: a test that wires four properties keeps working while production config grows a fifth, and it fails silently by testing against the wrong value rather than failing loudly. Where `@DynamicPropertySource` is still correct is anything that is not a connection detail — a feature flag, a timeout, a bucket name computed at runtime — and any container with no `ConnectionDetails` support, where nothing can derive the properties for you. The two compose, so the practical pattern is `@ServiceConnection` for the connection and `@DynamicPropertySource` for the handful of extras, rather than one or the other.
 
 ---
 

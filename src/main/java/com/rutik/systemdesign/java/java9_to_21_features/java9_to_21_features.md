@@ -49,7 +49,7 @@ Understanding these features is critical for modern Java interviews — they sho
 | Virtual threads | 21 | 21 | `Thread.ofVirtual()` |
 | Record patterns | 21 | 21 | `case Point(int x, int y)`, nested |
 | Sequenced Collections | 21 | 21 | `SequencedCollection` interface |
-| StructuredTaskScope | preview since 21 | — | still preview in Java 25 (JEP 505) and 26 (JEP 525); needs `--enable-preview` |
+| StructuredTaskScope | preview since 21 | — | still preview in Java 25 (JEP 505), 26 (JEP 525), and 27 (JEP 533); needs `--enable-preview` |
 | ScopedValue | 25 | 25 | final in Java 25 (JEP 506); `ThreadLocal` alternative |
 
 ### 4.2 Record Anatomy
@@ -433,7 +433,7 @@ No to both, because a record class is implicitly `final` and already extends `ja
 **Q3: How do sealed classes enable exhaustive pattern matching?**
 **Short:** A sealed type's permits clause lets the compiler verify a switch handles every subtype.
 
-When a sealed interface/class has a `permits` clause listing all subtypes, the compiler has complete knowledge of the closed hierarchy at compile time. A `switch` expression over a sealed type that handles every permitted subtype is considered exhaustive — no `default` branch needed, and the compiler flags any missing case. This is analogous to ADTs in Haskell/Scala: the type system guarantees you handle every variant.
+When a sealed interface/class has a `permits` clause listing all subtypes, the compiler has complete knowledge of the closed hierarchy at compile time. A `switch` expression over a sealed type that handles every permitted subtype is considered exhaustive — no `default` branch needed, and the compiler flags any missing case. This is analogous to ADTs in Haskell/Scala: the type system guarantees you handle every variant. It is also the modern answer to [Effective Java Item 23: "Prefer class hierarchies to tagged classes"] — a sealed hierarchy plus exhaustive pattern matching gives every advantage Bloch argued a class hierarchy has over a tagged class with a type-discriminator field, without the historical downside that a hierarchy could not be closed.
 
 **Q4: What is virtual thread pinning and how do you avoid it?**
 **Short:** Pinning holds a virtual thread's carrier because a native stack frame won't unmount.
@@ -468,7 +468,7 @@ Sequenced collections (JEP 431, Java 21) add three interfaces for collections wi
 **Q10: What is StructuredTaskScope and when would you use it?**
 **Short:** StructuredTaskScope confines concurrent subtasks to the enclosing try-block's lifetime.
 
-`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — `Joiner.anySuccessfulOrThrow()` for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed (its `join()` returns a `List` of the results), `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** (JEP 505 in Java 25, JEP 525 in Java 26), so it needs `--enable-preview` at both compile and run time — and the names move between previews, so the race joiner is spelled `anySuccessfulResultOrThrow()` on the Java 25 LTS.
+`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — the race joiner (`Joiner.anySuccessfulResultOrThrow()` on Java 25 [JEP 505], renamed `Joiner.anySuccessfulOrThrow()` from Java 26 [JEP 525] onward) for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed (its `join()` returns a `List` of the results as of Java 26), `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** — fifth preview in Java 25 (JEP 505), sixth in Java 26 (JEP 525, which also added `Joiner.onTimeout()`), seventh in Java 27 (JEP 533) — so it needs `--enable-preview` at both compile and run time. Seven previews is what a preview API costs you: a method rename or signature change per release in code you've already shipped, which is the concrete argument for wrapping a preview API behind an interface you own rather than calling it directly at every call site.
 
 **Q11: What is a text block and how does it handle indentation?**
 **Short:** Text blocks strip common leading whitespace based on the closing triple-quote's indentation.
@@ -483,7 +483,7 @@ Switch expression (Java 14+) yields a value, uses arrow labels `->` (no fall-thr
 **Q13: What does `exports` vs `opens` mean in a `module-info.java`?**
 **Short:** exports grants runtime API access; opens additionally permits deep reflection into a package.
 
-`exports com.pkg` makes the public types in `com.pkg` accessible to other modules at runtime — other modules can call public methods, create instances, etc. But non-public members remain inaccessible, and deep reflection (accessing private fields) is blocked. `opens com.pkg` additionally permits deep reflection: `setAccessible(true)` on private fields and methods works. Frameworks like Spring (dependency injection), Hibernate (field access for ORM), and Jackson (JSON deserialization with private fields) all require `opens` to function. `exports` is for normal API access; `opens` is the "reflection door." You can use `opens com.pkg to specific.module` to limit reflection to trusted modules only.
+`exports com.pkg` makes the public types in `com.pkg` accessible to other modules at runtime — other modules can call public methods, create instances, etc. But non-public members remain inaccessible, and deep reflection (accessing private fields) is blocked. `opens com.pkg` additionally permits deep reflection: `setAccessible(true)` on private fields and methods works. Frameworks like Spring (dependency injection), Hibernate (field access for ORM), and Jackson (JSON deserialization with private fields) all require `opens` to function. `exports` is for normal API access; `opens` is the "reflection door." You can use `opens com.pkg to specific.module` to limit reflection to trusted modules only. JPMS turns [Effective Java Item 15: "Minimize the accessibility of classes and members"] from a per-class discipline (`private`/package-private) into a module-level, compiler-enforced boundary.
 
 **Q14: What is record deconstruction and how does pattern matching for switch use it?**
 **Short:** Record deconstruction extracts a record's components directly within a pattern match.
@@ -499,7 +499,7 @@ A virtual thread is "pinned" when it cannot be unmounted from its carrier platfo
 
 ## 13. Best Practices
 
-1. **Prefer Records for all data carriers** — eliminate Lombok `@Value`, manual POJOs for DTOs/value objects.
+1. **Prefer Records for all data carriers** — eliminate Lombok `@Value`, manual POJOs for DTOs/value objects. A record's compiler-enforced final fields are [Effective Java Item 17: "Minimize mutability"] made structural rather than a discipline you have to maintain by hand.
 2. **Use sealed classes for closed type hierarchies** — protocol messages, domain events, result types.
 3. **Switch to virtual threads for I/O-bound code** — `Executors.newVirtualThreadPerTaskExecutor()` is a one-line change.
 4. **Use `StructuredTaskScope` instead of `CompletableFuture.allOf()`** for concurrent sub-tasks with proper cancellation.
@@ -746,6 +746,7 @@ record Cart(List<Item> items) {
     Cart { items = List.copyOf(items); }    // FIX: defensive copy in compact constructor
 }
 ```
+A record's canonical constructor stores exactly the reference it is handed, so a mutable component needs the same guard [Effective Java Item 50: "Make defensive copies when needed"] requires of any class — the compact constructor is simply where that copy now belongs.
 
 **4. `switch` on a non-sealed type missed a case.** A `switch` over an open interface compiled with a `default` that silently swallowed a newly added subtype, hiding a bug for weeks. Sealing the interface makes the compiler reject the non-exhaustive switch at build time.
 

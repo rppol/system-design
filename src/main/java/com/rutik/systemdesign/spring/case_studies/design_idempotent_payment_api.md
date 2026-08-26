@@ -12,6 +12,39 @@
 
 ---
 
+## Intuition
+
+Think of idempotency as a post office that stamps every letter with a serial number before it
+memorizes what it did with that number. The first time a stamped letter arrives, the post
+office delivers it and writes down what happened. Every subsequent letter with the *same*
+stamp is not delivered again — the post office just reads back what it already wrote down and
+hands the sender that same receipt. The stamp is the client's promise ("this is attempt N of
+one logical payment"), and the write-down is the server's promise back ("I will honor that,
+even if you ask me five times because your phone lost signal"). Nothing about this requires
+the post office to be fast; it requires the post office to never forget, and to never let two
+letters with the same stamp both get delivered at once.
+
+The mental model that resolves most of this design's hard questions: idempotency is a
+concurrency problem wearing a caching costume. A naive read-then-write ("check if the key
+exists, then charge") looks like a cache lookup, but two retries racing each other hit the gap
+between the read and the write and both charge the card — that's a mutual-exclusion failure,
+not a caching failure, and it needs a mutual-exclusion primitive (the advisory lock in §4.3),
+not a faster cache. The second hard question — how to tell a downstream consumer about a
+payment without a distributed transaction — is really the same shape one level out: the
+database write and the Kafka publish must not be allowed to race each other into an
+inconsistent pair, so the outbox pattern turns "publish an event" into "commit a row," which is
+a problem the database already knows how to solve atomically.
+
+One more thing worth holding onto while reading §4 onward: every "broken" example in this file
+is not a contrived mistake — it is the code you get by implementing the *stated requirement*
+literally and stopping one step short of the concurrency and failure-mode analysis. "Check for
+an existing key, if none charge and save" is exactly what the requirements ask for in plain
+English; it is also a double-charge bug under concurrent retries. The gap between
+correct-sounding prose and a correct implementation is where the advisory lock, the outbox,
+and the request-hash check in §4 all live.
+
+---
+
 ## 1. Requirements Clarification
 
 ### Functional Requirements
@@ -326,6 +359,88 @@ if (existing.isPresent()) {
 
 This prevents a client bug where the same key is accidentally reused for two different payments.
 
+### 4.8 BROKEN/FIX — Session-Scoped Advisory Lock Leaks Across a Pooled Connection
+
+```java
+// BROKEN: pg_advisory_lock is SESSION-scoped, not transaction-scoped -- it is held
+// until explicitly unlocked, not released at commit/rollback.
+public void acquireAdvisoryLock_broken(String clientId, String key) {
+    long lockId = deriveLockId(clientId, key);
+    em.createNativeQuery("SELECT pg_advisory_lock(:lockId)")
+      .setParameter("lockId", lockId)
+      .getSingleResult();
+    // ... charge, insert, commit ...
+    // If an exception is thrown before an explicit pg_advisory_unlock(), OR if the
+    // JPA transaction simply commits without ever calling unlock, the lock stays
+    // held on the physical connection for as long as HikariCP keeps that connection
+    // alive -- potentially hours, across dozens of unrelated future requests that
+    // happen to be handed the same pooled connection.
+}
+```
+
+**Failure mode:** HikariCP returns physical connections to the pool after each transaction;
+`pg_advisory_lock` locks are tied to the *session* (the physical connection), not the
+transaction. A connection that leaked a lock keeps holding it for every future borrower until
+someone calls `pg_advisory_unlock` on that same session or the connection is physically closed.
+Under load, this exhausts the effective lock namespace one connection at a time: eventually
+every pooled connection is "poisoned" with a stale lock, and every new request for that
+`(clientId, key)` — or any lock ID that happens to collide with a poisoned one — blocks
+forever, indistinguishable from a hung database.
+
+**Fix:** use `pg_advisory_xact_lock`, exactly as §4.3 does. It is released automatically at
+transaction commit or rollback, tying the lock's lifetime to the unit of work instead of the
+physical connection. There is no corresponding unlock call to forget, which is precisely why
+it is the correct primitive here and not a stylistic preference.
+
+```java
+// FIX (same as §4.3): xact-scoped lock, released automatically at commit/rollback
+em.createNativeQuery("SELECT pg_advisory_xact_lock(:lockId)")
+  .setParameter("lockId", lockId)
+  .getSingleResult();
+// No unlock call needed -- and none is possible to forget.
+```
+
+### 4.9 Fail-Fast Lock Variant — Returning 409 Instead of Queuing
+
+```java
+@Service
+public class IdempotencyService {
+    // ... existing methods from §4.3 ...
+
+    /**
+     * Fail-fast variant of acquireAdvisoryLock (§4.3): returns immediately instead of
+     * blocking. Used when a queued retry would rather see a fast 409 than wait out
+     * another in-flight attempt's provider round trip -- see §9 Pitfall 6 and the
+     * Q&A in §11 on retry-storm protection.
+     */
+    public boolean tryAcquireAdvisoryLock(String clientId, String key) {
+        long lockId = deriveLockId(clientId, key);
+        Boolean acquired = (Boolean) em.createNativeQuery(
+                "SELECT pg_try_advisory_xact_lock(:lockId)")
+            .setParameter("lockId", lockId)
+            .getSingleResult();
+        return Boolean.TRUE.equals(acquired);
+    }
+}
+```
+
+```java
+// PaymentController: fail-fast path returns 409 instead of blocking the request thread
+if (!idempotencyService.tryAcquireAdvisoryLock(clientId, idempotencyKey)) {
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .body(new ErrorResponse("IDEMPOTENCY_KEY_IN_PROGRESS",
+            "A request with this idempotency key is already being processed. Retry shortly."));
+}
+```
+
+The trade-off against §4.5's blocking `pg_advisory_xact_lock`: fail-fast never lets one slow
+request hold up another thread waiting on the same key, at the cost of pushing the retry
+decision back to the client. For a mobile client with its own backoff logic, that is the
+better trade; for a synchronous checkout flow where the caller has no retry loop of its own,
+blocking briefly (bounded by the provider's timeout) is usually the friendlier default. Pick
+per endpoint, not globally — this is exactly the choice Stripe and Shopify made differently in
+§6, and both are defensible for their own client population.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -396,6 +511,15 @@ response — it records which *steps* an attempt completed, and a retry runs rec
 that state before continuing. That is the answer to the failure this design leaves open in §11: a
 crash between the provider call and the commit. Like this design, they take a lock keyed on client
 plus idempotency key, and reject a concurrent duplicate with a 409.
+
+**Square:** the Payments API's `CreatePayment` endpoint requires an `idempotency_key` on every
+call, documented behavior identical to this design's contract — retrying with the same key
+returns the original result rather than creating a second payment. Square scopes the key
+uniqueness per application credentials rather than per customer, a narrower and simpler scope
+than this design's `(client_id, idempotency_key)` composite, workable because Square's clients
+are merchants (few, well-identified) rather than end consumers (many, less trusted to generate
+good keys) — the same reasoning behind this design's decision to validate UUID v4 format
+(§9 Pitfall 3) rather than trust arbitrary client-supplied strings.
 
 **Adyen:** identifies payments by a merchant-supplied `reference` in addition to an idempotency key,
 which gives a second, business-level deduplication axis that survives the idempotency window — worth
@@ -491,6 +615,58 @@ paymentService.recordAndPublish(clientId, idempotencyKey, requestHash, result); 
 
 ---
 
+### Runbook 5: Rolling Back a Bad Deploy That Changed Lock or Outbox Behavior
+
+**Symptom:** shortly after a deploy, `payment.charge.duration` P99 spikes, or
+`idempotency.cache.hit_rate` drops to near zero (retries are no longer matching stored
+records — a sign the lock-key derivation or the lookup query changed), or `outbox.lag` climbs
+steadily instead of draining.
+
+**Diagnosis:**
+1. Confirm the deploy timestamp against the metric inflection point in the dashboard.
+2. Diff the deployed commit against the previous release for changes touching
+   `IdempotencyService`, `PaymentService.charge()`, or `OutboxPoller` — these three own every
+   correctness guarantee in this design, so a regression almost always originates in one of
+   them.
+3. Check for in-flight `IN_PROGRESS` idempotency records created by the bad build — these are
+   the records a rollback must not silently orphan (see §9 Pitfall 1's stale-timeout logic).
+
+**Mitigation:** roll back to the previous artifact via the standard rolling/blue-green deploy
+path. Because idempotency state lives in Postgres, not in application memory, a rolled-back
+pod resumes serving retries correctly the instant it is healthy — there is no in-process cache
+to warm or invalidate.
+
+**Resolution:** after rollback, verify `payment.in_progress.stale_count` returns to zero within
+the 5-minute stale window and `outbox.lag` resumes draining. File a postmortem action to add a
+canary check on `idempotency.cache.hit_rate` and `outbox.lag` to the deploy pipeline, since both
+metrics catch a correctness regression faster than an error-rate alert would.
+
+### Rollback Procedure Summary
+
+1. Confirm via metrics + code diff which of the three correctness-critical components
+   regressed (advisory lock derivation, transaction boundaries, or outbox publish/delete
+   ordering).
+2. Roll back the application artifact; no data migration is needed since idempotency and
+   outbox tables are additive-only during normal operation.
+3. Verify `stale_timeout` reclaims any `IN_PROGRESS` records the bad build left behind rather
+   than manually deleting them — manual deletion risks a race with a client retry that arrives
+   mid-cleanup.
+4. Resume monitoring `idempotency.cache.hit_rate`, `outbox.lag`, and `payment.charge.duration`
+   P99 for 30 minutes before declaring the incident closed.
+
+### Alert Thresholds Reference
+
+| Metric | Threshold | Action |
+|---|---|---|
+| `idempotency.cache.hit_rate` | > 30% sustained 10 min | Investigate client retry storm; check for missing exponential backoff |
+| `idempotency.cache.hit_rate` | drops to ~0% after a deploy | Roll back — lock/lookup logic likely regressed (Runbook 5) |
+| `outbox.lag` | > 5,000 rows for > 5 min | Page on-call; check Kafka broker health (Runbook 2) |
+| `payment.in_progress.stale_count` | > 0 | Page on-call; crash-recovery gap, verify stale-timeout job is running (§9 Pitfall 1) |
+| `payment.charge.duration` P99 | > 500 ms | Check `pg_locks` for advisory-lock contention before assuming provider latency (Runbook 4) |
+| `hikaricp.connections.pending` | > 0 for > 30 s | Pool exhaustion — check for a retry storm before resizing the pool (§9 Pitfall 6) |
+
+---
+
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: IN_PROGRESS Records Never Cleaned Up After Crash (fintech startup, 2021)**
@@ -547,6 +723,25 @@ past five billion keys.
 
 ---
 
+**Pitfall 6: Advisory Lock Contention During a Flash Sale (retailer, 2023)**
+A promotional flash sale drove a 40x spike in retry traffic from a mobile client with an
+aggressive backoff-free retry loop — the same idempotency key resubmitted every 200 ms while
+the first attempt was still waiting on a slow payment provider (provider P99 hit 1.4s under its
+own load spike). Each retry blocked on the advisory lock rather than failing fast, so requests
+queued behind the lock instead of behind the provider, and the connection pool filled with
+threads waiting on `pg_advisory_xact_lock` rather than doing useful work. HikariCP timed out
+borrowers pool-wide, and unrelated payments (different clients, different keys) started failing
+with connection-acquisition timeouts even though their own keys had no contention at all.
+**Impact:** 11 minutes of degraded checkout availability (elevated 5xx rate) across all
+merchants on the platform, not just the one running the flash sale, until the misbehaving
+client's traffic was rate-limited at the edge. **Fix:** two changes, not one — first, the
+fail-fast `pg_try_advisory_xact_lock` variant from §4.9 instead of the blocking lock, returning
+409 immediately to a retry that would otherwise queue (matching Stripe's documented behavior in
+§6); second, a per-client rate limit ahead of the payment endpoint so one client's retry storm
+cannot exhaust the shared connection pool that every other client depends on.
+
+---
+
 ## 10. Capacity Planning
 
 ### Database Sizing
@@ -570,6 +765,50 @@ Events per second:   134 PaymentProcessed/s
 Message size:        ~2 KB
 Throughput:          134 × 2 KB = 268 KB/s (trivial for Kafka; single partition is fine initially)
 Retention:           7 days × 134 × 2 KB × 86,400 = 162 GB (single partition; replicate 3×)
+```
+
+### HikariCP pool sizing formula
+
+```
+Concurrent in-flight requests at peak: 167 req/s x avg hold time
+  Avg hold time per request (advisory-lock path, §8 Runbook 4 baseline): ~120 ms
+  -> 167 x 0.12 = ~20 connections held concurrently at steady state
+
+Pool formula (same shape as the batch pipeline's, applied to a web tier):
+  required = concurrent_holders + retry_headroom + metadata_overhead
+           = 20 + 8 (absorb short provider-latency spikes without pool exhaustion)
+           = 28 -> round up to hikari.maximum-pool-size: 30
+
+Undersized pool risk (this file's version of the batch job's connection-starvation trap):
+  if pool < concurrent_holders, requests queue for a CONNECTION before they even
+  reach the advisory-lock line, and the P99 spike in Runbook 4 is misdiagnosed as
+  lock contention when it is actually connection-pool contention -- check
+  hikaricp.connections.pending BEFORE pg_locks when P99 spikes.
+```
+
+### Traffic growth projection (Black Friday / flash-sale scaling)
+
+```
+Baseline peak:          167 req/s  (§2)
+5x flash-sale peak:     835 req/s  -> 835 x 0.12s hold = ~100 concurrent holders
+  -> HikariCP pool must scale to ~130 for the SAME latency profile; if it doesn't,
+     Pitfall 6 (§9) is what happens: contention masquerades as an outage.
+10x Black-Friday peak:  1,670 req/s -> at this point vertical pool scaling stops
+  working (Postgres itself has a practical connection ceiling well under 1,000
+  without a pooler in front of it) -- this is the threshold where sharding by
+  client_id (§11 Q&A) stops being optional.
+```
+
+### When to shard (capacity trigger)
+
+```
+Single Postgres instance connection ceiling (practical, with pgbouncer in front): ~500
+Required connections at 10x peak (above):                                        ~260-300
+  -> still under the ceiling, but with zero headroom for a second traffic spike
+     layered on top (a second promotion, a provider slowdown extending hold time).
+Sharding trigger: shard by client_id % N BEFORE required connections cross 60% of
+  the practical ceiling, not after -- migrating a hot idempotency table under live
+  traffic is the operation this threshold exists to avoid needing urgently.
 ```
 
 ---
@@ -651,6 +890,26 @@ A: Provider-side idempotency (Stripe's `Idempotency-Key` header) prevents double
 **Q: How would you test concurrent duplicate payment submissions in a Spring integration test?**
 
 A: Use `Testcontainers` with `PostgreSQLContainer` (real advisory lock) and fire two `CompletableFuture.runAsync()` calls with the same idempotency key simultaneously. Assert that exactly one `payment` row exists in the database after both complete, and that the second call returned the same response body as the first. This is the only reliable way to verify the advisory lock works — mocking the database would not test the actual lock acquisition. Use `@Transactional(propagation=NOT_SUPPORTED)` on the test method to avoid wrapping both threads in the same outer transaction, which would defeat the lock test.
+
+**Q: Why is the advisory lock acquired inside the same database transaction as the check, instead of as a separate distributed lock (Redis, Zookeeper)?**
+
+A: Locking inside the same transaction ties the lock's lifetime to the unit of work automatically — `pg_advisory_xact_lock` releases at commit or rollback with no separate release call, no TTL to tune, and no risk of a lock outliving its holder because a process crashed before calling unlock (see §4.8's broken/fixed pair, where using the session-scoped `pg_advisory_lock` instead reproduces exactly that failure). A separate system like Redis adds a second point of failure and requires its own consistency story — what happens if Redis is unavailable but Postgres is fine, or if the lock expires via TTL while the transaction is still legitimately in progress. Since the payment already requires a Postgres transaction, reusing that transaction's boundary for the lock is strictly less machinery, not just a cheaper one.
+
+**Q: How do you stop a burst of retries for the same idempotency key from queuing behind the advisory lock and degrading the whole service, as in §9 Pitfall 6?**
+
+A: Fail fast instead of blocking. `pg_advisory_xact_lock` blocks the caller until the lock is free; the fail-fast alternative is `pg_try_advisory_xact_lock` (§4.9), which returns immediately with a boolean instead of waiting. A request that cannot acquire the lock returns 409 (matching Stripe's documented behavior in §6) rather than occupying a connection and a thread for the duration of another request's provider round trip. Combine this with a per-client rate limit ahead of the payment endpoint, since the fail-fast lock protects the connection pool from one client's retry storm but does nothing to stop the client from generating the storm in the first place.
+
+**Q: Under what isolation level does the "double-check after lock acquisition" in §4.5 actually need to run, and would READ COMMITTED break it?**
+
+A: READ COMMITTED (Postgres's default) is sufficient, not because the isolation level does the work but because the advisory lock does. Once the second thread holds the lock, it re-reads `idempotency_keys` and sees whatever the first thread committed, because a `SELECT` under READ COMMITTED always sees the latest committed data at the moment it runs — the lock is what serializes the two threads so that "latest committed" is unambiguous. A higher isolation level like REPEATABLE READ would change nothing here since there is no long-lived read snapshot being reused across the lock wait; it would only add cost (higher serialization-failure rate) for no correctness benefit specific to this flow.
+
+**Q: How would you evolve the `idempotency_keys` table's schema (e.g., add a column) without downtime, given it takes a write on every new payment?**
+
+A: Postgres can add a nullable column or one with a constant default without rewriting the table (`ADD COLUMN ... DEFAULT NULL` is metadata-only since Postgres 11), so that half is safe at full traffic. What actually risks downtime is adding a `NOT NULL` constraint or a new index on a hot table — both take a lock that can queue behind in-flight writes. The safe sequence: add the column nullable, backfill it in batches with `WHERE column IS NULL LIMIT n` (never a single unbounded `UPDATE`), then add the `NOT NULL` constraint with `NOT VALID` followed by `VALIDATE CONSTRAINT` (Postgres validates without holding the write-blocking lock for the whole scan). Building the index with `CREATE INDEX CONCURRENTLY` follows the same principle — slower, but it never blocks the writes this table depends on for correctness.
+
+**Q: This design uses a stale-timeout (5 minutes) to reclaim orphaned IN_PROGRESS records after a crash (§9 Pitfall 1). What's the risk of setting that timeout too short, and how would you choose it?**
+
+A: Too short, and a legitimately slow-but-still-running request (a provider call stuck at 4 minutes during a provider-side incident) gets reclaimed while it is still in flight — a second attempt then races the first, exactly the double-charge scenario the lock was built to prevent, except now triggered by the reclaim logic itself rather than by client retries. The timeout must be set safely above the provider's worst realistic P99.9 latency, with margin — if the provider's documented timeout is 30 seconds, a 5-minute stale window has roughly 10x headroom, which is the right side to err on, since the cost of a slow reclaim is a delayed retry (annoying) while the cost of a fast reclaim is a duplicate charge (expensive, and the exact failure this whole design exists to prevent).
 
 ---
 

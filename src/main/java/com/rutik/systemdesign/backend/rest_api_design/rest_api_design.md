@@ -309,7 +309,155 @@ paths:
           $ref: '#/components/responses/RateLimited'
 ```
 
-### 6.4 Cursor-Based Pagination Implementation
+**What 3.2.0 added that changes how you write a spec.** It is a backward-compatible minor on the
+3.x line — every valid 3.0 or 3.1 document still means the same thing — but four additions are
+worth adopting deliberately:
+
+| Addition | What it lets you describe | Why it mattered enough to ship |
+|---|---|---|
+| `itemSchema` + sequential media types | One item of a **stream** (`text/event-stream`, `application/jsonl`, `application/x-ndjson`, `application/json-seq`), separately from `schema` which describes the whole collection | Streaming responses previously had no honest representation — teams typed an SSE endpoint as `string` or lied about it as an array |
+| The `query` HTTP method, plus `additionalOperations` | A safe, idempotent request that carries a body; and any non-standard method | Complex search that does not fit in a URL had to be a `POST`, which then falsely reads as unsafe and uncacheable |
+| Tag metadata: `summary`, `parent`, `kind` | Hierarchical, described tag groups | Replaces the vendor extensions (`x-tagGroups` and friends) every renderer had invented separately |
+| OAuth 2.0 Device Authorization Flow | `deviceAuthorization` as a first-class flow in a security scheme | CLI and TV-style clients had no standard way to be documented |
+
+```yaml
+# A streaming endpoint described honestly — 3.2.0 only
+paths:
+  /orders/events:
+    get:
+      summary: Server-sent stream of order state changes
+      responses:
+        '200':
+          description: An open SSE stream
+          content:
+            text/event-stream:
+              itemSchema:                       # ONE event, not the whole stream
+                $ref: '#/components/schemas/OrderEvent'
+```
+
+Adopt 3.2.0 only after checking your generators and renderers: 3.0.x and 3.1.x are still what a
+lot of tooling accepts, and a `3.2.0` document that your SDK generator silently downgrades is
+worse than a 3.1 document that is honest about its version.
+
+### 6.4 Machine-Checked Contracts — Lint, Diff, Publish
+
+An OpenAPI document that is written by hand and reviewed by eye drifts. The governance loop that
+stops it is four steps, all runnable in CI, and none of them are optional once you have an
+external consumer:
+
+```bash
+# 1. LINT — style and consistency, against a ruleset you own
+npx @stoplight/spectral-cli lint openapi.yaml --ruleset .spectral.yaml --fail-severity=warn
+
+# 2. DIFF — is this change breaking? Compare the PR against main, not against nothing.
+oasdiff breaking main-openapi.yaml pr-openapi.yaml --fail-on ERR
+
+# 3. BUNDLE + PUBLISH — resolve every $ref into one file, then version it like any artifact
+npx @redocly/cli bundle openapi.yaml -o dist/order-api-1.4.0.yaml
+
+# 4. GENERATE — clients come FROM the contract, never the other way round
+npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g typescript-fetch -o ./sdk
+```
+
+```yaml
+# .spectral.yaml — a ruleset that encodes THIS document's house rules
+extends: ["spectral:oas"]
+rules:
+  operation-operationId: error          # every operation is addressable by generators
+  operation-tag-defined: error
+  no-http-basic:
+    description: Basic auth is not permitted on public endpoints
+    given: $.components.securitySchemes[*]
+    then: { field: scheme, function: pattern, functionOptions: { notMatch: "^basic$" } }
+    severity: error
+  problem-details-on-errors:
+    description: 4xx/5xx must return application/problem+json (RFC 9457)
+    given: $.paths[*][*].responses[?(@property.match(/^[45]/))].content
+    then: { field: "application/problem+json", function: truthy }
+```
+
+`oasdiff` grades findings at three levels — `ERR` for definite breaking changes, `WARN` for
+potential ones, and `INFO` — so `--fail-on ERR` gates the hard breaks and `--fail-on WARN`
+tightens the gate further. The trap it catches that a human reviewer will not is **an added enum
+value in a response**: every team ships that as "purely additive", and a strict client
+deserialising into a closed enum throws on the value it has never seen. Two rules make the loop hold: run the lint
+and the diff on the **PR**, not nightly, so the gate is a red check rather than a report nobody
+reads; and never hand-edit a generated spec, because the next generation silently discards your
+edit and the document quietly becomes a lie.
+
+### 6.5 Outbound Events — Webhook Signing and the Retry Ladder
+
+A webhook is an API you *call* rather than serve, aimed at an endpoint you do not control and
+cannot trust. Two mechanisms carry the whole design.
+
+**Signing.** The receiver must be able to prove the request came from you and is not a replay.
+The common shape — Stripe's, and the one the **Standard Webhooks** specification codified (adopted
+by OpenAI, Anthropic, Google Gemini, Kong, Svix, Supabase, Vanta and Drata) — is HMAC-SHA256 over
+a string that includes a **timestamp**, sent in a header alongside it:
+
+```java
+// Sender: sign the timestamp AND the body, so the signature is not replayable forever
+long timestamp = Instant.now().getEpochSecond();
+String signedPayload = timestamp + "." + rawBody;          // exact bytes you will transmit
+Mac mac = Mac.getInstance("HmacSHA256");
+mac.init(new SecretKeySpec(endpointSecret.getBytes(UTF_8), "HmacSHA256"));
+String signature = HexFormat.of().formatHex(mac.doFinal(signedPayload.getBytes(UTF_8)));
+request.header("Webhook-Timestamp", String.valueOf(timestamp));
+request.header("Webhook-Signature", "v1," + signature);    // versioned: lets you rotate the scheme
+```
+
+```java
+// Receiver: verify against the RAW body, in constant time, inside a replay window
+public boolean verify(String rawBody, String tsHeader, String sigHeader, List<String> secrets) {
+    long ts = Long.parseLong(tsHeader);
+    if (Math.abs(Instant.now().getEpochSecond() - ts) > 300) return false;  // 5-minute window
+    String expected = hmacHex(ts + "." + rawBody, ...);
+    // during rotation BOTH secrets are live, so check every one
+    return secrets.stream().anyMatch(s ->
+        MessageDigest.isEqual(hmacHex(ts + "." + rawBody, s).getBytes(UTF_8),
+                              parseSignature(sigHeader).getBytes(UTF_8)));
+}
+```
+
+Three things go wrong here and all three are silent. Verifying against a **deserialized-then-
+reserialized** body instead of the raw bytes fails intermittently, because key order and number
+formatting are not stable — capture the raw body in a filter before the JSON parser touches it.
+Comparing with `String.equals` leaks timing; use `MessageDigest.isEqual`. And rotating a secret
+without an **overlap window** where both are accepted breaks every in-flight delivery at once.
+
+For a standards-track alternative, **RFC 9421 HTTP Message Signatures** (Proposed Standard,
+February 2024) generalises this: `Signature-Input` names the covered components — derived ones
+like `@method`, `@authority`, `@path` plus real headers such as `content-digest` — and
+`Signature` carries the value, so the signature covers a canonicalised request rather than a
+bespoke concatenation you invented.
+
+```
+Signature-Input: sig1=("@method" "@authority" "@path" "content-digest" "content-type")
+  ;created=1618884475;keyid="acme-webhook-2026";alg="ecdsa-p256-sha256"
+Signature: sig1=:e8UJ5wMiRaonlth5ERtE8GIiEH7Akcr493nQ07VPNo6y3qvjdK...:
+```
+
+**The retry ladder.** Delivery is at-least-once, so the receiver owes you idempotency and you owe
+the receiver a bounded, decelerating retry schedule. Stripe's published ladder is the reference
+shape: immediately, then 5 min, 30 min, 2 hr, 5 hr, 10 hr, then every 12 hr, for **72 hours total**,
+after which the endpoint is disabled and its owner is notified.
+
+| Property | Rule | Why |
+|---|---|---|
+| Backoff | Exponential with jitter, decelerating to a fixed interval | Un-jittered retries from many senders re-synchronise into a herd on the receiver's recovery |
+| Ceiling | A wall-clock deadline (72 h), not an attempt count | An attempt count means nothing to the person deciding whether the event is still useful |
+| Terminal state | Disable the endpoint and **tell a human** | A silently-dropped event is indistinguishable from one that never happened |
+| Isolation | Per-endpoint concurrency and circuit breaking | One dead subscriber must not head-of-line-block every other subscriber |
+| Retryable | 5xx, 429, timeouts. **Not** 4xx other than 429 | A 400 will be a 400 forever; retrying it just burns the ladder |
+| Replay | Keep a delivery-attempt record and expose manual redrive | The receiver *will* ask you to resend last Tuesday |
+
+Three failures worth designing against up front: a **slow subscriber** that head-of-line-blocks a
+shared queue (give each endpoint its own concurrency budget); **SSRF**, because the endpoint URL
+is user-supplied and `http://169.254.169.254/` is a valid-looking URL (resolve and block link-local
+and private ranges *after* DNS resolution, not by string-matching the hostname); and a **redrive
+without dedup**, which turns one operator action into a duplicate storm at every subscriber.
+
+### 6.6 Cursor-Based Pagination Implementation
 
 ```java
 // Request: GET /api/v1/orders?cursor=eyJpZCI6MTAwfQ&size=20
@@ -416,6 +564,13 @@ private String encodeCursor(Long id) {
 | `karate` | BDD-style API testing |
 | Bruno | Open-source Postman alternative |
 | Stoplight Studio | OpenAPI visual editor |
+| Spectral | OpenAPI/AsyncAPI **linter** with a rules DSL — the CI gate for style and house rules |
+| oasdiff | OpenAPI **breaking-change detector**; `oasdiff breaking` fails a PR that breaks a client |
+| Redocly CLI | Lint, bundle, split and **publish** a spec as a versioned artifact |
+| Buf + Buf Schema Registry | The Protobuf equivalent: `buf lint`, `buf breaking`, and a hosted schema registry |
+| openapi-generator | Generates clients and server stubs **from** the contract |
+| Standard Webhooks | Reference spec for webhook payload envelope and HMAC-SHA256 signature headers |
+| Svix / Hookdeck | Managed webhook delivery — signing, per-endpoint retry ladders, redrive, delivery logs |
 
 ---
 
@@ -495,6 +650,21 @@ The client uses the Accept header to specify acceptable response formats: `Accep
 **Short:** Implement rate limiting at the gateway or filter layer and return 429 with Retry-After and X-RateLimit headers.
 
 Implement at the API gateway or a filter/middleware layer. Return 429 Too Many Requests when the limit is exceeded, with headers: `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 0`, `X-RateLimit-Reset: 1735689600` (epoch when window resets), `Retry-After: 60` (seconds). Know which of those are standardised and which are not: `Retry-After` is defined by RFC 9110, while the three `X-RateLimit-*` fields are a de facto convention with no specification behind them — clients guess at their semantics, and different APIs disagree on whether `Reset` is an epoch or a delta. The IETF work to replace them, `draft-ietf-httpapi-ratelimit-headers` (`RateLimit` and `RateLimit-Policy`), is still an active working-group draft at revision 11 and has **not** been published as an RFC, so keep emitting the `X-` fields and treat the standardised pair as something to add later, not to switch to. Use sliding window or token bucket algorithms. Limit by API key, user ID, or IP depending on the use case.
+
+**Q: How do you sign a webhook so the receiver can trust it, and what is the most common way teams get it wrong?**
+**Short:** Sign an HMAC-SHA256 over a timestamp concatenated with the raw request body, send both in headers, and have the receiver verify inside a short replay window.
+
+Send an HMAC-SHA256 over `timestamp + "." + rawBody`, keyed by a per-endpoint secret, in a versioned signature header alongside the timestamp — this is Stripe's shape and the one the Standard Webhooks specification codified, now used by OpenAI, Anthropic, Kong, Svix and Supabase. The timestamp is what makes it non-replayable: the receiver rejects anything outside a window of about five minutes, so a captured request cannot be resent tomorrow. The mistake almost everyone makes once is verifying against a **deserialized-then-reserialized** body instead of the raw bytes — JSON key order and number formatting are not stable across libraries, so the signature matches in staging and fails intermittently in production; capture the raw body in a filter before your JSON parser sees it. Two smaller traps: compare with `MessageDigest.isEqual`, not `String.equals`, because the latter short-circuits and leaks the signature a byte at a time under timing analysis; and rotate secrets with an **overlap window** where both the old and new secret verify, or the rotation breaks every in-flight delivery simultaneously. If you want a standards-track alternative, RFC 9421 HTTP Message Signatures (Proposed Standard, February 2024) does the same job over a canonicalised request: `Signature-Input` names the covered components — `@method`, `@authority`, `@path`, `content-digest` — so you are signing a defined structure rather than a concatenation you invented.
+
+**Q: A customer's webhook endpoint has been down for an hour. What should your delivery system be doing?**
+**Short:** Retrying on a decelerating, jittered ladder bounded by a wall-clock deadline, with that endpoint isolated so its failure cannot block deliveries to anyone else.
+
+Retrying on a decelerating ladder with jitter, against a wall-clock deadline rather than an attempt count, while keeping that endpoint isolated from every other subscriber. Stripe's published schedule is the reference: immediately, then 5 minutes, 30 minutes, 2 hours, 5 hours, 10 hours, then every 12 hours, for 72 hours total, after which the endpoint is disabled and a human is notified. Jitter matters more than it looks — un-jittered exponential backoff from many senders re-synchronises into a herd that hits the endpoint the moment it recovers and knocks it straight back down. The isolation requirement is the one that gets designed in late and hurts: on a single shared queue, one dead subscriber head-of-line-blocks delivery to everybody, so give each endpoint its own concurrency budget and circuit breaker. Retry 5xx, 429 and timeouts only — a 400 will still be a 400 in ten hours, and retrying it just burns the ladder. Finally, terminal failure must be loud and recoverable: persist a delivery-attempt record per event, expose a redrive/replay tool, and dedup on redrive, or one operator clicking "resend" becomes a duplicate storm at every subscriber.
+
+**Q: How do you stop your OpenAPI document from drifting away from what the service actually does?**
+**Short:** Gate every pull request on a spec linter and a breaking-change differ, and generate clients from the contract rather than writing the contract after the code.
+
+Put the contract in CI as a gate, not a nightly report. Four steps, all runnable: `spectral lint` against a ruleset you own, which encodes house rules a human reviewer will not catch consistently (every operation has an `operationId`, every 4xx returns `application/problem+json`); `oasdiff breaking` comparing the PR's spec against main and failing on ERR; publishing the spec as a versioned artifact; and generating clients and SDKs *from* it. The differ earns its place on one case in particular — an **added enum value in a response**, which every team ships as "purely additive" and then explains in an incident review, because a strict client deserialising into a closed enum throws on the value it has never seen; `oasdiff` grades findings as `ERR` (definite break), `WARN` (potential) or `INFO`, so `--fail-on ERR` gates the hard breaks and `--fail-on WARN` catches this class too. Two rules keep the loop honest: run lint and diff on the pull request so the outcome is a red check rather than a dashboard, and never hand-edit a generated spec, since the next generation discards your edit and the document quietly becomes fiction. The Protobuf world has the identical loop under different names — `buf lint`, `buf breaking`, and the Buf Schema Registry.
 
 ---
 

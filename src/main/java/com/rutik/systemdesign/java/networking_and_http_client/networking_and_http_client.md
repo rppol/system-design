@@ -55,11 +55,15 @@ For server-side networking, NIO's `Selector` enables a single thread to monitor 
 
 | Feature | HTTP/1.1 | HTTP/2 | HTTP/3 (QUIC) |
 |---------|----------|--------|---------------|
-| Transport | TCP | TCP | UDP (QUIC) |
-| Multiplexing | No (pipelining only, head-of-line blocking) | Yes (streams over 1 connection) | Yes (independent streams, no HOL blocking) |
-| Header compression | None | HPACK | QPACK |
+| Transport | TCP | TCP | UDP (QUIC, RFC 9000) |
+| Multiplexing | No (pipelining only, head-of-line blocking) | Yes (streams over 1 connection), but a lost TCP segment still stalls every stream | Yes (independent streams; QUIC gives each its own loss recovery, so a lost packet stalls only its own stream) |
+| Header compression | None | HPACK | QPACK (RFC 9204) |
 | Server push | No | Yes | Yes |
-| Java support | HttpClient Java 11 | HttpClient Java 11 | JEP pending |
+| Java support | `HttpClient` Java 11 | `HttpClient` Java 11, still the default preferred version | `HttpClient` Java 26, opt-in via `Version.HTTP_3` (JEP 517, RFC 9114) |
+
+JEP 517 ("HTTP/3 for the HTTP Client API") shipped in Java 26 and deliberately left the
+default preferred version at HTTP/2 — HTTP/3 must be requested explicitly. See Section 6
+for the opt-in API and negotiation strategies.
 
 ---
 
@@ -289,6 +293,78 @@ BodyPublishers.ofFile(Path.of("upload.csv")) // stream from file
 BodyPublishers.ofInputStream(() -> stream)    // lazy InputStream
 ```
 
+### HTTP/3 — Opt-in Transport over QUIC (Java 26, JEP 517)
+
+JEP 517 ("HTTP/3 for the HTTP Client API") shipped in Java 26. HTTP/3 is **opt-in** — the
+JEP explicitly does not change `HttpClient`'s default preferred version, which stays
+HTTP/2. HTTP/3 itself is RFC 9114, running over **QUIC** (RFC 9000, plus the supporting
+RFCs 8999/9001/9002) with **QPACK** (RFC 9204) for header compression instead of HPACK.
+
+**Why this is not a connection upgrade.** HTTP/1.1 negotiates HTTP/2 in place — either via
+ALPN during the TLS handshake, or the h2c `Upgrade` header — because both are byte streams
+carried over the *same* TCP connection; the upgrade only changes how bytes on that stream
+are framed. QUIC is not TCP: it is an independent transport built directly on UDP
+datagrams, with TLS 1.3 integrated into the transport itself rather than layered on top.
+There is no existing connection to hand off, so an HTTP/3 attempt always establishes a
+brand-new QUIC connection — in parallel with, or instead of, a TCP one. That is exactly
+why HTTP/3 needs an explicit negotiation strategy instead of a one-line upgrade.
+
+**Opt in per client** — races an HTTP/3 attempt against HTTP/2 or HTTP/1.1 whenever the
+request itself does not pin a version:
+
+```java
+HttpClient http3Client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_3)     // Java 26 (JEP 517); default is still HTTP_2
+    .build();
+```
+
+**Opt in per request** — tries HTTP/3 first for this one request, falling back to HTTP/2
+or HTTP/1.1 after a timeout:
+
+```java
+HttpRequest request = HttpRequest.newBuilder(uri)
+    .version(HttpClient.Version.HTTP_3)
+    .GET()
+    .build();
+```
+
+**Because every path can fall back, never assume you got what you asked for — check the
+response:**
+
+```java
+HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
+if (response.version() != HttpClient.Version.HTTP_3) {
+    // negotiation fell back to HTTP/2 or HTTP/1.1 — log it, don't assume HTTP/3 ran
+}
+```
+
+**Four negotiation strategies, each with a real cost:**
+
+| Strategy | How to opt in | What happens | Cost |
+|----------|----------------|--------------|------|
+| Prefer HTTP/3 on the **request** | `.version(HTTP_3)` on `HttpRequest` | Tries HTTP/3 first for this request, falls back to HTTP/2 or HTTP/1.1 after a timeout | Pays that timeout on every request to a server that doesn't speak HTTP/3 |
+| Prefer HTTP/3 on the **client** | `.version(HTTP_3)` on `HttpClient`, request left unset | Races an HTTP/3 connection attempt against HTTP/2 or HTTP/1.1 in parallel; first to succeed wins | May open an HTTP/3 connection it never ends up reusing, if TCP wins the race |
+| **Alt-Svc discovery** | `HttpRequest.Builder.setOption(HttpClient.H3_DISCOVERY, Http3DiscoveryMode.ALT_SVC)` | First request goes over HTTP/2 or HTTP/1.1; if the response advertises HTTP/3 via the `Alt-Svc` header, later requests to that origin use HTTP/3 | Pays one full HTTP/2 (or HTTP/1.1) round trip before ever switching |
+| **HTTP/3-only** | `setOption(HttpClient.H3_DISCOVERY, Http3DiscoveryMode.HTTP_3_URI_ONLY)` | Uses HTTP/3 or fails outright — no fallback | Breaks immediately if the server doesn't support HTTP/3; only safe when you already know it does |
+
+**Head-of-line blocking — why QUIC is the actual win, not multiplexing.** HTTP/2 already
+removed *application*-layer head-of-line blocking: independent streams inside one TCP
+connection mean a slow response no longer blocks the others queued behind it. But TCP
+itself still enforces strict in-order byte delivery — if any TCP segment is lost, the OS
+holds every byte behind it, including bytes belonging to unrelated streams, until
+retransmission succeeds. So on a lossy network, a single lost packet can stall *all* of
+HTTP/2's streams at the transport layer even though the application thinks they are
+independent. QUIC gives each stream its own loss recovery inside one UDP flow, so a lost
+packet for one stream blocks only that stream. That per-stream loss recovery — not
+multiplexing, which HTTP/2 already has — is HTTP/3's real advantage.
+
+**Limitations of the first implementation.** Only the default SunJSSE secure-socket
+provider is supported for the QUIC/TLS handshake — a third-party JSSE provider is not
+supported for HTTP/3 connections. There is no public QUIC API exposed for building other
+protocols on it. The JDK implements only the HTTP/3 *client*, not a server. And the legacy
+`java.net.URL`/`URLConnection` protocol handler is unaffected — it remains HTTP/1.1-only;
+only `java.net.http.HttpClient` gained HTTP/3.
+
 ### Classic Blocking ServerSocket (and its limits)
 
 ```java
@@ -422,6 +498,15 @@ server.accept(null, new CompletionHandler<AsynchronousSocketChannel, Void>() {
 | Blocking + platform threads | Thousands | Low | Simple, low-concurrency services |
 | `HttpClient.sendAsync()` | Millions | Medium | Outbound HTTP, parallel fan-out |
 
+**HTTP/3 (`Version.HTTP_3`, Java 26) is a transport choice, not a strictly-better one.** It
+earns its keep on mobile networks, other lossy links, high-RTT connections, and clients
+that move across networks mid-session — QUIC's connection ID survives a Wi-Fi-to-cellular
+handoff without a fresh handshake, unlike a TCP connection tied to a 4-tuple. It is not
+worth it for a datacenter-internal service on a clean 10G link, where HTTP/2 already sees
+~0% packet loss and the extra negotiation buys nothing. It can be actively worse behind a
+corporate network or firewall that blocks outbound UDP/443 — every HTTP/3 attempt there
+burns a connection timeout before falling back to HTTP/2.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -538,7 +623,7 @@ The Reactor pattern: one or more `Reactor` threads run event loops, demultiplexi
 **Q6: What is HTTP/2 multiplexing and how does `HttpClient` expose it?**
 **Short:** HTTP/2 multiplexing interleaves many request and response streams over a single TCP connection.
 
-HTTP/2 multiplexing sends multiple request/response pairs concurrently over a single TCP connection via numbered "streams." HTTP/1.1 requires a separate TCP connection per concurrent request (or uses pipelining with head-of-line blocking). HTTP/2 frames carry a stream ID: frames for stream 1 (GET /users), stream 3 (GET /orders), stream 5 (POST /events) interleave on one TCP connection. `HttpClient` with `HTTP_2` version and TLS negotiates HTTP/2 automatically; the client maintains a connection pool. Multiple `sendAsync()` calls to the same host reuse the same connection with multiplexed streams. No application code change is required — `HttpClient` abstracts the streams.
+HTTP/2 multiplexing sends multiple request/response pairs concurrently over a single TCP connection via numbered "streams." HTTP/1.1 requires a separate TCP connection per concurrent request (or uses pipelining with head-of-line blocking). HTTP/2 frames carry a stream ID: frames for stream 1 (GET /users), stream 3 (GET /orders), stream 5 (POST /events) interleave on one TCP connection. `HttpClient` with `HTTP_2` version and TLS negotiates HTTP/2 automatically; the client maintains a connection pool. Multiple `sendAsync()` calls to the same host reuse the same connection with multiplexed streams. No application code change is required — `HttpClient` abstracts the streams. HTTP/2 is not the ceiling: Java 26 (JEP 517) adds opt-in HTTP/3 over QUIC, which removes the transport-level head-of-line blocking that a single lost TCP segment still causes across all of HTTP/2's streams — see Section 6 for the negotiation strategies.
 
 **Q7: How does `HttpClient` handle TLS/SSL?**
 **Short:** HttpClient uses the JVM's default SSLContext unless given a custom one, negotiating HTTP/2 via ALPN.
@@ -558,7 +643,7 @@ With virtual threads (Java 21), blocking I/O calls like `socket.read()` are reim
 **Q10: What happens to in-flight `HttpClient` requests when the application shuts down?**
 **Short:** HttpClient.close() (Java 21) waits for in-flight requests to finish before closing the connection pool.
 
-`HttpClient` implements `AutoCloseable` (Java 21). If not explicitly closed, the client's internal connection pool and executor survive until GC. For clean shutdown: call `client.close()` (Java 21) which waits for in-flight requests to complete then closes connections, or `client.shutdown()` (Java 21) which initiates graceful shutdown and returns a `CompletableFuture<Void>` completing when done. In Java 11-20, there is no `close()` method — shutdown is handled by the provided executor's shutdown. Best practice: use a custom executor so you control its lifecycle independently of the `HttpClient`.
+`HttpClient` implements `AutoCloseable` (Java 21) — the same [Effective Java Item 9: "Prefer try-with-resources to try-finally"] contract that already governs sockets and channels now extends to the client itself. If not explicitly closed, the client's internal connection pool and executor survive until GC. For clean shutdown: call `client.close()` (Java 21) which waits for in-flight requests to complete then closes connections, or `client.shutdown()` (Java 21) which initiates graceful shutdown and returns a `CompletableFuture<Void>` completing when done. In Java 11-20, there is no `close()` method — shutdown is handled by the provided executor's shutdown. Best practice: use a custom executor so you control its lifecycle independently of the `HttpClient`.
 
 **Q11: How does `Selector`-based NIO differ from a thread-per-connection model, and what did Java 21 virtual threads change?**
 **Short:** Virtual threads give thread-per-connection's simple code with NIO's scalability to 100,000-plus connections.
@@ -627,6 +712,21 @@ HTTP/2 server push allows the server to proactively send resources to the client
 
 `HttpClient` uses an internal connection pool with no built-in metrics exposed via JMX or Micrometer. Symptoms of exhaustion: requests queue up, p99 latency spikes, `HttpTimeoutException` at `request.timeout()`. Diagnosis steps: (1) enable JDK HTTP client logging with `-Djdk.httpclient.HttpClient.level=ALL`; (2) check if target server closes connections early (look for `GOAWAY` in HTTP/2 or `Connection: close`); (3) measure actual concurrency — if `sendAsync()` is called with 1,000 unbounded `CompletableFuture`s, all 1,000 requests compete for pool slots. Fix: use a `Semaphore` to bound concurrent in-flight requests to a sensible limit (e.g., 50 per host); drain results before issuing more. For HTTP/2, confirm the server advertises `MAX_CONCURRENT_STREAMS` and that the client respects it — Java's `HttpClient` does respect the server's `MAX_CONCURRENT_STREAMS` setting automatically.
 
+**Q16: How do you enable HTTP/3 in `HttpClient`, and what is the default?**
+**Short:** HTTP/3 is opt-in via Version.HTTP_3 on the client or request; HTTP/2 stays the default.
+
+HTTP/3 support ships in Java 26 (JEP 517) and is opt-in — the JEP explicitly leaves `HttpClient`'s default preferred version at HTTP/2. Enable it per client with `HttpClient.newBuilder().version(HttpClient.Version.HTTP_3).build()`, which races an HTTP/3 connection attempt against HTTP/2 or HTTP/1.1 and uses whichever completes first, or per request with `HttpRequest.newBuilder(uri).version(HttpClient.Version.HTTP_3).build()`, which tries HTTP/3 first for that request and falls back after a timeout. A third path, the `H3_DISCOVERY` request option set to `Http3DiscoveryMode.ALT_SVC`, defers the decision to the server: the first request goes over HTTP/2, and later requests use HTTP/3 only if that response advertised it via the `Alt-Svc` header. Because every path can fall back, always check `response.version()` rather than assuming a request actually used HTTP/3.
+
+**Q17: Why can't an existing HTTP/2 connection be upgraded to HTTP/3 the way HTTP/1.1 upgrades to HTTP/2?**
+**Short:** HTTP/2 runs over TCP and HTTP/3 runs over QUIC/UDP, so there is no shared connection to upgrade in place.
+
+HTTP/1.1 upgrading to HTTP/2 — via ALPN during the TLS handshake, or the h2c `Upgrade` header — works because both are byte streams carried over the *same* TCP connection; the upgrade only changes how bytes on that stream are framed. HTTP/3 has no equivalent path because it is not TCP at all: RFC 9114 runs over QUIC (RFC 9000, plus 8999/9001/9002), an independent transport built directly on UDP datagrams with TLS 1.3 integrated into the transport rather than layered on top of it. There is no existing connection to hand off — an HTTP/3 attempt always establishes a brand-new QUIC connection, in parallel with or instead of a TCP one. That is exactly why HTTP/3 needs an explicit negotiation strategy (racing, `Alt-Svc` discovery, or HTTP/3-only) instead of a one-line protocol upgrade.
+
+**Q18: You configured `HttpClient.Version.HTTP_3` but traffic is still going over HTTP/2 — how do you diagnose it?**
+**Short:** Check response.version() and Alt-Svc/network conditions — HTTP_3 is a preference that silently falls back.
+
+Setting `Version.HTTP_3` only expresses a preference, not a guarantee — every negotiation path (request-level preference, client-level racing, or `Alt-Svc` discovery) falls back to HTTP/2 or HTTP/1.1 when HTTP/3 doesn't succeed, and the client does not surface that fallback as an error. Start by reading `response.version()` on the actual response — if it reports `HTTP_2`, negotiation fell back. Common causes: the server or its CDN doesn't advertise HTTP/3 support at all; `Http3DiscoveryMode.ALT_SVC` was used but the first HTTP/2 response never carried an `Alt-Svc` header advertising h3; a firewall, NAT, or corporate proxy between client and server drops outbound UDP/443, so every QUIC handshake attempt times out; or, on a fast low-RTT network, the client-level race simply lost to the parallel TCP+TLS handshake. If you know the server supports HTTP/3 and want a hard failure instead of a silent fallback while diagnosing, temporarily switch to `Http3DiscoveryMode.HTTP_3_URI_ONLY`, which fails outright rather than falling back — surfacing the real connectivity problem instead of masking it.
+
 ---
 
 ## 13. Best Practices
@@ -636,7 +736,7 @@ HTTP/2 server push allows the server to proactively send resources to the client
 3. **Use `sendAsync()` for parallel fan-out** — collect multiple `CompletableFuture`s, join at the end.
 4. **Always remove processed `SelectionKey`s** from the iterator in NIO event loops.
 5. **Never block inside a NIO Selector event loop** — hand off to a separate executor.
-6. **Use virtual threads for new server code** (Java 21) — simpler than NIO for application-level code.
+6. **Use virtual threads for new server code** (Java 21) — simpler than NIO for application-level code. Routing connection handling through `Executors.newVirtualThreadPerTaskExecutor()` rather than raw `new Thread()` calls is [Effective Java Item 80: "Prefer executors, tasks, and streams to threads"] carried into the virtual-thread era.
 7. **Use HTTP/2** for high-volume service-to-service calls — multiplexing reduces connection overhead.
 8. **Close `InputStream`s** from `BodyHandlers.ofInputStream()` — unclosed streams hold connection resources.
 9. **Monitor connection pool usage** in production — connection pool exhaustion manifests as `HttpTimeoutException`.

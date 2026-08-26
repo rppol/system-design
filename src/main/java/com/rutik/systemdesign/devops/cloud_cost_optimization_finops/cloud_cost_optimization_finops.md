@@ -2,6 +2,18 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Intermediate
 
+> **Pricing anchor (checked 2026-08-25).** Every discount band on this page is AWS's own
+> published figure, re-verified today against the vendor pages: **Spot — up to 90% off
+> On-Demand**; **Standard Reserved Instances — up to 72%** (AWS's stated averages are ~40%
+> for 1-year and ~60% for 3-year, which is where the `~40-72%` band comes from);
+> **Convertible RIs — up to 66%**; **Compute Savings Plans — up to 66%**; **EC2 Instance
+> Savings Plans — up to 72%**. Bands are ranges, not quotes: the number you actually get
+> depends on term, payment option, instance family and Region, so the arithmetic below
+> always carries its assumed `d` explicitly. Sources:
+> [Spot](https://aws.amazon.com/ec2/spot/),
+> [Reserved Instances](https://aws.amazon.com/ec2/pricing/reserved-instances/),
+> [Savings Plans](https://aws.amazon.com/savingsplans/compute-pricing/).
+
 Cloud bills grow silently — idle resources, over-provisioned instances, untagged spend nobody owns, and on-demand pricing on steady workloads. **FinOps** is the operating model that brings engineering, finance, and product together to manage cloud cost as a continuous discipline, not an annual surprise. This module covers the levers — **tagging**, **rightsizing**, **Spot/Reserved/Savings Plans**, **commitment strategy** — and the practices — **cost allocation**, **showback/chargeback**, and the FinOps Inform-Optimize-Operate lifecycle — with concrete numbers (Spot up to 90% off, Savings Plans/RIs in 1- or 3-year terms for ~30-72% discounts, rightsizing routinely cutting 20-40%).
 
 ---

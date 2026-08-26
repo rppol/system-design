@@ -145,7 +145,66 @@ flowchart LR
 
 ## 6. How It Works — Detailed Mechanics
 
-### 6.1 Allocating Native Memory with Arena
+### 6.1 The Native-Access Policy (JEP 472) — Read This Before Running Any Snippet Below
+
+Every downcall, upcall, `MemorySegment.reinterpret`, and `SymbolLookup.libraryLookup` call
+in this module — including a jextract-generated binding — is a **restricted method** under
+JEP 472 *Prepare to Restrict the Use of JNI* (Java 24). The umbrella goal is OpenJDK's
+"integrity by default" programme: the JVM cannot verify that native code is memory-safe, so
+interoperating with it is moving from silently-allowed to explicitly-opted-in. JNI and FFM
+are held to the *same* policy — FFM is not being singled out as the dangerous one, JNI is
+being brought up to FFM's standard after 25 years unrestricted.
+
+**What happens if you do nothing.** On JDK 24+ — including the Java 25 LTS baseline this
+section targets — the first restricted call from a module prints a warning naming the
+caller, and every downcall/upcall example later in this section triggers it:
+
+```
+WARNING: A restricted method in java.lang.foreign.Linker has been called
+WARNING: java.lang.foreign.Linker::downcallHandle has been called by class NativeStrlen in an unnamed module
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+```
+
+**Granting access explicitly:**
+```bash
+java --enable-native-access=com.example.ffi MyApp   # named module(s), comma-separated
+java --enable-native-access=ALL-UNNAMED MyApp        # classpath code -- the common case here
+# or, in an executable JAR's manifest:
+#   Enable-Native-Access: ALL-UNNAMED
+```
+
+**The policy knob — `--illegal-native-access={allow|warn|deny}`:**
+
+| Value | Behavior | Status on JDK 25 |
+|---|---|---|
+| `warn` | One warning per offending module; program still runs | **Default today** |
+| `deny` | Throws `IllegalCallerException` at the restricted call | Not yet default — OpenJDK states it *will* become the default in a future release |
+| `allow` | No check, no warning | Being phased out; do not rely on it |
+
+**The same downcall, three ways:**
+```bash
+# 1. Default today: runs, warns once per module
+java NativeStrlen
+#   WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning...
+
+# 2. Grant access: clean run
+java --enable-native-access=ALL-UNNAMED NativeStrlen
+
+# 3. Opt into tomorrow's default now, to catch unguarded callers in CI:
+java --illegal-native-access=deny NativeStrlen
+#   Exception in thread "main" java.lang.IllegalCallerException:
+#     class NativeStrlen is in an unnamed module which does not have
+#     ENABLE-NATIVE-ACCESS set
+```
+
+Run CI with `--illegal-native-access=deny` today: it fails loudly, at build time, on
+exactly the callers that `deny` will break once it becomes the default — instead of
+discovering them from under a `warn` default that flips in a release you never audited for.
+jextract-generated bindings get no exemption: a generated wrapper around `downcallHandle`
+is still calling `downcallHandle`, so a jextract-heavy codebase needs the identical
+`--enable-native-access` grant as hand-written Panama code.
+
+### 6.2 Allocating Native Memory with Arena
 
 ```java
 // Confined arena — single thread, must close explicitly or via try-with-resources
@@ -169,7 +228,7 @@ try (Arena arena = Arena.ofConfined()) {
 } // freed here
 ```
 
-### 6.2 Calling a C Function (Downcall)
+### 6.3 Calling a C Function (Downcall)
 
 ```java
 import java.lang.foreign.*;
@@ -202,7 +261,7 @@ class NativeStrlen {
 }
 ```
 
-### 6.3 Struct Layout and VarHandle Access
+### 6.4 Struct Layout and VarHandle Access
 
 ```java
 // C struct: typedef struct { int32_t x; int32_t y; float z; } Point3D;
@@ -229,7 +288,7 @@ try (Arena arena = Arena.ofConfined()) {
 }
 ```
 
-### 6.4 Array of Structs (SequenceLayout)
+### 6.5 Array of Structs (SequenceLayout)
 
 ```java
 // Allocate 1000 Point3D structs as a contiguous C array
@@ -294,7 +353,7 @@ runs either way, but here the result is compared against `byteSize()` before the
 store. Reaching one element past the end throws instead of quietly overwriting
 whatever the allocator put next in the address space.
 
-### 6.5 Upcall Stub — Native Code Calls Back into Java
+### 6.6 Upcall Stub — Native Code Calls Back into Java
 
 ```java
 // Provide a Java-implemented callback to a C function
@@ -328,7 +387,7 @@ try (Arena arena = Arena.ofConfined()) {
 }
 ```
 
-### 6.6 Replacing sun.misc.Unsafe
+### 6.7 Replacing sun.misc.Unsafe
 
 ```java
 // BROKEN (pre-Panama): using Unsafe to read an off-heap long
@@ -568,7 +627,7 @@ The GC (G1, ZGC, Shenandoah) moves live objects during garbage collection — co
 **Q6: How does `Arena.ofAuto()` differ from explicit arena management, and when is the difference significant?**
 **Short:** Arena.ofAuto() frees memory only when GC finalizes it, so its deallocation timing is non-deterministic.
 
-`Arena.ofAuto()` ties segment lifetime to GC finalisation: the memory is freed when the arena object becomes unreachable and the JVM's cleaner thread runs. This is analogous to `ByteBuffer.allocateDirect()` with `Cleaner`. The problem: finalisation timing is non-deterministic. Under memory pressure, you may allocate gigabytes of native memory faster than GC reclaims old arenas, causing native OOM or excessive RSS growth. Explicit `Arena.ofConfined()` / `ofShared()` with `try-with-resources` gives deterministic deallocation — the memory is freed exactly when the arena is closed. For any latency-sensitive or memory-intensive workload, explicit arenas are strongly preferred. `Arena.ofAuto()` is a convenience for exploratory code or cases where the arena is short-lived enough that timing does not matter.
+`Arena.ofAuto()` ties segment lifetime to GC finalisation: the memory is freed when the arena object becomes unreachable and the JVM's cleaner thread runs. This is analogous to `ByteBuffer.allocateDirect()` with `Cleaner`. The problem: finalisation timing is non-deterministic — the exact unpredictability [Effective Java Item 8: "Avoid finalizers and cleaners"] warns is the reason neither belongs on a resource-release path you can depend on. Under memory pressure, you may allocate gigabytes of native memory faster than GC reclaims old arenas, causing native OOM or excessive RSS growth. Explicit `Arena.ofConfined()` / `ofShared()` with `try-with-resources` gives deterministic deallocation — the memory is freed exactly when the arena is closed. For any latency-sensitive or memory-intensive workload, explicit arenas are strongly preferred. `Arena.ofAuto()` is a convenience for exploratory code or cases where the arena is short-lived enough that timing does not matter.
 
 **Q7: What is `jextract` and how does it reduce Panama boilerplate?**
 **Short:** jextract generates MemoryLayout, VarHandle, and downcall-handle boilerplate automatically from a C header file.
@@ -649,7 +708,7 @@ try (Arena arena = Arena.ofConfined()) {
 **Q14: What is the relationship between Panama and Project Valhalla?**
 **Short:** Panama handles foreign memory and functions, while Valhalla eliminates object-header overhead for in-heap value types.
 
-Panama and Valhalla are complementary but orthogonal. Panama (`java.lang.foreign`) addresses foreign memory and foreign functions — calling native C code and managing off-heap data. Valhalla (value types / primitive classes, still in preview as of Java 24) addresses in-heap performance by eliminating object headers for small value types (`long`, `int`, and user-defined `value class Point { int x; int y; }`). The convergence point: a future Java may combine Valhalla value types with Panama `MemoryLayout` to store arrays of value types as contiguous native memory with zero GC overhead — today achievable with Panama + manual layout, future: automatically via the type system.
+Panama and Valhalla are complementary but orthogonal. Panama (`java.lang.foreign`) addresses foreign memory and foreign functions — calling native C code and managing off-heap data; it is a standard API you can use today. Valhalla addresses in-heap performance by eliminating object headers for small value types, and it has never previewed in a shipped JDK: JEP 401 *Value Objects (Preview)* integrated to mainline in July 2026 targeting **Java 28**, alongside JEP 539 *Strict Field Initialization in the JVM (Preview)*, so today it is reachable only in EA builds behind `--enable-preview`. Under JEP 401 a user-defined `value class Point { int x; int y; }` gives up identity so the JVM may flatten and unbox it freely. The practical consequence for a Panama user in 2026 is that value types are not something you can plan a release around, while `MemoryLayout` is shipping and standard. The convergence point: once Valhalla lands, value types plus Panama `MemoryLayout` will store arrays of value types as contiguous native memory with zero GC overhead — achievable today only with Panama and a hand-written layout.
 
 **Q15: How would you benchmark whether Panama's overhead is acceptable compared to JNI for a function called 1 million times/second?**
 **Short:** Benchmarks show Panama downcalls run faster than JNI, and Linker.Option.critical() cuts the overhead further.
@@ -677,11 +736,21 @@ public int jniStrlen(BenchmarkState s) {
 ```
 At 1 million calls/second, JNI costs ~60 µs/sec overhead; Panama with critical() costs ~15 µs/sec. For higher-frequency calls, the gap widens. The benchmark must include arena allocation (real cost) and should be run with JMH's full blackhole/fork methodology to prevent JIT from eliding the native call.
 
+**Q16: Your FFM code prints a warning on JDK 25 and you want it gone — what do you pass, and what happens if you do nothing?**
+**Short:** Grant --enable-native-access=ALL-UNNAMED; without it JDK 25 only warns, but a future deny default will throw IllegalCallerException.
+
+Pass `--enable-native-access=ALL-UNNAMED` on the `java` command line for classpath code (or `--enable-native-access=your.module.name` for a named module, or `Enable-Native-Access: ALL-UNNAMED` in the JAR manifest). Every restricted method — `Linker.downcallHandle`, `Linker.upcallStub`, `MemorySegment.reinterpret`, `SymbolLookup.libraryLookup`, and any jextract-generated call that reaches them — is gated by JEP 472. On JDK 24+, including the Java 25 LTS baseline, the default policy is `--illegal-native-access=warn`: doing nothing means the program still runs, but prints one warning per offending module naming the caller. That default is not permanent — OpenJDK states `deny` will become the default in a future release, at which point the same unguarded call throws `IllegalCallerException` instead of warning. The forward-looking move is to run CI now with `--illegal-native-access=deny` to find every caller that needs the grant before the default flips underneath you.
+
+**Q17: Why are JNI and the Foreign Function & Memory API now under one native-access policy, when JNI was unrestricted for 25 years?**
+**Short:** JNI and FFM both call unverifiable native code, so OpenJDK's integrity-by-default policy now restricts both identically.
+
+Both JNI and FFM let Java code call arbitrary native functions, and the JVM has no way to verify that native code respects Java's memory-safety guarantees — a bad call through either API can corrupt the heap or crash the process. JEP 472 (*Prepare to Restrict the Use of JNI*, Java 24) is the umbrella for OpenJDK's "integrity by default" programme, and its framing is deliberate: FFM is not being singled out as newly dangerous, JNI is being brought up to the standard FFM shipped with from GA. JNI escaped this scrutiny for 25 years mostly because it required hand-written C glue code that was already an obvious trust boundary; FFM makes native calls a one-line, pure-Java `MethodHandle` invocation, which is exactly what makes an accidental or unaudited restricted call easy to ship. Unifying the policy means a codebase's native-access surface — however it reaches native code — is auditable and gate-able through one flag, `--enable-native-access`, rather than two inconsistent trust models.
+
 ---
 
 ## 13. Best Practices
 
-1. **Always use `try-with-resources` with explicit arenas** — never let a confined or shared arena be GC-finalised; deterministic deallocation prevents native OOM.
+1. **Always use `try-with-resources` with explicit arenas** — never let a confined or shared arena be GC-finalised; deterministic deallocation prevents native OOM. This is [Effective Java Item 9: "Prefer try-with-resources to try-finally"] applied to a native resource instead of a file or socket.
 2. **Use `jextract` for large native libraries** — hand-coding 50+ function descriptors is error-prone; let the tool generate correct Java bindings from the C header.
 3. **Match struct padding to the C ABI explicitly** — use `MemoryLayout.paddingLayout()` and verify with `offsetof()` in a C test.
 4. **Use `allocateFrom(String)` (Java 22)** for C string creation — it appends the null terminator automatically; manual `copyFrom` without it causes buffer overreads.

@@ -2,6 +2,16 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
+> **Version anchor (2026-08-25).** **Terraform 1.15.9** (2026-08-19) is the current stable
+> release; 1.14.x and 1.15.x are the supported lines and **1.16.0-rc2** is in release
+> candidate. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
+> recommendation — it is the release that made S3-native state locking GA, which is the
+> oldest version the backend block on this page will work on. The `hashicorp/aws ~> 6.57`
+> pin is current as of this date; providers move faster than the CLI, so re-check the pin
+> before copying it. **Terraform Stacks** (§4) are GA and **HCP Terraform-only**.
+> Sources: [Terraform releases](https://github.com/hashicorp/terraform/releases),
+> [Stacks](https://developer.hashicorp.com/terraform/language/stacks).
+
 Terraform makes **infrastructure declarative, versioned, and reproducible**. Instead of clicking through the AWS console or running imperative scripts, you describe the desired end state in HCL (HashiCorp Configuration Language), and Terraform computes the diff between that desired state and a recorded **state file**, then calls cloud provider APIs to converge reality to the declaration. The state file is the keystone: it maps your config to real-world resource IDs, and almost every Terraform sharp edge — drift, locking, secrets leakage, blast radius — traces back to how state is stored and shared.
 
 ---
@@ -65,6 +75,50 @@ Terraform's lineage matters for naming: HashiCorp relicensed Terraform from MPL 
 | Directory per env | `envs/dev`, `envs/prod` with separate backends | Strong isolation; some duplication |
 | Terragrunt | DRY wrapper generating backends per env | Less duplication (see [terraform_advanced_and_alternatives](../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md)) |
 | Separate AWS accounts | Account per env + per-account state | Strongest blast-radius isolation |
+| Terraform Stacks | `component` blocks deployed into named `deployment`s, each with its own state | Strongest *coordination* story; HCP Terraform only |
+
+**Terraform Stacks** are the newest of these and the only one that is not just a convention
+over directories. A Stack splits a configuration into **components** — Terraform modules
+declared in `component` blocks in a `.tfcomponent.hcl` file — and then instantiates the whole
+set into one or more **deployments** declared in `.tfdeploy.hcl`. Each deployment gets its own
+isolated state, but the Stack is planned, applied and versioned as a single unit, and HCP
+Terraform works out the dependency order between components for you.
+
+```hcl
+# components.tfcomponent.hcl
+component "network" {
+  source    = "./modules/network"
+  inputs    = { cidr = var.cidr }
+  providers = { aws = provider.aws.this }
+}
+
+component "cluster" {
+  source    = "./modules/eks"
+  inputs    = { subnet_ids = component.network.private_subnet_ids }  # ordering is inferred
+  providers = { aws = provider.aws.this }
+}
+```
+
+```hcl
+# deployments.tfdeploy.hcl
+deployment "dev"  { inputs = { cidr = "10.0.0.0/16",  region = "us-east-1" } }
+deployment "prod" { inputs = { cidr = "10.10.0.0/16", region = "us-east-1" } }
+```
+
+**How it differs from what you already know.** Workspaces give you N states over one config
+but no way to express that the network must apply before the cluster — you run them in order
+by hand or in a pipeline. Terragrunt solves the same problem from outside, by generating
+backend and input boilerplate per directory and reading a `dependency` graph; it is a wrapper,
+so the dependency ordering lives in Terragrunt's config rather than in Terraform's. Stacks put
+the graph *inside* Terraform: `component.network.private_subnet_ids` is a first-class
+reference, not a `terraform_remote_state` lookup, so a change that ripples across components
+shows up in one plan.
+
+**The honest tradeoff is availability.** Stacks are an HCP Terraform feature and do not run in
+open-source CLI workflows or in OpenTofu, and they are not offered on legacy HCP Terraform team
+plans. If you are self-hosting state in S3, Stacks are not an option and the directory-per-env
+or Terragrunt rows above remain the answer.
+
 
 ### Meta-arguments (control resource creation)
 
@@ -577,6 +631,7 @@ resource "aws_instance" "node" {
 | Trivy (`trivy config`) / Checkov | Static security scanning of HCL |
 | `terraform-docs` | Auto-generate module docs from variables/outputs |
 | Atlantis | PR-driven plan/apply with locking and audit |
+| Terraform Stacks | Components + deployments planned as one unit; HCP Terraform only |
 | Terragrunt | DRY backends/inputs across many states |
 | Infracost | Cost estimate in the PR |
 
@@ -643,6 +698,21 @@ Split one monolithic state into multiple smaller states by lifecycle/ownership (
 **Q15: What changed with the Terraform-to-OpenTofu license fork, and does it affect your code?**
 **Short:** HashiCorp relicensed Terraform to the source-available BUSL in 2023, prompting the MPL-licensed OpenTofu fork that is a largely drop-in CLI replacement.
 In August 2023 HashiCorp relicensed Terraform from MPL 2.0 to the BUSL (a source-available, non-compete license), prompting the Linux Foundation-backed OpenTofu fork that keeps the MPL and is a drop-in CLI replacement. Your HCL, providers, and workflow are largely identical, so migration is mostly swapping the binary and re-running `init`; the divergence to watch is newer features landing differently in each. Choose based on licensing comfort and the specific features (e.g., state encryption, early variable evaluation) each ships — covered in [terraform_advanced_and_alternatives](../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md).
+
+**Q16: Your team has 40 directory-per-env states and every release needs them applied in a specific order. What does Terraform Stacks change?**
+**Short:** Stacks move the dependency graph inside Terraform — components reference each other directly and deploy as one planned unit — instead of leaving the ordering to a pipeline or a wrapper.
+
+Stacks move the ordering problem from your pipeline into Terraform. Today that graph lives somewhere outside the configuration: a Jenkins job that applies `network` then `data` then `app`, or a Terragrunt `dependency` block, with cross-state values passed by `terraform_remote_state`. In a Stack you declare each module as a `component` in a `.tfcomponent.hcl` file, reference one component's outputs from another directly (`component.network.private_subnet_ids`), and instantiate the whole set into named `deployment`s in `.tfdeploy.hcl` — each deployment keeps its own isolated state, but HCP Terraform derives the apply order and plans the set as one unit, so a change rippling across four components appears in a single plan instead of four sequential ones. The catch, and you should say it in an interview because it is the first thing a good interviewer asks: **Stacks are an HCP Terraform feature**, unavailable in the open-source CLI workflow, in OpenTofu, and on legacy HCP team plans. If your state lives in your own S3 bucket, this is not on the menu and directory-per-env with a pipeline remains the right answer.
+
+**Q17: What does `required_version = ">= 1.11"` actually protect you from, and why not pin it exactly?**
+**Short:** It is a floor that stops an older CLI from misreading configuration written for a newer one, and pinning it exactly would break every colleague who is one patch ahead.
+
+`required_version` is a compatibility floor, and its job is to fail `init` loudly rather than let an older binary silently misinterpret newer syntax. The `>= 1.11` on this page is not arbitrary: 1.11 is where S3-native state locking went GA, so it is the oldest CLI that understands the `use_lockfile = true` in this configuration's backend block — an older binary would ignore the setting and run unlocked, which is exactly the silent-corruption case the constraint exists to prevent. Pinning it exactly (`= 1.11.0`) is the common overcorrection and it is worse: every teammate, CI runner and Atlassian bot then has to hold that precise patch, and a security patch release breaks the whole team at once. Use a floor for the CLI and a pessimistic major pin (`~> 6.57`) for providers, and commit `.terraform.lock.hcl` so provider *versions and checksums* are reproducible even though the constraint is a range. The current stable line is 1.15.x, so a `>= 1.11` floor is comfortably satisfied everywhere while still refusing the binary that would run your state unlocked.
+
+**Q18: You run `terraform plan` and it wants to destroy and recreate a resource you only renamed in the config. Why, and what do you do?**
+**Short:** Terraform keys state by resource address, so renaming the block makes the old address vanish and a new one appear — which reads as a destroy plus a create.
+
+Terraform tracks resources by their address in state (`aws_instance.web`), not by any property of the cloud resource, so renaming the block makes the old address disappear and a new one appear — and a disappeared address means destroy, a new address means create. The cloud resource never changed; only your label for it did. The fix is to tell Terraform about the rename rather than let it infer a replacement, and there are two ways. The declarative one is a `moved` block, which you commit alongside the rename so every teammate and CI runner replays the same history: `moved { from = aws_instance.web  to = aws_instance.frontend }`. The imperative one is `terraform state mv aws_instance.web aws_instance.frontend`, which mutates state directly and is invisible to everyone else — use it only for a one-off you are cleaning up locally, and back the state up first. Prefer `moved` blocks: they are code-reviewable, they survive in history, and they are safe to leave in place for a release or two before deleting. The same trap fires when you move a resource into a module or add `for_each` to something that had none, and `moved` handles both.
 
 ---
 

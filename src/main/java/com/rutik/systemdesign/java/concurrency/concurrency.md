@@ -16,7 +16,7 @@ This module is the most critical for senior Java interviews. Expect questions on
 
 **Why it matters**: A race condition that appears 1 in 10,000 runs in testing will appear 1 in 100 runs in production under load. Double-checked locking without `volatile` worked fine in testing (single-threaded) and caused mysterious NPEs on production servers for years. ThreadLocal memory leaks slowly killed servlet containers at scale.
 
-**Key insight**: The majority of concurrency bugs fall into three categories: (1) visibility failure (stale reads — fix with `volatile` or `synchronized`); (2) atomicity failure (check-then-act race — fix with locks or CAS); (3) ordering failure (JIT reorders operations — fix with `volatile`/`synchronized`/JMM happens-before).
+**Key insight**: The majority of concurrency bugs fall into three categories: (1) visibility failure (stale reads — fix with `volatile` or `synchronized` [Effective Java Item 78: "Synchronize access to shared mutable data"]); (2) atomicity failure (check-then-act race — fix with locks or CAS); (3) ordering failure (JIT reorders operations — fix with `volatile`/`synchronized`/JMM happens-before).
 
 ---
 
@@ -466,7 +466,7 @@ flowchart LR
     class Lock lossN
 ```
 
-`L` can't finish (`M` preempts it), `H` can't proceed (`L` holds the lock) — `H` is starved by `M` even though `H` has higher priority than `M`.
+`L` can't finish (`M` preempts it), `H` can't proceed (`L` holds the lock) — `H` is starved by `M` even though `H` has higher priority than `M` [Effective Java Item 84: "Don't depend on the thread scheduler"].
 
 Java manifestation:
 - OS thread scheduler prioritizes M over L
@@ -537,7 +537,7 @@ class NonFairSync extends AbstractQueuedSynchronizer {
 
 ## 7. Real-World Examples
 
-- **Thread pool queue saturation → RejectedExecutionException**: A service used `Executors.newCachedThreadPool()` (unbounded threads). Under load spike, it created 50,000 threads, exhausted OS thread limit, crashed the JVM. Fix: bounded `ThreadPoolExecutor` with `ArrayBlockingQueue`.
+- **Thread pool queue saturation → RejectedExecutionException**: A service used `Executors.newCachedThreadPool()` (unbounded threads). Under load spike, it created 50,000 threads, exhausted OS thread limit, crashed the JVM. Fix: bounded `ThreadPoolExecutor` with `ArrayBlockingQueue` [Effective Java Item 80: "Prefer executors, tasks, and streams to threads"].
 - **HashMap infinite loop (Java 6 concurrent resize race)**: Two threads concurrently inserting into a `HashMap` triggered simultaneous resize. The linked list in a bucket formed a cycle during the resize, causing infinite loop in `get()`. Fixed in Java 8 (resize algorithm reworked), but ConcurrentHashMap should always be used for multi-threaded access.
 - **ThreadLocal memory leak in Tomcat**: A web app stored request-scoped data in `ThreadLocal`. After undeploy, Tomcat reused threads but the `ThreadLocal` values (with references to app classloader) were never removed. This prevented the app's classloader (and all its loaded classes) from being GC'd — metaspace leak.
 
@@ -596,7 +596,7 @@ public static Service getInstance() {
     return instance;  // Thread B may see non-null but uninitialized object
 }
 ```
-Caused intermittent NPEs in production on multi-core servers. Fix: `volatile` on `instance`.
+Caused intermittent NPEs in production on multi-core servers. Fix: `volatile` on `instance` [Effective Java Item 83: "Use lazy initialization judiciously"].
 
 ### War Story 2: ThreadPoolExecutor — tasks never run (wrong queue)
 A developer used `Executors.newFixedThreadPool(10)` which uses `LinkedBlockingQueue` (unbounded). Under load, the queue grew to millions of tasks. The pool had only 10 threads, maximum was also 10 — no new threads were created because the queue was never full. Tasks waited for hours. Fix: `ArrayBlockingQueue` with bounded size + `CallerRunsPolicy` for backpressure.
@@ -728,7 +728,7 @@ AQS is the framework underlying all major JUC synchronizers. Core structure: `vo
 
 ## 13. Best Practices
 
-1. **Prefer JUC over `synchronized`/`wait`/`notify`** — `ReentrantLock`, `BlockingQueue`, `CountDownLatch` are higher-level and safer.
+1. **Prefer JUC over `synchronized`/`wait`/`notify`** — `ReentrantLock`, `BlockingQueue`, `CountDownLatch` are higher-level and safer [Effective Java Item 81: "Prefer concurrency utilities to wait and notify"].
 2. **Size thread pools explicitly**: CPU-bound = `# CPU cores + 1`; IO-bound = `# CPU cores × (1 + wait_time/compute_time)`.
 3. **Always use bounded queues** in `ThreadPoolExecutor` with a sensible saturation policy (`CallerRunsPolicy` for backpressure).
 4. **Always call `threadLocal.remove()`** in a `finally` block in pooled thread environments.

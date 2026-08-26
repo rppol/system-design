@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: gpu -->
 
-The 208 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 207 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **GPU & parallel** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1596,12 +1596,6 @@ This is why a single OpenCL binary runs on whatever hardware a machine happens t
 It implements the WebGPU API in Rust over native backends, namely Vulkan, Metal, DirectX 12 and OpenGL, so the same code runs as a desktop binary or, compiled to WebAssembly, against the browser's own WebGPU implementation. Compute work is written in WGSL and dispatched as workgroups over storage buffers bound through explicit bind groups and pipelines, with resource state and lifetime validated rather than left to the programmer.
 
 Reach for it when the target is the browser or a portable desktop application and shipping vendor drivers is not an option. It is not a datacentre compute stack: the portable API has no tensor-core-class matrix instructions, buffer size and workgroup limits are conservative, and support for the newest hardware features only arrives once the standard defines them.
-
-### When each wins
-**Short:** Table-row fragment, not a product: MIG versus MPS, hard blast-radius isolation against shared small-model throughput.
-**Kind:** concept
-**Lang:** *
-**Roles:** gpu/multi-gpu-and-collectives @1
 
 ### xformers
 **Short:** Meta's library of memory-efficient attention kernels and transformer building blocks for PyTorch.

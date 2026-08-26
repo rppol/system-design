@@ -12,7 +12,11 @@ between studies.
 
 All code in the studies targets Java 21+ and is written against the Java 25 LTS baseline.
 Concurrency examples use the java.util.concurrent package and `VarHandle` — never
-`sun.misc.Unsafe`, which is no longer reachable from application code. `synchronized` appears
+`sun.misc.Unsafe`. The class itself is still reachable (it lives in the `jdk.unsupported`
+module, resolved by default), but its memory-access methods are deprecated for removal
+(JEP 471, JDK 23) in favor of `VarHandle` and the Foreign Function & Memory API, and as of
+JDK 26 calling one throws by default (JEP 498) — so new code should never reach for it.
+`synchronized` appears
 where it is genuinely the right primitive as well as in broken-then-fixed pairs; since JEP 491
 (Java 24) it no longer pins virtual threads, so it is not something to avoid on Loom's
 account. What still pins a carrier is a native frame — a JNI call or a Foreign Function &

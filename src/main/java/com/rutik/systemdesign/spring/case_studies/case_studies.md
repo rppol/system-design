@@ -54,6 +54,12 @@ Studies are grouped by primary engineering concern, not product category.
 
 ---
 
+### Group 6: AI and Tool Platforms
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [MCP Tool Platform](design_mcp_tool_platform.md) | Model-facing tool APIs, OAuth 2.1 resource server | `@McpTool`/`@McpResource`/`@McpPrompt` on ordinary beans, scope-filtered `tools/list`, RFC 8693 token exchange instead of passthrough, progressive disclosure for large catalogues, handle-based state. |
+
 ## Cross-Cutting / Shared Primitives
 
 These files in `cross_cutting/` cover infrastructure patterns used across multiple case studies. Consume each file just before (or alongside) the case studies that rely most heavily on it.
@@ -116,6 +122,8 @@ design_batch_pipeline                    (standalone; no direct upstream depende
 | How do you prevent double-charge in payments? | [Idempotent Payment API](design_idempotent_payment_api.md) |
 | How do you isolate tenants in a shared database? | [Multi-Tenant API](design_multitenant_api.md) |
 | How do you implement circuit breaking in Spring? | [API Gateway](design_api_gateway.md) + [Resilience4j Patterns](cross_cutting/resilience4j_patterns.md) |
+| Design an MCP server / internal tool platform for LLM agents | [MCP Tool Platform](design_mcp_tool_platform.md) |
+| How do you stop a service forwarding a caller's token downstream? | [MCP Tool Platform](design_mcp_tool_platform.md) |
 
 ---
 

@@ -4,7 +4,7 @@
 
 Browser agents are LLM agents that navigate and interact with web pages — clicking, typing, scrolling, filling forms, extracting data — to accomplish tasks on sites without official APIs. They complement the more general "computer use" pattern by specializing on web interfaces, where DOM structure provides richer context than raw pixels and where browser automation tools (Playwright, Puppeteer) provide reliable primitives.
 
-The 2024-2025 browser-agent ecosystem includes Browser Use (Python, LLM-controlled Playwright with hybrid DOM+vision extraction), Stagehand (TypeScript, Browserbase-backed, vision+DOM), Playwright MCP (Anthropic's official MCP server for Playwright control), Browserbase (cloud browser infrastructure), and Skyvern (form-heavy automation). On the WebArena benchmark of real-world web tasks, leading agents achieve ~58% success (Browser Use with Claude Sonnet 4 + DOM extraction); pure-screenshot approaches hover around 30%.
+The browser-agent ecosystem includes Browser Use (Python, LLM-controlled Playwright with hybrid DOM+vision extraction), Stagehand (TypeScript, Browserbase-backed, vision+DOM), Playwright MCP (Anthropic's official MCP server for Playwright control), Browserbase (cloud browser infrastructure), Skyvern (form-heavy automation), and the vision-driven "computer use" agents — Anthropic's Claude computer use and OpenAI's Computer-Using-Agent (the model behind ChatGPT Atlas) — plus a newer wave of AI-native consumer browsers (Perplexity Comet, OpenAI's ChatGPT Atlas, Opera Neon). WebArena (2023), the benchmark this ecosystem originally measured itself against, has stopped separating systems — third-party trackers put 2026 frontier scaffolds in the high-60s to mid-70s, close to WebArena's own 78.24% human reference. The field has moved to OSWorld 2.0 (2026, 108 hour-scale GUI workflows, best reported agent around 20% binary completion) and BrowseComp (2025, 1,266 web-research questions, where persistence-built agents reach roughly 51.5% against under 2% for browsing-only baselines) for benchmarks that still discriminate between systems — see [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md) for the full roster and numbers.
 
 The fundamental design choice — DOM extraction vs vision vs hybrid — drives reliability, latency, and cost.
 
@@ -38,7 +38,7 @@ The fundamental design choice — DOM extraction vs vision vs hybrid — drives 
 
 ### 4.1 Browser Use (Python)
 
-Open-source library. Wraps Playwright. Default flow: extract accessibility tree → LLM picks action → execute → re-extract. Strong with Claude Sonnet 4 (~58% WebArena). Modular: swap models, customize extraction.
+Open-source library. Wraps Playwright. Default flow: extract accessibility tree → LLM picks action → execute → re-extract. Modular: swap models, customize extraction. See §8 for how it performs on current benchmarks (OSWorld 2.0, BrowseComp) rather than the now-saturated WebArena.
 
 ### 4.2 Stagehand (TypeScript)
 
@@ -289,11 +289,15 @@ context = await browser.new_context(storage_state="auth.json")
 | Computer Use (generic) | Slow (multi-second per action) | ~60-70% on web | High | Universal |
 | Stagehand semantic actions | Fast (DOM-first) | 90%+ | Mid | Excellent for natural language |
 
-WebArena benchmark scores (approximate, 2024-2025):
-- Browser Use + Claude Sonnet 4 + DOM: **~58%**
-- Stagehand + Claude Sonnet 4: ~50%
-- GPT-4 + Computer Use: ~30-40%
-- SeeAct + GPT-4V (screenshot): ~30%
+WebArena (2023) was the benchmark this table's numbers used to cite, and it has stopped
+separating systems: third-party 2026 trackers put frontier scaffolds in the high-60s to
+mid-70s, close to WebArena's own 78.24% human reference — a benchmark score that no longer
+discriminates DOM from vision approaches the way it once did. Current benchmarks that still
+discriminate, per [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md):
+- BrowseComp (2025, persistent multi-hop web research) — a persistence-built search agent
+  reaches **~51.5%**, against **~1.9%** for browsing access alone (GPT-4o with no search loop)
+- OSWorld 2.0 (2026, 108 hour-scale GUI workflows, ~318 steps/task) — best reported agent
+  (Claude Opus 4.8, maximum thinking effort) reaches **~20.6%** binary completion (54.8% partial)
 
 ### Why 95% per-step accuracy is not a 95% agent
 
@@ -305,15 +309,15 @@ P(task succeeds) = p ^ n
 
 **What the formula is telling you.** "Per-step accuracy is multiplied, not averaged — so a number that sounds excellent in isolation decays into a number that sounds broken once you chain fifteen of them."
 
-This single exponent explains the whole benchmark table. Nobody's agent is 30% accurate at clicking buttons; the vision-only agents scoring ~30% on WebArena are individually right well over 90% of the time. Compounding does the rest.
+This single exponent explains the whole benchmark table. Nobody's research agent is 2% accurate at individual actions; the browsing-only baseline scoring ~1.9% on BrowseComp is individually right on most of its steps. Compounding does the rest.
 
 | Symbol | What it is |
 |--------|------------|
 | `p` | Per-step reliability. One click, one type, one extraction landing correctly |
 | `n` | Actions in the task. The Section 14 agent averages 15 and caps at `max_steps=25` |
-| `p ^ n` | End-to-end task success. What a benchmark like WebArena actually reports |
+| `p ^ n` | End-to-end task success. What a benchmark like BrowseComp or OSWorld actually reports |
 | `p = S^(1/n)` | The inverse. Given an observed task success `S`, the per-step reliability it implies |
-| `S` | Observed end-to-end success rate — the ~58% / ~30% figures above |
+| `S` | Observed end-to-end success rate — the ~51.5% / ~1.9% BrowseComp figures above |
 
 **Walk one example.** Per-step reliability across realistic task lengths:
 
@@ -330,14 +334,14 @@ This single exponent explains the whole benchmark table. Nobody's agent is 30% a
   At 15 steps it delivers 0.4633: the agent fails more than half its tasks
   while every individual action is 95% correct.
 
-  Now invert the benchmark scores, assuming n = 15 actions per task:
-    WebArena 58%  ->  p = 0.58 ^ (1/15) = 0.9643    (DOM, Browser Use)
-    WebArena 30%  ->  p = 0.30 ^ (1/15) = 0.9229    (screenshot-only)
+  Now invert the BrowseComp scores, assuming n = 15 actions per task:
+    Persistent search agent 51.5%  ->  p = 0.515 ^ (1/15) = 0.9567
+    Browsing access alone     1.9%  ->  p = 0.019 ^ (1/15) = 0.7679
 
-  4.15 points of per-step reliability  ->  28 points of task success.
+  18.9 points of per-step reliability  ->  49.6 points of task success.
 ```
 
-**Why this reframes the DOM-vs-vision argument.** The gap between the best and worst rows of the benchmark table looks like a chasm — 58% vs 30%. Run it back through the exponent and the two approaches differ by just 4.15 percentage points per action. Compounding is an amplifier: it makes small per-step edges look like architectural revolutions, which is exactly why marginal-seeming techniques (semantic selectors over CSS, waiting for explicit state, verifying after each action) pay off so disproportionately. It also sets the engineering target — chasing `p` from 0.96 to 0.99 is worth far more than any prompt-level cleverness, and shortening `n` is the other lever, which is what `max_actions_per_step` chaining buys you.
+**Why this reframes the "just add browsing" argument.** The gap between a persistent search agent and browsing access alone looks like a chasm — 51.5% vs 1.9%. Run it back through the exponent and the two approaches differ by 18.9 percentage points per action, not the ~50-point gulf the headline numbers suggest. Compounding is an amplifier: it makes real per-step edges look like architectural revolutions, which is exactly why marginal-seeming techniques (query reformulation on a dead end, verifying a claim before committing to it, backtracking out of a bad lead) pay off so disproportionately over a 15-plus-step research task. It also sets the engineering target — chasing `p` upward is worth far more than any single prompt-level trick, and shortening `n` is the other lever, which is what `max_actions_per_step` chaining buys you.
 
 ---
 
@@ -446,9 +450,9 @@ Two patterns: (1) Session persistence — manually log in once, save cookies+loc
 **Short:** Captchas are handled by avoiding triggers with stealth proxies, solving via a service like 2captcha, or escalating to a human to solve live.
 Three options: (1) Avoid by using residential proxies / stealth browsers (Browserbase has this) to reduce captcha triggering. (2) Solve via 2captcha or CapSolver API — agent detects captcha, sends image, gets solution back. (3) Escalate to human — pause agent, request user to solve in real browser, resume.
 
-**Q: What's WebArena and how do agents perform on it?**
-**Short:** WebArena is CMU's realistic multi-step benchmark across six live sites, where leading agents like Browser Use with Claude reach roughly 58%.
-WebArena (CMU 2024) is a benchmark of real web tasks across 6 sites (Shopping, GitLab, Reddit, OpenStreetMap, etc). Tests are realistic multi-step tasks. Leading agents: Browser Use + Claude Sonnet 4 ~58%, Stagehand ~50%, vision-only approaches ~30%. Benchmark drives architectural progress.
+**Q: What's WebArena, and is it still the right benchmark to cite for browser agent performance?**
+**Short:** WebArena is a 2023 multi-step web benchmark that has since saturated — 2026 frontier scaffolds cluster in the high-60s to mid-70s near its human reference, so current work cites OSWorld 2.0 or BrowseComp instead.
+WebArena (CMU, 2023) is a benchmark of real web tasks across 6 self-hosted sites (Shopping, GitLab, Reddit, OpenStreetMap, etc), scored by checking backend state against the annotated goal rather than the transcript — a scoring approach that outlived the benchmark itself and is now the default pattern other environments (OSWorld, τ-bench) copied. As a number, though, WebArena has stopped discriminating between systems: third-party trackers put 2026 frontier scaffolds in the high-60s to mid-70s, in the neighborhood of the paper's own 78.24% human reference. For a benchmark that still separates systems, use OSWorld 2.0 (2026, hour-scale GUI workflows, best reported agent ~20.6% binary completion) or BrowseComp (2025, persistent web research, ~51.5% for a persistence-built search agent versus ~1.9% for browsing access alone). See [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md) for the full current roster.
 
 **Q: When should you use vision vs DOM extraction?**
 **Short:** Use DOM extraction for standard HTML sites and fall back to vision only for canvas UIs, PDFs, or when DOM extraction returns ambiguous results.
@@ -526,7 +530,7 @@ flowchart TD
     w0["Worker 0<br/>Portal A<br/>Browserbase session"]
     w1["Worker 1<br/>Portal B<br/>Browserbase session"]
     w5["Worker 5<br/>Portal C<br/>Browserbase session"]
-    claude["Claude Sonnet 4<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
+    claude["Claude Sonnet 5<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
     s3@{ icon: "logos:aws-s3", form: "square", label: "Audit Log +<br/>Screenshot Archive (S3)", pos: "b", h: 44 }
 
     oms --> pg

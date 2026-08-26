@@ -19,7 +19,7 @@ The motivation is to solve the pain points of large monolithic systems:
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Microservices are like specialized departments in a company — the Payments team, Inventory team, and Shipping team each do their job independently, communicate via well-defined processes, and can be scaled or updated without shutting down the whole company.
 
@@ -31,7 +31,7 @@ The motivation is to solve the pain points of large monolithic systems:
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 ### Single Responsibility
 Each service is responsible for one bounded context (e.g., User Service, Order Service, Payment Service). "Do one thing and do it well."
@@ -56,7 +56,7 @@ In a distributed system, partial failures are normal. Every service must handle:
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
 ### Monolith vs Microservices vs SOA
 
@@ -113,7 +113,101 @@ Three architectural generations side by side: the monolith is one deployable blo
 
 ---
 
-## 4. How It Works — Detailed Mechanics
+## 5. Architecture Diagrams
+
+### Full Microservices Architecture
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    mysql@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
+    mongo@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
+    bus@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    graf@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
+    ext([External Clients<br/>Web Browser, Mobile]) --> gw("API GATEWAY<br/>Auth · Rate Limit<br/>Routing · SSL Term")
+
+    gw --> user("User Service")
+    gw --> order("Order Service")
+    gw --> product("Product Service")
+
+    user --> pg
+    order --> mysql
+    product --> mongo
+
+    mysql --> bus
+
+    bus --> payment("Payment Service")
+    bus --> notif("Notification Service")
+    bus --> analytics("Analytics Service")
+
+    payment --> paydb("Payment DB")
+
+    subgraph OBS["Observability Layer (crosses all services)"]
+        direction LR
+        jaeger("Jaeger<br/>Tracing")
+        prom
+        elk("ELK Stack<br/>Logs")
+        graf
+    end
+
+    class ext io
+    class gw mathOp
+    class user,order,product,payment,notif,analytics train
+    class paydb base
+    class jaeger,elk frozen
+```
+
+Every request flows top to bottom through the gateway into a service and its own database; the Kafka event bus is the only path from the synchronous request-serving tier into the asynchronous Payment/Notification/Analytics tier. The observability layer sits outside the request path but instruments every one of these services.
+
+### Service Mesh with Sidecar Proxies
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph S1["Order Service"]
+        o1("App") --> o2("Envoy Proxy")
+    end
+    subgraph S2["Payment Service"]
+        p1("App") --> p2("Envoy Proxy")
+    end
+    subgraph S3["Inventory Service"]
+        i1("App") --> i2("Envoy Proxy")
+    end
+
+    o2 <-->|"mTLS"| p2
+    p2 <-->|"mTLS"| i2
+
+    o2 -.-> cp("istiod Control Plane<br/>xDS config · CA · telemetry")
+    p2 -.-> cp
+    i2 -.-> cp
+
+    class o1,p1,i1 train
+    class o2,p2,i2 mathOp
+    class cp frozen
+```
+
+Application code never talks mTLS directly — every sidecar proxy handles encryption and identity, while the control plane pushes certificates and policy to every sidecar out-of-band (dotted).
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 A microservices architecture is built from five recurring mechanisms: services need to find each other (discovery), external clients need a single entry point (gateway), services need to talk to each other (communication), each service needs to own its data (data management), and an existing monolith needs an incremental path to get there (migration).
 
@@ -506,101 +600,7 @@ genuinely unavoidable and expand-and-contract cannot absorb it.
 
 ---
 
-## 5. Architecture Diagrams
-
-### Full Microservices Architecture
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
-    mysql@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
-    mongo@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
-    bus@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
-    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
-    graf@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
-
-    ext([External Clients<br/>Web Browser, Mobile]) --> gw("API GATEWAY<br/>Auth · Rate Limit<br/>Routing · SSL Term")
-
-    gw --> user("User Service")
-    gw --> order("Order Service")
-    gw --> product("Product Service")
-
-    user --> pg
-    order --> mysql
-    product --> mongo
-
-    mysql --> bus
-
-    bus --> payment("Payment Service")
-    bus --> notif("Notification Service")
-    bus --> analytics("Analytics Service")
-
-    payment --> paydb("Payment DB")
-
-    subgraph OBS["Observability Layer (crosses all services)"]
-        direction LR
-        jaeger("Jaeger<br/>Tracing")
-        prom
-        elk("ELK Stack<br/>Logs")
-        graf
-    end
-
-    class ext io
-    class gw mathOp
-    class user,order,product,payment,notif,analytics train
-    class paydb base
-    class jaeger,elk frozen
-```
-
-Every request flows top to bottom through the gateway into a service and its own database; the Kafka event bus is the only path from the synchronous request-serving tier into the asynchronous Payment/Notification/Analytics tier. The observability layer sits outside the request path but instruments every one of these services.
-
-### Service Mesh with Sidecar Proxies
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    subgraph S1["Order Service"]
-        o1("App") --> o2("Envoy Proxy")
-    end
-    subgraph S2["Payment Service"]
-        p1("App") --> p2("Envoy Proxy")
-    end
-    subgraph S3["Inventory Service"]
-        i1("App") --> i2("Envoy Proxy")
-    end
-
-    o2 <-->|"mTLS"| p2
-    p2 <-->|"mTLS"| i2
-
-    o2 -.-> cp("istiod Control Plane<br/>xDS config · CA · telemetry")
-    p2 -.-> cp
-    i2 -.-> cp
-
-    class o1,p1,i1 train
-    class o2,p2,i2 mathOp
-    class cp frozen
-```
-
-Application code never talks mTLS directly — every sidecar proxy handles encryption and identity, while the control plane pushes certificates and policy to every sidecar out-of-band (dotted).
-
----
-
-## 6. Resilience, Tracing, Security & Deployment
+### Resilience, Tracing, Security & Deployment
 
 Beyond the core request-handling mechanics in §4, every production microservices system needs a layer of cross-cutting resilience and operations concerns: how to fail gracefully (circuit breakers), how to keep data consistent across services without 2PC (sagas), how to debug a request that touched 10 services (tracing), how to secure service-to-service traffic (mesh/mTLS), and how to ship code (deployment).
 
@@ -1135,8 +1135,8 @@ Notice that the latency number and the saturation number come from the same mult
 | Service Discovery | Eureka, Consul, Kubernetes DNS / kube-proxy, etcd, Apache ZooKeeper | Kubernetes DNS is the default in any K8s deployment; Eureka/Consul are common in non-K8s or hybrid environments |
 | API Gateway | Kong, AWS API Gateway, Envoy, Apigee, Spring Cloud Gateway | Envoy doubles as a gateway and a service-mesh data plane; Spring Cloud Gateway is the JVM-native option |
 | Circuit Breaker | Resilience4j (current JVM standard), Polly (.NET), pybreaker (Python) | Resilience4j is lightweight and uses semaphore-based isolation by default, not thread pools — tune accordingly |
-| Service Mesh | Istio, Linkerd, Cilium Service Mesh, Consul service mesh; on AWS, Amazon ECS Service Connect (ECS) and VPC Lattice (EKS) | Istio is the most feature-rich but operationally heaviest; Linkerd is simpler to run; Cilium does it in eBPF with no per-pod sidecar |
-| Distributed Tracing | Jaeger, Zipkin, OpenTelemetry (instrumentation standard), AWS X-Ray, Datadog APM | OpenTelemetry is the vendor-neutral instrumentation layer; Jaeger/Zipkin/X-Ray/Datadog are backends it can export to |
+| Service Mesh | Istio, Linkerd, Cilium Service Mesh, Consul service mesh, ECS Service Connect, Amazon VPC Lattice | Istio is the most feature-rich; its **ambient mode** (GA in v1.24, November 2024, and the mainline data plane on the current roadmap) drops the per-pod sidecar for a per-node `ztunnel` handling mTLS and L4, with an optional per-namespace waypoint proxy for L7 — cutting data-plane memory substantially versus sidecars and removing the sidecar-injection and pod-restart operational tax. Linkerd stays the simplest to run; Cilium does L4 in eBPF with no proxy at all; on AWS, ECS Service Connect covers ECS and VPC Lattice covers EKS |
+| Distributed Tracing | OpenTelemetry (instrumentation standard), Jaeger v2, Zipkin, AWS X-Ray, Datadog APM | OpenTelemetry is the vendor-neutral instrumentation layer and graduated in the CNCF in May 2026. Jaeger v2 is built on the OTel Collector framework and speaks OTLP end to end — there is no separate Jaeger agent tier and no Jaeger client library any more (the OTel SDKs replaced them), and v1 reached end of life on 31 December 2025 with no releases after that |
 | Container Orchestration | Kubernetes, AWS ECS, AWS Fargate, Docker Swarm, Nomad | Kubernetes is the de-facto standard; ECS/Fargate is simpler if fully AWS-committed |
 | Messaging / Event Bus | Apache Kafka, RabbitMQ, AWS SNS, AWS SQS, Google Pub/Sub | Kafka for high-throughput event streams with replay; SQS/RabbitMQ for simpler point-to-point queues |
 | Saga Orchestration | Temporal, Camunda, AWS Step Functions, Conductor OSS (maintained by Orkes) | Temporal/Camunda are general workflow engines often repurposed for sagas; Step Functions if AWS-native |
@@ -1177,9 +1177,9 @@ Each service owns its own database; no other service accesses it directly. Benef
 The API gateway is the single entry point handling SSL termination, authentication (validate JWT), rate limiting (token bucket/sliding window), routing (path-based to services), and optional request aggregation. Use Kong, AWS API Gateway, or Envoy as the implementation.
 
 **Q7: What is a service mesh and when would you use it?**
-**Short:** A service mesh manages service-to-service traffic via sidecar proxies, justified once a system has 20+ services.
+**Short:** A service mesh moves mTLS, traffic policy and telemetry out of application code into the platform, and is justified once a system has 20+ services.
 
-A service mesh (Istio/Envoy) manages service-to-service communication as infrastructure via sidecar proxies. Use it when you need: mutual TLS for all service traffic, fine-grained traffic policies (canary, retries, timeouts), and consistent observability without changing application code. Justified at 20+ services.
+A service mesh (Istio/Envoy, Linkerd, Cilium) manages service-to-service communication as infrastructure rather than as library code in every service. Use it when you need mutual TLS on all service traffic, fine-grained traffic policy (canary, retries, timeouts, outlier ejection), and consistent observability without touching applications. Justified at roughly 20+ services — below that, a shared client library is cheaper than a control plane. The data plane comes in two shapes now, and knowing the difference is the follow-up question: the classic **sidecar** model injects a proxy container into every pod (one proxy per workload, a pod restart to inject or upgrade it, and per-pod memory), while Istio's **ambient** mode — GA since v1.24 in November 2024 — runs a per-node `ztunnel` for mTLS and L4 and adds a per-namespace waypoint proxy only where L7 policy is actually needed. Ambient is the cheaper default for a large fleet that mostly wants encryption and identity; keep sidecars where you need per-workload L7 policy everywhere or depend on a sidecar-only Envoy extension.
 
 **Q8: How does distributed tracing work?**
 **Short:** A trace ID propagates through every service call, and spans are stitched together by a tracing backend like Jaeger.
@@ -1233,21 +1233,6 @@ Make every schema change additive and ship it as three separate deploys — expa
 
 ---
 
-## Cross-Perspective: LLD Connections
-
-**LLD View — Design Patterns That Implement Microservices**
-
-- **Facade** — API gateways and BFF (Backend for Frontend) services are Facades: they present a simplified, client-specific interface over the complex microservice mesh, hiding routing, aggregation, and protocol translation.
-- **Proxy** — Service mesh sidecars (Envoy, Linkerd) and circuit breakers are Proxy pattern at the infrastructure level: they wrap every service-to-service call to add retries, timeouts, mTLS, load balancing, and distributed tracing.
-- **Observer** — Event-driven inter-service communication (via Kafka or SNS) is Observer: services publish domain events without knowing who consumes them, enabling loose coupling and independent deployability.
-- **Strategy** — Service discovery (client-side, server-side, DNS-based), circuit breaker policies (error rate threshold, half-open retry interval), and retry strategies (exponential backoff, jitter) are interchangeable Strategy implementations.
-
----
-
-**Cross-references:** [backend/microservices_fundamentals](../../backend/microservices_fundamentals/microservices_fundamentals.md) (decomposition strategies, bounded contexts in code), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/api_gateway_patterns.md), [backend/service_mesh_and_service_discovery](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) (Istio/Envoy, sidecar pattern), [spring/spring_cloud_patterns](../../spring/spring_cloud_patterns/spring_cloud_patterns.md) (Spring Cloud Gateway, service discovery with Eureka/Consul), [event_sourcing_cqrs](../event_sourcing_cqrs/event_sourcing_cqrs.md) (Saga pattern deep dive).
-
----
-
 ## 13. Best Practices
 
 ### Design for Failure
@@ -1272,6 +1257,21 @@ Isolate resources (thread pools, connection pools) per dependency. If Dependency
 
 ### Graceful Degradation
 Identify critical vs non-critical features. If the recommendation service is down, show the checkout page without recommendations rather than failing entirely.
+
+---
+
+### Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement Microservices**
+
+- **Facade** — API gateways and BFF (Backend for Frontend) services are Facades: they present a simplified, client-specific interface over the complex microservice mesh, hiding routing, aggregation, and protocol translation.
+- **Proxy** — Service mesh sidecars (Envoy, Linkerd) and circuit breakers are Proxy pattern at the infrastructure level: they wrap every service-to-service call to add retries, timeouts, mTLS, load balancing, and distributed tracing.
+- **Observer** — Event-driven inter-service communication (via Kafka or SNS) is Observer: services publish domain events without knowing who consumes them, enabling loose coupling and independent deployability.
+- **Strategy** — Service discovery (client-side, server-side, DNS-based), circuit breaker policies (error rate threshold, half-open retry interval), and retry strategies (exponential backoff, jitter) are interchangeable Strategy implementations.
+
+---
+
+**Cross-references:** [backend/microservices_fundamentals](../../backend/microservices_fundamentals/microservices_fundamentals.md) (decomposition strategies, bounded contexts in code), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/api_gateway_patterns.md), [backend/service_mesh_and_service_discovery](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) (Istio/Envoy, sidecar pattern), [spring/spring_cloud_patterns](../../spring/spring_cloud_patterns/spring_cloud_patterns.md) (Spring Cloud Gateway, service discovery with Eureka/Consul), [event_sourcing_cqrs](../event_sourcing_cqrs/event_sourcing_cqrs.md) (Saga pattern deep dive).
 
 ---
 

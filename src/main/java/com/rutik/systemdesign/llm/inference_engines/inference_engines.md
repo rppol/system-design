@@ -653,6 +653,27 @@ route for load. Getting the blend wrong is visible as either a collapsed prefix-
 (too much balancing) or one replica at 100% while seven idle (too much affinity), so instrument
 both `prefix_cache_hit_rate` and per-replica queue depth before tuning the thresholds.
 
+**One level up: the fleet orchestrator.** The routers above ship *with* an engine and assume you
+have already decided the fleet's shape. Above them sits a layer that decides the shape itself —
+how many prefill pods versus decode pods, when to scale, and where the KV cache lives across the
+whole cluster rather than inside one replica. **llm-d** is the open instance of this layer: a
+CNCF Sandbox project, Kubernetes-native and conformant to the **Gateway API Inference Extension
+(GAIE)**, running vLLM or SGLang as its model servers across GPUs, TPUs or HPUs. Its three pieces
+map cleanly onto the problem: a **Router** (a high-performance proxy plus an *Endpoint Picker*
+routing engine) doing LLM-aware balancing and queuing, an **InferencePool** that groups the pods
+serving one base model as an "LLM-optimized Service", and the **Model Server** itself. On top of
+the prefix-cache-aware routing described above it adds tiered KV storage, disaggregated
+prefill/decode across pods, latency-prediction routing, and SLO-aware autoscaling. NVIDIA's
+**Dynamo** occupies the same layer for the NVIDIA stack; the disaggregation lineage it comes from
+(DistServe, Mooncake, Splitwise) is covered in
+[vLLM Deep Dive §7](../vllm_deep_dive/vllm_deep_dive.md).
+
+The sequencing rule is the same one that governs chunked prefill: do not reach for a fleet
+orchestrator until the single-replica knobs and the in-engine router are tuned. A cluster-wide
+KV index and an SLO autoscaler are a lot of moving parts to debug at 3am, and they buy nothing
+that a correctly configured `--routing-logic prefixaware` has not already bought you at eight
+replicas.
+
 ---
 
 ## 7. Real-World Examples
@@ -747,6 +768,8 @@ both `prefix_cache_hit_rate` and per-replica queue depth before tuning the thres
 | **ExLlamaV2** | Fast GPTQ; consumer GPUs |
 | **MLC-LLM** | Mobile/browser inference |
 | **ONNX Runtime** | Cross-platform inference |
+| **llm-d** | Fleet layer, not an engine — CNCF Sandbox, Kubernetes-native, GAIE-conformant; Router + InferencePool over vLLM/SGLang, tiered KV, disaggregated prefill/decode, SLO-aware autoscaling |
+| **NVIDIA Dynamo** | The same fleet layer for the NVIDIA stack (see §6, "One level up") |
 
 ---
 
@@ -815,6 +838,11 @@ A: Because the prefix cache lives in one replica's GPU memory and is not shared,
 **Q: How do inference engines handle model loading and what are the optimization strategies?**
 **Short:** Cold-start model loading is sped up with parallel shard loading across GPUs, memory-mapped safetensors files, and pre-warming instances before they accept traffic.
 Model loading (downloading weights and transferring to GPU memory) takes 1-10 minutes for large models, creating cold-start latency. Optimization strategies: (1) tensor parallelism loading — load shards in parallel across GPUs rather than sequentially (2-4x faster); (2) memory-mapped loading — mmap the model file and let the OS handle page-level loading (avoids full copy into CPU RAM first); (3) safetensors format — random-access tensor loading without deserializing the entire file (faster than PyTorch .bin format); (4) model caching — keep models in CPU RAM or on fast NVMe for quick reload; (5) pre-warming — load models during deployment before accepting traffic. Order of magnitude only, and worth measuring on your own storage path: a 7B model loads in tens of seconds from local NVMe and a 70B in a few minutes. For serverless inference (Lambda, Modal), cold start is the primary latency concern — keep instances warm or use shared model caches. Kubernetes strategy: use initContainers to download models from S3/GCS to a local PVC, then the inference container mmaps from local storage.
+
+**Q: What does a fleet orchestrator like llm-d give you that an engine's own prefix-aware router does not?**
+**Short:** It decides the fleet's shape across pods — prefill/decode split, cluster-wide KV placement, SLO-driven scaling — rather than only picking a replica.
+
+An engine's router picks which existing replica a request lands on; a fleet orchestrator decides what the fleet is. llm-d is the open instance: a CNCF Sandbox project, Kubernetes-native and conformant to the Gateway API Inference Extension, running vLLM or SGLang as its model servers. Its Router pairs a high-performance proxy with an Endpoint Picker, its InferencePool groups the pods serving one base model as an LLM-optimized Service, and on top of prefix-cache-aware routing it adds tiered KV storage that outlives a single pod, disaggregated prefill and decode split across different pods, latency-prediction routing, and SLO-aware autoscaling. NVIDIA's Dynamo fills the same slot for the NVIDIA stack. The judgment an interviewer is testing is sequencing, not vocabulary: you reach for this layer only after chunked prefill and an in-engine `prefixaware` or `cache_aware` policy are already tuned. At eight replicas a correctly configured engine router captures most of the available win, and a cluster-wide KV index plus an SLO autoscaler is a large amount of new failure surface to debug during an incident. The signals that justify the move are a prefill/decode mix so skewed that dedicated pools would raise utilization, a KV working set larger than aggregate GPU memory, or per-tenant SLOs that scaling on queue depth alone cannot hold.
 
 ---
 

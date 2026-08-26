@@ -1,4 +1,7 @@
 # Design a Dependency Injection Container (Java)
+
+## Intuition
+
 > **A DI container is a recipe book that cooks itself.**  
 > Given a set of classes annotated with instructions ("I need a `PaymentService` and a `Logger`"),
 > the container reads the recipes, resolves ingredients recursively, and assembles the final
@@ -529,6 +532,53 @@ Without qualifiers, you cannot bind `PaymentGateway` to both `StripeGateway` and
 `@Named("stripe")` and `@Named("paypal")` allows both. The binding key is `(type, name)` pair.
 Spring's `@Qualifier` works identically; JSR-330's `@Named` is the standard.
 
+### Decision 6: virtual threads — this design is unaffected, and here is why
+
+Container construction in `Injector`'s constructor (§4.4) runs once, synchronously, at
+application startup, and `getBean()` after that is a read from an already-built
+`Collections.unmodifiableMap` — no lock, no mutation, no blocking call anywhere on the
+resolution path. Virtual threads (JEP 444, Java 21) reduce the cost of blocking a large
+number of *concurrent, per-request* threads; a DI container's expensive work happens
+once, before any request thread exists, and its steady-state read path was already
+lock-free. There is nothing here for `Thread.ofVirtual()` to improve — running
+`Injector`'s constructor on a virtual thread would not make `resolve()` faster, because
+the work was never blocked on I/O or contended on a lock in the first place.
+
+The one place a *different* container design could reintroduce a Loom concern is lazy
+singleton resolution (Decision 1's rejected alternative): a lazy `getBean()` that
+double-checks a cache and falls back to `synchronized` construction on a miss would,
+before JEP 491 (Java 24), risk pinning a carrier for every virtual thread that lost the
+race and blocked on the monitor during the one-time construction of a popular bean.
+Since JEP 491, that block releases the carrier normally, so even the lazy variant would
+degrade to ordinary contention rather than carrier starvation. This design sidesteps the
+question entirely by resolving eagerly — which the Decision 1 table already recommends
+for fail-fast reasons, and which happens to be the Loom-safe choice too, as a side
+effect rather than by design.
+
+### Decision 7: reflection vs compile-time/build-time wiring for native image and AOT startup
+
+Every `resolve()` call in §4.3 walks `getDeclaredConstructors()` and calls
+`constructor.newInstance()` reflectively. That is fine for a JVM process that starts
+once and runs for hours, but it is exactly the pattern a closed-world, ahead-of-time
+compiler cannot verify. GraalVM native-image performs reachability analysis at build
+time and strips anything it cannot prove is used, so a reflectively-invoked constructor
+must be declared in `reflect-config.json` (or via a registration hint) or the native
+binary throws `NoSuchMethodException` at a call site that compiled and ran fine on the
+JVM. The same gap applies to JDK 24's ahead-of-time class loading and linking
+(JEP 483, Project Leyden): its cache is built from a recorded training run, and a class
+reached only through reflection on some request paths may never appear in that run — so
+the AOT cache speeds up the statically-referenced part of the graph and does nothing
+for the reflectively-wired part, which in a container like this one is most of it.
+
+This is why Dagger, Micronaut, and Quarkus Arc (§6) resolve the dependency graph at
+compile time or build time instead: the generated code is a plain sequence of `new`
+calls that both a reachability analyzer and an AOT class-loading cache can see
+statically, with nothing left for the runtime to reflect over. A reflection-based
+container like this one is not wrong — it is simpler to write and more flexible for
+runtime rebinding — but "flexible at runtime" and "verifiable ahead of time" are close
+to opposites, and native-image / AOT deployment is the environment where that tradeoff
+gets expensive.
+
 ---
 
 ## 6. Real-World Implementations
@@ -659,6 +709,30 @@ A `CacheManager` bean had a `@PostConstruct` that loaded the initial cache from 
 DI containers call `@PostConstruct` in dependency order (dependency first, then dependent).
 Our `DependencyResolver` achieves this because `createInstance(ProductService)` first resolves
 and fully creates `CacheManager` (including its `@PostConstruct`) before creating `ProductService`.
+
+### Pitfall 6 — GraalVM native-image build succeeds, then fails at runtime on a reflective constructor
+
+**Scenario** (a common pattern across teams adopting native image for a reflection-based
+container, not tied to one reported incident): a service using a Guice-style runtime
+container builds cleanly into a GraalVM native binary — the build has no visibility into
+which constructors are invoked reflectively, so there is nothing for it to fail on — and
+then throws `NoSuchMethodException` the first time a request path reaches a bean whose
+constructor was never exercised while generating the reflection configuration.
+
+**Root cause:** GraalVM's closed-world assumption requires every reflectively-accessed
+member to be declared explicitly (`reflect-config.json`, typically generated by the
+`native-image-agent` from a *recorded run* of the application, or hand-written hints). A
+recorded run only captures the code paths it actually exercised, so a rarely-hit bean
+(an error-handling service, a feature-flagged path) is invisible to the agent and simply
+missing from the generated config.
+**Impact:** the failure surfaces in production on the first request to the untested
+path, not in CI or at build time — the native-image build itself succeeds, so there is
+no build-time signal that a reflective call site is unconfigured.
+**Fix:** either exercise every code path with the tracing agent before generating
+`reflect-config.json` (fragile — coverage-dependent, and silently stale as code changes),
+or move to a container that resolves its graph at compile time or build time (Micronaut,
+Quarkus Arc, Dagger) so there is no reflective call site left for native-image to miss.
+Every implementation in §6 that targets native image took the second option.
 
 ---
 
@@ -804,6 +878,32 @@ it needs a fresh instance. This avoids the "prototype injected into singleton ge
 because the singleton holds a `Supplier`, not a specific instance. Spring supports this via
 `ObjectProvider<T>` injection (Spring 4.3+) which also adds `ifAvailable()` and `ifUnique()`
 null-safety methods.
+
+---
+
+**Q11. Does this DI container benefit from virtual threads (JEP 444)?**
+No, and that is a legitimate answer to give in an interview rather than a gap to
+explain away. Container construction runs once at startup, synchronously, and
+`getBean()` is a lock-free read of an already-built immutable map — nothing on that
+path blocks on I/O or contends on a lock, which is the specific cost virtual threads
+reduce. The only container design that would care about Loom is a *lazy* one using
+double-checked locking to build a bean on first access: before JEP 491 (Java 24), a
+virtual thread losing that race and blocking on the monitor could pin its carrier for
+the duration of that one-time construction; since JEP 491, the same block releases the
+carrier normally. This design avoids the question by resolving eagerly, which the
+fail-fast rationale in Decision 1 already argues for on its own merits.
+
+**Q12. Why is a reflection-based container harder to run under GraalVM native image than a compile-time one?**
+GraalVM native-image performs closed-world reachability analysis at build time and
+strips anything it cannot prove is reachable; a constructor invoked only through
+`Constructor.newInstance()` is invisible to that analysis unless it is explicitly
+declared in `reflect-config.json`. That configuration is normally generated by running
+the application under a tracing agent, which only records the code paths that specific
+run happened to exercise — so a rarely-hit bean is silently missing, and the failure
+(`NoSuchMethodException`) surfaces at runtime, not at build time. Dagger, Micronaut, and
+Quarkus Arc avoid this entirely by generating plain `new` calls at compile or build
+time: there is no reflective call site for the analysis to miss, because there is no
+reflection at all.
 
 ---
 

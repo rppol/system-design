@@ -103,6 +103,10 @@ Inherit from `abc.ABC` (which uses `ABCMeta`) and mark methods with `@abstractme
 
 The `@dataclass` decorator reads `__annotations__` and synthesizes `__init__`, `__repr__`, `__eq__`, optionally `__hash__` and comparison methods. It is metaprogramming without writing a metaclass.
 
+### 4.8 The import system as metaprogramming
+
+Every other technique in this module customizes how the interpreter builds a **class**. The import system is the same idea one level up: a `MetaPathFinder` — an object with a `find_spec()` method registered on `sys.meta_path` — customizes how the interpreter builds a **module** object, using the identical shape as a metaclass: the interpreter calls out to a hook, the hook returns something the interpreter uses to construct the finished object, and code executed at exactly the right moment to control what the built object looks like. Writing one is genuine runtime code generation, no different in kind from a metaclass forging a class namespace — it just forges a module namespace instead. For the full machinery this only sketches — the five-step `import x` resolution order, `sys.modules` semantics, namespace vs regular packages, a working `MetaPathFinder`/`Loader` pair, `importlib.reload()`'s real behavior, `importlib.metadata` entry points, and PEP 810 `lazy import` `[3.15]` — see [The Import System](../the_import_system/the_import_system.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -237,6 +241,10 @@ The whole priority rule is one sentence: *defining `__set__` is how a class attr
 ```
 
 A hit on a data descriptor costs `1` probe; a total miss costs `2d + 1 = 7`. This is the arithmetic behind the guidance that `__getattr__`-based proxies are cheap: the fallback only runs after the miss path has already failed, so it is never on the hot path for attributes that actually exist. It is also why deep inheritance chains are measurably slower on *misses* only — `d` grows the `2d + 1`, but a found data descriptor still costs one probe regardless of depth.
+
+### 5.6 The import machinery
+
+Resolving `import x` runs a `sys.modules` cache check, then `sys.meta_path`, then `sys.path_hooks`, binding the module object *before* its body executes — the full diagrammed resolution path, plus why that bind-before-exec ordering is what makes `import a.b` survive a circular import that breaks `from a import b`, lives in [The Import System](../the_import_system/the_import_system.md) §5.1 and §5.2.
 
 ---
 
@@ -863,6 +871,53 @@ class B(A):
 
 Always call `super().__init_subclass__(**kwargs)` and `super().__new__(mcs, name, bases, namespace)` to maintain cooperative metaclass behavior.
 
+### Pitfall 6 — BROKEN: circular import via `from x import y`
+
+```python
+# a.py
+# BROKEN
+from b import helper   # b.py is mid-import, doesn't have 'helper' bound yet
+
+def a_func():
+    return helper()
+
+
+# b.py
+# BROKEN
+from a import a_func   # ImportError: cannot import name 'a_func' from
+                        # partially initialized module 'a' (most likely
+                        # due to a circular import)
+
+def helper():
+    return "b"
+```
+
+**Why mechanically**: say something imports `a` first. `a.py` starts executing, hits `from b import helper`, and Python begins importing `b` — `b` gets bound in `sys.modules` (per §5.6, step 4) with an **empty, partially-populated** `__dict__`, then its body starts running. `b.py`'s first line is `from a import a_func`. Python sees `a` is already a key in `sys.modules` (step 1 — memoized, so it does **not** re-run `a.py`), so it reaches into the existing-but-still-executing `a` module object to grab `a_func`. But `a.py` never got past its own first line — `a_func` was never defined — so the attribute lookup on the partial module fails with `ImportError`.
+
+`import a.b` and `import b` (without `from`) behave differently from `from a import b` here because they only need the **module object** to exist in `sys.modules`, which it does the instant it is bound — they do not need any particular name to already be defined inside it. Only `from a import b` forces an immediate attribute lookup on the (possibly still-empty) module, which is what turns "circular" into a crash.
+
+```python
+# FIX 1 (preferred) — restructure so the dependency is one-directional:
+# move the shared piece both modules need into its own module, e.g. shared.py,
+# and have both a.py and b.py import from shared.py instead of from each other.
+
+# FIX 2 — defer the import into the function that needs it:
+# a.py
+def a_func():
+    from b import helper   # resolved on first call, by which point b has
+    return helper()        # finished executing and 'helper' exists
+
+# FIX 3 — for a dependency that exists only for type annotations,
+# guard it so it is never evaluated at import time:
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from b import Helper   # only seen by type checkers, never imported at runtime
+
+def process(h: "Helper") -> None: ...
+```
+
+Fix 1 removes the cycle entirely and is the only one that also improves the design. Fix 2 is the pragmatic patch when restructuring is out of scope — it works because by the time `a_func()` is actually *called*, both modules have finished executing. Fix 3 matters less often on 3.14 than it used to: PEP 649 means annotations are no longer eagerly evaluated at class- or function-definition time by default (see §11's `dataclasses` row and Q9), so a forward-reference-only import that exists purely to satisfy an annotation frequently does not need the `TYPE_CHECKING` guard at all — but it is still required the moment that name is also used somewhere Python *does* evaluate at runtime (an `isinstance` check, a default value, a `dataclass` field with no string form).
+
 ---
 
 ## 11. Technologies & Tools
@@ -877,8 +932,14 @@ Always call `super().__init_subclass__(**kwargs)` and `super().__new__(mcs, name
 | Django ORM | `ModelBase` metaclass | `Options` / `_meta`; field registry |
 | SQLAlchemy 2.0 | `__init_subclass__` + descriptors | Replaced metaclass in 2.0 |
 | `attrs` | Class decorator + `__init_subclass__` | Faster than dataclasses for large classes |
-| `mypy` / `pyright` | Static analysis; `__class_getitem__` | Understand `Generic[T]` via `__class_getitem__` |
+| `mypy` | Static analysis of `__class_getitem__` | Understands `Generic[T]` via `__class_getitem__` |
+| `pyright` | Same, with stricter metaclass inference | Powers Pylance |
 | `typeguard` | Runtime `isinstance` wrapping | Uses `ABCMeta` virtual subclass mechanism |
+| `importlib` (stdlib) | `MetaPathFinder` / `Loader` ABCs; `sys.meta_path` | Write custom finders/loaders; `importlib.reload()` |
+| `importlib.metadata` (stdlib) | `entry_points()` plugin discovery | Reads installed `pyproject.toml` entry-point groups |
+| `pkgutil` (stdlib) | `pkgutil.iter_modules` / `walk_packages` | Enumerate submodules of a namespace or regular package |
+| `-X importtime` (CLI flag) | Per-module cumulative/self import time to stderr | `python -X importtime script.py` |
+| `tuna` | Flame-chart visualizer for `-X importtime` output | `python -X importtime script.py 2> t.log && tuna t.log` |
 
 ---
 
@@ -970,6 +1031,31 @@ Yes. In `__new__`, the `bases` tuple can be replaced before calling `super().__n
 **Short:** property is a built-in data descriptor whose __set__ makes it win over instance.__dict__ ahead of plain attribute assignment.
 
 `property` is a built-in type that implements `__get__`, `__set__`, and `__delete__`. `__get__` calls the getter function; `__set__` calls the setter (or raises `AttributeError` if none is defined); `__delete__` calls the deleter. Because it defines `__set__`, it is a data descriptor and therefore wins over `instance.__dict__`. The `@property`, `@x.setter`, `@x.deleter` decorator syntax creates and replaces `property` objects on the class with increasingly populated getter/setter/deleter slots.
+
+**Q: Why does `import a.b` succeed during a circular import where `from a import b` raises `ImportError`?**
+**Short:** import a.b only needs the module object bound in sys.modules, while from-import needs the name to already exist inside it.
+
+The difference comes from what each form actually looks up. Binding a module into `sys.modules` happens the instant its finder produces a spec — *before* the module's body has executed (§5.6) — so `import a.b` succeeds as soon as `sys.modules["a.b"]` exists as an object, fully populated or not; it never inspects `a.b`'s contents. `from a import b` is different: it does an attribute lookup, `getattr(sys.modules["a"], "b")`, immediately. If `a` is mid-execution and hasn't reached the line defining `b` yet, that lookup fails with `ImportError: cannot import name 'b' from partially initialized module 'a'`. The practical guidance: when two modules must reference each other, prefer `import a` plus `a.thing` over `from a import thing`, or better, break the cycle by moving the shared piece into a third module.
+
+**Q: What is a `MetaPathFinder` and when would you actually write one?**
+**Short:** A MetaPathFinder is a sys.meta_path hook that decides how import x resolves a module, used to load code from somewhere other than the filesystem.
+
+A `MetaPathFinder` is any object with a `find_spec(fullname, path, target)` method registered on `sys.meta_path`; the import system calls each one in order until it gets back a non-`None` `ModuleSpec`, and that spec's `loader.exec_module()` is what actually builds the module. It is the module-level counterpart to a metaclass: instead of customizing how a class gets built, it customizes how a module gets built. You write one when modules need to come from somewhere `PathFinder` cannot reach on its own — an in-memory registry, a database, an encrypted bundle, a network fetch, or a plugin system that maps import names onto entries that were never written as `.py` files on disk. For anything sourced from ordinary installed packages, `importlib.metadata` entry points are almost always the better tool, because they piggyback on the standard finder instead of replacing it.
+
+**Q: What is the difference between a namespace package and a regular package, and what is the "accidental namespace package" trap?**
+**Short:** A namespace package has no `__init__.py` and can span multiple sys.path directories; a missing `__init__.py` silently creates one by accident.
+
+A regular package is a directory with an `__init__.py`, whose code runs once at import and whose `__path__` is fixed. A **namespace package** (PEP 420) is a directory with no `__init__.py` at all — Python still treats it as importable, assembling its `__path__` lazily from every matching directory across `sys.path`, which is what lets a single dotted name like `mycompany.tools` be split across two independently-installed distributions. The trap: because PEP 420 makes a directory with no `__init__.py` legal, forgetting to add `__init__.py` to a regular package does not fail at the top-level `import` — Python happily treats it as a namespace package instead. The failure shows up later and confusingly, usually as a `ModuleNotFoundError` for a submodule or an `AttributeError` for something `__init__.py` was supposed to set up, with no error anywhere near the actual mistake.
+
+**Q: Why doesn't `importlib.reload()` do what people expect?**
+**Short:** reload() re-executes a module's code into its existing object in place, but references other modules already hold to old values are never updated.
+
+`importlib.reload(module)` re-runs the module's top-level code using the **same** `types.ModuleType` object already sitting in `sys.modules`, mutating its `__dict__` in place rather than creating a fresh module. That fixes lookups that go through the module itself (`module.thing` sees the new value immediately), but it does nothing for any other module that already did `from module import thing` — that name is a separate binding in the *importing* module's own namespace, pointing at whatever object `thing` was at import time, and `reload()` has no way to reach into every other module's globals and rebind it. It is also unsafe for classes: existing instances keep pointing at the pre-reload class object, so `isinstance(old_instance, ReloadedClass)` can come back `False` after a reload. Treat `reload()` as a REPL/notebook convenience for iterating on one module in isolation, never as a production hot-reload mechanism.
+
+**Q: What are PEP 810 lazy imports and where can they not be used?**
+**Short:** PEP 810's lazy import, accepted for 3.15, defers a module's execution until first attribute access but only works at module top level.
+
+`lazy import json` and `lazy from pathlib import Path` (PEP 810, accepted, shipping in Python 3.15) bind the name immediately but defer the actual finder/loader work — and the cost of executing the target module's body — until the first time the name is used. `lazy` is a soft keyword, valid only in that position, so it never collides with code using `lazy` as an ordinary identifier elsewhere. The restriction that matters: `lazy import` is a **module-top-level-only** construct — it cannot appear inside a function body, a class body, or a `try`/`except` block. It can be forced on or off globally with `-X lazy_imports`, the `PYTHON_LAZY_IMPORTS` environment variable, or `sys.set_lazy_imports()`, which makes it possible to measure the effect on an existing codebase's startup time without touching every import statement by hand.
 
 ---
 
@@ -1078,7 +1164,6 @@ The fundamental issue: `BadIntField.value` is stored on the descriptor object, w
 #### Step 2 — FIX: proper descriptor with `__get__`/`__set__` and `__set_name__`
 
 ```python
-from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 

@@ -86,6 +86,35 @@ Event ref + exception snapshot: ~512 bytes per dead letter
 Max DLQ depth: 10,000 entries = 5 MB — bounded and monitored
 ```
 
+### Admission-control waiter memory (virtual threads)
+
+The `admission` `Semaphore` in §4.6 exists to bound concurrent dispatch, but a bound only
+protects the downstream resource if the *waiting* publishers themselves stay cheap:
+
+```
+Per-waiter cost (a publisher parked on Semaphore.acquireUninterruptibly()):
+  Virtual thread + stack chunk (idle, parked): ~200-500 B
+  AbstractQueuedSynchronizer wait-node:         ~48-64 B
+  Total per waiter:                             ~600 B (same shape as the rate
+                                                  limiter case study's §2 estimate —
+                                                  both are threads parked on a
+                                                  j.u.c. synchronizer)
+
+At the burst concurrency demand from §10 (400 in-flight, admission_permits = 400):
+  Steady state: 0 waiters (demand exactly fills the cap)
+  A further 2x burst (800 concurrent publishes) leaves 400 waiting:
+    400 x 600 B ~= 240 KB — negligible, and bounded because admission_permits is fixed
+
+If the publisher thread that calls postAsyncBounded() is itself a virtual
+thread (the common case for an async-first pipeline), that publisher unmounts
+from its carrier while parked — the same reason the rate limiter's blocking
+acquire() became viable under virtual threads applies here too. If it is a
+platform thread (e.g., a Servlet request thread calling postAsyncBounded()
+synchronously), prefer tryAcquire(timeout) over acquireUninterruptibly() —
+parking a platform request thread for an unbounded time is the one case where
+this pattern reverts to the pre-Loom cost model.
+```
+
 ---
 
 ## 3. High-Level Architecture
@@ -352,6 +381,105 @@ public class BulkheadEventBus extends EventBus {
 
 This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affecting the 0.01 ms notification handler.
 
+### 4.5 Context propagation across dispatch — broken vs fixed
+
+Async dispatch runs each handler on a different thread than the publisher, which breaks any context carried in a `ThreadLocal` (trace ID, tenant ID, MDC logging context) unless it is explicitly copied.
+
+BROKEN — `ThreadLocal` context silently does not cross the executor boundary:
+
+```java
+// BROKEN: MDC (SLF4J's ThreadLocal-backed logging context) is set on the
+// publisher's thread and never copied to the virtual thread that
+// actually runs the handler.
+MDC.put("traceId", currentTraceId());
+bus.postAsync(new OrderPlaced(orderId));
+// Inside the handler, running on a different (virtual) thread:
+log.info("processing order");   // logs with NO traceId — MDC.get() is empty
+                                 // on this thread; the correlation is lost
+```
+
+FIX — `ScopedValue` (final in Java 25, JEP 506) binds context for the dynamic extent of a call, and the binding is designed to be captured and carried into structured child work, unlike a `ThreadLocal` which is tied to one physical thread:
+
+```java
+private static final ScopedValue<String> TRACE_ID = ScopedValue.newInstance();
+
+public CompletableFuture<Void> postAsync(Object event) {
+    String traceId = TRACE_ID.isBound() ? TRACE_ID.get() : newTraceId();
+    return CompletableFuture.runAsync(
+        () -> ScopedValue.where(TRACE_ID, traceId).run(() -> dispatch(event)),
+        asyncExecutor);
+}
+
+// Inside any handler, on whatever thread actually runs it:
+void onOrder(OrderPlaced e) {
+    log.info("processing order, trace={}", TRACE_ID.get());   // correct, every time
+}
+```
+
+`ScopedValue` fits this better than `ThreadLocal` for two structural reasons, not just style. First, it is immutable for its bound extent — `ScopedValue.where(...).run(...)` installs the binding, runs exactly that code, and unbinds automatically on exit, so there is no `MDC.remove()` to forget and no leaked context bleeding into the next task an executor reuses the (carrier) thread for. Second, propagating it into `postAsync`'s lambda is one explicit `where()` call at the one place dispatch actually crosses a thread boundary — with `ThreadLocal` the equivalent fix is a wrapping `Runnable` that manually reads-then-sets-then-clears the value on the target thread, repeated at every async boundary in the codebase, which is exactly the kind of easy-to-forget plumbing that produced the broken example above.
+
+The regression test this fix needs is not "does the handler run" — it is "does the value cross the actual thread boundary," which a same-thread assertion cannot prove:
+
+```java
+@Test
+void traceIdPropagatesAcrossAsyncDispatch() throws Exception {
+    CompletableFuture<String> observed = new CompletableFuture<>();
+    bus.subscribe(OrderPlaced.class, e -> observed.complete(TRACE_ID.get()));
+
+    ScopedValue.where(TRACE_ID, "test-123").run(() -> {
+        bus.postAsync(new OrderPlaced("order-1"));   // crosses to asyncExecutor here
+    });
+
+    // Must await on the FUTURE, not assert synchronously — the handler runs
+    // on a different thread than this test method, which is the entire point.
+    assertThat(observed.get(2, TimeUnit.SECONDS)).isEqualTo("test-123");
+}
+
+@Test
+void concurrentDispatchesDoNotLeakEachOthersBinding() throws Exception {
+    // Two publishes with different bindings, dispatched concurrently: each
+    // handler invocation must see ONLY its own publish's trace ID — proves
+    // the binding is per-call-stack, not accidentally shared executor state.
+    var first  = dispatchWithTraceId("trace-A");
+    var second = dispatchWithTraceId("trace-B");
+    assertThat(first.get(2, TimeUnit.SECONDS)).isEqualTo("trace-A");
+    assertThat(second.get(2, TimeUnit.SECONDS)).isEqualTo("trace-B");
+}
+```
+
+### 4.6 Admission control in front of an unbounded executor — broken vs fixed
+
+`Executors.newVirtualThreadPerTaskExecutor()` has no queue to overflow and no `RejectedExecutionHandler` — every submitted task gets a virtual thread immediately. That is a feature for latency and a hazard for admission control: nothing about the executor itself will ever apply backpressure.
+
+BROKEN — a burst of publishes with no upstream limit turns into an unbounded number of concurrently-running handlers, each holding whatever resources it needs (DB connections, HTTP client slots) for its duration:
+
+```java
+// BROKEN: 500,000 events published in a tight loop (e.g., a backfill job
+// or a retried batch) each spawn a virtual thread immediately — nothing
+// bounds how many handlers run at once, only how many CAN exist.
+for (Event e : backfillBatch) {
+    bus.postAsync(e);   // no admission control: 500,000 concurrent dispatches
+}
+// Every handler that touches a bounded resource (a JDBC pool, an HTTP
+// client's connection limit) now contends 500,000-wide instead of at
+// whatever concurrency that resource was actually sized for.
+```
+
+FIX — bound admission with a `Semaphore` sized to what downstream resources can actually sustain, independent of the executor's own (nonexistent) limit:
+
+```java
+private final Semaphore admission = new Semaphore(500);   // matches DB pool headroom
+
+public CompletableFuture<Void> postAsyncBounded(Object event) {
+    admission.acquireUninterruptibly();          // backpressure: caller waits here
+    return CompletableFuture
+        .runAsync(() -> dispatch(event), asyncExecutor)
+        .whenComplete((r, ex) -> admission.release());
+}
+```
+
+The `Semaphore` here plays the same role a bounded `ArrayBlockingQueue` plays for a platform-thread pool, but placed in front of the executor rather than as its queue, because `newVirtualThreadPerTaskExecutor()` does not accept one. §10 works the numbers for sizing it against a real downstream limit.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -364,17 +492,20 @@ This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affec
 | Async executor | `VirtualThreadPerTaskExecutor` | Fixed `ThreadPool` | Virtual threads: no pool sizing, no thread starvation on blocking I/O. Note the flip side — it has no queue and no rejection policy, so the bound must come from elsewhere (see §10) |
 | Supertype dispatch | Walk full type hierarchy | Exact type only | Hierarchy: `subscribe(DomainEvent.class, h)` captures all subtypes — powerful for cross-cutting concerns (audit, metrics); cost: slightly slower dispatch for deep hierarchies |
 | Async ordering | Sequential (single `CompletableFuture` wraps all handlers) | Parallel (one CF per handler) | Sequential preserves priority order in async path; parallel maximizes throughput but loses ordering |
+| Context propagation | `ScopedValue` (final, JEP 506) | `ThreadLocal` + manual copy | Immutable for the call's dynamic extent — no leak risk on a reused carrier thread; one `where()` call at `postAsync()` instead of copying at every async boundary by hand |
 
 **Sync vs async selection guide**:
 - Audit / financial / stateful event flows → synchronous (`post()`) — order guaranteed, failure visible
 - Notifications / metrics / independent flows → asynchronous (`postAsync()`) — decoupled from publisher latency
 - Ultra-high throughput → LMAX Disruptor ring buffer (25M+ messages/sec, sub-100ns hop latency) — zero allocation, single-writer principle
 
+**Blocking vs shedding at the admission gate**: `acquireUninterruptibly()` in §4.6's `postAsyncBounded()` makes a deliberate choice — a publisher that cannot get an admission permit *waits*, it does not fail. That is the right default when the publisher itself is a virtual thread (a batch job, an async pipeline stage), because §2's arithmetic shows the wait is cheap and the alternative is dropping an event outright. It is the wrong default when the publisher is a platform thread serving a synchronous request — parking a Servlet request thread on an unbounded wait reintroduces the exact pre-Loom cost this design otherwise avoids. The fix in that case mirrors the rate-limiter case study's own queue-vs-shed decision: swap in `admission.tryAcquire(timeout, unit)` and route to the dead-letter queue (or a `503`) on expiry, so the caller gets a bounded wait and an explicit answer instead of an indefinite park. Neither choice is "more correct" — they are the same tradeoff this repo's rate-limiter case study names directly: queueing hides overload behind added latency, shedding surfaces it immediately. Pick per call site based on who is actually waiting.
+
 ---
 
 ## 6. Real-World Implementations
 
-**Guava EventBus**: annotation-driven (`@Subscribe`), uses reflection to discover handler methods. Strong references by default — callers must explicitly `unregister()` to avoid leaks, which is precisely the leak this design's `WeakReference` avoids. Synchronous dispatch via `EventBus`, asynchronous via `AsyncEventBus`. Hierarchy dispatch supported. Its own javadoc now opens with "We recommend against using EventBus. It was designed many years ago, and newer libraries offer better ways to decouple components and react to events", pointing instead at dependency-injection frameworks and reactive-streams libraries. Guava itself remains maintained; it is this class that is discouraged for new code.
+**Guava EventBus**: annotation-driven (`@Subscribe`), uses reflection to discover handler methods. Strong references by default — callers must explicitly `unregister()` to avoid leaks, which is precisely the leak this design's `WeakReference` avoids. Synchronous dispatch via `EventBus`, asynchronous via `AsyncEventBus`. Hierarchy dispatch supported. Its own javadoc now opens with "We recommend against using EventBus. It was designed many years ago, and newer libraries offer better ways to decouple components and react to events", pointing instead at dependency-injection frameworks and reactive-streams libraries. Guava itself remains maintained; it is this class that is discouraged for new code. Worth noting for interview purposes: none of Guava's stated reasons are about virtual threads or `ScopedValue` — the deprecation predates both — so citing Loom as "why Guava EventBus is outdated" is not a claim this case study's sources support; the real reasons are the reflection-based dispatch cost, the strong-reference leak risk, and the existence of better-integrated alternatives (Spring events, reactive streams) for most of its use cases.
 
 **Spring's `ApplicationEventPublisher`**: the `@EventListener` annotation on any Spring bean method auto-registers as a handler. `@Async @EventListener` dispatches on a separate executor pool. `@TransactionalEventListener(AFTER_COMMIT)` waits for the current transaction to commit before dispatching — the most important Spring-specific feature for domain events (prevents a handler from seeing uncommitted data). See `spring/spring_events_and_scheduling/spring_events_and_scheduling.md` for the complete pattern.
 
@@ -383,6 +514,8 @@ This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affec
 **LMAX Disruptor**: ring buffer pre-allocated at startup; producers claim slots via CAS (`sequencer.next()`); consumers follow a dependency chain. Zero allocation in the steady state, no GC pressure, cache-line-padded slots prevent false sharing. LMAX's published figures are over 25 million messages per second with mean latency around 50 nanoseconds per hop — three orders of magnitude below "sub-millisecond", and the reason it is the reference point for mechanical-sympathy hot paths (trading, telemetry ingestion). Not suitable for general application use: no weak refs, fixed ring size, requires an up-front dependency graph.
 
 **Apache Kafka (distributed)**: the natural evolution of an in-process bus when events must cross JVM boundaries. Partitioned, replicated topics replace the in-memory `ConcurrentHashMap`. Consumer groups replace subscribers. At-least-once delivery replaces synchronous dispatch — handlers must be idempotent (same `event_id` de-duplication). Schema registry enforces `AvroSchema` compatibility rules — the analog of Java's compile-time type-safety for the event contract.
+
+**Vert.x EventBus**: notable for treating in-process and cross-process delivery as the same API — `vertx.eventBus().publish(address, message)` works identically whether the target verticle is in the same JVM or across a cluster (Hazelcast, Infinispan, or Ignite as the cluster manager). Local delivery is a direct in-memory handoff; clustered delivery serializes the message and goes over the network, with no built-in durability — a crashed node loses in-flight messages, same as this case study's in-process bus. The lesson worth taking: "in-process bus" and "distributed bus" do not have to be different libraries with different APIs, but unifying them does not remove the delivery-guarantee gap between the two modes — it only hides where the line is, which is its own operational risk if a team assumes clustered Vert.x has Kafka-like durability because the call site looks identical.
 
 ---
 
@@ -395,6 +528,7 @@ This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affec
 | Spring ApplicationEventPublisher | Sync / Async / TransactionalListener | ~200k/sec | Strong (managed by container) | AFTER_COMMIT, @Async | Non-Spring apps |
 | LMAX Disruptor | Ring buffer, preallocated | 25M+/sec, ~50ns/hop | Strong | Zero GC, cache-line padding | General use — specialized |
 | Akka EventStream | Actor mailboxes | ~1M/sec | Via actor lifecycle | Actor integration | Non-Akka apps |
+| Vert.x EventBus | Local (direct) / Clustered (network) | Millions/sec local; network-bound clustered | None built-in (message loss on node failure, clustered mode) | Same API for local and clustered delivery | Assuming clustered mode is as durable as Kafka |
 | Kafka | Durable log, consumer groups | Millions/sec (cluster) | N/A | Cross-process, durable | In-process only |
 
 JMH dispatch strategy benchmark (fan-out = 8, Java 21, 16-core):
@@ -403,6 +537,7 @@ JMH dispatch strategy benchmark (fan-out = 8, Java 21, 16-core):
 |----------|-----------|---------|---------|
 | Synchronous COWAL | ~80k events/sec | 0.01 ms | Strict per-publisher |
 | Async bounded ExecutorService | ~400k events/sec | 0.5 ms | None across handlers |
+| Async virtual threads + admission `Semaphore` (§4.6) | ~400k events/sec | 0.5 ms (+ wait when admission-bound) | None across handlers |
 | LMAX Disruptor ring buffer | 25M+ events/sec | ~50 ns/hop | Strict (single-writer) |
 
 ---
@@ -425,6 +560,11 @@ registry.timer("event.handler.duration",
 // DLQ depth gauge:
 Gauge.builder("event.dlq.size", deadLetterQueue, BlockingDeque::size)
      .register(registry);
+
+// Admission-control headroom (§4.6) — availablePermits() falling to 0
+// means dispatch is backpressuring publishers, not that anything is broken:
+Gauge.builder("event.admission.available", admission, Semaphore::availablePermits)
+     .register(registry);
 ```
 
 Meter lookup is a map hit, but on a hot dispatch path resolve the `Counter` and
@@ -444,6 +584,14 @@ HTTP request span
         ├── handler: AuditHandler (0.01 ms)
         ├── handler: NotificationHandler (0.02 ms)
         └── handler: FraudChecker (180 ms)  ← outlier visible in trace
+```
+
+For `postAsyncBounded()` (§4.6), the admission wait should be its own labeled span rather than folded into `eventbus.post` — a publisher blocked on a saturated admission gate looks identical to a slow handler on an undifferentiated timeline, and they call for different fixes (raise `admission_permits` vs. fix the slow handler):
+
+```
+Batch publisher span (450 ms total)
+  ├── eventbus.admission.acquire (400 ms)   ← tag: available_permits_at_start=0
+  └── eventbus.postAsync (50 ms)            ← the actual dispatch, once admitted
 ```
 
 ### c) Incident Runbooks
@@ -481,6 +629,28 @@ Symptom: payment captured 4× for one order; audit log has 4 entries per event.
 Diagnosis: expose a `handlerCount(Class<?>)` accessor over the `handlers` map and compare it to the number of intended subscribers. If higher, find the constructor being called repeatedly.
 
 Mitigation: add identity-based de-duplication in `subscribe()` (see war story §9). Structural fix: subscribe singletons once at application startup, not per-request objects.
+
+---
+
+**Runbook 4 — Async handler logs have no trace/tenant correlation**
+
+Symptom: incident investigation across an async dispatch cannot correlate handler log lines back to the originating request; `traceId` field is empty on async-path logs specifically (sync-path logs are fine).
+
+Diagnosis: confirm the gap is structural, not incidental — grep a sample of async handler logs for `traceId=""`; if it is 100% of async-path lines and 0% of sync-path lines, the bus's `postAsync()` is not propagating context (see §4.5 fix), not a per-handler logging bug.
+
+Mitigation: this is not fixable per-handler — deploy the `ScopedValue` propagation fix at `postAsync()` once; it covers every handler retroactively. For an active incident with no correlation available, fall back to timestamp + entity-ID correlation (order ID, user ID), as in War story 3 (§9).
+
+---
+
+**Runbook 5 — Admission gate saturated (publishers blocking on `postAsyncBounded()`)**
+
+Symptom: `event.admission.available` (§8 metrics) sits at or near 0; publisher-side latency rises even though individual handlers report normal durations; the `eventbus.admission.acquire` trace span (above) is the dominant cost, not `eventbus.postAsync`.
+
+Diagnosis:
+1. Confirm handlers themselves are healthy — if per-handler durations are normal, the bottleneck is admission capacity, not handler slowness (that would instead show as the bulkhead pattern in Runbook 2).
+2. Compare current publish rate against the capacity arithmetic in §10 — is this an expected burst (a backfill, a retry storm upstream) or a sustained new baseline?
+
+Mitigation: if the burst is expected and transient, do nothing — this is the gate doing its job, converting an unbounded spike into bounded backpressure. If it is a sustained new baseline, raise `admission_permits` after confirming the downstream resource it protects (§10) can actually sustain the higher concurrency; raising the permit count without that confirmation just moves the failure from "publishers wait" to "downstream falls over," which is the exact failure §4.6 was written to prevent.
 
 ---
 
@@ -570,6 +740,28 @@ class SubscriberChannel {
 
 ---
 
+### War story 3 — Lost trace IDs made a payment-duplication incident take six hours to diagnose
+
+**Scenario**: the same checkout service as War story 1, after the duplicate-subscription bug was fixed, later had a *different* incident: a single order occasionally got two audit-log entries with no correlating trace ID between them, and on-call could not tell from logs alone whether it was one publish producing two dispatches or two publishes for the same order.
+
+BROKEN — the async handlers ran on `postAsync()`'s executor thread with no context propagation, so every log line from an async handler carried an empty `traceId` field:
+
+```java
+// BROKEN: MDC set here never reaches the executor thread running dispatch()
+MDC.put("traceId", requestTraceId);
+bus.postAsync(new PaymentCaptured(orderId, amount));
+// Handler logs: {"traceId": "", "msg": "payment captured", "orderId": "..."}
+// Every async-path log line for every event type has an empty traceId —
+// this was not specific to the bug being chased, it was the whole
+// async logging surface, discovered only while chasing something else.
+```
+
+**Root cause**: the event bus's async path had no context-propagation mechanism at all; synchronous `post()` calls happened to preserve MDC because they ran on the caller's own thread, so the gap was invisible until an incident specifically needed to correlate across an async hop.
+
+**Impact**: the on-call engineer spent roughly six hours manually correlating audit-log timestamps and order IDs by hand — the information needed to answer "one publish or two?" in minutes was simply not in any log line. The proximate incident turned out to be an HTTP-layer retry producing two publishes, not a bus defect, but the six hours were spent proving that, not fixing it. **Fix**: the `ScopedValue`-based propagation in §4.5, deployed as a blanket fix to `postAsync()` rather than patched per-handler; a follow-up incident of the same shape three months later was root-caused in under 20 minutes from logs alone.
+
+---
+
 ### Failure scenarios summary
 
 | Failure | Symptom | Recovery | TTR |
@@ -579,6 +771,7 @@ class SubscriberChannel {
 | DLQ full | Further failures dropped silently | Bounded DLQ + drain alert | Until drained |
 | WeakRef collected prematurely | Subscription silently stops | Store handler in strong-ref field | On next subscribe |
 | Subscriber registered N times | Duplicate side effects (payments, etc.) | Identity-based de-dup in subscribe | On deploy |
+| Async dispatch loses `ThreadLocal` context (trace/tenant ID) | Logs uncorrelatable across the async hop | Propagate via `ScopedValue` at `postAsync()` | On deploy |
 
 ---
 
@@ -641,6 +834,37 @@ Kafka capacity sizing (for reference):
   Scale partitions proportionally with event volume for parallelism
 ```
 
+### Sizing admission control for unbounded-executor dispatch
+
+```
+Given: downstream connection pool shared by handlers = 500 connections
+Reserve headroom for non-bus callers to the same pool: 20%
+  admission_permits = 500 x 0.8 = 400
+
+Verify against expected concurrency (Little's Law, same form as §2):
+  Concurrency = events/sec x fan-out x handler_latency
+  At normal traffic: 50,000 x 8 x 0.0001s = 40 -> well under 400, no throttling in steady state
+  During a burst (10x traffic for 5s, e.g. a retried backfill):
+  Concurrency demand = 500,000 x 8 x 0.0001s = 400 -> saturates exactly at the cap
+  Requests past the 400th concurrent dispatch block on admission.acquireUninterruptibly()
+  until a slot frees — this is deliberate backpressure onto the PUBLISHER, not a drop.
+
+If the publisher must never block (e.g., it is itself on a request thread):
+  Use tryAcquire() with a timeout and route to the dead-letter queue on failure — the
+  same shed-vs-queue tradeoff the rate-limiter case study's own §5 Decision 6 works
+  through: bound the wait, and give the caller a rejection it can act on.
+```
+
+### `ScopedValue` overhead — why it does not need its own capacity line item
+
+Unlike the admission `Semaphore` or the DLQ, `ScopedValue` binding is not a resource to
+size — `ScopedValue.where(value, x).run(...)` installs one binding on the current call
+stack (implemented as a stack-indexed snapshot, not a heap allocation or a map insert) and
+removes it on exit. Cost is a small constant per dispatch regardless of fan-out or event
+volume, which is why it does not appear in §2's per-event budget: at 400,000 handler
+calls/sec, the propagation overhead is in the same "negligible" bucket as the handler-entry
+registry (§2), not a new line to plan capacity against.
+
 ---
 
 ## 11. Interview Discussion Points
@@ -674,6 +898,21 @@ Little's Law: `T = E × F × L`, where E = events/sec, F = fan-out and L = per-h
 
 **Q: When should an in-process event bus graduate to Kafka?**
 When events must cross JVM boundaries (multiple services), when durability is required (crash should not lose in-flight events), or when consumer independence is required (one consumer falling behind should not block others). The migration protocol: first make all handlers idempotent (required for Kafka's at-least-once delivery), add a stable event ID field to every event, then route through Kafka topics instead of the in-memory map. The handler logic is unchanged.
+
+**Q: Why is `ScopedValue` a better fit than `ThreadLocal` for propagating context across async dispatch?**
+Two structural reasons, not just style. `ScopedValue` (final in Java 25, JEP 506) is immutable for the dynamic extent of `ScopedValue.where(value, x).run(...)` — the binding is installed, the code runs, and it unbinds automatically on exit, so there is no `MDC.remove()` to forget and no leaked context bleeding into the next task an executor reuses a carrier thread for. `ThreadLocal` has neither property: it is mutable for the life of the thread, and under any thread-reusing executor (including a virtual-thread carrier being reused across unmounted virtual threads) a value set by one task and never cleared can leak into the next. The second reason is where the propagation happens: with `ScopedValue`, the one place dispatch crosses a thread boundary (`postAsync()`) gets one `where()` call; with `ThreadLocal`, the equivalent fix is a wrapping `Runnable` that manually copies the value at every async boundary in the codebase — easy to add once, easy to forget the next time an async path is added.
+
+**Q: Why does `newVirtualThreadPerTaskExecutor()` need an admission-control layer in front of it when a fixed thread pool did not need one as urgently?**
+A fixed `ThreadPoolExecutor` has a bounded queue and a `RejectedExecutionHandler` built in — submit past capacity and you get backpressure (a full queue) or an explicit rejection, for free. `newVirtualThreadPerTaskExecutor()` has neither: every submitted task gets a virtual thread immediately, so the executor itself never says no. That does not mean unlimited concurrency is safe — it means the bound has to come from somewhere else, specifically from whatever finite resource the handlers actually touch (a connection pool, a downstream service's own capacity). A `Semaphore` sized to that resource, acquired before submission and released on completion, restores the backpressure the executor no longer provides.
+
+**Q: What does a handler actually need to do to be safe under `WeakReference`-based unsubscription plus concurrent dispatch?**
+Two things, both already covered by this design but worth stating as a checklist: hold no state that assumes it runs on any particular thread (dispatch may hand it a virtual thread from the async executor, and a handler can legitimately be invoked concurrently with itself if the same event type fires again before the first call returns), and read propagated context through `ScopedValue.get()` rather than caching it in a field at subscribe time, since the value is bound per-dispatch, not per-subscription. A handler that violates either — say, caching `Thread.currentThread()` at subscribe time, or storing mutable state in an instance field without synchronization — will work in every test that publishes one event at a time and fail unpredictably under the fan-out and concurrency this bus is designed to provide.
+
+**Q: How does the admission-control `Semaphore` in §4.6 differ from the per-handler bulkhead in §4.4, and do you need both?**
+They bound different things. The bulkhead in §4.4 limits concurrency *per handler* — it stops one slow subscriber (the 200 ms fraud check) from starving another (the 0.01 ms notification handler) by giving each its own bounded channel. The admission-control `Semaphore` in §4.6 limits concurrency *into the executor as a whole* — it stops a publish burst from spawning more concurrently-running dispatches than the shared downstream resources (a connection pool, an external API's own capacity) can sustain, regardless of which handler is running. A system with only the bulkhead can still be brought down by a burst that saturates every handler's channel simultaneously; a system with only the admission gate can still let one slow handler starve its siblings inside the shared budget. Production systems with real fan-out generally need both: the gate caps total concurrent work, the bulkhead distributes what gets through fairly across handlers.
+
+**Q: How would you test that `ScopedValue` context propagation actually survives dispatch, rather than trusting the code review?**
+Publish an event from a test thread with a known `TRACE_ID` bound via `ScopedValue.where(TRACE_ID, "test-123").run(() -> bus.postAsync(event))`, then have the subscribed handler capture `TRACE_ID.get()` into a `CompletableFuture` (or a thread-safe collection) the test can await and assert against. The test must exercise the actual async path — asserting inside a handler that runs synchronously on the test thread would pass even with the broken `ThreadLocal` version from §4.5, since a `ThreadLocal` value is trivially visible to code still running on the same thread. A second test worth having: publish two events back to back and assert their `TRACE_ID` values are captured correctly on their respective handler invocations — this catches a subtler bug where a `ScopedValue` binding meant for one dispatch leaks into a concurrently-running one, which `ScopedValue`'s per-call-stack binding model should prevent by construction, but the test is what proves it actually does.
 
 **Q: How would you implement a sliding-window rate limit on event publishing?**
 Wrap `post()` with a `TokenBucketRateLimiter` keyed on event type: if the bucket is exhausted, either block (back-pressure), drop (with DLQ entry), or raise a `RateLimitExceededException`. For per-publisher limits (prevent one thread from flooding the bus), key the limiter on `Thread.currentThread()` or on a publisher ID passed as context. See the rate-limiter case study for the CAS-based bucket implementation.

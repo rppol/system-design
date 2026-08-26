@@ -75,7 +75,62 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 
 **Standard recipe:** BF16 for forward/backward, FP32 for optimizer states, FP32 for gradient AllReduce (to prevent accumulation errors).
 
-### 4.3 Batch Size Scaling
+### 4.3 Optimizer Families — AdamW, and the Muon Line
+
+AdamW is still the default, but it is no longer the only optimizer that has survived a
+frontier-scale run. The distinction that matters is **what the update is applied to.** AdamW
+treats every parameter as an independent scalar: it divides each coordinate by its own running
+second moment. **Muon** treats a weight *matrix* as a matrix — it takes the momentum buffer,
+orthogonalizes it with a few Newton-Schulz iterations, and applies that orthogonalized matrix as
+the update. The effect is that no single direction in the weight matrix is allowed to dominate a
+step.
+
+| Optimizer | Update granularity | State per parameter | Applies to |
+|-----------|--------------------|---------------------|-----------|
+| **AdamW** | Per-coordinate, scaled by first and second moments | 2 accumulators (`m`, `v`) | Everything |
+| **Muon** | Per-matrix, momentum orthogonalized by Newton-Schulz | 1 momentum buffer | 2-D hidden weight matrices only |
+| **LARS / LAMB** | Per-layer, scaled by the gradient/weight norm ratio | 2 accumulators | Very large batch (B > 64K examples) |
+
+**Muon is not a drop-in replacement for the whole model.** It is defined for 2-D weight
+matrices, so the embedding table, the LM head, and every 1-D parameter (LayerNorm gains and
+biases) stay on AdamW. A real run is therefore a *hybrid*: Muon on the transformer's hidden
+matrices, AdamW on everything else. That hybrid is also where the memory win comes from — Muon
+carries one momentum buffer rather than Adam's two accumulators, so the parameters it covers
+drop from `8` optimizer bytes to `4` at FP32 (see the §8 memory arithmetic, which assumes
+all-AdamW and is therefore an upper bound for a Muon hybrid).
+
+**The scaling result.** *Muon is Scalable for LLM Training* (Liu et al., arXiv 2502.16982)
+reports that two changes were required to make Muon work past small models: **adding weight
+decay** and **carefully adjusting the per-parameter update scale**. With both, the authors
+report roughly **2× computational efficiency versus AdamW** under compute-optimal training, and
+released **Moonlight**, a 3B/16B-parameter MoE trained on 5.7T tokens with Muon.
+
+**MuonClip and the attention-logit failure mode.** Muon's instability at scale is specific and
+diagnosable: attention logits grow until training diverges. The Kimi K2 report (arXiv 2507.20534)
+pairs Muon with **QK-Clip**, a post-update weight clip. Per attention head `h`, when the observed
+max logit `S_max^h` exceeds a threshold `τ`, compute `γ = min(1, τ / S_max^h)` and rescale the
+projections:
+
+```
+W_q^h  ←  γ^α       · W_q^h
+W_k^h  ←  γ^(1-α)   · W_k^h        with α typically 0.5 (equal split)
+```
+
+QK-Clip touches only the weights *after* the step — it does not alter the forward or backward
+computation — which is why it costs almost nothing. Moonshot trained K2 with **`τ = 100`** and
+report **no observable loss spikes across the entire 15.5T-token pre-training run**. Note the
+contrast with the PaLM experience in §7: PaLM's answer to spikes was rollback-and-skip-batches
+*after* the fact; QK-Clip is a standing constraint that stops the divergence forming. For MLA
+(Multi-head Latent Attention), the clip is applied to the head-specific components while the
+shared rotary components are left alone.
+
+**What this changes for you.** Nothing, if you are fine-tuning — the optimizer choice is a
+pre-training decision and AdamW is fine below the scale where the 2× matters. It changes your
+reading of a frontier training report: an optimizer line that says "Muon" implies a hybrid
+parameter split and almost certainly a logit-control mechanism beside it, and if the report does
+not name one, that is the question to ask.
+
+### 4.4 Batch Size Scaling
 
 | Method | Formula | When to Use |
 |--------|---------|------------|
@@ -84,7 +139,7 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 | **LARS / LAMB** | Layer-wise adaptive LR based on gradient/weight norms | Very large batch (B > 64K examples) |
 | **Batch ramp-up** | Start small, increase over first N steps | Prevent instability at training start |
 
-### 4.4 Loss Spike Taxonomy
+### 4.5 Loss Spike Taxonomy
 
 | Spike Type | Characteristic | Root Cause | Detection |
 |-----------|---------------|------------|-----------|
@@ -543,7 +598,7 @@ the mean), and an alarm that cries wolf gets muted, which is how a six-figure di
 
 ### Attention Logit Growth: QK-Norm and Logit Soft-Capping
 
-Section 4.4's "Numerical" row names attention as a source of inf/nan without saying how attention
+Section 4.5's "Numerical" row names attention as a source of inf/nan without saying how attention
 produces one. The mechanism is **attention logit growth**: nothing in `QK^T / sqrt(d_k)` bounds the
 score, so if training drives `||q||` and `||k||` upward the maximum logit grows with them, softmax
 saturates to one-hot, the gradient through it collapses, and in BF16 the run either stalls or
@@ -1168,6 +1223,7 @@ def batch_size_schedule(
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `mup` (Microsoft Research) | muP implementation | pip install mup; MuAdamW, make_base_shapes |
+| Moonshot AI's distributed Muon | Muon at scale | Released with the Moonlight checkpoints (arXiv 2502.16982); hybrid by design — Muon on 2-D hidden matrices, AdamW on embeddings, LM head and 1-D params |
 | `wandb` | Training monitoring | Real-time loss, grad_norm, LR plots |
 | DeepSpeed | Mixed precision, ZeRO, gradient clipping | BF16 + FP32 optim states |
 | `torch.amp` | Autocast for BF16/FP16 | `torch.amp.autocast("cuda", dtype=torch.bfloat16)`; `torch.amp.GradScaler("cuda")` for FP16 only |
@@ -1214,6 +1270,16 @@ Warmup-Stable-Decay (WSD) has three phases: linear warmup, a stable phase at pea
 **Short:** Check for NaN versus a finite spike, inspect the gradient norm and offending batch, then roll back to the last clean checkpoint and skip the bad data.
 
 Diagnosis — 5-step process: (1) Check if loss_spike is NaN/Inf (numerical overflow) vs finite but large (data/LR issue). NaN → check for BF16 overflow or division by zero in attention. (2) Check gradient norm at the step before the spike — if grad_norm > 3x rolling average, the spike was from a specific bad batch. (3) Inspect the data batch at the spike step — run the batch through the model and check for anomalous input lengths, binary sequences, or encoding errors. (4) Check if the spike is recoverable (loss returns to previous level within 200-500 steps) or diverging (loss continues to grow). Recoverable = data spike; diverging = LR/numerical issue. Recovery procedure: (1) Identify the last clean checkpoint (before the spike); (2) Roll back to that checkpoint (restore model + optimizer state); (3) Skip or shuffle the problematic data shard; (4) Resume with optional 50% LR reduction for first 100 recovery steps; (5) Add gradient norm alert to prevent silent recurrence. At billion-parameter scale, checkpoint every 100 steps exactly for this reason.
+
+**Q: What does the Muon optimizer do differently from AdamW, and which parameters does it actually cover?**
+**Short:** Muon orthogonalizes the momentum matrix with Newton-Schulz and applies that as the update, and it covers only 2-D hidden weight matrices.
+
+Muon treats a weight matrix as a matrix rather than as a bag of independent scalars. AdamW divides each coordinate by its own running second moment, so the update's shape is whatever the per-coordinate scaling produces. Muon takes the momentum buffer for a 2-D weight, runs a few Newton-Schulz iterations to orthogonalize it, and uses that orthogonalized matrix as the update — which prevents any single direction in the weight from dominating a step. The consequence people get wrong in interviews is coverage: Muon is defined for 2-D matrices, so the embedding table, the LM head and every 1-D parameter (LayerNorm gains, biases) stay on AdamW. Every real run is a hybrid, never a wholesale swap. There is a memory side effect worth knowing: Muon carries one momentum buffer where AdamW carries two accumulators, so the parameters it covers drop from 8 optimizer bytes to 4 at FP32, making the all-AdamW arithmetic in §8 an upper bound. `Muon is Scalable for LLM Training` (Liu et al., arXiv 2502.16982) reports that two changes were needed to scale it — adding weight decay and adjusting the per-parameter update scale — and claims roughly 2x computational efficiency versus AdamW under compute-optimal training, demonstrated on Moonlight, a 3B/16B MoE trained on 5.7T tokens.
+
+**Q: What failure mode does Muon hit at scale, and how does QK-Clip fix it?**
+**Short:** Attention logits grow until training diverges, and QK-Clip rescales the query and key projections after each step to hold the max logit under a threshold.
+
+Muon's characteristic instability is exploding attention logits rather than a generic loss spike, which is why the fix targets attention specifically. QK-Clip, the second half of MuonClip in the Kimi K2 report (arXiv 2507.20534), watches the observed max logit `S_max^h` per attention head and, whenever it exceeds a threshold `τ`, computes `γ = min(1, τ / S_max^h)` and rescales the projections as `W_q^h ← γ^α · W_q^h` and `W_k^h ← γ^(1-α) · W_k^h`, with `α` typically 0.5 so the two share the correction equally. The mechanism is cheap precisely because it touches only the weights after the update — it does not alter the forward or backward computation of the current step. Moonshot trained K2 with `τ = 100` and report no observable loss spikes across the whole 15.5T-token run. Contrast this with PaLM's approach in §7, which was reactive: roll back to a checkpoint about 100 steps earlier and skip the intervening batches. QK-Clip is a standing constraint that stops the divergence forming rather than a recovery procedure. Under MLA the clip applies to the head-specific components and leaves the shared rotary components alone. Practically: if a training report names Muon and does not name a logit-control mechanism beside it, that is the question to ask.
 
 **Q: What is the linear scaling rule for batch size and when does it break down?**
 **Short:** Doubling the batch size should double the learning rate to preserve convergence, but this breaks down near or above the critical batch size.

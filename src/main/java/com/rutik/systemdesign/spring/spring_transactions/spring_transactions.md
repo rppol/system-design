@@ -783,6 +783,59 @@ public class OrderService {
 }
 ```
 
+### Pitfall 7: Virtual Threads Move the Queue, They Do Not Remove It
+
+On a Boot 4.1 / Java 25 baseline, `spring.threads.virtual.enabled=true` is a one-line
+change with a large second-order effect on transactions. `@Transactional` binds the
+`EntityManager` and the JDBC `Connection` to the current thread through
+`TransactionSynchronizationManager`, which uses a `ThreadLocal`. That still works
+correctly under virtual threads — each virtual thread is a distinct thread with its own
+`ThreadLocal` map, so nothing about propagation, suspension, or `REQUIRES_NEW` changes.
+What changes is how many of them there are.
+
+```java
+// The code is unchanged. The failure mode is not.
+@Transactional
+public OrderResult placeOrder(OrderRequest req) {
+    Order order = orderRepository.save(buildOrder(req));
+    return buildResult(order);
+}
+```
+
+```
+BROKEN mental model: "virtual threads remove the thread-pool bottleneck"
+  Tomcat, platform threads, 200 max
+    -> 200 concurrent requests max; request 201 queues at the connector
+    -> at most 200 threads ever contend for HikariCP's 10 connections
+
+  Tomcat, virtual threads, effectively unbounded
+    -> 10,000 concurrent requests all admitted and all running
+    -> 10,000 threads contend for the SAME HikariCP 10 connections
+    -> the queue did not disappear; it MOVED from the connector to the pool,
+       and it is now invisible in your thread metrics
+
+FIXED mental model: the pool is the real admission control
+    -> size HikariCP to what the database can serve, not to the thread count
+    -> set spring.datasource.hikari.connection-timeout so waiters fail fast
+       instead of piling up behind a 30s default
+    -> keep transactions short: with 10k concurrent virtual threads, every
+       millisecond a connection is held is multiplied by the arrival rate
+    -> put an explicit concurrency limit in front of the endpoint
+       (@ConcurrencyLimit, a bulkhead, or a bounded executor)
+```
+
+The practical rule: enabling virtual threads makes long transactions **worse**, not
+better. Every pitfall above — the external HTTP call inside a transaction, the
+`REQUIRES_NEW` that opens a second connection while holding the first — was previously
+rate-limited by the 200-thread ceiling, and virtual threads remove that accidental
+protection. Audit connection-hold time before you flip the flag, not after.
+
+The one genuine mechanical caveat is gone: `synchronized` blocks stopped pinning
+virtual threads in JDK 24 (JEP 491), so an older driver's `synchronized` internals no
+longer freeze a carrier thread mid-transaction. Watch the `jdk.VirtualThreadPinned`
+JFR event, which fires at a 20 ms threshold, rather than the removed
+`jdk.tracePinnedThreads` property.
+
 ---
 
 ## 11. Technologies & Tools
@@ -925,6 +978,16 @@ It is not just documentation. For Hibernate/JPA it sets the flush mode to `MANUA
 **Short:** Catching an exception inside a shared REQUIRED transaction cannot clear its rollback-only mark, so commit later fails.
 
 If an inner method runs in a *new* physical transaction (`REQUIRES_NEW`), its rollback is independent: it rolls back its own transaction and the outer one can catch the exception and continue/commit normally. But if the inner method participates in the *same* transaction (default `REQUIRED`) and throws a rollback-triggering exception, Spring marks the shared transaction `rollback-only`; even if the outer method catches the exception and tries to proceed, the eventual commit fails with `UnexpectedRollbackException` ("Transaction silently rolled back because it has been marked as rollback-only"). The lesson: catching an exception does not un-mark a transaction for rollback within the same physical transaction — to truly isolate a failing sub-operation so the caller can recover, run it in `REQUIRES_NEW`, or do not let it mark the shared transaction rollback-only.
+
+**Q: Does `@Transactional` still work correctly when you enable virtual threads?**
+**Short:** Yes — each virtual thread has its own ThreadLocal, so transaction binding is unaffected; what changes is how many threads contend for the pool.
+
+Yes, and the reason is worth stating precisely: `@Transactional` binds the `EntityManager` and JDBC `Connection` to the current thread via `TransactionSynchronizationManager`, which uses a `ThreadLocal`, and a virtual thread is a real thread with its own `ThreadLocal` map. Propagation, suspension and `REQUIRES_NEW` behave identically. The mechanical caveat that used to exist is also gone: `synchronized` blocks stopped pinning virtual threads to their carrier in JDK 24 (JEP 491), so an older driver's `synchronized` internals no longer freeze a carrier thread mid-transaction — monitor the `jdk.VirtualThreadPinned` JFR event at its 20 ms threshold rather than the removed `jdk.tracePinnedThreads` property. What genuinely changes is scale: the 200-thread Tomcat ceiling was quietly limiting how many requests could contend for HikariCP's ten connections, and virtual threads remove that ceiling. The transaction semantics are fine; the capacity model is not.
+
+**Q: Why can enabling virtual threads make an application with long transactions worse?**
+**Short:** It removes the thread-pool ceiling that was accidentally protecting the connection pool, moving the queue into HikariCP where metrics do not show it.
+
+Because the thread pool was doing admission control you were not accounting for. With 200 platform threads, request 201 queued at the connector where it was visible, and at most 200 threads ever competed for a ten-connection HikariCP pool. Switch to virtual threads and ten thousand requests are all admitted and all running, competing for the same ten connections — the queue did not disappear, it moved from the connector into the pool, where your thread metrics cannot see it and every waiter sits on the default 30-second `connection-timeout` before failing. Every transaction anti-pattern gets multiplied: an external HTTP call inside a transaction, or a `REQUIRES_NEW` that holds a second connection while the first is open, was previously rate-limited by the thread ceiling. The fixes are to size HikariCP to what the database can actually serve rather than to the thread count, shorten `connection-timeout` so waiters fail fast instead of piling up, audit connection-hold time before flipping the flag, and put explicit concurrency limiting in front of the endpoint — `@ConcurrencyLimit`, a bulkhead, or a bounded executor — since something must perform admission control and it is no longer the thread pool.
 
 ---
 

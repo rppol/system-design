@@ -484,3 +484,82 @@ Mixing all creation patterns for one object adds confusion. Pick the simplest th
 | **Composite** | | | | | | | | | ✓✓ | |
 
 ✓✓ = very common combination | ✓ = occasional combination
+
+---
+
+## Interview Questions with Answers
+
+**Q: Why is "Singleton + Dependency Injection" listed as an anti-combination rather than a normal pairing?**
+**Short:** Hand-rolled Singletons are hard to mock and replace, while a DI container's managed singleton scope is both injectable and mockable.
+
+Hand-rolled Singletons (a private constructor plus a static `getInstance()`) couple every caller directly to one concrete class, which makes substituting a test double or a per-tenant instance nearly impossible without reworking the class itself. DI frameworks like Spring or Guice already provide managed singleton scope that gives you the same "one instance" guarantee while remaining fully injectable and mockable in tests. The guidance is explicit: avoid hand-rolled Singletons entirely once a DI framework is in play, letting the container own the lifecycle instead.
+
+**Q: How does BorderedScrollableResizablePanel illustrate the "Decorator vs Deep Inheritance" anti-combination?**
+**Short:** Stacking each optional feature as another subclass in a hierarchy produces a rigid class explosion Decorator avoids.
+
+`BorderedScrollableResizablePanel extends ScrollablePanel extends BorderedPanel extends Panel` bakes every combination of border, scroll, and resize behavior into a fixed, single inheritance chain — adding a fourth optional feature means deciding where in that chain it slots, and every combination needs its own named subclass. Decorator replaces this with composable wrapper objects — `new ResizeDecorator(new ScrollDecorator(new BorderDecorator(panel)))` — that can be combined in any order at runtime without a single new subclass. This is the textbook justification for choosing Decorator over deep inheritance whenever features need to combine.
+
+**Q: What specifically goes wrong in "Observer Everywhere / Event Spaghetti," and what's the corrective rule?**
+**Short:** Overusing Observer creates invisible coupling that makes tracing execution flow through the system nearly impossible.
+
+When every component publishes and every other component subscribes, following what happens after a single state change means chasing an unbounded, implicit web of listener callbacks rather than a readable call stack — the coupling still exists, it's just hidden behind the pub/sub mechanism instead of a direct reference. The corrective rule given is to use direct method calls when the relationship between two components is clear and stable, and reserve Observer specifically for genuinely loose coupling across module boundaries, not as a default communication style.
+
+**Q: Why does Command + Memento work well together for undo/redo, and what does each pattern specifically own?**
+**Short:** Command owns WHAT action happened; Memento owns the STATE snapshot needed to reverse it — complementary, not overlapping.
+
+In the `TextEditor` example, `executeCommand()` pushes a `Memento` capturing the text's state BEFORE the command runs, then applies the command's change — `undo()` simply pops the most recent Memento and restores that snapshot directly, without needing the Command to implement its own reverse logic. This split matters when an operation's reverse isn't cleanly algorithmic (e.g., "delete random substring" has no obvious inverse operation) — Memento supplies a state-based fallback that Command's own `undo()` method might not be able to compute.
+
+**Q: How does the Proxy + Observer combination stay transparent to both the client and the target object?**
+**Short:** The client only sees the Subject interface, and the target has no idea observers exist — the proxy silently bridges both.
+
+`AuditingProxy` implements `InvocationHandler` and wraps a target object; when the client calls a method through the proxy, it measures elapsed time, invokes the real method, and then notifies registered `AuditObserver`s with the resulting event — all without the client needing to know auditing is happening, and without the target class containing a single line of observer-related code. Neither party needs to know about the other's role, which is exactly why the combination is cited for audit logging, metrics collection, and reactive frameworks like Hibernate/Spring Data JPA.
+
+**Q: Why does Prototype + Factory outperform plain object construction for something like a game's enemy spawning system?**
+**Short:** Cloning a pre-configured prototype avoids repeating expensive initialization for every new enemy instance.
+
+`EnemyFactory.registerPrototype("GOBLIN", new Goblin(50, 10, Speed.FAST))` is set up once; every subsequent `factory.create("GOBLIN")` call clones that prototype rather than re-running whatever expensive setup (asset loading, stat computation) originally constructed it. This matters at scale — spawning 100 goblins via `new Goblin(...)` 100 times repeats all that initialization, while cloning a single pre-built prototype 100 times is comparatively cheap. The Factory in this combination hides the cloning mechanism behind a familiar `create(type)` call, so client code looks identical to a plain factory.
+
+**Q: In the Spring Framework pattern map, why is ApplicationContext described as "Factory Method + Singleton" rather than just Factory Method?**
+**Short:** The container both creates beans (Factory Method) and, by default, ensures each bean has exactly one instance (Singleton scope).
+
+`ApplicationContext` (backed by a Bean Factory) is responsible for instantiating beans on request — the Factory Method half — but Spring's default bean scope is singleton, meaning the container also guarantees that a `getBean()` call for a given bean name returns the same instance every time, which is the Singleton half. Neither pattern alone fully describes the behavior: dropping "Singleton" would miss that repeated lookups return the same object, and dropping "Factory Method" would miss that the container decides how to construct beans in the first place.
+
+**Q: Per the Spring pattern map, why is AOP aspect weaving classified as Proxy rather than Decorator?**
+**Short:** AOP intercepts and controls method invocation transparently, matching Proxy's intent, not Decorator's behavior-adding intent.
+
+Spring AOP generates a proxy object around a bean and intercepts every method call to apply advice (transactions, security checks, logging) before or after the real method runs — the client calls the bean as normal and is unaware a proxy sits in between, which is Proxy's defining transparency. It isn't classified as Decorator because the intent is controlling and intercepting invocation (often without changing what the method fundamentally does), not layering new, client-visible behavior the way stacking I/O decorators does.
+
+**Q: Why does the Java I/O pattern map list BufferedReader(new FileReader(...)) as "Decorator wrapping Adapter" rather than two Decorators?**
+**Short:** FileReader itself adapts a byte-based InputStream into a character-based Reader before BufferedReader decorates it with buffering.
+
+`FileReader` bridges the byte-oriented underlying file stream into the character-oriented `Reader` interface — that conversion between two genuinely different interface shapes (bytes vs. characters) is Adapter's job, not Decorator's. `BufferedReader` then wraps the resulting `Reader` purely to add buffering behavior without changing the interface at all, which is Decorator's job. Recognizing that `FileReader` is doing interface translation, not behavior addition, is what correctly splits this chain into "Decorator wrapping Adapter" instead of two decorators.
+
+**Q: What does the Pattern Combinations Matrix's "✓✓" between Factory and Prototype signal, and what does that combination look like in practice?**
+**Short:** ✓✓ marks Factory + Prototype as a very common pairing where the factory clones registered prototypes instead of constructing from scratch.
+
+The matrix uses ✓✓ for "very common combination" and ✓ for "occasional" — Factory/Prototype earns ✓✓ because factories frequently use cloning internally as an optimization, exactly as shown in the `EnemyFactory` example where `create(type)` calls `prototype.clone()` rather than `new Enemy(...)`. This lets a factory's public API stay identical to a plain constructing factory while gaining Prototype's performance benefit under the hood — callers never need to know cloning is happening.
+
+**Q: Why is Command + Chain of Responsibility a natural fit for middleware pipelines like servlet filters?**
+**Short:** CoR determines whether/how to route the request through guards; Command encapsulates the actual work to be executed at the end.
+
+In the `AuthHandler`/`RateLimitHandler`/`LoggingHandler`/`ExecutionHandler` chain, each guard implements `handle(Command cmd)` and either rejects the request or forwards it via `next.handle(cmd)` — only the final `ExecutionHandler` actually calls `cmd.execute()`. This means the routing/filtering logic (CoR) and the encapsulated unit of work (Command) are cleanly separated: any guard can reject a Command without knowing anything about what executing it would actually do, and the Command itself never needs to know which guards it passed through.
+
+**Q: How does State + Command differ from a plain switch statement for something like an ATM's operation validation?**
+**Short:** State encapsulates per-state validity rules as objects instead of one large switch, while Command still represents the requested operation.
+
+`PINVerifiedState.process(cmd)` checks `if (cmd instanceof WithdrawalCommand || cmd instanceof BalanceCommand)` and only then executes — the validity rule ("what operations are allowed here") lives inside the State object itself, meaning adding a new state doesn't require touching a giant central switch statement scattered across the whole ATM class. Each `ATMState` implementation independently owns its own list of valid Commands, which is the same "replace conditional logic with polymorphic objects" benefit State provides on its own, now applied specifically to gating which Commands are legal per state.
+
+**Q: What is the risk the "Factory + Abstract Factory + Builder Together" anti-combination warns against, and how do you choose correctly?**
+**Short:** Mixing all three creation patterns on one object adds confusion; pick Builder for optional fields, Factory for polymorphism, Abstract Factory for families.
+
+Combining all three creational mechanisms for constructing a single type means a caller has to reason about which layer decided what — is the concrete class chosen by Factory, is the family consistency enforced by Abstract Factory, and are the optional fields being assembled by Builder, all at once? The corrective guidance is to identify the single dominant axis of complexity for the object at hand: many optional fields points to Builder, needing polymorphic subclass selection points to Factory, and needing whole families of related objects together points to Abstract Factory — apply only the one that matches.
+
+**Q: Why does RecyclerView.Adapter in the Android pattern map earn the name "Adapter" even though it also involves data binding?**
+**Short:** It converts a data source's shape into the view-holder interface RecyclerView expects, which is exactly Adapter's translation role.
+
+`RecyclerView.Adapter` takes an arbitrary data collection (a list of domain objects) and translates it into the specific `ViewHolder` binding calls RecyclerView's rendering engine expects — the data source's native shape is incompatible with what RecyclerView can directly consume, so the Adapter bridges that gap. The data-binding behavior on top doesn't change the underlying pattern classification; the core responsibility is still interface translation between an incompatible data shape and what the client (RecyclerView) requires.
+
+**Q: Why does the Android pattern map classify Fragment as Composite despite Fragment being a lifecycle-heavy Android-specific concept?**
+**Short:** A Fragment can contain child Fragments and views uniformly, forming a part-whole hierarchy just like any Composite tree.
+
+Despite carrying Android-specific lifecycle machinery, structurally a `Fragment` can host nested child Fragments and view hierarchies, and code that manipulates the fragment tree (adding, removing, querying) can treat a leaf view and a container Fragment through largely uniform operations — the defining shape of Composite. The lifecycle concerns (onCreate, onResume, etc.) are an orthogonal Android platform detail layered on top; they don't change the fact that the containment structure itself is a classic tree-of-components.

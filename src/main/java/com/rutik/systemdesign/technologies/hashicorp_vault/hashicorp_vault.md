@@ -1,6 +1,6 @@
 # HashiCorp Vault (and OpenBao) — Secrets Management
 
-> **Version anchor (2026-08-04).** HashiCorp Vault **2.0.3** (2026-06-17) on the **2.0** feature line, which went GA as **2.0.0** on 2026-04-14; the supported lines are **2.0.x**, **1.21.x**, **1.20.x** and **1.19.x**. Licence is **BUSL 1.1**, with the Licensor now recorded as **International Business Machines Corporation (IBM)**, a **Change Date** four years after each release and a **Change License** of MPL 2.0. **OpenBao 2.6.1** (2026-07-22), **MPL 2.0**, under the Linux Foundation. Ecosystem: **Vault Secrets Operator 1.5.0**, **vault-k8s (Agent Injector) 1.7.5**, **vault-csi-provider 1.7.3**, and **External Secrets Operator 2.8.0** serving `external-secrets.io/v1` (v1beta1 stopped being served in `[ESO 0.17]`). Version-specific behaviour is tagged inline as `[2.0]`, `[OpenBao 2.6]`, `[VSO 1.5]`, `[ESO 0.17]`; nothing here is called current without naming the release it landed in.
+> **Version anchor (2026-08-25).** HashiCorp Vault **2.0.4** (2026-08-04) on the **2.0** feature line, which went GA as **2.0.0** on 2026-04-14; the supported lines are **2.0.x**, **1.21.x**, **1.20.x** and **1.19.x**. Licence is **BUSL 1.1**, with the Licensor now recorded as **International Business Machines Corporation (IBM)**, a **Change Date** four years after each release and a **Change License** of MPL 2.0. **OpenBao 2.6.1** (2026-07-22), **MPL 2.0**, under the Linux Foundation. Ecosystem: **Vault Secrets Operator 1.5.0**, **vault-k8s (Agent Injector) 1.7.5**, **vault-csi-provider 1.7.3**, and **External Secrets Operator 2.8.0** serving `external-secrets.io/v1` (v1beta1 stopped being served in `[ESO 0.17]`). Version-specific behaviour is tagged inline as `[2.0]`, `[OpenBao 2.6]`, `[VSO 1.5]`, `[ESO 0.17]`; nothing here is called current without naming the release it landed in.
 
 Vault is a **secrets platform**: a process that holds an encrypted store, authenticates a caller against an identity the caller already has, decides what that identity may reach, and — for the interesting half of its surface — **mints a brand-new credential on the spot** and takes it away again when its lease ends. This page is about the inside of that process: the barrier, the seal, the engines, the leases, the policies, the identities, and the operational failure modes that only show up at 3am.
 
@@ -72,7 +72,7 @@ Three separate facts get tangled together here, and an adoption review needs all
 | 2023–2025 | **Vault Secrets Operator** (a native Kubernetes controller, no sidecar); Seal HA (Enterprise); OpenBao ships its own releases and begins to diverge |
 | **Feb 2026** | **IBM closes the HashiCorp acquisition**; brand becomes "IBM Vault (formerly HashiCorp Vault)" |
 | **Apr 2026** | **Vault 2.0.0 GA** — the first major-version bump in a decade, carrying the security-hardening breaking changes in §6.23 |
-| 2026 | Vault **2.0.3**; OpenBao **2.6.1**, now removing and deprecating things Vault still ships |
+| 2026 | Vault **2.0.4**; OpenBao **2.6.1**, now removing and deprecating things Vault still ships |
 
 ### What Vault is not
 
@@ -159,7 +159,7 @@ Engines divide cleanly into three kinds, and the interesting boundary is between
 |---|---|---|---|---|
 | **Static store** | `kv` v1, `kv` v2, `cubbyhole` | The value you previously wrote | No (KV) | Nothing — you must rotate at the source |
 | **Dynamic generator** | `database`, `aws`, `azure`, `gcp`, `consul`, `nomad`, `rabbitmq`, `ssh` (OTP/CA), `terraform`, `kubernetes` | A credential that **did not exist a moment ago** | Yes | A real action at the target: `DROP ROLE`, `DeleteAccessKey`, delete service principal |
-| **Cryptographic service** | `transit`, `pki`, `kmip`, `keymgmt`, `totp` | A ciphertext, signature, certificate or code — the key never leaves | Sometimes (PKI leaves, opt-in) | Key rotation or CRL, not deletion |
+| **Cryptographic service** | `transit`, `pki`, `kmip`, `keymgmt`, `totp`, `spiffe` `[2.0]` | A ciphertext, signature, certificate, code or JWT-SVID — the key never leaves | Sometimes (PKI leaves, opt-in) | Key rotation or CRL, not deletion |
 
 A fourth category worth naming separately because it behaves unlike the rest: **static roles**. `database/static-roles/<name>` and `aws/static-roles/<name>` do not mint a new principal per request — they take ownership of **one existing account** and rotate its password on a schedule you set. Every reader gets the *same* username and the *current* password. Use them where a real human account or a legacy service account must keep its identity (§6.6).
 
@@ -785,6 +785,22 @@ What makes it worth the round trip: the key material never leaves Vault, so an a
 
 The costs are equally concrete. Every encrypt and decrypt is a network round trip, so it belongs on field-level PII and not on a hot path — use `transit/encrypt/<key>` in **batch mode** (`batch_input`) to amortise, or `transit/datakey/plaintext/<key>` for envelope encryption where Vault mints a data key, you use it locally, and you store only the wrapped copy. And **convergent encryption** (same plaintext to same ciphertext, needed for equality search) leaks equality by construction; enable it only when you have decided that trade explicitly.
 
+### 6.8a Secret sync, and the workload-identity federation that makes it credential-free (`[2.0]`, Enterprise)
+
+Everything above pulls secrets *out* of Vault at read time. **Secret sync** runs the other direction: it keeps a KV secret mirrored *into* a cloud-native store — AWS Secrets Manager, Azure Key Vault, Google Secret Manager — so that a Lambda, a Function App or a Cloud Run service can read it through its own platform's native mechanism without ever holding a Vault token. Vault stays the system of record and the audit point; the cloud store becomes a read replica for consumers Vault cannot reach cleanly.
+
+That design had one embarrassing hole for its first two years, and it is exactly the hole this page keeps pointing at elsewhere: **to write into AWS Secrets Manager, the sync destination needed an AWS credential, so the secrets platform whose whole purpose is eliminating static credentials was itself configured with a long-lived IAM access key.** Secret zero (§6.11) reappeared at the destination.
+
+`[2.0]` closes it with **workload identity federation**. Instead of holding a key, Vault presents its own signed identity token — the same identity-token machinery as `identity/oidc/token/<role>` in §6.16 — to the cloud provider, which has been configured to trust Vault as an OIDC issuer, and exchanges it for short-lived STS credentials scoped to that destination:
+
+| Provider | What you configure on the provider side |
+|---|---|
+| **AWS** | an IAM OIDC identity provider trusting Vault's issuer, and a role with a trust policy matching the token's `sub`/`aud` |
+| **GCP** | a **workload identity pool and provider** whose issuer URI is Vault's identity-token issuer with the `/.well-known/openid-configuration` suffix removed |
+| **Azure** | a federated credential on an app registration — and note Azure accepts an OIDC issuer **only over a publicly trusted CA**, so a Vault cluster behind a private CA cannot federate to Azure at all |
+
+Two operational consequences follow, and the second is the one that bites. First, the same WIF plumbing is available to the cloud **secrets engines** (`aws`, `azure`, `gcp`), so a Vault that mints AWS credentials no longer needs a root AWS key of its own either — which removes the `aws/config/rotate-root` chore in §6.6 rather than automating it. Second, **Vault's identity-token issuer URL must be reachable by the cloud provider**, because the provider fetches the JWKS to verify the signature. An air-gapped or purely internal Vault cannot use WIF, and that is a topology decision, not a setting: teams discover it after designing the whole migration around federation.
+
 ### 6.9 Leases — the centrepiece, and the arithmetic nobody runs first
 
 Every dynamic secret and every service token is accompanied by a **lease**: a server-side object with an id, a TTL, an issue time, a renewability flag and a revocation path. The expiration manager holds them and acts when they expire. This is Vault's most important abstraction and its most common source of production trouble.
@@ -1134,7 +1150,13 @@ vault write identity/group-alias name="payments-oncall" \
 
 Policies attach at three levels and they **do** accumulate here: the token's own policies, plus the entity's, plus every group the entity belongs to. That is the one place in Vault where the answer is additive — and `deny` still beats all of it.
 
-The identity layer also powers **identity tokens** (`identity/oidc/token/<role>`), which turn Vault into an OIDC provider issuing signed JWTs about an entity. That is how a workload authenticated to Vault proves *to a third system* who it is, without that system needing to talk to Vault at all.
+The identity layer also powers **identity tokens** (`identity/oidc/token/<role>`), which turn Vault into an OIDC provider issuing signed JWTs about an entity. That is how a workload authenticated to Vault proves *to a third system* who it is, without that system needing to talk to Vault at all — and it is the same machinery the `[2.0]` secret-sync federation in §6.8a exchanges for cloud STS credentials.
+
+**`[2.0]` The SPIFFE secrets engine — Vault as a JWT-SVID issuer (Enterprise).** SPIFFE and its SPIRE implementation have been the usual *source* of the short-lived workload identity Vault consumes (§6.11); `[2.0]` lets Vault sit on the other side of that relationship. A workload that has already authenticated to Vault by any method can request a short-lived **JWT-SVID** — a SPIFFE-format identity document naming it by SPIFFE ID — and present it to any service in a SPIFFE trust domain. The point is not that this is a new kind of credential; it is that a fleet where Vault is already the identity broker no longer needs SPIRE deployed alongside it purely to mint SVIDs, and the rotation happens on Vault's schedule rather than a hand-written job's. Where you already run SPIRE, keep it: this engine is for the case where you have Vault and want SPIFFE-shaped identity without adding a second control plane.
+
+**`[2.0]` SCIM 2.0 provisioning (Enterprise).** Identity's weak point has always been the *joiner-mover-leaver* half. External groups (above) make IdP membership drive policy in real time, but entities themselves were created lazily on first login and never cleaned up — so a departed employee's entity, its aliases and its group memberships sat in Vault indefinitely, and deprovisioning was somebody's runbook step. Vault `[2.0]` runs a **SCIM server**, so any SCIM-compliant identity provider (Okta, SailPoint and others) provisions and **deprovisions** users, groups and group memberships in Vault the same way it does for every other application in the estate. `2.0.4` added filtering on the `/Users` and `/Groups` endpoints and, more importantly, **manual-merge guardrails** that stop an operator merging a SCIM-owned entity by hand and silently desynchronising it from the IdP that owns it.
+
+The operational rule this creates: once a mount's entities are SCIM-owned, stop creating them with `vault write identity/entity`. Mixing hand-made and provisioned entities is how you end up with two entities for one human and a policy that applies to whichever one they happened to log in through.
 
 ### 6.17 Response wrapping and cubbyhole
 
@@ -1605,7 +1627,7 @@ Read the plot as the recommendation it is: **VSO occupies the useful corner** �
 
 ### 11.1 Vault itself and its fork
 
-- **HashiCorp Vault** — the identity-brokered secrets platform this page covers, at 2.0.3 under BUSL 1.1 with IBM recorded as Licensor since the February 2026 acquisition close.
+- **HashiCorp Vault** — the identity-brokered secrets platform this page covers, at 2.0.4 under BUSL 1.1 with IBM recorded as Licensor since the February 2026 acquisition close.
 - **OpenBao** — the Linux Foundation, MPL 2.0 fork taken at the BUSL change, at 2.6.1, API-compatible at the fork point and diverging on operational surface rather than on paths.
 
 The Vault CLI, the HTTP API and the client libraries are the three surfaces you actually touch; Integrated Storage is the storage backend to choose, and Vault Enterprise is where namespaces, replication, HSM seals and lease-count quotas live.
@@ -1630,10 +1652,13 @@ The Vault CLI, the HTTP API and the client libraries are the three surfaces you 
 - **Message brokers:** **RabbitMQ** — dynamic users and permissions with the same lease model.
 - **Schedulers and platforms:** **Kubernetes**, **Nomad** — Vault mints service-account tokens and Nomad tokens the same way it mints database users.
 - **Certificate consumers:** **cert-manager** — the Kubernetes issuer that drives the PKI engine on a renewal schedule so nothing hand-rolls certificate lifecycle.
+- **Workload identity meshes:** **SPIFFE**, **SPIRE** — usually the *source* of the identity Vault consumes, but `[2.0]`'s SPIFFE engine also lets Vault issue JWT-SVIDs itself (§6.16), which removes the second control plane where you only wanted the SVIDs.
+- **Sync destinations `[2.0]`:** **AWS Secrets Manager**, **Azure Key Vault**, **GCP Secret Manager** — secret sync mirrors a KV secret into the consumer's native store, now authenticated by workload identity federation rather than a stored cloud key (§6.8a).
+- **Identity providers driving provisioning `[2.0]`:** **Okta**, **SailPoint** — any SCIM-compliant IdP provisions and deprovisions Vault entities, groups and memberships through Vault's SCIM server (§6.16).
 
 ### 11.5 Alternatives you will be asked to compare against
 
-- **Cloud-native managers:** **AWS Secrets Manager**, **GCP Secret Manager**, **Azure Key Vault**, **AWS SSM Parameter Store** — managed, single-cloud, no dynamic credentials, priced per secret and per call.
+- **Cloud-native managers:** **AWS Secrets Manager**, **GCP Secret Manager**, **Azure Key Vault**, **AWS SSM Parameter Store** — managed, single-cloud, no dynamic credentials, priced per secret and per call. Note that secret sync (§6.8a) makes these a *complement* rather than only a competitor: Vault stays the system of record and they become the read replica.
 - **Encrypt-then-commit:** **Sealed Secrets**, **SOPS** — a different answer entirely, keeping ciphertext in Git rather than brokering identity; owned by [`devops/secrets_management`](../../devops/secrets_management/secrets_management.md).
 
 ### 11.6 Operating it
@@ -1780,6 +1805,18 @@ Take 5,000 secrets at $0.40 per secret per month — that is $2,000 — and a fl
 **Q: Vault is now on the critical path for every deployment. What breaks when it goes down, and how do you design for it?**
 **Short:** Running workloads keep working because credentials are already in memory, but nothing new can start and nothing can renew a lease past its expiry.
 The failure is asymmetric and that asymmetry is the design lever. A process holding a valid credential keeps using it, so an outage shorter than your TTLs is largely invisible; what stops is start-up — new pods cannot fetch, autoscaling stalls, deploys fail, and anything whose lease expires during the outage cannot renew. So the mitigations are all about widening that window: TTLs generous enough to cover a realistic outage rather than aspirationally short, renewal at two-thirds of the lease rather than at the last moment, Vault Agent or Proxy caching on each host so a Vault blip is absorbed locally, and `VALID UNTIL` in creation statements so the database enforces expiry even when Vault cannot. Then make the outage rarer: 3 or 5 Raft nodes across failure domains, auto-unseal so a restart needs no human, two audit devices, and a rehearsed DR promotion. Finally, be honest in the design review that this dependency exists, rather than discovering it during the first incident.
+
+**Q: You configured secret sync to AWS Secrets Manager and it needed a long-lived IAM key. Isn't that self-defeating, and what changed in Vault 2.0?**
+**Short:** It was, and `[2.0]` workload identity federation replaces the stored cloud key with Vault's own OIDC identity token exchanged for short-lived STS credentials.
+It was exactly self-defeating: the platform whose purpose is eliminating static credentials held a permanent IAM access key to write into the destination, so secret zero simply reappeared one layer out. `[2.0]` closes it with **workload identity federation** — the cloud provider is configured to trust Vault as an OIDC issuer, Vault presents the same signed identity token as `identity/oidc/token/<role>`, and the provider exchanges it for short-lived STS credentials scoped to that destination. The same plumbing serves the `aws`/`azure`/`gcp` **secrets** engines, which removes the root-credential rotation chore rather than automating it. The hard prerequisite is topological, not configurational: the provider fetches Vault's JWKS to verify the signature, so **Vault's identity-token issuer must be publicly reachable** — an air-gapped Vault cannot federate at all, and Azure additionally requires that issuer to sit behind a publicly trusted CA.
+
+**Q: A departed employee's Vault entity is still there weeks later with its group memberships intact. Why, and what fixes it properly?**
+**Short:** Entities are created lazily on first login and never removed, so `[2.0]`'s SCIM server is what makes an IdP deprovision them.
+Because Vault's identity store only ever handled half of joiner-mover-leaver. External groups make IdP membership drive policy in real time, so a *mover* is handled, but entities themselves are created lazily on first login and nothing ever deletes them — a *leaver* left an entity, its aliases and its memberships behind, and deprovisioning was a runbook step somebody eventually skipped. Vault `[2.0]` runs a **SCIM 2.0 server**, so any SCIM-compliant IdP (Okta, SailPoint and others) provisions and deprovisions users, groups and memberships in Vault the way it already does for every other application. `2.0.4` added `/Users` and `/Groups` filtering plus manual-merge guardrails. The rule that comes with it: once a mount's entities are SCIM-owned, stop running `vault write identity/entity` by hand, or you will end up with two entities for one human and a policy that applies to whichever one they logged in through.
+
+**Q: You already run SPIRE. Does Vault 2.0's SPIFFE engine replace it?**
+**Short:** No — it removes the need to add SPIRE where you only wanted JWT-SVIDs and already run Vault, not the reverse.
+No, and the direction matters. SPIFFE/SPIRE has normally been the *source* of the short-lived identity Vault consumes to solve secret zero, and if SPIRE is already attesting your nodes and workloads it stays the right place for that. What `[2.0]`'s SPIFFE secrets engine changes is the other case: a fleet where Vault is already the identity broker can now issue **JWT-SVIDs** directly to a workload that has authenticated by any method, so you get SPIFFE-shaped identity for a trust domain without standing up a second control plane purely to mint SVIDs. Rotation then runs on Vault's schedule rather than a hand-written job's. Choose by which system already attests your workloads — adding either one just to obtain the other's token format is the wrong trade.
 
 ---
 

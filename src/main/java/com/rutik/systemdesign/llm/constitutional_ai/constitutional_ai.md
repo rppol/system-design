@@ -391,8 +391,8 @@ style where the disagreement is the thing you are trying to measure.
 
 ## 7. Real-World Examples
 
-**Anthropic Claude (all versions):** Every Claude model (Claude 2, 3, 3.5 Sonnet, Claude 3
-Opus) is trained using Constitutional AI. The HHH framework (Helpful, Harmless, Honest)
+**Anthropic Claude (all versions):** Every Claude model (Claude Fable 5, Opus 5, Sonnet 5,
+Haiku 4.5) is trained using Constitutional AI. The HHH framework (Helpful, Harmless, Honest)
 maps directly to constitutional principles at different priority levels. Anthropic has
 published the general approach; specific constitution contents are not fully public.
 

@@ -749,6 +749,92 @@ Numba does not expose Cooperative Groups' `grid_group`/tiled-partition API direc
 wide synchronization and sub-warp tiles are a CUDA C++-only concept in practice, which is
 why §6.6-6.7 above stay C++.
 
+### 6.9 Producer/consumer warp specialization
+
+Every kernel in this module so far is **homogeneous**: every warp runs the identical code
+path on different data, and the only per-lane variation is which values a warp happens to
+hold. A modern Hopper/Blackwell kernel breaks that assumption the same way this module's
+opening broke "combine through memory" — it makes warps **heterogeneous by role**. Warps
+(or warpgroups — Hopper's 128-thread, 4-warp scheduling unit) are partitioned at compile
+time by branching on a uniform value like `threadIdx.x / 32` or a warpgroup index, and
+because every lane in a warp takes the *same* branch, the split costs zero divergence:
+
+```cuda
+constexpr int WARPGROUP_SIZE = 128;   // 4 warps -- Hopper's warpgroup-MMA scheduling unit
+
+__global__ void warpSpecializedMainloop(/* ... */) {
+    int warpgroupId = threadIdx.x / WARPGROUP_SIZE;   // uniform per warp: no divergence cost
+
+    if (warpgroupId == 0) {
+        producerLoop(/* issues async TMA copies only, no math */);
+    } else {
+        consumerLoop(/* runs the Tensor Core MMA / softmax pipeline */);
+    }
+}
+```
+
+**The canonical three-role split**, from FlashAttention-3/4 (see
+[`../case_studies/build_a_flash_attention_kernel.md`](../case_studies/build_a_flash_attention_kernel.md)
+§4e and §6 for the full kernel this is drawn from): a **producer** warp — often just one
+warp, sometimes a single thread — does nothing but issue asynchronous bulk copies; one or
+more **consumer** warpgroups run the matrix multiplies; and on FlashAttention-4, a further
+**softmax warpgroup** ping-pongs against the MMA warpgroup, so that while one warpgroup
+computes the non-matmul softmax rescale, the other is already issuing the next tile's MMA
+instructions, and the two roles swap tile-to-tile rather than queuing behind each other.
+
+**Why dedicating a whole warp to nothing but copies is cheap.** A producer warp's job —
+issuing an async copy instruction and returning — consumes almost no registers and touches
+no math unit, so pulling it out of the math warps costs very little in occupancy while
+removing copy-issue latency from the critical path the Tensor Core warps run on entirely.
+The two roles are decoupled by a ring of async barriers, one per pipeline stage, that the
+producer's copy signals on completion and the consumer polls before consuming a tile — the
+exact `cuda::barrier`/mbarrier mechanics (including the phase-parity trap a polling consumer
+must get right) are covered in
+[synchronization_and_atomics §6.6](../synchronization_and_atomics/synchronization_and_atomics.md);
+this section does not re-teach barrier semantics, only how the roles use them.
+
+**Register budgeting under specialization.** The producer and consumer roles want wildly
+different register counts — a copy-issuing warp needs almost none, while an MMA
+warpgroup's accumulator can want the maximum a thread block can claim. A single
+`__launch_bounds__` figure applied uniformly cannot serve both well. Hopper's `setmaxnreg`
+mechanism (exposed through CUTLASS's warpgroup register-management helpers, or directly as
+a PTX instruction) lets the producer warpgroup **give back** registers it does not need so
+the consumer warpgroups can claim more than an even split would allow — mention this as the
+mechanism at work, not something you are expected to hand-write: reaching for it directly is
+CUTLASS/Triton-Gluon territory, not a first kernel.
+
+```
+Producer/consumer pipeline, 3 stages deep, steady state (each stage's mbarrier hides load
+latency behind compute -- compare the serial Ampere case in Section 6 of the FlashAttention
+case study, where one warp both loads and computes with no overlap):
+
+  time -->    t0    t1    t2    t3    t4    t5    t6    t7    t8
+  Producer    L0    L1    L2    L3    L4    L5    L6     .     .
+  MMA warps    .    M0    M1    M2    M3    M4    M5    M6     .
+  Softmax wg   .     .    X0    X1    X2    X3    X4    X5    X6
+
+  L_i = producer issues an async TMA copy of tile i (non-blocking, signals an mbarrier
+        on completion instead of a thread reporting arrival)
+  M_i = consumer MMA warpgroup runs the Tensor Core matmul on tile i, once L_i landed
+  X_i = softmax warpgroup rescales tile i-1's output WHILE the MMA warpgroup issues M_i --
+        the FlashAttention-4 ping-pong: a non-matmul stage overlaps a matmul stage instead
+        of queuing behind it on the same warpgroup
+
+At steady state the producer runs 1+ tiles ahead of the MMA warps, and the MMA warps run
+1 tile ahead of the softmax warpgroup: three independent pipelines in flight together, none
+idle waiting on the others, coordinated only by the mbarrier ring each stage arrives on.
+```
+
+**The honest guidance.** You will almost always *get* warp specialization by reaching for
+CUTLASS/CuTe, Triton (`num_stages` for pipelined loads; Gluon for explicit warp
+specialization), or a compiler pass that inserts it for you — hand-writing the producer/
+consumer split and its mbarrier ring is significant, error-prone plumbing that a library has
+already tuned per architecture. But you must be able to *read* this shape fluently: every
+peak-throughput Hopper and Blackwell kernel — FlashAttention-3/4, CUTLASS's Hopper GEMM
+kernels, and the code those libraries generate underneath a high-level call — is structured
+this way, and "why does this kernel have two `if (warpgroupId == ...)` branches instead of
+one code path" is now a baseline question, not an advanced one.
+
 ---
 
 ## 7. Real-World Examples
@@ -1050,6 +1136,18 @@ Yes — `tiled_partition<8>` or `<16>` partitions a warp into 4 or 2 independent
 **Q: Does replacing shared memory with `__syncwarp()` alone remove the memory-hierarchy cost that shuffle removes?**
 **Short:** No — `__syncwarp()` only removes cross-warp barrier semantics; shared-memory reads/writes still happen, unlike shuffle, which reads registers directly.
 No — `__syncwarp()` only removes the cross-warp barrier semantics of `__syncthreads()`; the shared-memory reads/writes and their bank-conflict/latency cost still happen. Only `__shfl_*_sync` removes the memory access itself by reading the source lane's register directly.
+
+**Q: What is warp specialization, and how is it different from every other kernel structure in this module?**
+**Short:** Warps are partitioned by role at compile time — producer warps issue copies, consumer warps compute — instead of every warp running identical code on different data.
+Warp specialization partitions a kernel's warps by *role* at compile time — typically by branching on `threadIdx.x / 32` or a warpgroup index — so a producer warp does nothing but issue asynchronous copies while consumer warps run the compute pipeline, instead of every warp in the kernel executing the identical code path on different data. It is a heterogeneous kernel shape rather than the homogeneous SIMT pattern everything else in this module assumes, and it costs no divergence because every lane in a given warp takes the same branch.
+
+**Q: Why does dedicating an entire warp to just issuing copies not waste that warp's compute capacity?**
+**Short:** A copy-issuing warp uses almost no registers and no math units, so removing it from the math warps costs little occupancy while taking copy-issue latency off their critical path.
+Because issuing an asynchronous bulk copy and returning consumes almost no registers and touches no math unit, so pulling that role out into its own warp costs very little in occupancy — it is a nearly-idle warp by design. What it buys back is much larger: the consumer (matmul) warps no longer stall issuing or waiting on copies themselves, so copy latency is hidden behind compute instead of sitting on the math warps' critical path.
+
+**Q: What problem does Hopper's `setmaxnreg` mechanism solve for a warp-specialized kernel?**
+**Short:** It lets a low-register-need producer warpgroup give registers back so higher-register-need consumer warpgroups can claim more than a uniform `__launch_bounds__` split would allow.
+Producer and consumer warpgroups in a specialized kernel want very different register counts — a copy-issuing producer needs almost none, while an MMA warpgroup's accumulator wants as many as it can get — and a single uniform `__launch_bounds__` budget cannot serve both roles well. `setmaxnreg` (used via CUTLASS's warpgroup register helpers, or directly at the PTX level) lets the producer warpgroup explicitly give back registers it does not need so the consumer warpgroups can claim more than an even per-warpgroup split would provide, rather than every warpgroup being capped to the same ceiling regardless of role.
 
 ---
 

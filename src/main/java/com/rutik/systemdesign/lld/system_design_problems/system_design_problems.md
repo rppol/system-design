@@ -85,6 +85,96 @@ Minutes 25–30: Handle "Add a Feature" extension
 
 ---
 
+## 3b. The 90-Minute Machine-Coding Round
+
+The framework above is for a **design discussion**: you talk, you draw, the artifact is a diagram and
+an argument. The machine-coding round is a different exam with a different artifact, and in the
+Indian market it is the round that eliminates most candidates. You are given a problem statement and
+**90 to 120 minutes alone with an IDE**, and you hand back a *working, demonstrable* console
+application. Then 20–30 minutes of code review with the interviewer, who will ask you to add a
+requirement live.
+
+Do not walk into it with the 30-minute habits. Thirty minutes of whiteboard reasoning is 30 minutes
+you did not spend making something run, and an elegant unfinished design scores below an average
+finished one — "code should be working and demonstrable" is the first line on every published rubric.
+
+### The clock
+
+| Minutes | Do | Do not |
+|---------|----|--------|
+| 0–10 | Re-read the statement. Write the requirements down as a checklist in a comment or README, including the ones you are choosing to skip. Decide the one or two assumptions you will state aloud later | Start typing classes |
+| 10–25 | Enums, interfaces and entity signatures only — no bodies. This is where the design happens, and it is the last cheap moment to change it | Implement anything |
+| 25–70 | Core implementation, one use case at a time, keeping it compiling. Finish the primary flow before starting the second | Chase a pattern you have not needed yet |
+| 70–80 | `main()` that drives a scripted end-to-end demo and prints readable output | Build a menu-driven interactive loop |
+| 80–90 | Input validation and the unhappy paths on the checklist; a short README naming your assumptions and known gaps | Refactor for beauty |
+
+The single most common failure is arriving at minute 85 with a beautiful class hierarchy and no
+`main`. Reverse the risk: get a trivial end-to-end path running by minute 40 — one vehicle parks and
+exits, one player takes one turn — and grow it. A running program you keep extending is always
+demonstrable; a program you assemble at the end is demonstrable only if you finish.
+
+### What is actually graded
+
+| Axis | What a pass looks like | What a fail looks like |
+|------|------------------------|------------------------|
+| **Working code** | `main()` runs, prints a sensible trace of the primary flow, exits cleanly | Compiles but does nothing; or a menu loop the interviewer has to drive by hand to see anything |
+| **Clean OO decomposition** | Behavior sits on the object that owns the data; interfaces where variation is real | One `Manager`/`Service` class holding every rule, with anaemic data classes around it |
+| **Extensibility** | Adding the live requirement is a new class plus one line of registration | Adding it means editing an `if`/`switch` in three files |
+| **Input validation / edge cases** | Invalid input rejected with a clear reason; the empty, full and duplicate cases are handled | Happy path only; an `ArrayIndexOutOfBoundsException` when the lot is full |
+
+### The live extension test
+
+The review always ends with "now add X". This is the round's real signal: the interviewer is checking
+whether your extension points were designed or accidental. The exercises in this section give you the
+usual shapes — add a spot tier or a pricing rule (Strategy), add a payment method (Strategy +
+Factory), add a new piece with different movement (polymorphism over a `switch`), add a notification
+channel (Observer), add a rate-limiting algorithm (Strategy). Practise saying, before you start
+typing, *where* the change lands and *what stays untouched*. If the honest answer is "three
+`if`-chains", say so — naming your own design's weakness scores better than discovering it live.
+
+### House rules
+
+Unless the statement says otherwise, assume all of these — they are conventions, not gaps, and stating
+them costs one sentence:
+
+- **In-memory only.** `HashMap`/`List` as the store. No database, no JDBC, no file persistence.
+- **No framework.** No Spring, no dependency-injection container. Wire dependencies in `main` with
+  constructors; that IS the dependency injection you are being graded on.
+- **No UI.** Console output. A UI is explicitly not required and is a time sink.
+- **No external libraries** beyond the JDK unless permitted; a test dependency is usually fine.
+- **One runnable entry point.** `public static void main` driving a scripted scenario.
+
+### What to cut when the clock beats you
+
+Cut in this order, and say which cuts you made:
+
+1. **Persistence** — always the first to go; an in-memory map is expected anyway.
+2. **UI / interactive menu** — replace with a hard-coded scenario in `main`.
+3. **Thread safety** — drop to single-threaded and *name it*: "`ParkingLotSystem.parkVehicle` has a
+   check-then-act race between `findAvailableSpot` and `occupy`; single-threaded here, and the fix is
+   a lock per floor or a CAS on spot status." A named, unimplemented concurrency concern scores; a
+   silent one does not.
+4. **Secondary features** — the third and fourth requirement on your checklist.
+
+Never cut: the primary flow, `main()`, or input validation. Those are the three axes.
+
+### Worked pass/fail — Parking Lot at minute 90
+
+Same problem, two submissions:
+
+| | Fails | Passes |
+|---|---|---|
+| Entry point | No `main`; three JUnit tests, one red | `main` parks a car and a truck, rejects a motorcycle when small spots are full, exits a vehicle and prints the fee |
+| Pricing | `if (type == COMPACT) fee = 2 * hours; else if …` inside `ParkingLotSystem` | `PricingStrategy` interface, `HourlyPricing` injected in `main` |
+| Spot lookup | Linear scan of every spot in the lot | `Map<ParkingSpotType, List<ParkingSpot>>` per floor |
+| Full lot | Returns `null`, caller NPEs | Returns an explicit result the caller prints as "no spot available" |
+| "Now add weekend pricing" | Edit the `if`-chain, recompile, hope | New `WeekendPricing` class, one line in `main` |
+| Class count | 1 class of 400 lines | 9 classes, longest 60 lines |
+
+Both candidates understood the problem. Only one has something to review.
+
+---
+
 ## 4. Pattern Selection by Problem Type
 
 | If the problem has... | Reach for... |
@@ -296,7 +386,7 @@ stateDiagram-v2
 
 ---
 
-## 9. Key Class Relationships — ASCII Diagrams
+## 9. Key Class Relationships — Class Diagrams
 
 ### Parking Lot
 
@@ -304,60 +394,83 @@ stateDiagram-v2
 classDiagram
     direction LR
 
-    class ParkingLot {
-        -floors: Floor[]
+    class ParkingLotSystem {
+        <<Singleton>>
+        -floors List
+        -activeTickets Map
+        -pricingStrategy
+        +parkVehicle()
+        +exitVehicle()
     }
-    class Floor {
-        -spots: ParkingSpot[]
+    class ParkingFloor {
+        -spotsByType
+        -observers
     }
     class ParkingSpot {
-        -type: SpotType
-        -status: SpotStatus
-        -pricingStrategy: PricingStrategy
+        <<abstract>>
     }
-    class SpotType {
+    class SmallSpot
+    class MediumSpot
+    class LargeSpot
+    class ParkingSpotType {
         <<enumeration>>
-        COMPACT
+        SMALL
+        MEDIUM
         LARGE
-        MOTORCYCLE
-        DISABLED
     }
-    class SpotStatus {
-        <<enumeration>>
-        AVAILABLE
-        OCCUPIED
-        RESERVED
+    class Vehicle {
+        <<abstract>>
+        +requiredSpotType()
+    }
+    class Motorcycle
+    class Car
+    class Truck
+    class VehicleFactory {
+        <<Factory>>
+        +create(type, plate)
     }
     class PricingStrategy {
         <<interface>>
+        +calculateFee(duration, spotType)
     }
-    class HourlyPricingStrategy
-    class FlatRatePricingStrategy
+    class HourlyPricing
+    class DailyPricing
+    class WeekendPricing
+    class ParkingSpotObserver {
+        <<interface>>
+        +onAvailability()
+    }
+    class DisplayBoard
     class ParkingTicket {
-        -spot: ParkingSpot
-        -entryTime: LocalDateTime
-        -exitTime: LocalDateTime
-        -totalCost: BigDecimal
-    }
-    class ParkingLotController {
-        +findAvailableSpot(vehicleType) ParkingSpot
-        +park(vehicle) ParkingTicket
-        +exit(ticket) BigDecimal
+        -vehicle
+        -spot
+        -entryTime
+        -status
     }
 
-    ParkingLot "1" o-- "*" Floor : aggregates
-    Floor "1" *-- "*" ParkingSpot : contains
-    ParkingSpot --> SpotType
-    ParkingSpot --> SpotStatus
-    ParkingSpot --> PricingStrategy
-    PricingStrategy <|.. HourlyPricingStrategy
-    PricingStrategy <|.. FlatRatePricingStrategy
-    ParkingLotController ..> ParkingSpot : finds
-    ParkingLotController ..> ParkingTicket : creates
+    ParkingLotSystem "1" o-- "*" ParkingFloor : aggregates
+    ParkingLotSystem "1" --> "*" ParkingTicket : activeTickets
+    ParkingLotSystem --> PricingStrategy : uses
+    ParkingFloor "1" *-- "*" ParkingSpot : spotsByType
+    ParkingFloor "1" o-- "*" ParkingSpotObserver : observers
+    ParkingSpot <|-- SmallSpot
+    ParkingSpot <|-- MediumSpot
+    ParkingSpot <|-- LargeSpot
+    ParkingSpot --> ParkingSpotType
+    Vehicle <|-- Motorcycle
+    Vehicle <|-- Car
+    Vehicle <|-- Truck
+    Vehicle --> ParkingSpotType : requiredSpotType()
+    VehicleFactory ..> Vehicle : creates
+    PricingStrategy <|.. HourlyPricing
+    PricingStrategy <|.. DailyPricing
+    PricingStrategy <|.. WeekendPricing
+    ParkingSpotObserver <|.. DisplayBoard
+    ParkingTicket --> Vehicle
     ParkingTicket --> ParkingSpot
 ```
 
-`ParkingLotController` is the only class with behavior; everything below it — `Floor`, `ParkingSpot`, and the two `PricingStrategy` implementations — is pure structure, which is what makes adding a new `SpotType` or pricing tier an additive change instead of a rewrite (see the "add a feature" Q&A below).
+This is a compression of the full diagram in [ParkingLot.md](ParkingLot.md), not a second design — same class names, same enum values, same five patterns. `ParkingLotSystem` is the only class with real behavior; everything below it is structure, which is what makes adding a `ParkingSpotType` value or a fourth `PricingStrategy` an additive change instead of a rewrite (see the "add a feature" Q&A below). Note where each pattern earns its place: Singleton on the lot, Strategy on pricing, Factory on vehicle creation, Observer between a floor and its display boards, and the `ParkingSpot` hierarchy that lets a vehicle ask for the spot type it needs rather than the lot mapping it.
 
 ### Vending Machine (State Pattern)
 

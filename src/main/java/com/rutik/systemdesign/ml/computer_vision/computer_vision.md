@@ -586,7 +586,7 @@ When fine-tuning with a small batch (< 16) on a new domain, BatchNorm running st
 | Segmentation | mmsegmentation, huggingface | SAM via `segment-anything` package |
 | Training | PyTorch Lightning, Hugging Face Trainer | Reduces boilerplate |
 | Data | Albumentations | Fast augmentation library (10x faster than torchvision) |
-| Serving | TorchServe, Triton Inference Server | Triton for multi-model, multi-framework |
+| Serving | Triton Inference Server, BentoML | Triton for multi-model, multi-framework |
 | Annotation | Label Studio, CVAT, Roboflow | CVAT for open-source; Roboflow for managed |
 | Experiment tracking | Weights & Biases, MLflow | W&B standard in CV teams |
 | Profiling | torch.profiler, NVIDIA Nsight | Find GPU bottlenecks |

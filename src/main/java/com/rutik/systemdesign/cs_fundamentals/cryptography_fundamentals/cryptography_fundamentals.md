@@ -292,13 +292,16 @@ Common algorithms: Ed25519 (the default for new systems — fast, deterministic,
 
 Every asymmetric primitive above — RSA, ECDH, ECDSA, Ed25519 — falls to Shor's algorithm on a sufficiently large quantum computer. Symmetric primitives do not: Grover's algorithm only square-roots the search, so AES-256 keeps a 128-bit margin and SHA-384/SHA-512 keep theirs. The exposure is therefore entirely in key exchange and signatures, and "harvest now, decrypt later" makes it a *present* risk for anything that must stay confidential past the 2030s.
 
-NIST published the first post-quantum standards in **August 2024**:
+NIST published the first post-quantum standards in **August 2024** and selected a fifth algorithm, HQC, on **11 March 2025**:
 
 | Standard | Algorithm | Based on | Replaces |
 |----------|-----------|----------|----------|
 | **FIPS 203** | ML-KEM (Kyber) | Module lattices | RSA / ECDH key exchange |
 | **FIPS 204** | ML-DSA (Dilithium) | Module lattices | RSA / ECDSA signatures |
 | **FIPS 205** | SLH-DSA (SPHINCS+) | Hash functions only | Signatures where lattice hardness is too new an assumption |
+| draft ~2026, final 2027 | HQC (Hamming Quasi-Cyclic) | Error-correcting codes | Backup KEM for ML-KEM — a non-lattice hedge |
+
+**Why a fifth algorithm, and why a code-based one.** Three of the four published standards rest on the same hardness assumption: ML-KEM and ML-DSA are both module-lattice schemes, so a structural break in lattices would take out key exchange and the primary signature scheme in one stroke. SLH-DSA hedges the signature side with nothing but hash functions; HQC hedges the *key-exchange* side with error-correcting codes, a family that has been studied in information security for decades. It is not a replacement — ML-KEM stays the primary recommendation and is the one in CNSA 2.0 — and it costs more: HQC's keys and ciphertexts are larger and it needs more compute than ML-KEM. You deploy ML-KEM now; HQC exists so that a lattice break is a migration rather than a catastrophe.
 
 The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. TLS 1.3 does this today with the `X25519MLKEM768` group, shipped by default in Chrome and Firefox — an X25519 ECDH combined with ML-KEM-768. Signatures are migrating more slowly because certificate chains carry every signature in the path and an ML-DSA-44 signature is 2,420 bytes against Ed25519's 64.
 
@@ -1214,7 +1217,7 @@ AEAD encrypts plaintext (for confidentiality) and also authenticates associated 
 
 **Q: Which of today's primitives survive a quantum computer, and what replaces the ones that don't?**
 **Short:** Symmetric crypto like AES-256 survives with its margin halved by Grover's algorithm, but Shor's algorithm breaks RSA/ECDH/ECDSA outright, replaced by NIST's ML-KEM and ML-DSA.
-Symmetric primitives survive with a doubled key size; every deployed asymmetric primitive does not. Grover's algorithm only square-roots a brute-force search, so AES-256 retains a 128-bit margin and SHA-384/512 retain theirs — that is why AES-256 is preferred over AES-128 for long-lived data. Shor's algorithm, by contrast, breaks RSA, ECDH, ECDSA and Ed25519 outright. NIST published the replacements in August 2024: FIPS 203 ML-KEM (key encapsulation), FIPS 204 ML-DSA and FIPS 205 SLH-DSA (signatures). Deployment is hybrid rather than a swap — TLS 1.3's `X25519MLKEM768` group feeds both an X25519 and an ML-KEM-768 shared secret into the KDF, so the session holds if either survives, and browsers negotiate it by default today.
+Symmetric primitives survive with a doubled key size; every deployed asymmetric primitive does not. Grover's algorithm only square-roots a brute-force search, so AES-256 retains a 128-bit margin and SHA-384/512 retain theirs — that is why AES-256 is preferred over AES-128 for long-lived data. Shor's algorithm, by contrast, breaks RSA, ECDH, ECDSA and Ed25519 outright. NIST published the replacements in August 2024: FIPS 203 ML-KEM (key encapsulation), FIPS 204 ML-DSA and FIPS 205 SLH-DSA (signatures), and added a fifth algorithm on 11 March 2025 — HQC, a code-based KEM chosen as a non-lattice backup for ML-KEM, with a draft standard due around 2026 and a final one in 2027. Deployment is hybrid rather than a swap — TLS 1.3's `X25519MLKEM768` group feeds both an X25519 and an ML-KEM-768 shared secret into the KDF, so the session holds if either survives, and browsers negotiate it by default today.
 
 **Q: Why is "harvest now, decrypt later" a present-tense risk rather than a future one?**
 **Short:** An adversary can record encrypted traffic today and decrypt it once a quantum computer exists, so the exposure date is the recording date, not the decryption date.

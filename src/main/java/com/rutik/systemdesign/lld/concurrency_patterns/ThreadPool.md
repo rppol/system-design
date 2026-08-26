@@ -9,6 +9,8 @@
 
 **Key insight**: The right pool size depends on whether tasks are CPU-bound (size = CPU cores) or I/O-bound (size = CPU cores × (1 + wait_time/compute_time)). Guessing wrong degrades either throughput or memory — profile before tuning.
 
+**Full runnable implementation:** [`ThreadPool.java`](ThreadPool.java) — 399 lines, one file, `main()` at the bottom. It demonstrates `SimpleThreadPool` built from a `BlockingQueue` plus worker threads, the same work handed to `ExecutorService`, a `CompletableFuture` async pipeline, a `SimpleWebServer` handler pool, and `ParallelSum`/`ParallelMergeSort` as `RecursiveTask`s on the common `ForkJoinPool`.
+
 ---
 
 ## Intent
@@ -324,8 +326,8 @@ ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 **Virtual threads change the calculus**:
 - I/O-bound tasks: no need to size thread pools — virtual threads are cheap
 - CPU-bound tasks: still need bounded pools (one per CPU core)
-- No ThreadLocal starvation issues
-- Pinning: synchronized blocks + native calls still pin virtual threads to carrier threads
+- `ThreadLocal` starvation disappears, but a `ThreadLocal` set on a per-task virtual thread is also gone at task end — use `ScopedValue` (final in Java 25) when a value must be visible down the call chain
+- Pinning: a blocking **native** frame — JNI, an FFM upcall, class loading, a class initializer — still pins a virtual thread to its carrier. `synchronized` does not, since JEP 491 in Java 24
 
 ---
 
@@ -361,3 +363,73 @@ I/O-bound formula: `threads = N_CPUs × (1 + DB_wait/compute_time)`. Profile to 
 **Q: Why might `Executors.newFixedThreadPool()` cause OOM in production?**
 **Short:** It uses an unbounded LinkedBlockingQueue, so a sustained submission surplus grows the queue until the heap is exhausted.
 It uses an unbounded `LinkedBlockingQueue`. If tasks are submitted faster than processed, the queue grows without bound until OOM. Always use `ThreadPoolExecutor` with a bounded queue in production.
+
+---
+
+**Q: Walk through the exact order ThreadPoolExecutor follows when a task is submitted.**
+**Short:** It tries a core thread first, then the queue, then a new thread up to maximumPoolSize, then rejects.
+
+A: First, if a core thread is available (fewer than `corePoolSize` are running), the task is assigned straight to a core thread. If not, the task goes into the work queue if there is space. If the queue is full and the pool is still below `maximumPoolSize`, a new non-core thread is created to run the task. Only if the queue is full and the pool is already at `maximumPoolSize` does the task hit the rejection handler — this cascade is exactly why an unbounded queue means the pool never reaches step three.
+
+---
+
+**Q: Why does an unbounded work queue mean the pool never grows past corePoolSize?**
+**Short:** New threads beyond corePoolSize are only created once the queue is full, and an unbounded queue never fills.
+
+A: `ThreadPoolExecutor` only creates a thread beyond `corePoolSize` when the work queue is full and a task still needs somewhere to go. An unbounded queue (like the default `LinkedBlockingQueue` behind `newFixedThreadPool()`) has no capacity limit, so it is never "full" in the sense the executor checks — tasks just keep queuing instead of triggering new threads. The practical result: setting `maximumPoolSize=200` with an unbounded queue is pure decoration, since the pool stays pinned at `corePoolSize` no matter how much load arrives.
+
+---
+
+**Q: What's the CPU-bound thread pool sizing formula, and why the "+1"?**
+**Short:** Size CPU-bound pools at N_CPUs + 1, with the extra thread covering a briefly paused core.
+
+A: For CPU-bound tasks, `threads = N_CPUs + 1`. The "+1" ensures a thread is available to keep a core busy if another thread is briefly paused — for a page fault or a minor GC pause, for instance — rather than leaving that core idle. Beyond `N_CPUs + 1`, extra threads add context-switch overhead without adding throughput, since there's no more CPU capacity left to hand them. This is why the CPU-bound formula has no `wait_time`/`compute_time` term the way the I/O-bound formula does — when wait time is zero, more threads only compete for the same fixed compute capacity.
+
+---
+
+**Q: Using Little's Law, how do you size a bounded work queue for a given latency budget?**
+**Short:** Queue size equals arrival rate times acceptable wait time, so 800 tasks/sec with a 250ms budget needs 200 slots.
+
+A: Little's Law gives `L = lambda x W` — average items resident in the queue equals arrival rate times average wait time. For a pool draining 800 tasks/sec with a 250ms queueing-budget slice of the SLA, `L = 800 x 0.25 = 200` slots. Sizing larger (say 2,000 slots) blows the SLA tenfold when the queue is full; sizing smaller (20 slots) rejects on tiny, otherwise-harmless bursts — 200 is the size that spends the whole budget without exceeding it.
+
+---
+
+**Q: What causes the classic thread-pool-induced deadlock, and how do you avoid it?**
+**Short:** A task that submits and blocks on a dependent task in the same fixed-size pool starves the pool of a thread.
+
+A: If a pool has only 2 threads and Task A, running on one of them, submits Task B to the same pool and then calls `b.get()` to block waiting for it, Task B can never start once both pool threads are occupied by copies of Task A — the pool has no thread left to run it, so Task A waits forever. The fix is to run dependent tasks on a separate pool from the one they were submitted from, or use `ForkJoinPool` with `join()`, which is specifically designed to let a blocked thread help execute other queued work instead of just parking.
+
+---
+
+**Q: Why is ThreadLocal dangerous in a pooled thread, and how do you fix it?**
+**Short:** Values persist on the thread across tasks since the thread returns to the pool instead of dying; call remove() in a finally block.
+
+A: A `ThreadLocal` value set during one task's execution is not automatically cleared when the task finishes — the underlying platform thread goes back into the pool and picks up the next task with the old value still attached. If Task 1 sets `threadLocal.set("Alice")` and Task 2 later runs on that same recycled thread, `threadLocal.get()` still returns `"Alice"`, silently leaking data between unrelated tasks. The fix is to always call `threadLocal.remove()` in a `finally` block at the end of every task, guaranteeing cleanup regardless of how the task completes.
+
+---
+
+**Q: Why does executor.submit() with a Runnable silently swallow an uncaught exception?**
+**Short:** The exception is captured inside the returned Future instead of surfaced, so nobody sees it unless the Future is checked.
+
+A: When a `Runnable` submitted via `executor.submit()` throws, the exception is captured and stored inside the returned `Future` rather than propagated anywhere visible — if nobody calls `future.get()` (which would re-throw it as an `ExecutionException`), the failure is completely silent. The fix is to catch and log the exception inside the task itself before it can escape unnoticed, or to consistently check every submitted `Future`. This is a routine production trap: a task quietly failing every time with no log line and no alert, until someone notices the expected side effect never happened.
+
+---
+
+**Q: What is CallerRunsPolicy and why is it called "natural backpressure"?**
+**Short:** The submitting thread itself executes the rejected task, which slows the producer to consumer speed without dropping work.
+
+A: `CallerRunsPolicy` runs a rejected task directly on the thread that tried to submit it, instead of throwing or discarding it. Because the caller is now busy executing that task itself, it cannot submit further tasks until it finishes, which naturally throttles the rate of incoming work to match the pool's actual processing speed. This makes it "natural backpressure": no task is lost, and no separate throttling mechanism is needed — the producer is slowed down by the exact mechanism that would otherwise have rejected its work.
+
+---
+
+**Q: How does newWorkStealingPool differ from the other Executors factory methods?**
+**Short:** It's backed by ForkJoinPool with work-stealing across N_CPUs threads, for parallel divide-and-conquer tasks.
+
+A: `newWorkStealingPool()` is backed by `ForkJoinPool` rather than a standard `ThreadPoolExecutor`, and it defaults to `N_CPUs` threads that use work-stealing — an idle thread pulls queued sub-tasks from a busy thread's own deque rather than sitting idle. This suits divide-and-conquer workloads with uneven, recursively forked sub-tasks, unlike `newFixedThreadPool()` or `newCachedThreadPool()`, which are built for independent, uniformly-sized tasks submitted from outside the pool. Choosing it for ordinary request-handling work would be a mismatch, since there's no recursive forking to steal work from.
+
+---
+
+**Q: How does Kubernetes' Horizontal Pod Autoscaler mirror ThreadPoolExecutor's sizing knobs?**
+**Short:** The pod resource request maps to corePoolSize, max replicas maps to maximumPoolSize, and pod startup time maps to thread creation overhead.
+
+A: A fleet of worker pods processing jobs from a queue is a thread pool at infrastructure scale: the pod's baseline replica count is the equivalent of `corePoolSize`, the HPA's configured max replicas is `maximumPoolSize`, and pod startup latency plays the same role as the ~1ms cost of spinning up a new thread. CPU utilization or queue depth driving the HPA's scale-out decision is the same signal that drives a `ThreadPoolExecutor` past `corePoolSize` toward `maximumPoolSize` once its work queue fills. The tuning tradeoffs are identical in shape: too few replicas/threads underuses capacity, too many wastes resources on idle workers.

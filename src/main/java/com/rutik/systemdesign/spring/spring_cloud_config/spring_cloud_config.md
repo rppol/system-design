@@ -1,5 +1,13 @@
 # Spring Cloud Config
 
+> Centralized, versioned externalized configuration for a distributed system, served
+> over HTTP and refreshed live via `@RefreshScope` and Spring Cloud Bus. Baseline:
+> Spring Boot 4.1.x on the 2025.1 ("Oakwood") Spring Cloud train, which supports Boot
+> 4.0.x and 4.1.x from 2025.1.2 onward. **Watch the BOM order:** each train patch is
+> built against one Boot patch (2025.1.3 is based on 4.0.8), so import
+> `spring-boot-dependencies` before `spring-cloud-dependencies` or you silently run
+> 4.0.8 (see §4).
+
 ---
 
 ## 1. Concept Overview
@@ -55,8 +63,25 @@ Key insight: Config Server trades deployment simplicity for operational complexi
 
 | Approach | Boot Version | Configuration |
 |----------|-------------|---------------|
-| `bootstrap.yml` / bootstrap context | Boot 2.x | `spring.cloud.config.uri` in bootstrap.yml; loads before ApplicationContext |
-| `spring.config.import` | Boot 3.x (recommended) | `spring.config.import=configserver:http://config-server:8888` in application.yml |
+| `bootstrap.yml` / bootstrap context | Boot 2.x (legacy) | `spring.cloud.config.uri` in bootstrap.yml; loads before ApplicationContext |
+| `spring.config.import` | Boot 3.0+ (current baseline: Boot 4.1.x) | `spring.config.import=configserver:http://config-server:8888` in application.yml |
+
+**Baseline caveat — BOM order, not the train, decides which Boot version actually
+runs.** A Config Server or Client pulls its Spring Cloud coordinates from a **release
+train** via `spring-cloud-dependencies`. The current train, **2025.1 ("Oakwood")**,
+supports Spring Boot **4.0.x and 4.1.x**, the latter from **2025.1.2** onward, which
+"is compatible with Spring Boot 4.0.7 and introduces compatibility for Spring Boot
+4.1.0" — so Config Server on Boot 4.1 is a supported combination. What is easy to miss
+is that each patch is *built against* one Boot patch: **2025.1.3** (2026-08-20) "is
+based on Spring Boot `4.0.8`", and that is the version its BOM manages. Because Maven
+resolves a managed version from the **first** BOM that declares it, a project importing
+`spring-cloud-dependencies` ahead of `spring-boot-dependencies` runs 4.0.8 no matter
+what Boot version it thinks it asked for. Declare the Boot BOM first to get 4.1.x.
+Stepping outside the train's supported generations entirely is the genuinely unsupported
+move, and it never fails at compile time — it surfaces as a runtime
+`NoSuchMethodError`/`NoClassDefFoundError`. One more trap: the `spring-cloud-release`
+wiki's supported-versions table still lists Oakwood against 4.0.x alone and is stale;
+the compatibility matrix on the project page is the current one.
 
 ### Refresh Strategies
 
@@ -236,7 +261,7 @@ spring:
       password: ${CONFIG_SERVER_PASSWORD}
 ```
 
-### Config Client — Boot 3.x (spring.config.import)
+### Config Client — spring.config.import (Boot 3.0+, current baseline: Boot 4.1.x)
 
 ```xml
 <!-- pom.xml -->
@@ -251,7 +276,7 @@ spring:
 ```
 
 ```yaml
-# application.yml in the microservice (Boot 3.x)
+# application.yml in the microservice (Boot 4.1.x)
 spring:
   application:
     name: order-service              # maps to order-service.yml in Config repo
@@ -459,12 +484,12 @@ GET  /actuator/health -- Config Server health (includes Git connectivity)
 
 ### Bootstrap Context vs spring.config.import
 
-| Dimension | Bootstrap (Boot 2.x) | spring.config.import (Boot 3.x) |
+| Dimension | Bootstrap (Boot 2.x) | spring.config.import (Boot 3.0+, current baseline: Boot 4.1.x) |
 |-----------|---------------------|--------------------------------|
 | Phase | Before ApplicationContext | During ApplicationContext startup |
 | Configuration | Separate bootstrap.yml | Single application.yml |
 | Behavior on failure | App fails to start | Configurable (optional vs required) |
-| Recommendation | Legacy; still supported | Preferred for new projects |
+| Recommendation | Legacy; still supported | The only supported approach for new projects |
 
 ---
 
@@ -517,21 +542,22 @@ public DataSource dataSource() {
 // HikariCP: hikari.setUsername() + hikari.setPassword() + hikari.softEvictConnections()
 ```
 
-### Pitfall 2: bootstrap.yml vs spring.config.import confusion after Boot 3.x migration
+### Pitfall 2: bootstrap.yml vs spring.config.import confusion after migrating off Boot 2.x
 
 ```yaml
-# BROKEN in Boot 3.x: bootstrap.yml is ignored without the bootstrap starter.
-# Developer migrates from Boot 2 to Boot 3 but keeps bootstrap.yml.
+# BROKEN from Boot 3.0 onward (including today's Boot 4.1.x): bootstrap.yml is
+# ignored without the bootstrap starter.
+# Developer migrates off Boot 2.x but keeps bootstrap.yml.
 # Config Server URL is never read; service starts with empty/default config.
 # bootstrap.yml:
 spring:
   cloud:
     config:
-      uri: http://config-server:8888  # silently ignored in Boot 3.x without extra dep
+      uri: http://config-server:8888  # silently ignored from Boot 3.0 onward without extra dep
 ```
 
 ```yaml
-# FIXED: use spring.config.import in application.yml (Boot 3.x)
+# FIXED: use spring.config.import in application.yml (Boot 3.0+, current: Boot 4.1.x)
 # application.yml:
 spring:
   application:
@@ -542,7 +568,7 @@ spring:
     config:
       fail-fast: true
 
-# If you must keep bootstrap context in Boot 3.x (migration period):
+# If you must keep bootstrap context on Boot 3+/4.x (migration period):
 # add spring-cloud-starter-bootstrap dependency explicitly.
 ```
 
@@ -658,13 +684,13 @@ spring:
 **Short:** Config Server centralizes configuration in a versioned Git repository instead of baking it into each artifact.
 Spring Cloud Config Server is a centralized configuration service that externalizes application configuration from the artifact. It solves configuration drift between environments: instead of each microservice maintaining its own `application.yml` baked into the Docker image, all services fetch their configuration from a single versioned source (typically a Git repository) at startup. Changes to configuration are auditable, reviewable via PRs, and can be applied at runtime without redeployment using `@RefreshScope`.
 
-**Q: How does a Config Client fetch configuration in Spring Boot 3.x?**
+**Q: How does a Config Client fetch configuration in Spring Boot 4.x?**
 **Short:** The client declares spring.config.import=configserver:... so ConfigDataLocationResolver fetches remote properties.
-In Boot 3.x, the client declares `spring.config.import=configserver:http://config-server:8888` in `application.yml`. During the `ApplicationContext` startup, Spring's `ConfigDataLocationResolver` sees the `configserver:` import, connects to the Config Server, and fetches properties for the current `spring.application.name` and active profiles. These remote properties are merged into the `Environment` with higher priority than local `application.yml`. In Boot 2.x, this was done via a separate `bootstrap.yml` loaded in a bootstrap context before the main context.
+The client declares `spring.config.import=configserver:http://config-server:8888` in `application.yml` — the mechanism introduced in Boot 3.0 and unchanged through today's Boot 4.1.x baseline. During the `ApplicationContext` startup, Spring's `ConfigDataLocationResolver` sees the `configserver:` import, connects to the Config Server, and fetches properties for the current `spring.application.name` and active profiles. These remote properties are merged into the `Environment` with higher priority than local `application.yml`. In Boot 2.x, this was done via a separate `bootstrap.yml` loaded in a bootstrap context before the main context — that legacy path still exists but requires an explicit extra dependency.
 
 **Q: What is the difference between bootstrap context and spring.config.import?**
-**Short:** Bootstrap context is a separate pre-main phase in Boot 2.x; spring.config.import folds that into one phase in Boot 3.x.
-Bootstrap context (Boot 2.x) is a parent `ApplicationContext` that loads before the main context, specifically to resolve configuration from external sources. It requires a separate `bootstrap.yml` and the `spring-cloud-starter-bootstrap` dependency. `spring.config.import` (Boot 3.x) achieves the same goal in a single phase without a separate context: Spring's `ConfigData` infrastructure processes import declarations during the main context startup. The new approach is simpler (one config file), but the behavior on failure differs — `optional:configserver:` continues without the remote config, while the required form (default) fails the startup.
+**Short:** Bootstrap context was a separate pre-main phase in Boot 2.x; spring.config.import folds that into one phase, unchanged through Boot 4.1.x.
+Bootstrap context (Boot 2.x) is a parent `ApplicationContext` that loads before the main context, specifically to resolve configuration from external sources. It requires a separate `bootstrap.yml` and the `spring-cloud-starter-bootstrap` dependency. `spring.config.import` — introduced in Boot 3.0 and still the mechanism in today's Boot 4.1.x — achieves the same goal in a single phase without a separate context: Spring's `ConfigData` infrastructure processes import declarations during the main context startup. The new approach is simpler (one config file), but the behavior on failure differs — `optional:configserver:` continues without the remote config, while the required form (default) fails the startup.
 
 **Q: How does @RefreshScope work and what beans should NOT use it?**
 **Short:** @RefreshScope proxies a bean so it is destroyed and re-created on refresh; never apply it to a DataSource.
@@ -730,6 +756,7 @@ The Config Server loads properties by combining three application names in order
 10. Scope `busrefresh` events by service name (`/actuator/busrefresh/{service}:**`) during partial rollouts to avoid refreshing unrelated services.
 11. Monitor the Config Server Git pull latency. A slow Git host causes increased startup times for all services. Consider a Git mirror (Gitea, Bitbucket Data Center) in the same network zone.
 12. In Kubernetes, prefer mounting ConfigMaps for truly static configuration and use Config Server only for dynamic, frequently changing config to minimize the blast radius of a Config Server outage.
+13. Check the Spring Cloud release train's declared Boot pin before assuming Config Server runs on your project's newest Boot minor — the train (not your Boot BOM) decides the Spring Cloud starters' actual Boot version, and forcing them apart fails at runtime, not at compile time (see §4).
 
 ---
 
@@ -776,7 +803,9 @@ flowchart TD
 ### Bootstrap and Refresh Setup
 
 ```yaml
-# application.yml on each service (Spring Boot 3.x uses spring.config.import, not bootstrap.yml)
+# application.yml on each service (Spring Boot 4.1.x uses spring.config.import, not
+# bootstrap.yml; note this fleet's spring-cloud-dependencies train still runs Boot 4.0.8
+# under the covers per the §4 caveat)
 spring:
   application:
     name: payment-service

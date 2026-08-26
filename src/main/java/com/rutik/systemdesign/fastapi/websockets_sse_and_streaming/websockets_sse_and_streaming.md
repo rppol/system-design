@@ -24,16 +24,19 @@ Key concepts covered in this module:
 - `WebSocketDisconnect` exception and graceful teardown
 - `ConnectionManager` class for in-process broadcasting
 - Redis pub/sub for multi-pod fan-out
-- SSE with `StreamingResponse` and `sse-starlette`'s `EventSourceResponse`
-- `StreamingResponse` with async generators
+- Native SSE with `fastapi.sse` — `EventSourceResponse` and `ServerSentEvent` [FastAPI 0.135+]
+- `Last-Event-ID` resume after a dropped SSE stream
+- Native JSON Lines streaming — `AsyncIterable[Model]` to `application/jsonl` [FastAPI 0.134+]
+- `StreamingResponse` with async generators, and the raw SSE wire format underneath
+- Admission control, cancellation propagation, and idle-gap timeouts for GPU-backed streams
 - Backpressure and `asyncio.Queue` buffering
 - Heartbeat / ping-pong for stale-connection detection
 - JWT authentication in WebSocket connections
 
 Cross-references:
-- Async generators and backpressure fundamentals: `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
+- Async generators and backpressure fundamentals: `../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
 - ASGI protocol and Starlette internals: `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md`
-- Production multi-pod streaming architecture: `../../../llm/case_studies/cross_cutting/streaming_at_scale.md`
+- Production multi-pod streaming architecture: `../../llm/case_studies/cross_cutting/streaming_at_scale.md`
 
 ---
 
@@ -129,7 +132,8 @@ A shared message bus (Redis pub/sub, Kafka, or a dedicated broker) is required f
 | Pattern | Generator yields | Use Case |
 |---------|-----------------|----------|
 | File streaming | `bytes` chunks (e.g., 64 KB) | Large file downloads |
-| LLM token streaming | SSE-formatted text lines | ChatGPT-style responses |
+| LLM token streaming | `ServerSentEvent` objects | ChatGPT-style responses to a browser |
+| JSON Lines | Pydantic models, one per line | Machine consumers — LLM output, telemetry, logs |
 | CSV export | Row strings | Large dataset export |
 | Log tailing | Log line strings | Live log viewer |
 
@@ -304,7 +308,12 @@ async def room_endpoint(websocket: WebSocket, room_id: str) -> None:
         manager.disconnect(room_id, websocket)
 ```
 
-### 6.3 SSE with StreamingResponse
+### 6.3 The SSE wire format, by hand
+
+FastAPI emits SSE natively (Section 6.4) and that is what you should ship. Write it once by
+hand anyway: every field the native API sets for you is visible here, and when a stream
+misbehaves in production you are reading this wire format in `curl`, not a Python object.
+
 
 ```python
 from fastapi import Request
@@ -335,7 +344,10 @@ async def stream_ticks(request: Request) -> StreamingResponse:
     )
 ```
 
-For named events with IDs (enabling browser reconnection from last seen event):
+Every event is a block of `field: value` lines terminated by a blank line. The five fields a
+browser understands are `data`, `event`, `id`, `retry`, and a bare `:` comment line that
+clients ignore — which is how keep-alive pings work. Named events with IDs let a browser
+resume from where it left off:
 
 ```python
 async def sse_generator(request: Request, last_id: int = 0):
@@ -347,53 +359,264 @@ async def sse_generator(request: Request, last_id: int = 0):
         await asyncio.sleep(0.5)
 ```
 
-### 6.4 SSE with sse-starlette (recommended)
+Getting all of that right by hand — the three headers, the `retry` field, the per-event
+framing, the periodic comment ping so an idle stream is not killed by a proxy — is the
+boilerplate the next section deletes.
+
+### 6.4 Native SSE with `fastapi.sse` [FastAPI 0.135+]
+
+SSE is part of FastAPI core. Declare `response_class=EventSourceResponse` on a path
+operation that `yield`s, and the framework does the framing:
 
 ```python
-from sse_starlette.sse import EventSourceResponse
+from collections.abc import AsyncIterable
+
+from fastapi import FastAPI
+from fastapi.sse import EventSourceResponse, ServerSentEvent
+from pydantic import BaseModel
+
+app = FastAPI()
 
 
-async def numbers(request: Request):
+class Tick(BaseModel):
+    seq: int
+    value: float
+
+
+@app.get("/sse/ticks", response_class=EventSourceResponse)
+async def sse_ticks() -> AsyncIterable[Tick]:
     for i in range(100):
-        if await request.is_disconnected():
-            break
-        yield {"data": str(i), "event": "number", "id": str(i)}
+        yield Tick(seq=i, value=i * 1.5)
         await asyncio.sleep(0.1)
-
-
-@app.get("/sse/numbers")
-async def sse_numbers(request: Request) -> EventSourceResponse:
-    return EventSourceResponse(numbers(request))
 ```
 
-`EventSourceResponse` handles the `Content-Type`, retry field, and per-message formatting.
-
-### 6.5 StreamingResponse for LLM Token Streaming
+Yield a Pydantic model and FastAPI serializes it into the `data:` field. Yield a
+`ServerSentEvent` when you need the other fields:
 
 ```python
-import httpx
-
-
-async def llm_stream(prompt: str):
-    async with httpx.AsyncClient(timeout=60) as client:
-        async with client.stream(
-            "POST",
-            "https://api.openai.com/v1/chat/completions",
-            json={"model": "gpt-4o", "stream": True, "messages": [{"role": "user", "content": prompt}]},
-            headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-        ) as resp:
-            async for line in resp.aiter_lines():
-                if line.startswith("data:") and "[DONE]" not in line:
-                    chunk = line[5:].strip()
-                    yield f"data: {chunk}\n\n"
-
-
-@app.get("/chat/stream")
-async def chat_stream(prompt: str) -> StreamingResponse:
-    return StreamingResponse(llm_stream(prompt), media_type="text/event-stream")
+@app.get("/sse/updates", response_class=EventSourceResponse)
+async def sse_updates() -> AsyncIterable[ServerSentEvent]:
+    for i in range(100):
+        yield ServerSentEvent(
+            data={"seq": i},        # JSON-encoded into the data: field
+            event="update",         # client-side addEventListener("update", ...)
+            id=str(i),              # echoed back as Last-Event-ID on reconnect
+            retry=3000,             # client reconnect delay, milliseconds
+        )
+        await asyncio.sleep(0.1)
 ```
 
-### 6.6 Backpressure with asyncio.Queue
+`ServerSentEvent` carries `data`, `raw_data`, `event`, `id`, `retry`, and `comment`. `data`
+is JSON-encoded; `raw_data` is written through untouched and the two are mutually exclusive
+— `raw_data` is how you emit a bare sentinel such as OpenAI's `[DONE]`, which is not JSON:
+
+```python
+yield ServerSentEvent(raw_data="[DONE]")
+```
+
+What the framework handles that hand-rolled `StreamingResponse` does not:
+
+| Concern | Handled by `EventSourceResponse` |
+|---|---|
+| `Content-Type: text/event-stream` | set automatically |
+| `Cache-Control: no-cache` | set automatically |
+| `X-Accel-Buffering: no` | set automatically — the nginx buffering bug in Section 10 |
+| Keep-alive | a `:` comment ping every 15 s while the generator is idle |
+| Per-event framing | `data:` / `event:` / `id:` / `retry:` lines and the blank terminator |
+| `Last-Event-ID` | readable from the request header for resume (Section 6.5) |
+| Multi-line `data` | split across repeated `data:` lines per the spec |
+
+Third-party `sse-starlette` predates this and is still the only option on a pin older than
+0.135.0; its `EventSourceResponse` takes a generator argument rather than a response class
+and yields dicts. On a current FastAPI there is no reason to add the dependency.
+
+### 6.5 Resuming a dropped stream with `Last-Event-ID`
+
+A browser `EventSource` reconnects on its own after a drop and sends the `id` of the last
+event it saw in the `Last-Event-ID` request header. The server's job is to honour it —
+otherwise every reconnect replays from zero or, worse, silently loses the gap.
+
+```python
+from typing import Annotated
+
+from fastapi import Header
+
+
+@app.get("/sse/feed", response_class=EventSourceResponse)
+async def feed(
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> AsyncIterable[ServerSentEvent]:
+    # Header() maps Last-Event-ID -> last_event_id automatically.
+    cursor = int(last_event_id) if last_event_id else 0
+    async for row in read_events_after(cursor):     # your durable log
+        yield ServerSentEvent(data=row.payload, id=str(row.seq))
+```
+
+This only works if event ids are monotonic and the backing store can seek to one. An id
+derived from `uuid4()` is unusable for resume — it identifies an event but does not order
+it. Use the sequence number of a durable log (a Postgres `bigserial`, a Redis Stream id, a
+Kafka offset); if there is no such log, say so and let the client re-fetch a snapshot on
+reconnect instead of pretending resume works.
+
+### 6.6 Streaming an LLM: admission, cancellation, and the idle gap
+
+Proxying a model's tokens is the most common streaming endpoint written today, and it is
+where the naive version is most expensive. Three things separate it from a tick feed: the
+work behind it is a scarce GPU slot rather than a cheap read, it costs money per token, and
+it can stall for minutes without the connection ever closing.
+
+**Admission control, not concurrency.** An ASGI server will happily accept ten thousand
+concurrent requests; your four GPU slots will not. Bound the work with an
+`anyio.CapacityLimiter` sized to the slots, and shed the overflow immediately rather than
+queueing it forever — a caller who waits 90 seconds for a slot has already timed out and
+retried, so the queue is manufacturing load, not absorbing it.
+
+```python
+import anyio
+from fastapi import HTTPException
+
+GPU_SLOTS = anyio.CapacityLimiter(4)          # not a bare Semaphore: see below
+ADMISSION_WAIT_S = 2.0
+
+
+async def acquire_slot() -> None:
+    try:
+        with anyio.fail_after(ADMISSION_WAIT_S):
+            await GPU_SLOTS.acquire()
+    except TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="No capacity",
+            headers={"Retry-After": "5"},
+        )
+```
+
+`CapacityLimiter` over `asyncio.Semaphore` for two reasons: its bound is mutable at runtime
+(`GPU_SLOTS.total_tokens = 8` when you scale the pool), and it is the same primitive
+Starlette already uses for the sync-route thread pool, so it works under either anyio
+backend. A `Semaphore` created at import time also binds to whichever event loop is running
+then, which is a classic source of `got Future attached to a different loop`.
+
+**The idle gap is the timeout that matters.** A total-request timeout is useless here — a
+legitimate generation runs 300 seconds. What you must bound is the gap *between* tokens: an
+upstream that accepts the connection and then stalls holds a GPU slot, a socket, and a
+coroutine forever, and no total-duration alarm you would be willing to set will fire.
+
+```python
+from collections.abc import AsyncIterable
+
+from fastapi.sse import EventSourceResponse, ServerSentEvent
+
+IDLE_GAP_S = 20.0
+
+
+async def llm_tokens(prompt: str, budget: "CostBudget") -> AsyncIterable[ServerSentEvent]:
+    await acquire_slot()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=IDLE_GAP_S)) as client:
+            async with client.stream(
+                "POST",
+                UPSTREAM_URL,
+                json={"model": MODEL, "stream": True,
+                      "messages": [{"role": "user", "content": prompt}]},
+                headers={"Authorization": f"Bearer {UPSTREAM_KEY}"},
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        yield ServerSentEvent(raw_data="[DONE]")
+                        break
+                    budget.add(chunk)                  # count tokens as they pass
+                    if budget.exceeded:
+                        yield ServerSentEvent(event="error", data={"reason": "budget"})
+                        break
+                    yield ServerSentEvent(data=chunk)
+    except httpx.ReadTimeout:
+        # No byte for IDLE_GAP_S. The upstream is wedged; do not wait out the
+        # total budget holding a GPU slot.
+        yield ServerSentEvent(event="error", data={"reason": "upstream_stalled"})
+    finally:
+        # Runs on normal completion, on error, AND on the GeneratorExit that
+        # Starlette throws in when the client disconnects.
+        GPU_SLOTS.release()
+        await budget.flush()
+
+
+@app.get("/chat/stream", response_class=EventSourceResponse)
+async def chat_stream(prompt: str) -> AsyncIterable[ServerSentEvent]:
+    return llm_tokens(prompt, CostBudget(max_tokens=4096))
+```
+
+`httpx.Timeout(10.0, read=IDLE_GAP_S)` is the load-bearing line: `read` is a per-chunk
+timeout, not a whole-response one, so a stream that keeps producing runs as long as it likes
+while a stalled one fails in 20 seconds.
+
+**Cancellation must reach the provider.** When a user closes the tab, Starlette throws
+`GeneratorExit` into the generator. If you swallow it, or if the upstream request is not
+inside the generator's own scope, the provider keeps generating and keeps billing for tokens
+nobody will ever read. The `async with client.stream(...)` block above is what saves you:
+unwinding the generator exits that context manager, which closes the connection, which is
+the signal the provider uses to abandon the generation. Never move the upstream call into a
+`BackgroundTasks` job or a detached `asyncio.create_task` — both outlive the client and both
+turn a closed tab into a bill.
+
+**Bill what you served, not what you promised.** The `finally` block flushes the accumulator
+on every exit path, so a request cancelled at token 300 of 4000 is still logged and charged
+for 300. The common bug is accounting only on the success path, which makes cancelled
+requests free in your ledger and expensive on the provider's invoice — a discrepancy that
+shows up as an unexplained margin gap, not as an error.
+
+**Tokens are the rate limit, not requests.** A requests-per-minute cap treats a 20-token
+completion and a 4000-token one identically, so one caller can consume 200x another's budget
+inside the same limit. Meter the token counter above against a per-tenant budget and reject
+with 429 when it is spent. See
+[`../api_design_and_versioning/api_design_and_versioning.md`](../api_design_and_versioning/api_design_and_versioning.md)
+for the limiter mechanics and
+[`../case_studies/design_ml_inference_api_fastapi.md`](../case_studies/design_ml_inference_api_fastapi.md)
+for the whole shape end to end. Batching strategy, KV cache and model compression are
+[`../../ml/model_serving_and_inference/model_serving_and_inference.md`](../../ml/model_serving_and_inference/model_serving_and_inference.md)
+and [`../../llm/`](../../llm/README.md) — this module owns only the HTTP edge.
+
+### 6.7 JSON Lines for machine consumers [FastAPI 0.134+]
+
+SSE is a browser protocol. When the consumer is another service, a CLI, or a data pipeline,
+the client does not want `EventSource` framing — it wants one JSON object per line. Return
+an `AsyncIterable[Model]` with no response class and FastAPI streams `application/jsonl`:
+
+```python
+from collections.abc import AsyncIterable
+
+
+class LogLine(BaseModel):
+    ts: float
+    level: str
+    message: str
+
+
+@app.get("/logs/stream")
+async def stream_logs() -> AsyncIterable[LogLine]:
+    async for line in tail_log():
+        yield LogLine(ts=line.ts, level=line.level, message=line.text)
+```
+
+The body is `{"ts":...}\n{"ts":...}\n`, not a `[...]` array — so a consumer parses and acts
+on each record as it arrives instead of buffering to the closing bracket. FastAPI's own docs
+name an AI LLM service, logs and telemetry as the motivating cases. It is typed, so the model
+appears in the OpenAPI schema like any other response, and a sync `def` returning
+`Iterable[Model]` works the same way.
+
+Pick between the three by consumer, not by taste:
+
+| Consumer | Shape | Why |
+|---|---|---|
+| Browser, one-way | SSE (`EventSourceResponse`) | free auto-reconnect, `Last-Event-ID` resume |
+| Service, CLI, pipeline | JSONL (`AsyncIterable[Model]`) | no framing to strip, typed, trivially `jq`-able |
+| Browser, two-way | WebSocket | the client also sends |
+
+### 6.8 Backpressure with asyncio.Queue
 
 When a slow consumer can't keep up, unbounded sends pile up in Starlette's internal send
 buffer. For WebSockets, `send_text` will block if the kernel TCP send buffer is full (the
@@ -480,7 +703,7 @@ scenario with an unbounded queue has no upper number at all. Size `MAX_QUEUE` fr
 `time_to_full`, then multiply out `bytes_held` to confirm the pod can survive every connection
 hitting the bound simultaneously.
 
-### 6.7 Heartbeat / Ping-Pong
+### 6.9 Heartbeat / Ping-Pong
 
 The browser silently drops WebSocket connections through idle firewalls after ~30–90 seconds.
 The WebSocket protocol has built-in ping/pong frames; Starlette/ASGI does not expose them
@@ -529,7 +752,7 @@ async def ws_with_heartbeat(websocket: WebSocket, client_id: str) -> None:
         heartbeat.cancel()
 ```
 
-### 6.8 JWT Authentication in WebSockets
+### 6.10 JWT Authentication in WebSockets
 
 The browser `WebSocket` API does not allow setting custom headers. JWT must be sent as a
 query parameter or as the first message after connection:
@@ -722,11 +945,17 @@ flowchart LR
 - Your infrastructure includes HTTP-only proxies or CDNs that don't understand WebSocket upgrades
 - You need to stream LLM tokens, log lines, or progress events
 
+### Use JSON Lines when:
+
+- The consumer is a service, CLI, or data pipeline rather than a browser — no framing to strip
+- You want the streamed item typed and visible in the OpenAPI schema
+- Records must be actionable as they arrive (LLM output to another service, telemetry, log tailing)
+
 ### Use StreamingResponse when:
 
 - You are generating large responses lazily (CSV exports, PDF pages, file chunks)
-- You are proxying a streaming upstream (OpenAI API, HuggingFace Inference Endpoints)
-- The client is not a browser (`curl`, CLI, or programmatic consumer)
+- The payload is bytes rather than modelled records
+- You need a media type FastAPI does not frame for you
 
 ### Do NOT use WebSockets when:
 
@@ -738,6 +967,8 @@ flowchart LR
 ### Do NOT use SSE when:
 
 - Clients need to send data back frequently — each send is a new HTTP request
+- The consumer is not a browser: you are paying `event:`/`data:` framing for a client that
+  has to strip it again. Use JSON Lines
 - You need binary payloads
 - You are on HTTP/1.1 with many users — each SSE connection holds a TCP connection, and
   browsers cap concurrent connections per domain at 6 (HTTP/1.1); HTTP/2 removes this limit
@@ -874,7 +1105,72 @@ return StreamingResponse(
 )
 ```
 
-### Pitfall 5 — JWT in query param leaks into access logs
+### Pitfall 5 — A streaming endpoint with no idle-gap timeout hangs forever
+
+```python
+# BROKEN: bounded by nothing that ever fires
+async def tokens(prompt: str):
+    async with httpx.AsyncClient(timeout=600) as client:      # 10 minutes
+        async with client.stream("POST", UPSTREAM, json=...) as resp:
+            async for line in resp.aiter_lines():
+                yield ServerSentEvent(data=line)
+
+# The upstream accepts the connection, emits three tokens, and stalls.
+# No exception is raised: the socket is open and the total timeout is 600 s.
+# The coroutine, the GPU slot and the client's browser tab all wait ten minutes
+# for a stream that died in second four. At 4 slots and a 600 s ceiling, eight
+# stalled requests take the whole service down for twenty minutes.
+```
+
+```python
+# FIX: bound the gap between chunks, not the whole response
+async def tokens(prompt: str):
+    # connect=10 s, read=20 s — read is PER CHUNK, so a healthy 5-minute
+    # generation runs to completion while a stalled one fails in 20 s.
+    timeout = httpx.Timeout(10.0, read=20.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", UPSTREAM, json=...) as resp:
+            async for line in resp.aiter_lines():
+                yield ServerSentEvent(data=line)
+```
+
+The instinct to raise the total timeout is exactly backwards. A long stream is normal; a
+silent one is not. Bound silence.
+
+### Pitfall 6 — A disconnected client keeps the upstream generating, and billing
+
+```python
+# BROKEN: the upstream call outlives the client
+@app.get("/chat")
+async def chat(prompt: str, background: BackgroundTasks):
+    queue = asyncio.Queue()
+    background.add_task(pump_upstream, prompt, queue)   # detached
+    return EventSourceResponse(drain(queue))
+
+# The user closes the tab. Starlette tears down the response generator, but
+# pump_upstream is a separate task with no link to it: the provider keeps
+# generating all 4,000 tokens and invoices for every one. At 30% abandonment
+# on a chat UI, roughly a third of the token spend buys output nobody reads.
+```
+
+```python
+# FIX: keep the upstream call inside the response generator's own scope
+@app.get("/chat", response_class=EventSourceResponse)
+async def chat(prompt: str) -> AsyncIterable[ServerSentEvent]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=20.0)) as client:
+        async with client.stream("POST", UPSTREAM, json=...) as resp:
+            async for line in resp.aiter_lines():
+                yield ServerSentEvent(data=line)
+    # Disconnect -> GeneratorExit -> both context managers unwind ->
+    # connection closed -> provider abandons the generation.
+```
+
+The rule generalizes past LLMs: anything expensive that a stream drives must live inside the
+generator, so that cancelling the generator cancels the work. `BackgroundTasks` and a bare
+`asyncio.create_task` both deliberately outlive the request, which is the opposite of what a
+stream wants.
+
+### Pitfall 7 — JWT in query param leaks into access logs
 
 ```python
 # BROKEN: token visible in URL and server access logs
@@ -909,8 +1205,10 @@ async def secure_ws(websocket: WebSocket) -> None:
 
 | Tool / Library | Role | Notes |
 |---------------|------|-------|
-| FastAPI / Starlette | WebSocket and StreamingResponse primitives | Built-in, no extra install |
-| `sse-starlette` | `EventSourceResponse` with reconnection headers | `pip install sse-starlette` |
+| FastAPI / Starlette | WebSocket, StreamingResponse, and JSON Lines primitives | Built-in; JSONL is an `AsyncIterable[Model]` return type served as `application/jsonl` [FastAPI 0.134+] |
+| `fastapi.sse` | `EventSourceResponse` and `ServerSentEvent` — SSE in core | Built-in [FastAPI 0.135+]; handles keep-alive, headers, `Last-Event-ID` |
+| `sse-starlette` | SSE for pins older than FastAPI 0.135 | `pip install sse-starlette`; unnecessary on a current FastAPI |
+| `anyio.CapacityLimiter` | Admission control for GPU-backed or otherwise scarce work | Built-in via anyio; resizable at runtime, unlike `asyncio.Semaphore` |
 | `redis.asyncio` (redis-py v4+) | Async Redis client for pub/sub | Replaces `aioredis` (merged in v4.2) |
 | `websockets` | Low-level WebSocket library (Starlette uses it) | Usually indirect dependency |
 | `httpx` | Async HTTP client with streaming support | Use for upstream SSE proxy |
@@ -999,17 +1297,71 @@ off` in the nginx location block, and set `X-Accel-Buffering: no` in the respons
 Similarly, Cloudflare's default buffering must be disabled (set `Buffering: no` on the origin
 response). Not setting this is the most common SSE production bug.
 
-**Q9: How does the `sse-starlette` library improve on raw StreamingResponse for SSE?**
-**Short:** sse-starlette's EventSourceResponse auto-sets SSE headers and formats events, removing manual boilerplate.
+**Q9: How do you serve Server-Sent Events from FastAPI, and what does the framework handle for you?**
+**Short:** Declare response_class=EventSourceResponse from fastapi.sse on a yielding path operation; FastAPI frames events and sets the headers.
 
-`EventSourceResponse` from `sse-starlette` automatically sets `Content-Type: text/event-stream`,
-`Cache-Control: no-cache`, `X-Accel-Buffering: no`, and the `retry:` field for client
-reconnection. It handles dict-format events (`{"data": ..., "event": ..., "id": ...}`) and
-formats them as proper SSE lines. Using raw `StreamingResponse` requires manual formatting
-of every event as `data: ...\n\n`, handling the ID and event fields, and setting the headers
-manually — error-prone boilerplate that `sse-starlette` eliminates.
+Import `EventSourceResponse` and `ServerSentEvent` from `fastapi.sse` and declare
+`response_class=EventSourceResponse` on an `async def` that `yield`s. Yield a Pydantic model
+and it becomes the `data:` field; yield a `ServerSentEvent` to also set `event`, `id`,
+`retry`, `comment`, or `raw_data` (which writes through unencoded — that is how you emit a
+bare `[DONE]` sentinel). FastAPI sets `Content-Type: text/event-stream`,
+`Cache-Control: no-cache` and `X-Accel-Buffering: no`, emits a `:` comment keep-alive every
+15 seconds so an idle stream survives a proxy's idle timeout, splits multi-line `data`
+across repeated `data:` lines, and exposes `Last-Event-ID` for resume. Hand-rolling this on
+`StreamingResponse` means getting all of it right yourself, and the header that is missed
+most often is `X-Accel-Buffering: no` — which is why "my SSE stream arrives all at once at
+the end" is the single most common SSE production bug.
 
-**Q10: What happens when a WebSocket client disconnects unexpectedly (network drop, browser close)?**
+**Q10: A client disconnects halfway through an LLM stream. What actually stops the upstream generation?**
+**Short:** Nothing, unless the upstream call lives inside the response generator — cancelling the generator is what closes the connection.
+
+Starlette throws `GeneratorExit` into the response generator when the client goes away. That
+cancels the upstream request only if the upstream request is inside that generator's scope —
+typically an `async with client.stream(...)` block, whose unwind closes the HTTP connection,
+which is the signal the provider uses to abandon the generation. If you instead pumped the
+upstream from a `BackgroundTasks` job or a bare `asyncio.create_task` and fed the response
+through a queue, the disconnect tears down the response and the generation keeps running to
+completion and keeps billing. On a chat UI with typical abandonment rates that is a large
+fraction of token spend buying output nobody reads. Put the expensive call inside the
+generator, and put your token accounting in a `finally` so a cancelled request is still
+logged and charged for what it actually consumed.
+
+**Q11: What timeout protects a streaming endpoint, given that a legitimate response can take five minutes?**
+**Short:** A per-chunk read timeout on the idle gap between tokens, never a total-response timeout.
+
+Bound the silence, not the duration. A total timeout large enough for a legitimate 300-second
+generation is far too large to catch an upstream that stalls after three tokens, and that
+stalled request holds a connection, a coroutine and whatever scarce slot it acquired for the
+whole ceiling. `httpx.Timeout(10.0, read=20.0)` sets `read` as a *per-chunk* timeout, so a
+healthy stream that keeps producing runs indefinitely while a silent one raises
+`ReadTimeout` in 20 seconds. Pair it with a `finally` that releases the slot, because the
+failure mode you are preventing is capacity exhaustion, not a slow response.
+
+**Q12: How do you cap concurrency on an endpoint backed by a fixed number of GPU slots?**
+**Short:** An anyio.CapacityLimiter sized to the slots, with a short acquire timeout that sheds overflow as 503 plus Retry-After.
+
+Use `anyio.CapacityLimiter(n)` and acquire it under `anyio.fail_after(~2s)`; on timeout
+return 503 with a `Retry-After` header rather than queueing. Shedding beats queueing here
+because a caller who waits 90 seconds for a slot has already timed out client-side and
+retried, so the queue amplifies load instead of absorbing it — and a 503 is a signal an
+autoscaler and a client can both act on. `CapacityLimiter` over `asyncio.Semaphore` because
+its bound is mutable at runtime (`limiter.total_tokens = 8` when the pool scales), it is the
+same primitive Starlette uses for its own sync-route thread pool so it works under either
+anyio backend, and a module-level `Semaphore` binds to whichever event loop is alive at
+import time — the usual source of `got Future attached to a different loop`.
+
+**Q13: When would you stream JSON Lines instead of SSE?**
+**Short:** When the consumer is a service, CLI, or pipeline rather than a browser — JSONL is typed, unframed, and needs no EventSource.
+
+Return `AsyncIterable[Model]` from a path operation and FastAPI streams `application/jsonl`
+— one JSON object per line, no `data:` framing, and the model still appears in the OpenAPI
+schema. SSE exists to make a browser's `EventSource` work: free auto-reconnect and
+`Last-Event-ID` resume. A service, CLI, or data pipeline gets none of that value and pays to
+strip the framing anyway, so JSONL is the better fit; FastAPI's own docs name an AI LLM
+service, logs and telemetry as the motivating cases. The rule of thumb: browser one-way is
+SSE, machine one-way is JSONL, and anything where the client also sends is a WebSocket.
+
+**Q14: What happens when a WebSocket client disconnects unexpectedly (network drop, browser close)?**
 **Short:** An unexpected disconnect raises WebSocketDisconnect on the next receive call, so wrap it in try/except.
 
 Starlette detects the broken connection when it tries to read the next frame from the socket.
@@ -1019,7 +1371,7 @@ code (e.g., processing a message), the exception is raised at the next `await` p
 the disconnect is detected. Always wrap the receive loop in a `try/except WebSocketDisconnect`
 and clean up in a `finally` block.
 
-**Q11: How would you implement a chat room where messages sent to a room are received by all
+**Q15: How would you implement a chat room where messages sent to a room are received by all
 members, even if they are connected to different pods?**
 **Short:** Redis pub/sub with one channel per room lets every pod broadcast to its own local connections for that room.
 
@@ -1030,7 +1382,7 @@ All pods (including the one that published) subscribe to the channel via a long-
 its local `ConnectionManager` for that room and calls `send_text()` on each WebSocket.
 This scales horizontally without sticky sessions.
 
-**Q12: What are the HTTP/2 implications for SSE scalability?**
+**Q16: What are the HTTP/2 implications for SSE scalability?**
 **Short:** HTTP/2 multiplexes many SSE streams over one connection, removing the browser's 6-connections-per-domain cap.
 
 HTTP/1.1 browsers cap concurrent connections per domain at 6. Since each SSE stream holds
@@ -1039,7 +1391,7 @@ HTTP/2 multiplexes all streams over one TCP connection, removing this limit enti
 Uvicorn supports HTTP/2 via the `h2` library (`uvicorn --http h2`). When SSE runs over
 HTTP/2, hundreds of SSE streams share a single TCP connection with no browser-side throttling.
 
-**Q13: When would you choose Kafka over Redis pub/sub for WebSocket fan-out, given Redis is faster?**
+**Q17: When would you choose Kafka over Redis pub/sub for WebSocket fan-out, given Redis is faster?**
 **Short:** Choose Kafka over Redis pub/sub only when reconnecting clients must replay messages missed while disconnected.
 
 Choose Kafka when a reconnecting client must receive messages it missed while disconnected. Redis
@@ -1050,7 +1402,7 @@ missed message during a brief reconnect is acceptable. Reach for Kafka only when
 needs a durable, replayable event log, such as an audit trail or a client that must seek back to
 an offset after reconnecting.
 
-**Q14: Why does 200ms of synchronous CPU work inside one WebSocket handler stall every other WebSocket connection on that worker?**
+**Q18: Why does 200ms of synchronous CPU work inside one WebSocket handler stall every other WebSocket connection on that worker?**
 **Short:** Blocking CPU work on the event loop freezes every other WebSocket connection sharing that worker process.
 
 A FastAPI worker runs a single `asyncio` event loop, and a blocking call like
@@ -1061,7 +1413,7 @@ the same 200ms window because none of their `receive_json()`/`send_json()` calls
 scheduled. Offload CPU-bound work with `await asyncio.to_thread(heavy_cpu_computation, data)` so
 the event loop stays free to service every other connection concurrently.
 
-**Q15: Why does SSE support automatic client-side reconnection while WebSocket does not?**
+**Q19: Why does SSE support automatic client-side reconnection while WebSocket does not?**
 **Short:** The browser's EventSource API auto-reconnects using the retry field, while WebSocket has no built-in retry.
 
 The browser's native `EventSource` API is specified to reconnect automatically after a dropped
@@ -1072,7 +1424,7 @@ a dropped socket simply fires a `close` event and the application must detect it
 prefer SSE for one-way feeds where the extra reconnect-handling code WebSocket requires adds no
 benefit.
 
-**Q16: Why does streaming LLM tokens with `StreamingResponse` reduce perceived latency even though total generation time is unchanged?**
+**Q20: Why does streaming LLM tokens reduce perceived latency even though total generation time is unchanged?**
 **Short:** Streaming cuts time-to-first-byte, not total generation time, which is what makes a UI feel more responsive.
 
 `StreamingResponse` writes each yielded chunk to the socket immediately instead of buffering the
@@ -1107,18 +1459,46 @@ more than delivering the complete response in one shot.
    drop idle TCP connections after 30–90 seconds. A heartbeat keeps the connection alive and
    detects genuinely stale clients.
 
-7. **Prefer `sse-starlette`'s `EventSourceResponse` over raw `StreamingResponse` for SSE.**
-   It handles all SSE formatting, headers, and reconnection fields correctly.
+7. **Use `fastapi.sse` for SSE and an `AsyncIterable[Model]` return for JSONL.** Both are core
+   [FastAPI 0.135+ / 0.134+]. `EventSourceResponse` sets the three headers, frames every
+   event, and pings every 15 s so an idle stream survives a proxy timeout; JSONL gives a
+   machine consumer typed records with no framing to strip. Reach for raw `StreamingResponse`
+   only for bytes.
 
-8. **Offload CPU-heavy work to `asyncio.to_thread()`.** Any computation taking more than
+8. **Bound the idle gap, not the total duration, on any long stream.**
+   `httpx.Timeout(10.0, read=20.0)` makes `read` per-chunk: a healthy five-minute generation
+   runs to completion while a stalled upstream fails in 20 seconds. A total timeout big
+   enough for the legitimate case can never catch the stall.
+
+9. **Keep expensive upstream work inside the response generator.** A client disconnect throws
+   `GeneratorExit` into the generator, which unwinds `async with client.stream(...)` and
+   closes the connection the provider is watching. Pump it from `BackgroundTasks` or a
+   detached `asyncio.create_task` instead and a closed tab keeps generating and keeps
+   billing. Put usage accounting in a `finally` so a cancelled request is still metered for
+   what it consumed.
+
+10. **Give a scarce-resource endpoint an `anyio.CapacityLimiter` and a shed path.** Size it to
+    the real slots, acquire under a ~2 s `fail_after`, and return 503 with `Retry-After`
+    rather than queueing — a caller who waits 90 seconds has already retried, so the queue
+    manufactures load. And meter LLM-backed endpoints in tokens: a request-per-minute cap
+    lets one caller consume 200x another's budget inside the same limit.
+
+11. **Give SSE events monotonic ids from a durable log so `Last-Event-ID` resume works.** A
+    `uuid4()` id identifies an event but cannot order it, so the reconnect either replays
+    from zero or silently drops the gap. If there is no seekable log, have the client
+    re-fetch a snapshot on reconnect instead of pretending resume works.
+
+12. **Offload CPU-heavy work to `asyncio.to_thread()`.** Any computation taking more than
    ~5 ms inside a WebSocket handler can starve other connections.
 
-9. **Use `asyncio.wait_for()` with a timeout on the first receive.** Clients that connect
+13. **Use `asyncio.wait_for()` with a timeout on the first receive.** Clients that connect
    but never send (or never authenticate) hold a file descriptor and a coroutine. Enforce a
    5-second authentication timeout to shed ghost connections.
 
-10. **Test with `websockets` and `httpx` in pytest.** Use `pytest-asyncio` with
-    `AsyncClient` for SSE integration tests. For WebSocket tests, Starlette's `TestClient`
+14. **Test with `websockets` and `httpx` in pytest.** For SSE, drive the app with
+    `AsyncClient(transport=ASGITransport(app=app), base_url="http://test")` under
+    `pytest-asyncio` and assert on chunk boundaries, not just the concatenated body —
+    `AsyncClient` has no `app=` parameter. For WebSocket tests, Starlette's `TestClient`
     exposes `with client.websocket_connect("/ws")` for synchronous test code.
 
 ---

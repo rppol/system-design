@@ -109,6 +109,65 @@ Route a fraction of traffic to multiple models simultaneously. Compare quality m
 
 Typically used as the data-collection phase for training classifier-based routers rather than as a permanent production strategy.
 
+### 4.6 Reasoning-Mode Routing
+
+Every strategy above routes along one axis: **which model**. Since reasoning models arrived there is a
+second axis on the same request — **how hard that model should think** — and a router that ignores it
+is leaving the larger saving on the table.
+
+```
+  classic router:     query ──► pick a model tier          (cheap ⟷ frontier)
+  2026 router:        query ──► pick a model tier
+                            └─► pick a REASONING MODE      (off ⟷ low ⟷ high ⟷ max)
+```
+
+The second axis exists because the same model now bills very differently depending on one parameter.
+The mechanism is covered in
+[Token Economics](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md)
+— reasoning tokens bill at the **output** rate, the most expensive class, and thinking length scales
+with problem difficulty — so the routing consequence is that **the spread within one model can exceed
+the spread between two models**. Downgrading Opus to Sonnet saves a fixed ratio on both token classes;
+turning thinking off for an easy query can remove most of the output tokens entirely.
+
+**Why this inverts the usual routing intuition.** Classic tier routing assumes the cheap path is a
+weaker model, so every saving costs quality. Reasoning-mode routing has a large band where it does
+not: a query that needs no deliberation gets an identical answer from the same model with thinking
+off, at a fraction of the output tokens. That band is where the free money is, and finding its edge
+is the whole design problem.
+
+**The signal you route on is difficulty, not task type.** Semantic routing (§4.4) asks *what kind of
+query is this*; reasoning-mode routing asks *does this instance require deliberation*. Those come
+apart constantly — two math questions in the same semantic cluster, one arithmetic and one a
+multi-step proof, belong in different modes. So a reasoning-mode router usually needs either a
+difficulty classifier trained on outcome labels, or a cascade.
+
+**The cascade form is the robust default**, because it needs no classifier:
+
+```
+  1. Answer with thinking OFF.
+  2. Score the answer (self-consistency across 2 samples, a verifier, or a
+     confidence signal — see 6.1 Cascade Confidence Estimation).
+  3. Disagreement or low confidence ──► retry the SAME model with thinking ON.
+```
+
+The escalation rate is the number to instrument. If it is very low, the reasoning tier is not
+earning its integration cost. If it is very high, the no-thinking pass is pure waste — you are
+paying for a discarded first attempt on most requests, and a difficulty classifier that decides
+up-front becomes cheaper than the cascade.
+
+**Two traps specific to this axis:**
+
+- **Latency, not just cost.** Extended thinking adds seconds before the first visible token. A
+  reasoning-mode router is therefore also a latency router, and on an interactive path the mode
+  decision may be forced by the p99 budget rather than by the quality gain. Route the same query
+  differently on a chat path and a batch path.
+- **The knob is provider-specific, so abstract it.** Providers expose reasoning depth differently —
+  an effort level on one, a token budget on another, adaptive-by-default on a third — and the
+  parameter names and value ranges do not correspond. Encode the decision as your own internal mode
+  (`off` / `low` / `high`) and translate at the provider adapter, or a provider swap silently changes
+  every routing decision you made. This is the routing-layer instance of the portability problem in
+  [Prompt Engineering](../prompt_engineering/prompt_engineering.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -939,6 +998,14 @@ Only downward misroutes hurt quality, so a single accuracy number tells you noth
 **Q: What is the RouteLLM project and what does it contribute to the routing field?**
 **Short:** RouteLLM is LMSYS's open-source binary strong/weak router trained on Chatbot Arena preference data, with published cost-saving ratios from 1.41x to 3.66x by benchmark.
 RouteLLM is an open-source project from LMSYS that provides routers trained on human preference data to choose between one strong and one weak model, plus standardized benchmarks. It is a binary strong/weak router, not a cascade — the decision is made before any model call, so the cheap model's output is never paid for and then discarded. It ships four trained routers (`mf` matrix factorization, `sw_ranking` similarity-weighted ranking, `bert` classifier, `causal_llm` classifier) trained on Chatbot Arena preference data, so teams can use them without collecting their own labels. Its headline results are cost-saving ratios of 3.66x on MT Bench at 95% of GPT-4 quality, 1.41x on MMLU at 92%, and 1.49x on GSM8K at 87% — the spread across those three is the most useful thing in the paper, because it shows how completely routing savings depend on the query-difficulty distribution.
+
+**Q: What is reasoning-mode routing, and why is it a second axis rather than another model tier?**
+**Short:** It routes how hard a model should think, not just which model to call — and because reasoning tokens bill at output rates, the spread within one model can exceed the spread between two.
+Classic routing picks a model tier; reasoning-mode routing picks the deliberation depth on whichever model you land on, so the two decisions are independent and compose. It is a genuinely separate axis because reasoning tokens bill at the output rate — the most expensive class — and thinking length scales with problem difficulty, which means turning thinking off for an easy query can remove most of a request's output tokens while downgrading a model tier only scales both token classes by a fixed ratio. It also inverts the usual routing intuition: classic tier routing assumes the cheap path is a weaker model, so every saving costs some quality, whereas there is a wide band of easy queries that get an identical answer from the same model with thinking off. The signal you route on is difficulty per instance, not task type — two questions in the same semantic cluster, one arithmetic and one a multi-step proof, belong in different modes — so semantic routing does not substitute for it. Start with the cascade form (answer with thinking off, score it, escalate the same model on low confidence) because it needs no trained classifier, and instrument the escalation rate: very low means the reasoning tier is not paying for its integration, very high means you are paying for a discarded first attempt on most traffic and an up-front difficulty classifier is now cheaper.
+
+**Q: What breaks when you implement reasoning-mode routing across multiple providers?**
+**Short:** Each provider exposes reasoning depth differently — effort levels, token budgets, adaptive defaults — with no correspondence between names or ranges, so a provider swap silently rewrites every routing decision.
+The reasoning-depth knob is provider-specific in both name and semantics: one exposes a discrete effort level, another a raw thinking-token budget, another decides adaptively by default with no direct control. The values do not correspond, so there is no safe literal mapping, and because nothing errors when the parameter is wrong you get a silent behavioural change rather than a failure — the same query quietly starts deliberating more or less than it did, moving both cost and quality with no signal. The fix is to encode the decision as your own internal mode (`off` / `low` / `high`), keep that in the routing layer, and translate to the provider's parameter in the adapter, so a provider swap is one mapping change instead of a rewrite of every routing rule. The second thing that breaks is latency: extended thinking adds seconds before the first visible token, so a reasoning-mode router is also a latency router, and on an interactive path the mode is often forced by the p99 budget rather than the quality gain — route the same query differently on a chat path and a batch path rather than assuming one policy fits both.
 
 ---
 

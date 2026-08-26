@@ -1,4 +1,7 @@
 # Design a Custom Thread Pool (Java)
+
+## Intuition
+
 > **A thread pool is a pre-paid workforce.**  
 > Creating a platform thread costs tens of microseconds of CPU (~35 µs measured for
 > create + start + join on a modern machine) plus a fresh ~1 MB native stack. A pool
@@ -440,6 +443,51 @@ allow `allowCoreThreadTimeOut(true)` with a shorter timeout.
 | `keepAlive=1s`, small core | High churn | Memory efficient | Bursty, long idle intervals |
 | `allowCoreThreadTimeOut=true` | Moderate | Highest | Batch jobs, scheduled tasks |
 
+### Decision 6: When do you still build or tune a `ThreadPoolExecutor` after virtual threads?
+
+Virtual threads (GA in Java 21, JEP 444) replace the reason most `ThreadPoolExecutor`
+tuning existed in the first place: the I/O-bound request-handling pool. If the pool in
+§10's worked example exists only to hold 100 threads blocked on 190ms of DB wait,
+`Executors.newVirtualThreadPerTaskExecutor()` is a straight replacement — no `corePoolSize`,
+no queue math, no rejection policy to pick. That pool disappears from the design entirely.
+
+But `ThreadPoolExecutor` did not become dead code. Four situations still call for one, each
+for a reason virtual threads do not touch:
+
+| Situation | Why a `ThreadPoolExecutor` is still right | Why virtual threads don't help |
+|-----------|--------------------------------------------|-------------------------------|
+| CPU-bound work | Fixed pool sized to core count matches the hardware | A virtual thread still needs a carrier platform thread to run on; more virtual threads cannot make an 8-core box do more than 8 things at once — oversubscribing just adds scheduling overhead |
+| Bounding a scarce downstream resource | A pool cap is a crude admission-control knob | Virtual threads are cheap to create, so nothing stops 50,000 of them from being created — the pool itself is not the resource being protected, so sizing it doesn't size the real limit. A `Semaphore` or the resource's own pool (see `design_connection_pool.md`) is the correct tool; a thread pool bounds thread count, not the thing that is actually scarce |
+| Thread affinity | Library-owned `ThreadLocal` state, or a native library that requires a fixed, stable OS thread | Nothing — the requirement is about a specific carrier, and virtual threads deliberately do not give you one (they migrate between carriers at each blocking point unless pinned) |
+| Backpressure via a bounded queue | See below — this is the one that costs real incidents when missed | `newVirtualThreadPerTaskExecutor()` has no queue and no `RejectedExecutionHandler` |
+
+**Backpressure is the deepest of the four, and it deserves working through.** A
+`ThreadPoolExecutor` with a bounded `ArrayBlockingQueue` and a rejection policy is not just
+a concurrency primitive — it is a **load-shedding device**. When demand exceeds capacity,
+the queue fills, `RejectedExecutionException` fires (or `CallerRunsPolicy` throttles the
+caller), and the failure is immediate, visible in metrics, and recoverable: the caller gets
+a fast, typed error and can retry, degrade, or fail the request.
+
+`newVirtualThreadPerTaskExecutor()` sheds nothing, because it has nothing to shed with.
+Walk through what happens when a service built on it accepts 50,000 concurrent requests with
+no admission control in front of it: every request gets its own virtual thread immediately —
+there is no queue to fill, so there is no back-pressure signal to observe. The "queue" that
+used to sit inside the executor, bounded and visible as `executor.queued`, has not
+disappeared — it has moved into the JVM heap as 50,000 live virtual thread stacks plus
+whatever request-scoped state each one is holding, unbounded and invisible to any pool
+metric. The failure mode changes character entirely: instead of a `RejectedExecutionException`
+thrown synchronously at admission time, the service degrades slowly as GC pause times climb,
+then fails opaquely with an `OutOfMemoryError` that names no offending request and no
+obvious root cause. Fast, observable, and recoverable becomes slow, opaque, and fatal — see
+Pitfall 4 in §9 for what this looks like with real numbers.
+
+The fix is not to bring the queue back inside an executor — that reintroduces the exact
+platform-thread pool virtual threads were meant to remove. It is to put admission control
+where it belongs: a `Semaphore` sized from Little's Law against the true bottleneck (usually
+a downstream connection pool or an external rate limit), acquired before the virtual thread
+does any work, so the shedding happens at the front door instead of inside a component that
+no longer has a front door of its own.
+
 ---
 
 ## 6. Real-World Implementations
@@ -586,6 +634,39 @@ the next request; blocking one submitter costs the system nothing.
 **Fix:** restate the bound explicitly — a `Semaphore` at the request-entry point sized from
 Little's Law against the scarcest downstream resource. Treat "which component was enforcing
 my concurrency limit?" as a required question in any Loom migration review.
+
+**Quantified impact — what the diff actually cost.** An order-ingest service on the §2
+profile (500 req/s steady, 200 ms tasks, so ~100 in flight) ran a
+`ThreadPoolExecutor(100, 100, …, new ArrayBlockingQueue<>(1000), new AbortPolicy())` on a
+pod with `-Xmx2g`. A marketing push took arrivals to 3,000 req/s for four minutes.
+
+```
+  BEFORE the migration -- bounded, and it held
+    admitted concurrently                     = 100 (pool) + 1,000 (queue)  = 1,100
+    arrivals over the 4-minute burst          = 3,000 x 240                 = 720,000
+    served at capacity                        =   500 x 240                 = 120,000
+    rejected fast, with RejectedExecutionException                          = ~598,900
+    p99 for ADMITTED requests                                               = 240 ms
+    heap                                      = flat at ~600 MB
+    the caller saw                            = HTTP 503 in ~2 ms, and retried
+
+  AFTER the one-line swap to newVirtualThreadPerTaskExecutor()
+    admitted concurrently                     = every arrival             -> unbounded
+    live virtual threads at t+3min            = ~430,000
+    heap held by request-scoped state, ~4 KB each = 430,000 x 4 KB          = ~1.7 GB
+    G1 pause time                             = 200 ms -> 3.1 s, ~70% of wall clock
+    p99 for ALL requests                      = 240 ms -> 41 s
+    outcome at t+3m52s                        = OutOfMemoryError, pod killed, 6-minute
+                                                cold start behind a cold cache
+```
+
+The shape of the damage is the lesson, not the size of it. The bounded version **shed
+598,900 requests and served 120,000 of them in 240 ms**; the unbounded version accepted all
+720,000, served almost none of them acceptably, and then lost the in-flight work too. The
+executor's queue did not go away — it moved into the heap, where nothing was counting it.
+Note also what the dashboards showed: `executor.queued` and the rejection counter, the two
+metrics an on-call engineer would have looked at first, both read **zero** for the entire
+incident, because the component that emitted them no longer existed.
 
 ### Pitfall 5 — Thread starvation deadlock
 
@@ -782,6 +863,56 @@ tasks preempt pending normal-priority tasks' permit acquisition. Alternatively, 
 `PriorityBlockingQueue` itself is unbounded): the semaphore limits in-flight tasks to N;
 tasks above N wait; when a slot opens, the highest-priority task in the unbounded queue is
 selected next.
+
+**Q12. It is 2026 and virtual threads are GA. Is `ThreadPoolExecutor` dead? Name what still needs one.**
+
+No, but its *main* historical use is gone, and being precise about which half died is the
+answer an interviewer is looking for. What virtual threads (JEP 444, Java 21) replace outright
+is the **I/O-bound request-handling pool** — a hundred threads parked on socket reads, which
+is what the great majority of `ThreadPoolExecutor` tuning was actually about. Little's Law
+still sizes your concurrency, but you no longer buy that concurrency by rationing an expensive
+resource, so `corePoolSize`, `maxPoolSize`, queue capacity, and keep-alive all stop being
+decisions.
+
+Four cases survive, each for a reason virtual threads do not touch:
+
+1. **CPU-bound work.** A virtual thread still needs a carrier platform thread to execute on,
+   so an 8-core box does 8 things at once no matter how many virtual threads you create.
+   A fixed pool sized to core count is still correct, and oversubscription still costs you
+   scheduling overhead and cache thrash for nothing.
+2. **Thread affinity.** Library-owned `ThreadLocal` state, or a native library requiring a
+   stable OS thread. Virtual threads deliberately migrate between carriers at every blocking
+   point, which is the opposite of what such code needs.
+3. **Bounding a scarce downstream resource** — though here the honest answer is that a thread
+   pool was always the wrong tool. It bounds *threads*, not the thing that is actually scarce.
+   A `Semaphore`, or the resource's own pool (see `design_connection_pool.md`), states the
+   real limit directly.
+4. **Backpressure via a bounded queue** — see Q13, which is where this gets interesting.
+
+**Q13. Your service swaps a bounded `ThreadPoolExecutor` for `newVirtualThreadPerTaskExecutor()`. What did you just lose, and how do you get it back?**
+
+You lost **load shedding**, and the failure mode changed from one you can see to one you
+cannot. A `ThreadPoolExecutor` with a bounded queue and a rejection policy is not only a
+concurrency primitive — it is an admission-control device. When demand exceeds capacity the
+queue fills, `RejectedExecutionException` fires, and the caller gets a fast, typed, observable
+error it can retry or degrade on. `Executors.newVirtualThreadPerTaskExecutor()` has **no queue
+and accepts no `RejectedExecutionHandler`**, so it sheds nothing: every `submit()` starts a
+thread. Every bound in the old configuration evaporates in a one-line diff.
+
+The queue does not actually disappear — it moves into the heap as live virtual-thread stacks
+plus their request-scoped state, unbounded and counted by no pool metric. Concretely, on the
+§2 profile a four-minute 3,000 req/s burst went from "598,900 requests rejected in ~2 ms each
+while 120,000 were served at a 240 ms p99" to "~430,000 live virtual threads, ~1.7 GB of
+request state, G1 pauses at 3.1 s, p99 at 41 s, then `OutOfMemoryError`." Fast, observable and
+recoverable became slow, opaque and fatal. Worse, the two dashboards on-call would check —
+queue depth and rejection count — both read **zero** throughout, because the component that
+emitted them no longer existed.
+
+The fix is not to put the queue back inside an executor; that reintroduces the platform-thread
+pool you just removed. It is to move admission control to the front door: a `Semaphore` sized
+from Little's Law against the true bottleneck (usually a connection pool or an external rate
+limit), acquired *before* the virtual thread does any work, plus an explicit alert on
+acquisition timeouts. State the limit where it is real, and let the cheap threads be cheap.
 
 ---
 

@@ -448,7 +448,8 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 
 | System          | Language | License      | Key Feature                        |
 |-----------------|----------|--------------|------------------------------------|
-| Redis           | C        | RSALv2/SSPL  | Rich data structures, Cluster, AOF |
+| Redis           | C        | RSALv2 / SSPLv1 / AGPLv3 (pick one) | Rich data structures, Cluster, AOF |
+| Valkey          | C        | BSD-3-Clause | Redis 7.2.4 fork, Linux Foundation |
 | Memcached       | C        | BSD          | Simple, multi-threaded, no persist |
 | VoltDB          | Java/C++ | AGPL/Commercial | ACID stored procedures, partitioned |
 | Apache Ignite   | Java     | Apache 2.0   | Distributed cache + compute grid   |
@@ -458,6 +459,8 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 | KeyDB           | C++      | BSD          | Redis fork, multi-threaded         |
 
 **Aerospike** is notable for its hybrid memory architecture: indexes in DRAM, values on NVMe SSD. Reads still avoid OS page cache (direct device access), achieving ~0.5ms latency with dataset sizes exceeding available RAM.
+
+**Redis is tri-licensed, not merely source-available.** Redis 8.0 added AGPLv3 as a third option alongside RSALv2 and SSPLv1, so by the OSI definition Redis is open source again — but a redistributor still has to pick exactly one, and an organisation that cannot ship AGPL code is left choosing between the two non-OSI licences. That is the whole reason Valkey (forked from the last BSD release, 7.2.4, and now the default engine on AWS ElastiCache and MemoryDB) still exists as a separate project. Full timeline and the Redis-vs-Valkey capability divergence: [`redis_internals`](../redis_internals/redis_internals.md).
 
 ---
 
@@ -484,9 +487,9 @@ Redis returns an error for write commands (`OOM command not allowed when used me
 RDB creates point-in-time snapshots by forking the process and writing a compact binary dump to disk. It has low I/O overhead during operation but the potential to lose minutes of data (between snapshots). AOF logs every write command; on restart Redis replays the AOF to reconstruct state. `fsync=always` gives durability similar to a traditional database but halves throughput; `fsync=everysec` risks 1 second of data loss. Use RDB for caches where some data loss is acceptable and fast restarts are needed. Use AOF `fsync=everysec` for session stores. Use both (hybrid mode) for primary data stores requiring fast restart and minimal data loss.
 
 **Q: How does Redis Sorted Set support a leaderboard with 10 million users?**
-**Short:** A Redis Sorted Set backed by a skip list gives O(log N) rank and range queries, handling a 10-million-user leaderboard in about 2GB of RAM.
+**Short:** A Redis Sorted Set backed by a skip list gives O(log N) rank and range queries, handling a 10-million-user leaderboard in about 1GB of RAM.
 
-A Redis Sorted Set stores members with a floating-point score, backed by a skip list for O(log N) rank operations. `ZADD leaderboard score user_id` adds or updates a user's score. `ZRANK leaderboard user_id` returns the user's rank (0-indexed) in O(log N). `ZREVRANGE leaderboard 0 9` retrieves the top 10 in O(log N + 10). Memory usage: ~200 bytes per entry (skip list overhead), so 10M users ≈ 2GB RAM. This is a well-known Redis use case that handles 10M entries with sub-millisecond operations.
+A Redis Sorted Set stores members with a floating-point score, backed by a skip list for O(log N) rank operations. `ZADD leaderboard score user_id` adds or updates a user's score. `ZRANK leaderboard user_id` returns the user's rank (0-indexed) in O(log N). `ZREVRANGE leaderboard 0 9` retrieves the top 10 in O(log N + 10). Memory usage: a `skiplist`-encoded ZSet stores every member twice — once in the skiplist for ordering, once in a hashtable for O(1) score lookup — which works out to ~100 bytes per member for short ids (48-byte skiplist node + 16-byte member sds + 24-byte dict entry + ~11 bytes of bucket array) and ~125 bytes if members are 36-char UUIDs. So 10M users ≈ 1GB RAM, and the number you must be able to defend in an interview is the *derivation*, not the constant. The full byte-by-byte walk lives in [`key_value_stores`](../key_value_stores/key_value_stores.md). This is a well-known Redis use case that handles 10M entries with sub-millisecond operations.
 
 **Q: What is the Redis fork pause and how do you mitigate it?**
 **Short:** Redis's fork for RDB or AOF rewrite pauses the process for roughly 1ms per GB of used memory while the page table is copied.
@@ -590,9 +593,14 @@ Score update:          ZADD global_lb XX <new_score> <player_id> → O(log N)
 ```
 
 **Memory calculation**:
-- 5M players in global leaderboard: ~200 bytes/entry × 5M = 1GB RAM
-- 1000 game leaderboards × 50K players each: ~200 bytes × 50K × 1000 = 10GB RAM
-- Total: ~11GB Redis memory
+- 5M players in global leaderboard: ~100 bytes/member × 5M = 0.5GB RAM
+- 1000 game leaderboards × 50K players each: ~100 bytes × 50K × 1000 = 5GB RAM
+- Total: ~5.5GB Redis memory
+
+The ~100 bytes/member constant is the section's canonical figure and is derived byte-by-byte in
+[`key_value_stores`](../key_value_stores/key_value_stores.md) — skiplist node 48 + member sds 16 +
+dict entry 24 + bucket array ~11. Swap in ~125 bytes if member ids are 36-char UUIDs rather than
+short numeric ids, which takes this design to ~6.9GB.
 
 **Cluster design**:
 - Hash slot assignment: `{global_lb}` pinned to one slot (entire sorted set must be on one node)

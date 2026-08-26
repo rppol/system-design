@@ -114,7 +114,7 @@ say so on first mention.
 
 ---
 
-## Module List — 7 Modules
+## Module List — 8 Modules
 
 Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
 and then the two serving modules as contrast pairs, with `envoy_proxy` **appended** at
@@ -147,6 +147,7 @@ next to `envoy_proxy`, and data-integration next to `debezium_change_data_captur
 | [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.39.0 |
 | [`hashicorp_vault/`](hashicorp_vault/hashicorp_vault.md) | Secrets management / identity broker | Barrier and the four-layer key hierarchy, seal/unseal and why recovery keys are not unseal keys, Integrated Storage, every secrets-engine family, the KV v2 policy trap, **leases and the lease-count arithmetic** (halving the TTL changes nothing and doubles issuance), auth methods and secret-zero, `bound_claims` vs `claim_mappings`, policies and identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, and the OpenBao delta | Vault 2.0.3, OpenBao 2.6.1 |
 | [`debezium_change_data_capture/`](debezium_change_data_capture/debezium_change_data_capture.md) | Change data capture | The two questions — where do I start, can I keep reading; logical decoding and output plugins; what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`); `flush.lsn.source`, heartbeats and the idle-captured-table trap; `REPLICA IDENTITY` and the `before: null` consequence; TOAST and `__debezium_unavailable_value`; snapshot modes and their removals; the incremental-snapshot watermark algorithm; the four-quadrant position-loss recovery table and why a lost slot is data loss; the never-compact schema-history topic; ordering per key / per table / never across tables; `ExtractNewRecordState` and the five tombstone modes; the `EventRouter` defaults; why `tasks.max` is ignored | Debezium 3.6.0.Final |
+| [`apache_iceberg/`](apache_iceberg/apache_iceberg.md) | Lakehouse table format | Spec v2 vs v3; the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap; hidden partitioning and partition evolution; column-ID schema evolution; copy-on-write vs merge-on-read; deletion vectors; snapshot expiry and orphan-file cleanup; compaction economics; the catalog tier (REST, Polaris, Glue, Nessie); engine support. The vendor-neutral concept layer lives in `../database/lakehouse_and_table_formats/` | Iceberg Java 1.11.0 |
 
 ---
 
@@ -315,6 +316,78 @@ physical line, and never bold anything in a labelled bullet that is not a produc
 Neither shape fails the build. The wrapped bullet shows up only as a bank record nothing
 teaches; the stray emphasis only as an indexed tool with no record. **Read the coverage
 line — the exit code cannot see either.**
+
+### The §11 lint, and the one thing you must never do about an orphan (2026-08-25)
+
+Every shape above is a **citation** defect. The fix is always to repair the cell or the
+bullet, never to make the warning go away at the other end.
+
+**NEVER author a bank record for extractor debris. That is the bug reporting itself.**
+An orphan warning means "a record exists that no module teaches"; writing a record for a
+phantom the extractor manufactured inverts it into "coverage is clean", which permanently
+blinds the only check that can see this class of defect. Eight such records were found and
+removed on 2026-08-25 — `AI`, `custom`, `on AWS`, `When each wins`,
+`Most large tech companies`, `IDE "expand inferred type`, `/client` and (introduced and
+caught in the same pass) `per-slice under MIG`. Five of them **stated in their own
+`**Short:**` line that they were not products**, which is what a record written to silence
+a warning looks like. Their citations were repaired instead, in
+`technologies/nvidia_triton_inference_server`, `hld/microservices`,
+`ml/ml_system_design/ab_testing_for_ml`, `llm/ai_applications`,
+`llm/data_flywheels_and_continuous_learning`,
+`backend/distributed_transactions_and_consistency`,
+`java/generics_and_type_system/type_inference_and_bounds` and
+`llm/mcp_model_context_protocol`.
+
+**Repairing a citation can RECOVER tools, not only remove phantoms.** The `hld/microservices`
+Service Mesh cell read `... Consul service mesh; on AWS, Amazon ECS Service Connect (ECS)
+and VPC Lattice (EKS)`. That invented `on AWS` **and** silently dropped both AWS products,
+because after the parenthetical strip the tail `Amazon ECS Service Connect  and VPC Lattice`
+exceeds the 5-space limit and the whole fragment is discarded. One malformed cell, one
+phantom and two real tools lost. Expect a repair to change the tool count in both
+directions.
+
+**The lint, before you commit a `## 11` section:**
+
+1. No labelled bullet (`- **Label:** ...`) whose **label** is not a product — the label
+   becomes the blurb, but every *later* bold span becomes a tool, so a labelled bullet is
+   only safe when everything bolded after the colon is a real product name.
+2. No **dashed** bullet (`- **X** — ...`) whose first bold is not a product. `**When each
+   wins** —` and `**DCGM exporter pairing** —` both indexed as tools. Convert a summary or
+   caveat bullet to the labelled form (`- **When each wins:** ...`), which indexes nothing.
+3. No ordinary **emphasis** inside a labelled bullet. Use `*italics*`.
+4. No bullet wrapping onto a second physical line.
+5. No ` / `, ` + ` or ` & ` inside a single tool name in column 0 or a bold span — those
+   are splitters. Between two real products they are correct and useful; the defect is
+   using them to join a product to prose (`Postgres logical replication + custom`,
+   `Optimizely / custom`, `Epic + AI`).
+6. No quotes inside column 0 — `IDE "expand inferred type"` loses its trailing quote to the
+   strip and lands as an unbalanced name.
+7. Column 0 stays a **bare product name**. Prose, flags, versions and "who uses it" belong
+   in the description column. A grouped table (`| Category | Tools |`) takes its names from
+   **column 1** instead, so the same rule applies there — `| In-House Platform | Most large
+   tech companies |` indexed the prose.
+8. When you rename a tool, use the exact `### ` name already in the bank. `Seldon` and
+   `AWS VPC Lattice` are uncovered; `Seldon Core` and `Amazon VPC Lattice` are the records.
+
+**Check it in-process, which does not race other agents.** `extract.py` writes
+`game/questions/`, so concurrent runs collide; this reads the same functions and writes
+nothing:
+
+```bash
+cd src/main/java/com/rutik/systemdesign/game && python3 -c "
+import sys; sys.path.insert(0,'.')
+import build_tech as bt
+idx=bt.build_tech_index(); r=bt.build_tech_bank(); bank=r[0] if isinstance(r,tuple) else r
+d={t['n'] for t in idx['tech']}
+orph=sorted(set(bank['tools'])-d); unc=sorted(d-set(bank['tools']))
+print('coverage: %d of %d; %d orphans'%(len(d)-len(unc),len(d),len(orph)))
+print('orphans:',orph)"
+```
+
+To trace a phantom back to the cell that made it, print `t['u']` for that record and map
+each `modIdx` through `idx['modules']`. Do that **before** deciding a record is debris —
+two of the seven citations recorded in the 2026-08-25 audit were traced to the wrong file
+by grep, and the extractor's own index was what corrected them.
 
 **A factual audit is the highest-risk time for this bank.** Renaming a tool is exactly what
 an audit should do (`tfsec` -> `Trivy`, `Kaniko` -> `rootless BuildKit`, `OpsGenie` -> `Jira

@@ -360,6 +360,76 @@ sequenceDiagram
 >
 > The diagnostic question: "Does the encapsulated object trigger transitions to a sibling object?" If yes, it's State. If not, it's Strategy.
 
+**Q: Strategy and State have nearly identical UML — what single arrow in the class diagrams is the structural tell?**
+**Short:** The dashed `ConcreteStateA ..> ConcreteStateB` "may transition to" arrow exists only in State's diagram, never Strategy's.
+
+State's class diagram carries a dashed arrow from `ConcreteStateA` to `ConcreteStateB` annotated "may transition to," showing that a state implementation can construct or reference a sibling state and hand it to `Context.setState()`. Strategy's diagram has no equivalent edge — `ConcreteStrategyA` and `ConcreteStrategyB` never reference each other, because strategies are independent and interchangeable, not participants in a lifecycle. If you're staring at a diagram trying to tell the two apart, that one arrow (or its absence) is the fastest confirming detail.
+
+**Q: Why does the note "setState() may be called by the active State itself" only appear on the State diagram's Context, never Strategy's?**
+**Short:** State objects are expected to drive their own transitions by calling back into the Context; Strategy objects never call setStrategy().
+
+`Context.setState()` in the State pattern is designed to be invoked from WITHIN a `ConcreteState`'s own `handle(context)` method — the currently active state decides when it's time to move to the next one and makes that call itself. `Context.setStrategy()` in Strategy is exclusively an EXTERNAL call made by client code; a `ConcreteStrategy.execute()` implementation has no reason and no expectation to ever call `context.setStrategy()` on itself. This directionality difference — who initiates the switch — is the semantic core of "who drives the switch" from the Key Differences table.
+
+**Q: In the vending machine example implied by this file, why does Idle transitioning to HasMoney after insertCoin() count as State, not Strategy?**
+**Short:** The transition is triggered by an event (insertCoin) and decided by the pattern itself, not chosen externally by client code.
+
+If the vending machine's current state object decides, upon receiving `insertCoin()`, to construct a `HasMoneyState` and hand it to the context via `setState()`, that's the state governing its own lifecycle progression based on an event — nobody outside the machine is choosing to "switch to HasMoney mode." Contrast this with a Strategy-based sorter, where the CLIENT explicitly calls `sorter.setStrategy(new QuickSortStrategy())` — an external decision, not an internal reaction to an event. Event-driven, self-governed transitions are State's signature; externally-chosen swaps are Strategy's.
+
+**Q: Why is the media player Play/Pause/Stop example in this file described as "wrong fit" when solved with Strategy?**
+**Short:** Because play/pause/stop naturally form a lifecycle with valid transitions, which Strategy has no mechanism to enforce.
+
+A Strategy-based media player would let the client freely call any operation regardless of the player's actual condition, since Strategy has no concept of "which strategy is valid right now" — nothing stops calling `play()` twice in a row or `pause()` before anything is playing. State naturally enforces this, since each `ConcreteState` (Playing, Paused, Stopped) only exposes the transitions that are actually valid from that phase, and illegal calls can be rejected or ignored by the specific state object handling them. The file uses this contrast specifically to show why picking the "structurally similar" pattern without checking intent produces a design that silently accepts invalid operations.
+
+**Q: What does "states follow a defined lifecycle/graph" mean concretely, and how does the vending machine or TCP connection illustrate it?**
+**Short:** Each state only permits transitions to specific next states, forming a directed graph rather than an arbitrary free-for-all.
+
+A TCP connection's states (`LISTEN`, `SYN_RECEIVED`, `ESTABLISHED`, `FIN_WAIT`, `CLOSED`) each allow only a fixed, specific set of next states per the protocol's state machine — you can't jump from `LISTEN` directly to `FIN_WAIT`. Strategy has no equivalent structure: `Comparator` implementations for ascending vs. descending sort have no defined "graph" connecting them, because there's no lifecycle at all — any strategy can be selected at any time with no ordering constraint. This "defined graph of legal transitions" is precisely what "Replaceability" in the Key Differences table means by "States follow a defined lifecycle/graph" versus Strategy's "freely interchangeable."
+
+**Q: Why does State typically hold a reference to Context while Strategy usually doesn't need one?**
+**Short:** A State often needs to call back into Context to trigger its own transition; a Strategy just executes its algorithm and returns.
+
+The Key Differences table's "Context awareness" row states State "usually receives Context to trigger transitions," matching `State.handle(context)`'s signature, which explicitly passes the context in so the state implementation can call `context.setState(nextState)` when appropriate. `Strategy.execute()` typically needs no such reference because its job ends when the algorithm finishes — there's no follow-up action like "now switch to a different strategy" for it to trigger. This is a direct consequence of State's self-governing transition responsibility versus Strategy's purely computational role.
+
+**Q: How would you explain "State can look like Strategy with extra steps" as a common confusion point?**
+**Short:** If a State implementation never triggers a transition, it behaves exactly like a stateless Strategy with no observable difference.
+
+A `ConcreteState` that only implements `handle()` without ever calling `context.setState()` to move to a different state is functionally indistinguishable from a Strategy — both just execute some behavior when invoked. The pattern only earns the name "State" once auto-transitions are actually happening; absent that, calling it State versus Strategy is purely a naming choice with no behavioral consequence, which is why this file calls it out as the most common confusion point rather than a hard rule.
+
+**Q: Why does a payment method selector (PayPal vs. credit card) clearly belong to Strategy and never State?**
+**Short:** The user explicitly picks a payment method, and the options never trigger transitions to each other — no lifecycle exists between them.
+
+Selecting PayPal over a credit card is an external, one-time choice made by the user (or client code) for a specific transaction — `PayPalStrategy` never decides to hand control to `CreditCardStrategy` mid-transaction, and there's no notion of "the payment method progresses through phases." This is the clean Strategy case the file references: independent, client-chosen algorithms with zero cross-awareness, contrasted directly against the vending machine's self-governing state progression.
+
+**Q: What does "mutability" mean as a distinguishing factor between Strategy and State, per the Key Differences table?**
+**Short:** A Strategy's algorithm field is set once by the client and rarely changes mid-operation; a State's field changes continuously as the system runs.
+
+`sorter.setStrategy(new QuickSortStrategy())` is typically called once, perhaps at construction or configuration time, and the same strategy instance handles every subsequent `sort()` call until explicitly reconfigured — a relatively static assignment. A vending machine's `state` field, by contrast, is expected to change on nearly every user interaction (insert coin, select item, dispense, return to idle) — continuous, ongoing mutation driven by the system's own operation is the normal case for State, not the exception.
+
+**Q: In the "Same Problem Solved Both Ways" section's Strategy version (marked wrong fit), what specifically breaks if two operations are called out of order?**
+**Short:** Nothing in a Strategy-based design prevents calling operations out of order, since Strategy has no concept of validity per current condition.
+
+Because `Sorter`-style Strategy contexts hold only a reference to the currently selected strategy with no notion of "what's currently allowed," a media-player-as-Strategy design would let a client call `stop()` before ever calling `play()`, or call `play()` twice consecutively with no error — there's no structural guard against operation sequences that don't make sense. This is exactly what the file's "wrong fit" framing highlights: the code compiles and superficially works, but the pattern provides zero protection against invalid state sequences, which State would naturally enforce through each state only implementing its own legal responses.
+
+**Q: Why is "who decides to switch" a more reliable diagnostic than counting the number of concrete implementations?**
+**Short:** Both patterns can have few or many implementations; only the initiator of a switch (client vs. the pattern itself) reliably separates them.
+
+A Strategy-based system could have a dozen `ConcreteStrategy` implementations (many payment gateways) or just two (ascending/descending comparator) — the count says nothing about which pattern is in play. Similarly, a State machine could have two states or twenty. What never varies is WHO initiates a change: if it's always external client code calling `setX()`, it's Strategy; if the pattern's own objects initiate the change from within, it's State. This is why the file's "Key insight" leads with "who decides to switch," not with structural complexity.
+
+**Q: How does eliminating conditional branches serve as motivation for both Strategy and State, but for different underlying problems?**
+**Short:** Strategy eliminates branches that SELECT an algorithm; State eliminates branches that check WHICH PHASE the object is currently in.
+
+Strategy's "Use Strategy when" guidance lists "you want to eliminate conditional branches that select algorithm behavior" — replacing an if/else picking between sort algorithms with polymorphic dispatch. State's guidance lists "you have state-specific behavior spread across many if/else or switch statements" — replacing conditionals that check `if (currentState == PLAYING)` scattered throughout a class with polymorphic state objects that each know their own valid behavior. Both patterns replace conditionals with polymorphism, but the conditionals they replace are answering different questions: "which algorithm" versus "which phase am I in."
+
+**Q: Why would testing a State-based media player require more setup than testing a Strategy-based sorter?**
+**Short:** Testing transitions requires driving the object through a sequence of states, while testing a Strategy needs just one call with fixed input.
+
+Verifying `QuickSortStrategy` works correctly requires only calling `sort(data)` once with a known input array and asserting on the output — no setup beyond constructing the strategy. Verifying a media player's State machine correctly transitions from `Stopped` to `Playing` on `play()`, and then correctly rejects a second `play()` call while already `Playing`, requires exercising a SEQUENCE of calls and asserting on intermediate states along the way, since the bug surface includes not just individual operations but the transitions between them. This additional sequencing complexity is a direct cost of modeling a lifecycle rather than a swappable algorithm.
+
+**Q: What real-world confusion arises when an order lifecycle (Placed -> Shipped -> Delivered -> Returned) is implemented as Strategy instead of State?**
+**Short:** Nothing prevents an order from jumping straight from Placed to Delivered, since Strategy enforces no legal transition graph.
+
+An order lifecycle modeled with State naturally restricts each phase to its legal next steps — a `PlacedState` might only allow transitioning to `Shipped` or `Cancelled`, never directly to `Delivered`. If the same lifecycle were mistakenly modeled as Strategy — treating each phase as an interchangeable "algorithm" selected externally — a caller could freely reassign the order straight to a `DeliveredStrategy` with no structural objection, silently permitting a business-invalid transition the State pattern would have prevented by construction.
+
 ---
 
 ## Real-World Examples

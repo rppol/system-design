@@ -439,6 +439,82 @@ public class KafkaConsumerConfig {
 }
 ```
 
+### Outbound Delivery to Endpoints You Do Not Own — Webhooks
+
+Every pattern above assumes the far side is a broker you operate. A **webhook** is the same
+at-least-once delivery problem aimed at an HTTP endpoint owned by someone else, which changes
+three things: you cannot fix the consumer, you cannot trust the URL, and the failure mode is a
+customer noticing before you do.
+
+**The retry ladder is a schedule, not a loop.** `FixedBackOff(1000L, 3L)` above is right for a
+broker consumer where the fault is usually transient and local. For an external endpoint the
+outage is measured in hours, so the ladder decelerates and terminates on a **wall-clock deadline**.
+Stripe's published schedule is the reference shape: immediately, then 5 min, 30 min, 2 hr, 5 hr,
+10 hr, then every 12 hr, for **72 hours total**, after which the endpoint is disabled and its
+owner is notified.
+
+| Decision | Rule | Failure if you get it wrong |
+|---|---|---|
+| Backoff | Exponential **with jitter** | Un-jittered senders re-synchronise and knock the endpoint back down the moment it recovers |
+| Ceiling | Wall-clock deadline (72 h), not an attempt count | An attempt count tells the subscriber nothing about whether the event is still useful |
+| Retryable set | 5xx, 429, connect/read timeouts. **Not** other 4xx | A 400 will be a 400 in ten hours; retrying it burns the ladder for nothing |
+| Isolation | Per-endpoint queue or concurrency budget + circuit breaker | One dead subscriber head-of-line-blocks delivery to every other subscriber |
+| Terminal state | Disable the endpoint and notify a human | A silently-dropped event is indistinguishable from one that never happened |
+| Recovery | Persist a delivery-attempt record; expose redrive with dedup | A redrive without dedup turns one operator click into a duplicate storm |
+
+```java
+// Per-endpoint isolation: a dead subscriber must not consume the shared worker pool.
+// The circuit breaker is keyed by endpoint, so an open circuit sheds that endpoint's
+// work immediately instead of holding a worker for the full connect timeout.
+private static final long[] LADDER_SECONDS = {0, 300, 1_800, 7_200, 18_000, 36_000};
+private static final long TAIL_INTERVAL_SECONDS = 43_200;   // every 12h after the ladder
+private static final Duration DEADLINE = Duration.ofHours(72);
+
+Duration nextDelay(int attempt, Instant firstAttemptAt) {
+    if (Duration.between(firstAttemptAt, Instant.now()).compareTo(DEADLINE) >= 0) {
+        return null;                                        // null = give up, disable, notify
+    }
+    long base = attempt < LADDER_SECONDS.length ? LADDER_SECONDS[attempt] : TAIL_INTERVAL_SECONDS;
+    long jitter = ThreadLocalRandom.current().nextLong(-base / 5 - 1, base / 5 + 1);  // +/-20%
+    return Duration.ofSeconds(Math.max(0, base + jitter));
+}
+
+boolean isRetryable(int status) {
+    return status >= 500 || status == 429;                  // every other 4xx is terminal
+}
+```
+
+**Signing.** The subscriber must be able to prove the request came from you and is not a replay.
+The common shape — Stripe's, and the one the **Standard Webhooks** specification codified (adopted
+by OpenAI, Anthropic, Google Gemini, Kong, Svix, Supabase, Vanta and Drata) — is HMAC-SHA256 over
+`timestamp + "." + rawBody`, with both the timestamp and a versioned signature sent as headers,
+verified inside a replay window of roughly five minutes.
+
+```java
+long timestamp = Instant.now().getEpochSecond();
+Mac mac = Mac.getInstance("HmacSHA256");
+mac.init(new SecretKeySpec(endpointSecret.getBytes(UTF_8), "HmacSHA256"));
+String sig = HexFormat.of().formatHex(mac.doFinal((timestamp + "." + rawBody).getBytes(UTF_8)));
+req.header("Webhook-Timestamp", String.valueOf(timestamp));
+req.header("Webhook-Signature", "v1," + sig);   // versioned so the scheme itself can rotate
+```
+
+Three signing failures are silent and all three are common: verifying against a
+deserialized-then-reserialized body rather than the **raw bytes** (JSON key order and number
+formatting are not stable, so it passes in staging and fails intermittently in production);
+comparing with `String.equals` instead of `MessageDigest.isEqual`, which short-circuits and leaks
+the signature to timing analysis; and rotating a secret with **no overlap window** where both
+values verify, which breaks every in-flight delivery at once. For a standards-track alternative,
+**RFC 9421 HTTP Message Signatures** (Proposed Standard, February 2024) signs a canonicalised
+request instead: `Signature-Input` names the covered components (`@method`, `@authority`,
+`@path`, `content-digest`) and `Signature` carries the value.
+
+One more hazard that has no analogue in broker messaging: the endpoint URL is **user-supplied**,
+so `http://169.254.169.254/latest/meta-data/` is a perfectly valid-looking subscription and your
+dispatcher is inside the VPC. Block link-local and private ranges **after** DNS resolution, not by
+string-matching the hostname, or a DNS record that resolves to `169.254.169.254` walks straight
+through the check.
+
 ### Message Schema Evolution with Avro
 
 ```json
@@ -588,6 +664,11 @@ public Order createOrder(CreateOrderRequest request) {
 | RabbitMQ | AMQP broker with exchange-based routing |
 | AWS SQS / SNS | Managed message queue and pub/sub |
 | KEDA | Kubernetes autoscaler based on Kafka consumer lag |
+| Standard Webhooks | Reference spec for the webhook payload envelope and HMAC-SHA256 signature headers |
+| Svix / Hookdeck | Managed webhook delivery — signing, per-endpoint retry ladders, circuit breaking, redrive, delivery logs |
+| EventBridge API destinations | AWS-managed HTTP delivery from an event bus, with built-in retry and rate limiting per destination |
+| RabbitMQ delayed-message exchange | Broker-side scheduled redelivery, so a retry ladder does not need an application-side scheduler |
+| CloudEvents | CNCF vendor-neutral event envelope (`id`, `source`, `specversion`, `type`) with HTTP/Kafka/AMQP/MQTT bindings — use it once events cross an organisational or vendor boundary |
 
 ---
 
@@ -672,6 +753,16 @@ Retain inbox rows only as long as redelivery is plausible for that message, typi
 **Short:** Split a hot aggregate's events across a bounded set of sub-keys, guaranteeing order only within each sub-key.
 
 Split the high-volume aggregate's events across a bounded set of sub-keys, and only guarantee ordering within each sub-key rather than across the whole aggregate. Using the raw aggregate ID as the partition key, as recommended above for the general case, breaks down when one aggregate generates disproportionate volume, such as one enterprise customer whose order events dwarf every other customer combined, creating a hot partition that one consumer thread cannot keep up with while other partitions sit idle. A common mitigation is a composite key like the order ID combined with an event sequence number modulo 4, spreading that aggregate's events across 4 partitions instead of 1 and restoring parallelism at the cost of only guaranteeing order within each sub-stream, acceptable when the consumer's logic does not require strict cross-sub-key ordering. The key discipline is deciding up front which ordering guarantee is actually needed, since retrofitting a sub-key scheme after consumers assume total order is a breaking change requiring a coordinated migration.
+
+**Q: Why can you not reuse your Kafka consumer's retry policy for delivering webhooks to customers?**
+**Short:** A broker retry assumes a transient local fault, but an external endpoint's outage lasts hours, so a webhook ladder must decelerate and end on a wall-clock deadline.
+
+Because the two failures have different shapes. `FixedBackOff(1000L, 3L)` is right for a broker consumer, where the fault is usually a transient local one — a momentary DB blip, a brief GC pause — and three retries a second apart genuinely resolve it. An external endpoint is down for hours, so the ladder has to decelerate and end on a **wall-clock deadline** rather than an attempt count; Stripe's published schedule is the reference shape, retrying immediately then at 5 min, 30 min, 2 hr, 5 hr, 10 hr and every 12 hr thereafter for 72 hours, after which the endpoint is disabled and its owner notified. Three further differences follow from not owning the far side. Jitter stops being optional, because un-jittered senders re-synchronise and hit the endpoint the instant it recovers, knocking it straight back down. Isolation becomes mandatory, because a shared worker pool means one dead subscriber head-of-line-blocks delivery to everyone else — give each endpoint its own concurrency budget and circuit breaker. And the retryable set narrows to 5xx, 429 and timeouts, since any other 4xx will still be a 4xx in ten hours and retrying it only burns the ladder. Finally, terminal failure must be visible and reversible: persist a delivery-attempt record per event and expose a redrive tool that deduplicates, or one operator clicking "resend" becomes a duplicate storm at every subscriber.
+
+**Q: What is the one webhook security hole that has no analogue in broker-to-broker messaging?**
+**Short:** The subscriber URL is user-supplied, so your dispatcher can be tricked into making requests to internal addresses — server-side request forgery from inside the VPC.
+
+SSRF through the subscription URL. In broker messaging every endpoint is one you configured; with webhooks the customer types the destination, so `http://169.254.169.254/latest/meta-data/` is a perfectly valid-looking subscription, and your dispatcher — which lives inside the VPC with an instance role — is the thing that will fetch it and hand back the response body in a delivery log. The naive defence is to reject private-looking hostnames as strings, and it does not work: an attacker registers a public DNS name that resolves to a link-local or RFC 1918 address, so the string check passes and the connection still lands internally. Block on the **resolved IP** after DNS resolution, and re-check on every attempt rather than at subscription time, since the record can be repointed later (a DNS-rebinding attack turns a validated endpoint hostile between the check and the connect). Layer the rest on top: send from an egress proxy or a subnet with no instance-metadata access, disable redirect-following or re-validate every hop, and never echo the endpoint's raw response body back into a customer-visible delivery log. Signing does not help here at all — it authenticates you to the subscriber, while this attack uses your own dispatcher as the confused deputy.
 
 ---
 

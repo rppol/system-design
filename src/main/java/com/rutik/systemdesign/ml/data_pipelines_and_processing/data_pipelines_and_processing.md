@@ -10,7 +10,7 @@ The three phases are:
 - **Transform**: clean nulls, normalize distributions, compute features, join datasets, enforce schema
 - **Load**: write to a feature store (Feast, Tecton), a training dataset (Parquet on S3), or a model-ready tensor format (TFRecord, Arrow)
 
-ML pipelines add requirements not present in BI pipelines: point-in-time correctness (no future leakage), data versioning (DVC, Delta Lake), schema registries (Avro/Protobuf), and statistical validation gates (Great Expectations).
+ML pipelines add requirements not present in BI pipelines: point-in-time correctness (no future leakage), data versioning (DVC, Apache Iceberg, Delta Lake), schema registries (Avro/Protobuf), and statistical validation gates (Great Expectations).
 
 ---
 
@@ -32,13 +32,13 @@ Key insight: the pipeline is not separate from the model — it IS part of the m
 
 **Point-in-time correctness**: when building a training dataset for time-series or event data, every feature value for a sample must be the value that would have been available at prediction time — no future data. Implemented via temporal joins (AS OF joins in Feast/Tecton).
 
-**Schema enforcement at ingress**: reject bad data at the source boundary rather than propagating it. Use schema registries (Confluent Schema Registry with Avro) or Great Expectations suites applied as the first pipeline stage.
+**Schema enforcement at ingress**: reject bad data at the source boundary rather than propagating it. Use schema registries (Confluent Schema Registry with Avro) or Great Expectations suites applied as the first pipeline stage. A data contract goes one step further, making the producer-consumer schema agreement an explicit, versioned artifact rather than an implicit one — see [MLOps & CI/CD](../mlops_and_ci_cd/mlops_and_ci_cd.md).
 
 **Separation of feature logic and pipeline orchestration**: feature computation (Python/PySpark functions) must live in a versioned library shared by both the training pipeline and the serving stack. The orchestrator (Airflow, Prefect) only wires together the DAG.
 
 **Immutable intermediate artifacts**: never overwrite intermediate data in place. Write to versioned paths (s3://bucket/features/v3/2024-01-15/). This enables reruns, debugging, and rollback.
 
-**Lineage tracking**: every output dataset records its inputs, code version, and parameters. DVC, Delta Lake, and commercial tools (Marquez, OpenLineage) provide this automatically.
+**Lineage tracking**: every output dataset records its inputs, code version, and parameters. DVC, Iceberg/Delta Lake table history, and commercial tools (Marquez, OpenLineage) provide this automatically.
 
 ---
 
@@ -52,7 +52,11 @@ Key insight: the pipeline is not separate from the model — it IS part of the m
 
 **Kappa architecture**: streaming-only pipeline stores all raw events immutably; replay the stream to rebuild batch results. Simpler than Lambda but requires a distributed log (Kafka with long retention).
 
-**Feature store architecture**: centralized system that separates feature computation from model training. Offline store (Parquet/Delta on S3) for training; online store (Redis, Cassandra) for low-latency serving. Feature definitions are versioned and shared across teams.
+**Feature store architecture**: centralized system that separates feature computation from model training. Offline store (Parquet on Iceberg or Delta, on S3) for training; online store (Redis, Cassandra) for low-latency serving. Feature definitions are versioned and shared across teams.
+
+**Lakehouse table format — Iceberg, Delta, Hudi**: the layer that gives raw Parquet files ACID transactions, schema evolution, and time travel. The axis that actually decides between them in 2026 is not the feature checklist — **Apache Iceberg v3** (GA on Snowflake since May 2026, on Databricks Runtime 18.0+) closed most of the older gap by adding deletion vectors, row lineage, and a VARIANT type, so Iceberg, Delta, and Hudi now cover largely the same ground. The decision is **which engines have to read your tables**. Delta Lake is the native format inside Databricks and Microsoft Fabric — nothing about the schema-enforcement and `OPTIMIZE` material below changes there, and it remains the right default in that ecosystem. Outside it — Snowflake, AWS (Glue, EMR, Athena, Redshift), BigQuery, Trino, ClickHouse — Iceberg is the interoperability default: every major cloud now ships a managed Iceberg catalog (AWS S3 Tables is Iceberg-native), so one engine's writes are readable by all the others with no translation step. You do not have to pick exactly one: Databricks **UniForm** writes Iceberg (and Hudi) metadata alongside a Delta table so non-Databricks engines read it as native Iceberg, and Apache **XTable** translates table metadata between Iceberg, Delta, and Hudi after the fact. Both have a real limit — they translate metadata, not the underlying data files, so a feature specific to one format's spec (a Delta-only column-mapping mode, for instance) does not surface on the translated side, and every writer still has to agree on the same physical Parquet layout underneath.
+
+Iceberg v3 adds three things that matter directly to an ML pipeline: **deletion vectors** write a row-level delete as a bitmap instead of rewriting the whole data file, reported up to 10x faster for DML and far less write amplification — the difference between a GDPR delete against a billion-row feature table taking minutes versus hours; **row lineage** stamps every row with an ID and the sequence number of its last modification, tracked automatically by the table format itself, which turns change-data-capture into a native metadata read (`WHERE _last_updated_sequence_number > checkpoint`) instead of a bolted-on Debezium/Kafka Connect pipeline — a feature pipeline can pull only the rows that changed since its last run natively; and the **VARIANT** type stores semi-structured JSON (event payloads, model metadata) without forcing a rigid schema up front.
 
 **Push vs Pull**:
 - Push: upstream system writes to the pipeline queue (Kafka producer)
@@ -693,7 +697,12 @@ Training pipeline uses `.fillna(0)` for missing purchase features. Serving pipel
 | Great Expectations | Data validation | Expectation suites, data docs |
 | Pandera | Schema validation | Pandas/Spark DataFrame schema enforcement |
 | DVC | Data versioning | Git for datasets, reproducible pipelines |
-| Delta Lake | Storage format | ACID transactions on Parquet, schema enforcement |
+| Apache Iceberg | Table format | ACID transactions on Parquet; the interoperability default outside Databricks/Fabric; v3 adds deletion vectors and row lineage |
+| Delta Lake | Table format | ACID transactions on Parquet, schema enforcement; native inside Databricks and Microsoft Fabric |
+| Delta UniForm | Format bridge | Writes Iceberg and Hudi metadata alongside a Delta table so non-Databricks engines read it natively |
+| Apache XTable | Format bridge | Translates table metadata between Iceberg, Delta, and Hudi without rewriting data files |
+| Polars | DataFrame library | Rust-based, multi-threaded; faster than pandas for single-node feature prep |
+| DuckDB | Embedded query engine | In-process OLAP engine; reads Iceberg and Parquet directly, no cluster needed under ~50 GB |
 | Feast | Feature store | Offline + online feature serving, point-in-time joins |
 | Tecton | Feature store (managed) | Enterprise managed feature platform |
 | Apache Airflow | Orchestration | DAG scheduling, dependency management |
@@ -781,6 +790,22 @@ Data lineage records the inputs, code version, and parameters that produced each
 **Q: What is the difference between at-least-once and exactly-once processing?**
 **Short:** At-least-once processing risks duplicate events on retry, while exactly-once guarantees a single effect per event via idempotent writes or transactional checkpoints.
 At-least-once may reprocess an event on failure and risk duplicates; exactly-once guarantees each event affects the result once, via idempotent writes or transactional checkpoints. Pure at-least-once (the default for many Kafka consumers) is cheap but requires downstream dedup to avoid double-counting. Exactly-once is achieved not by magic but by combining a replayable source, atomic checkpointed state (Flink's barrier snapshots), and transactional or idempotent sinks so a replay overwrites rather than appends. For ML features, at-least-once plus idempotent (overwrite) sinks usually delivers effectively-once results at far lower cost than strict end-to-end exactly-once.
+
+**Q: In 2026, how do you choose between Apache Iceberg and Delta Lake for a new lakehouse table?**
+**Short:** Choose Delta Lake inside Databricks or Microsoft Fabric, and Apache Iceberg everywhere else, since Iceberg is now the cross-engine interoperability default.
+The decision axis is which engines must read the table, not a feature checklist — Iceberg v3 (GA on Snowflake since May 2026, Databricks Runtime 18.0+) closed most of the older gap by adding deletion vectors, row lineage, and a VARIANT type, so the two formats now cover largely the same ground. Delta stays the right call inside Databricks or Fabric because it is the native format there and nothing about its `OPTIMIZE`/schema-enforcement story changes. Outside that ecosystem — Snowflake, AWS Glue/EMR/Athena, BigQuery, Trino — Iceberg wins because every major cloud ships a managed Iceberg catalog (AWS S3 Tables is Iceberg-native), so tables are readable cross-engine with no translation step. If you genuinely cannot predict every future reader, Databricks UniForm or Apache XTable let you write once and expose both, at the cost of metadata-only translation.
+
+**Q: What does Iceberg v3 row lineage give an ML feature pipeline that it did not have before?**
+**Short:** Row lineage stamps every row with an ID and its last-modified sequence number, turning CDC into a native metadata read instead of a bolted-on pipeline.
+Before row lineage, capturing "only the rows that changed since last run" required an external CDC tool such as Debezium writing to Kafka, then a consumer reconciling those events against the table — a second system to operate and keep in sync. With row lineage tracked automatically by the table format, a feature pipeline queries `WHERE _last_updated_sequence_number > checkpoint` directly against the table and gets exactly the changed rows, with no separate capture layer. Paired with deletion vectors — which record a row-level delete as a bitmap instead of rewriting the data file — this also makes point-in-time feature backfills and GDPR-style deletes against large feature tables an order of magnitude cheaper.
+
+**Q: What does Databricks UniForm do, and where does the translation break down?**
+**Short:** UniForm writes Iceberg and Hudi metadata alongside a Delta table so other engines read it natively, but it translates metadata only, never the underlying data files.
+UniForm generates Iceberg (and Hudi) metadata files that point at the same underlying Parquet data a Delta table already writes, so a query engine that only speaks Iceberg — say, a Trino cluster or Snowflake — reads the table without any Delta-aware connector. The limit is that only metadata is translated: a feature that exists solely in one format's spec, such as a Delta-only column-mapping mode, has no Iceberg equivalent and will not appear on the translated side, and every writer still has to agree on the same physical Parquet layout underneath. Apache XTable solves the same problem from the other direction, translating between all three formats after the fact rather than dual-writing at write time.
+
+**Q: When is DuckDB or Polars the right choice instead of Spark for ML data prep?**
+**Short:** DuckDB or Polars wins whenever the dataset fits comfortably on one machine, since both skip Spark's cluster-provisioning and shuffle overhead entirely.
+Both are now standard for single-node feature prep at a scale that no longer needs a cluster — Polars is a Rust-based, multi-threaded DataFrame library that runs faster than pandas without a JVM to start, and DuckDB is an in-process OLAP engine that reads Parquet and Iceberg tables directly with SQL. Reaching for Spark below roughly 50 GB (the threshold this module already gives for skipping Spark, see Section 9) means paying EMR/Databricks provisioning latency of minutes per run for a job neither tool needs a shuffle to finish. The trade is real: past single-machine memory, or once a job needs distributed shuffle and fault-tolerant recompute, Spark is still the right tool.
 
 ---
 

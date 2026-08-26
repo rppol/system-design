@@ -87,6 +87,19 @@ A note on where the model comes from: MLflow packages and hands off, and the run
 - Dynamic batching: wait up to max_wait_ms or until max_batch_size reached; adaptive
 - Continuous batching (iteration-level): for LLMs, adds new requests mid-generation; maximizes GPU utilization
 
+### Batch / Offline Inference
+- Scheduled or triggered scoring job that reads a table of inputs, runs the model over all of them, and writes predictions back — no online request path, no latency SLA
+- Runs the hardware only for the duration of the job, at whatever batch size maximizes throughput, then releases it; there is no idle time between the last request of one hour and the first of the next because there is no "between requests" — the job either runs or does not exist
+- Best fit: nightly or hourly scoring (recommendations refreshed daily, credit decisions batched overnight), anything with no synchronous user waiting on the response
+- Tools: SageMaker Batch Transform, Spark UDFs over a trained model, Ray Data
+
+### Serverless Inference
+- Fully managed autoscale-to-zero: no instance to size or keep warm, the platform provisions compute per request and bills for the time it actually runs, scaling back to zero between bursts
+- AWS SageMaker Serverless Inference bills per millisecond of compute at a rate proportional to a chosen memory tier (1024–6144 MB, in six fixed steps) plus a small per-GB data-processing charge, with a monthly free tier of compute-seconds. Verified against the AWS docs (`docs.aws.amazon.com/sagemaker/latest/dg/serverless-endpoints.html`) and AWS SageMaker pricing page, read 2026-08-25: **on-demand Serverless Inference explicitly excludes GPUs** — it is a CPU-only tier, unlike SageMaker's real-time endpoints. A model that needs a GPU cannot be deployed serverless on SageMaker today; GPU-class serverless inference exists on other platforms, but verify GPU support against the specific provider's current docs rather than assuming SageMaker's feature set generalizes
+- **Cold start is the defining tradeoff.** AWS's own guidance ties cold-start length directly to model size, container image size, and container start-up time — there is no published fixed number because it is workload-dependent; measure `OverheadLatency` (the CloudWatch metric SageMaker emits for exactly this) on your own container rather than assuming a figure. Optional Provisioned Concurrency (paid, keeps N instances warm) removes the cold start entirely for traffic you can forecast, at the cost of paying for that reserved capacity whether or not it is used — which reintroduces the idle-capacity cost this section's arithmetic is about
+- Good fit: bursty or unpredictable traffic with real idle periods between spikes, and non-production endpoints specifically — AWS's published MLOps pattern uses a serverless endpoint for a pipeline's staging/test stage precisely because CI hits it in short intense bursts and it sits idle the rest of the day (see Section 11)
+- Poor fit: sustained high-traffic or latency-sensitive endpoints. Once traffic is steady enough that the endpoint would rarely be idle anyway, a provisioned real-time endpoint is cheaper per prediction and has no cold start to budget for
+
 ---
 
 ## 5. Architecture Diagrams
@@ -583,6 +596,41 @@ assumed `fixed_overhead = 4.0ms` / `per_sample_cost = 0.25ms` pair. A model with
 overhead has less to amortize and a flatter curve, which is why you measure your own
 latency-vs-batch curve before quoting a saving to anyone.
 
+**Idle capacity is already inside this formula — and it usually dominates it.**
+`instance_cost_per_hour` bills for the whole hour whether the replica is busy or sitting idle
+waiting for the next request. `cost_per_prediction` only looks cheap when `QPS` stays near the
+level the fleet was sized for; a fleet sized for peak traffic that actually runs at a fraction of
+peak most of the day is paying full price for GPU time nobody used. Utilization, not raw
+per-request latency, is usually the first thing to fix, because the formula says so directly: cut
+`replicas` (or move off an always-on fleet entirely) and the numerator shrinks with nothing lost
+on the served side.
+
+**Walk one example.** The same `p3.2xlarge` at $3.06/hour, sized for a peak of 3,600
+predictions/hour (one per second) but averaging only **8% utilization** — 288 predictions/hour —
+because real traffic is concentrated in a few hours a day:
+
+```
+  always-on real-time endpoint, run at 8% utilization
+    cost_per_prediction = $3.06 / 288                = $0.010625 / prediction
+                                                       = $10,625 per million
+
+  the same GPU, run only long enough to clear the same daily volume,
+  as a batch job at full utilization (no idle hour billed)
+    cost_per_prediction = $3.06 / 3,600               = $0.000850 / prediction
+                                                       = $850 per million
+
+  ratio = $10,625 / $850                              = 12.5x worse, always-on at 8% utilization
+```
+
+That `12.5x` is not specific to these dollar figures — it falls straight out of the formula as
+`1 / utilization`, so it holds for any instance type at 8% utilization. This is the arithmetic
+behind "fix utilization before you fix latency": the endpoint above could halve its P50 latency
+and the cost-per-prediction would not move at all, because latency never appears in the formula —
+only `replicas` (which utilization drives) does. It is also the argument for the batch and
+serverless alternatives in Section 4: a batch job never bills for the idle hours, and a serverless
+endpoint bills per active millisecond instead of per wall-clock hour, so its cost-per-prediction
+does not carry a utilization penalty at all — see Section 8 for the three-way comparison.
+
 ---
 
 ## 7. Real-World Examples
@@ -614,6 +662,12 @@ latency-vs-batch curve before quoting a saving to anyone.
 | Static batching | Fixed overhead | High | Low |
 | Dynamic batching | Adaptive | High | Medium |
 | Continuous batching | Best for LLMs | Highest for LLMs | High |
+
+| Deployment Mode | Idle capacity billed? | Cost-per-prediction driver | Cold start | GPU support | Best-fit traffic |
+|---|---|---|---|---|---|
+| Real-time endpoint (provisioned, always-on) | Yes — pays the full instance-hour regardless of traffic | `1 / utilization` (see Section 6) — cheap only near the sizing target | None once warm | Yes | Steady, latency-sensitive, near-continuous traffic |
+| Batch / offline inference | No — runs only for the job's duration | Fixed by hardware throughput at full utilization, since the job runs at full utilization by construction | N/A — not on the request path | Yes | Scheduled scoring, no synchronous caller waiting |
+| Serverless inference | No — bills per active millisecond, scales to zero | Compute time per request x per-millisecond rate; no utilization penalty | The defining tradeoff — pays container/model load on the first request after idle | No on SageMaker on-demand Serverless Inference (verified 2026-08-25); verify per provider | Bursty, unpredictable traffic; non-production (staging/test) endpoints |
 
 ---
 
@@ -698,6 +752,10 @@ torch.onnx.export(
 | Ray Serve | Distributed serving | Composable pipelines, autoscaling, model multiplexing |
 | Seldon Core | K8s-native serving | Inference graphs, drift detection sidecar |
 | KServe (KFServing) | K8s CRD serving | Standardized inference protocol, canary built-in |
+| SageMaker Serverless Inference | Serverless (CPU-only) | Scales to zero, billed per active millisecond; no idle-capacity cost — see the utilization arithmetic in Section 6 and the AWS testing-cost pattern below |
+| SageMaker Batch Transform | Batch / offline inference | Scheduled scoring job, no request path, no idle billing |
+
+An AWS-published pattern (`aws.amazon.com/blogs/machine-learning/use-serverless-inference-to-reduce-testing-costs-in-your-mlops-pipelines/`, read 2026-08-25) deploys serverless specifically for a pipeline's staging/test endpoint — CI hits it in short bursts and it is idle the rest of the day — while keeping the production endpoint on a provisioned real-time instance; the article reports moving staging off an always-on `ml.m5.xlarge` cut that endpoint's monthly cost by roughly 45%, which is the same idle-capacity argument worked out in Section 6.
 
 ---
 
@@ -774,6 +832,18 @@ Blue-green keeps two full environments and flips 100% of traffic from the old (b
 **Q: When and why would you use server-sent events (SSE) or streaming for model serving?**
 **Short:** Streaming tokens as they're generated slashes a generative model's perceived latency even though it doesn't change total inference time.
 Use streaming for generative models so users see tokens as they are produced instead of waiting for the full response. It does not make inference faster, but it slashes perceived latency — time-to-first-token is what users feel, so a 3-second completion can feel instant. Streaming also enables natural backpressure: a client that stops reading signals the server to abort and reclaim resources, which is essential for LLM chat interfaces.
+
+**Q: How do you compute cost per prediction, and why does idle capacity usually matter more than latency?**
+**Short:** Cost per prediction is fully-loaded fleet cost per hour divided by predictions actually served that hour, so idle GPU-hours dominate it.
+`cost_per_prediction = (replicas x instance_cost_per_hour) / (QPS x 3600)` — the numerator bills for wall-clock instance time whether a replica is busy or idle, and the denominator is only the predictions actually served, not the fleet's theoretical capacity. An always-on GPU endpoint sized for peak traffic but averaging 8% utilization pays the same instance-hour whether it serves 1 request or 3,600, so its cost per prediction is `1 / utilization` times worse than the same hardware run only when needed — a worked example lands that at 12.5x. Cutting P50 latency in half does not move this number at all, since latency never appears in the formula; only replica count (which utilization drives) does. That is why utilization, not latency, is usually the first cost lever to pull, and why the batch and serverless deployment modes exist — both remove the idle-hour term the formula otherwise bills for.
+
+**Q: When is serverless inference the right call for a model endpoint, and what disqualifies it?**
+**Short:** Serverless fits bursty or non-production traffic with real idle gaps; sustained high-QPS, latency-critical, or GPU-only models disqualify it.
+It is the right call when traffic is bursty or unpredictable with genuine idle periods between spikes, because it bills per active millisecond and scales to zero rather than billing a wall-clock instance-hour regardless of use — AWS's own published pattern deploys it specifically for a pipeline's staging/test endpoint, since CI traffic arrives in short intense bursts and the endpoint is otherwise idle all day. Three things disqualify it. First, cold start: the platform has to provision compute and load the container and model before the first request after an idle period completes, and that latency is workload-dependent and can be unacceptable for a synchronous, latency-critical path. Second, sustained high traffic: once an endpoint is rarely idle, a provisioned real-time endpoint is cheaper per prediction and never pays a cold-start tax. Third, on SageMaker specifically, on-demand Serverless Inference is CPU-only — a model that requires a GPU cannot be deployed on it at all, full stop, regardless of traffic shape.
+
+**Q: Why can't a GPU-dependent model be deployed on SageMaker's on-demand Serverless Inference?**
+**Short:** SageMaker's on-demand Serverless Inference is a CPU-only tier — GPUs are an explicitly listed feature exclusion, unlike real-time endpoints.
+AWS's own documentation lists GPUs among the features available on SageMaker real-time endpoints but explicitly excluded from Serverless Inference, alongside multi-model endpoints, VPC configuration, and a few others — it is a deliberate scope limit of the on-demand serverless tier, not a temporary gap or a capacity constraint you can request around. The tier caps memory at 1024–6144 MB across six fixed steps, which is consistent with a CPU-sized workload rather than a GPU one. A model that needs a GPU has to run on a real-time endpoint, a batch job, or a GPU-capable serverless product from another provider — never assume a serverless tier supports GPUs without checking that specific provider's current feature list, since this varies and changes.
 
 ---
 

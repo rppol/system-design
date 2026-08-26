@@ -57,14 +57,31 @@ internals. CFS -> EEVDF was corrected across four files; also cgroup v2 names,
 free-threaded Python 3.14, 5-level paging, MGLRU, Apple Silicon's 128 B cache line and
 16 KB pages, and `sys.setrecursionlimit` no longer segfaulting since CPython 3.11/3.12.
 
-### Left open
+### Closed 2026-08-25
 
-`heaps_and_priority_queues` has an unnumbered `## Intuition` and duplicate `## 8`/`## 9`
-titles; `graphs_tries_and_advanced_structures` has `## 9. Prerequisite Knowledge` where the
-template's "When to Use" sits, shifting every later heading by one. Both were left untouched
-under the no-restructure rule and want a deliberate decision. Also unverified rather than
-guessed: a 250K-word trie at "~10 MB" (implies ~20 bytes/node) and a hash-set memory model
-sizing a slot at 8 B where CPython's `setentry` is 16 B.
+The two heading defects the audit left open are **fixed**. `heaps_and_priority_queues` had an
+unnumbered `## Intuition` and a duplicate `## 8`/`## 9`; `graphs_tries_and_advanced_structures`
+had `## 9. Prerequisite Knowledge` sitting where "When to Use" belongs. Both are now canonical
+`1..14`: the heaps cheatsheet was merged into §9 as a `### Interview Cheatsheet` sub-part, and
+the Prerequisite Knowledge block moved to the top of §1. Q&A counts were unchanged by both
+(18 and 18) — the extractor keys on the `## 12. Interview Questions with Answers` heading, not
+on the numbering, so renumbering never costs questions. Don't reopen these.
+
+Also closed the same day: `character_encoding_deep_dive`'s phase was documented as 5 while
+`STUDY_ORDER` shipped it at position 4; the tables now say Phase 1, which is what shipped.
+
+### Still open
+
+Unverified rather than guessed: a 250K-word trie at "~10 MB" (implies ~20 bytes/node) and a
+hash-set memory model sizing a slot at 8 B where CPython's `setentry` is 16 B.
+
+**A grep caveat for whoever audits next.** The 2026-08-25 pass re-ran the previous audit's
+"zero hits section-wide" list with `grep -w` and three claims moved: `count-min` is in 3 files
+(2 case studies *and* `dsa_patterns/interview_execution_playbook.md`, not case studies alone),
+`happens-before` is in 3, and `entropy` is in 3 — `greedy_and_divide_and_conquer` §14 already
+had a correct order-0-English entropy figure. The holes were still real (no module *defined*
+entropy, none taught a memory model), but the counts were not. Use `-w`, and read the hits
+before concluding a topic is absent.
 
 ---
 
@@ -76,17 +93,19 @@ This section is the **language-agnostic spine**: it teaches the concept at the C
 
 ---
 
-## Module List — 24 Modules (5 Phases)
+## Module List — 28 Modules (5 Phases)
 
 Code examples use Python (type-hinted, runnable-shaped) as the default language for algorithms and data structures. Java is noted where JVM-specific behaviour matters. This section deliberately **cross-references** `java/`, `python/`, `backend/`, `database/`, `devops/`, `hld/`, and `lld/` instead of duplicating applied depth — see the non-overlap boundary in `README.md` §2.
 
 | Phase | Modules |
 |-------|---------|
-| 1 — Complexity & Computation | complexity_analysis_and_big_o, discrete_math_for_engineers, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns |
+| 1 — Complexity & Computation | complexity_analysis_and_big_o, discrete_math_for_engineers, number_systems_and_bit_manipulation, character_encoding_deep_dive, recursion_and_problem_solving_patterns |
 | 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures |
 | 3 — Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer, graph_and_string_algorithms |
 | 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization |
-| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, character_encoding_deep_dive, theory_of_computation, how_code_runs_compilers_and_interpreters |
+| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, theory_of_computation, how_code_runs_compilers_and_interpreters |
+
+`character_encoding_deep_dive` sits in **Phase 1**, at position 4 in `STUDY_ORDER.cs_fundamentals` — directly after `number_systems_and_bit_manipulation`, because bits -> bytes -> code points is one chain. It was documented as Phase 5 for a while; the shipped order was always Phase 1, and the tables now agree with it.
 
 **Deep modules requiring 18+ Q&As:** complexity_analysis_and_big_o, arrays_strings_and_hashing, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, sorting_and_searching, dynamic_programming, graph_and_string_algorithms
 
@@ -140,6 +159,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `trees_and_binary_search_trees/` | `../../database/indexing_deep_dive/` — B+Tree storage engine role; `../../java/collections_internals/` — TreeMap as red-black tree |
 | `heaps_and_priority_queues/` | `../../java/collections_internals/` — PriorityQueue as binary min-heap; `sorting_and_searching/` (module 9) |
 | `graphs_tries_and_advanced_structures/` | `../../hld/` — Bloom filters in caching; `graph_and_string_algorithms/` (module 12) |
+| `probabilistic_and_streaming_structures/` | Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, t-digest, reservoir sampling, consistent hashing |
 | `sorting_and_searching/` | `../../database/` — sort-merge join; `complexity_analysis_and_big_o/` (module 1) |
 | `dynamic_programming/` | `recursion_and_problem_solving_patterns/` (module 3) |
 | `greedy_and_divide_and_conquer/` | `complexity_analysis_and_big_o/` (module 1) |
@@ -148,10 +168,12 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `cpu_scheduling_algorithms/` | `../../devops/linux_and_os_fundamentals/` — CFS in practice |
 | `memory_management_and_virtual_memory/` | `../../java/jvm_internals/` — JVM heap regions, GC; `../../python/cpython_memory_model/` — refcounting, pymalloc |
 | `deadlocks_and_synchronization/` | `../../java/concurrency/` — AQS, ReentrantLock, semaphores deep dive; `../../database/concurrency_control_and_locking/` — deadlock in DB transactions; `../../lld/concurrency_patterns/` — ReadWriteLock, ThreadPool |
+| `memory_models_and_concurrency_theory/` | happens-before, DRF-SC, SC/TSO/weak, acquire-release, linearizability vs serializability, ABA |
 | `computer_architecture_and_memory_hierarchy/` | `../../java/concurrency/` — `@Contended`, false sharing, memory barriers |
 | `networking_fundamentals/` | `../../backend/osi_model_and_networking/` — OSI 7-layer deep dive; `../../backend/tcp_ip_deep_dive/` — TCP internals; `../../backend/udp_and_quic/`; `../../backend/http_protocols/` |
 | `database_and_storage_fundamentals/` | `../../database/database_fundamentals/` — ACID/BASE/MVCC deep dive; `../../database/indexing_deep_dive/`; `../../database/schema_design_and_normalization/` |
 | `cryptography_fundamentals/` | `../../backend/backend_security_owasp/` — applied crypto (BCrypt, A02); `../../backend/auth_and_authorization_systems/` — JWT/TLS applied; `../../devops/secrets_management/` — Vault, key rotation |
+| `information_theory_and_compression/` | Entropy, source and channel coding, KL/cross-entropy, Kolmogorov complexity, entropy/dictionary/lossy coding |
 | `character_encoding_deep_dive/` | `../../python/strings_bytes_encoding_and_regex/` — codec API, `str`/`bytes` split; `../../java/strings_and_text/` — Compact Strings, surrogate pairs in practice |
 
 ---
@@ -177,7 +199,7 @@ This is the **pattern-recognition and strategy-selection layer** — the "fairly
 Files:
 - `dsa_patterns/dsa_patterns.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
 - `dsa_patterns/interview_execution_playbook.md` — UMPIRE method, L5 rubric, communication scripts, mock dialogue, "what to say when stuck"
-- `dsa_patterns/study_plans.md` — Blind 75 + NeetCode 150, pattern-mapped, LeetCode links, difficulty, suggested order
+- `dsa_patterns/study_plans.md` — which curated problem list to work at which stage (Blind 75 -> NeetCode 150 / LeetCode Top Interview 150 -> company tags), pattern-mapped, with LeetCode links, difficulty, and a 7-phase order
 - 25 pattern playbook files (one per pattern — see the master page `dsa_patterns/dsa_patterns.md` §6 Pattern Index for the full list)
 
 ### Pattern-File Template (NEW — third template alongside module and case-study templates)
@@ -200,7 +222,13 @@ Files:
 ```
 
 **Quality bar per pattern file:**
-- ~350–600 lines (focused playbook, not a full single-problem walkthrough)
+- **~350–800 lines** (focused playbook, not a full single-problem walkthrough). The ceiling
+  was ~600 until 2026-08-25, when 14 of the 25 shipped playbooks were found to exceed it —
+  and on inspection the long ones are the *hard* patterns (bit_manipulation 811,
+  trie_patterns 796, shortest_path 782, dynamic_programming 778, greedy 766). A pattern with
+  six sub-families and a fifteen-problem bank cannot be taught in 600 lines. The bar was
+  wrong, not the files; nothing was trimmed. Past ~800, ask whether the file is really two
+  patterns.
 - Python-first, type-hinted, runnable-shaped code
 - Diagrams appeal-first: Mermaid preferred for topological diagrams; ASCII kept only for grids/geometry; no image files
 - At least 1 BROKEN→FIX block in §8
@@ -222,7 +250,7 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 ### Adding a New Pattern File
 
 1. Create `dsa_patterns/<pattern_name>.md` — use the pattern-file template above
-2. Meet the quality bar: 350–600 lines, 10+ Q&As, ≥1 BROKEN→FIX, real LeetCode links in §7
+2. Meet the quality bar: ~350–800 lines, 10+ Q&As, ≥1 BROKEN→FIX, real LeetCode links in §7
 3. Add a row to the Pattern Index table in `dsa_patterns/dsa_patterns.md` §6
 4. Add a row to the DSA Pattern Playbooks manifest in `README.md` §7
 5. Add a bidirectional "See Also" entry in the relevant concept module(s) pointing to the new pattern file

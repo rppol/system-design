@@ -6,6 +6,8 @@
 
 **Key insight**: Resist the urge to hardcode fare math or notification logic inside `Ride` or `RideSharingSystem`. Fare calculation varies by vehicle tier and demand (Strategy), every status change has multiple independent listeners — the rider's app, the driver's app, an ops dashboard (Observer) — and vehicle creation should not leak `new EconomyVehicle(...)` calls throughout the codebase (Factory). The matching algorithm itself (nearest available driver via a linear scan) is intentionally simple for an interview — call out that production systems replace the scan with a geospatial index (quadtree / geohash / H3), but the class structure around it should not need to change.
 
+**Full runnable implementation:** [`RideSharing.java`](RideSharing.java) — 589 lines, one file, `main()` at the bottom. It demonstrates `VehicleFactory` over Economy/Premium/XL, three `FareStrategy` implementations including surge, and three observers (`RiderNotifier`, `DriverNotifier`, `DispatchDashboard`) watching one ride's state machine.
+
 ---
 
 ## Problem Statement
@@ -353,3 +355,82 @@ Caught: Cannot transition ride RIDE-1002 from CANCELLED to ACCEPTED (CANCELLED i
 4. **Multi-city support** — partition drivers and riders by `cityId`; matching only scans drivers within the same city/region, and surge multipliers are computed per-city.
 
 5. **Cancellation fee policies** — add a `CancellationPolicy` (Strategy) that charges the rider a fee if cancellation happens after `DRIVER_ARRIVED`, with the fee waived if cancelled within a grace period of `REQUESTED`.
+
+---
+
+## Interview Questions with Answers
+
+**Q: Why is `RideState.canTransitionTo()` called a "guarded transition table" and explicitly not the GoF State pattern?**
+**Short:** the states carry no behavior of their own, only legality rules — six handler classes would be pure ceremony.
+
+The GoF State pattern gives each state its own class implementing a common handler interface, the way `ElevatorSystem` and `ATM` do for their session phases — appropriate when each state has genuinely different *behavior*. Here, `RideState` is an enum whose only job is answering "is this transition legal," via a `switch (this)` inside `canTransitionTo()` — the states themselves don't do anything different, they just gate what's allowed next. Building six handler classes for that would be five files of ceremony around what's really one switch statement; naming precisely which one you built (a transition table, not GoF State) is the same discipline `ParkingLot.md` demands for "Simple Factory vs Factory Method."
+
+**Q: `SurgePricingFareStrategy extends StandardFareStrategy` — what limitation does that inheritance choice create?**
+**Short:** it can only ever surge the one strategy it subclasses; it can't be layered onto `PremiumFareStrategy`.
+
+Because `SurgePricingFareStrategy` calls `super.calculateFare(...)` and multiplies the result, it's structurally locked to surging exactly `StandardFareStrategy`'s calculation — there's no way to apply the same surge multiplier on top of `PremiumFareStrategy` without either duplicating the surge logic into a second subclass or restructuring the hierarchy. A Decorator wrapping any `FareStrategy` (instead of inheriting from one specific one) would compose with all three strategies interchangeably, the way `LRUCache.java`'s `ThreadSafeLRUCache` wraps any cache implementation. This page names the tradeoff explicitly — inheritance here is a real, callable-out limitation, not an oversight to silently work around.
+
+**Q: `DriverNotifier` only reacts to `REQUESTED` and ignores every later transition — is that a bug?**
+**Short:** no — it's a deliberate, narrow responsibility; the driver's app needs the initial assignment, not every status echo.
+
+`DriverNotifier` prints the driver-facing assignment message specifically on `REQUESTED` and does nothing on `ACCEPTED`, `DRIVER_ARRIVED`, `IN_PROGRESS`, or `COMPLETED` — which looks incomplete next to `RiderNotifier` (reacts to every transition) and `DispatchDashboard` (logs every transition) until you consider that the driver already knows their own actions caused those later transitions, since the driver's app is what triggers `acceptRide`/`arriveAtPickup`/`startRide` in the first place. Each observer reacting to only the events relevant to its own audience is exactly the point of Observer over a single shared broadcast — three independent listeners with three independent, and legitimately different, subsets of interest.
+
+**Q: Why can't a ride be cancelled once it's `IN_PROGRESS`?**
+**Short:** once the rider is physically in the car, the ride ends by completing, not by cancelling — the state diagram enforces this.
+
+`cancelRide` is a legal transition only from `REQUESTED`, `ACCEPTED`, and `DRIVER_ARRIVED` — all pre-pickup states where nothing has physically happened yet that a cancellation needs to "undo." Once `IN_PROGRESS`, the rider is already in the vehicle en route, so the only sensible way to end the ride is `completeRide`, even if it's cut short — modeling a mid-trip stop as a "cancellation" would conflate a business event (no fare, nothing happened) with a physical one (a partial trip that still needs a partial fare and a driver payout). `RideState.canTransitionTo()` enforces this by simply not including `IN_PROGRESS -> CANCELLED` in its legal-transition table.
+
+**Q: Why is driver matching a linear scan here, and what's the production fix?**
+**Short:** a linear scan is fine at demo scale; production replaces it with a quadtree, geohash, or H3 hexagonal index.
+
+`findNearestDriver()` scans every available driver of the requested tier and picks the closest by Euclidean distance — O(n) in the number of drivers, which is intentionally simple because at interview scale n is small and the point of the exercise is the class structure, not the geospatial algorithm. The Key insight names the fix explicitly: production systems replace the scan with a geospatial index (quadtree, geohash grid, or Uber's H3 hexagonal system) served by a dedicated proximity service, but the class structure around it — the `RideSharingSystem.findNearestDriver()` boundary — is deliberately isolated so swapping the algorithm doesn't touch `Ride` or any caller.
+
+**Q: Why Strategy for fare calculation instead of `if/else` chains inside `Ride`?**
+**Short:** fare rules (tier, demand, promotions) change far more often than the ride lifecycle they're embedded in.
+
+Encoding `if (vehicleType == PREMIUM) ... else if (surge) ...` directly inside `Ride` would make every pricing policy change a risky edit to the class that also owns the ride's core lifecycle logic — a change meant only to adjust surge multipliers could accidentally break state-transition handling nearby. `FareStrategy` isolates that volatility: `Ride` holds a reference chosen at request time, and a new strategy (a promotional discount, a corporate account rate) is a new class implementing the interface, with zero changes to `Ride` or `RideSharingSystem`.
+
+**Q: Why does `Ride.requestTransition()` validate through `RideState.canTransitionTo()` itself, rather than `RideSharingSystem` validating before calling into `Ride`?**
+**Short:** the invariant lives inside the entity that owns it, so every caller anywhere gets the same guard automatically.
+
+If `RideSharingSystem` were responsible for checking legality before calling `ride.setState(newState)` directly, every new caller of `Ride`'s state — a test, a future admin tool, a second orchestrating class — would have to remember to perform that same check itself, and any caller that forgot it could silently corrupt the ride's lifecycle (e.g., double-billing a completed ride). Putting the guard inside `Ride.requestTransition()` means the invariant is enforced no matter who calls it, which is the same reasoning `LibraryManagement.md` gives for keeping `RESERVED`-copy invariants inside the entity rather than scattered across callers.
+
+**Q: Why is the surge multiplier passed into `SurgePricingFareStrategy` per-ride at construction, instead of a global "surge mode" flag on `RideSharingSystem`?**
+**Short:** a per-ride multiplier supports zone-based surge without a single shared mutable global.
+
+A global boolean or multiplier on `RideSharingSystem` would force the entire system into one surge state at a time, which doesn't match how real surge pricing works — different geographic zones surge independently based on local supply and demand, so downtown might be at 2x while the suburbs are at 1x simultaneously. Passing the multiplier into each `Ride`'s strategy at request time lets different rides carry different multipliers concurrently with no shared mutable state to coordinate or race on, and it naturally extends to a future zone-aware pricing service that computes the multiplier per pickup location.
+
+**Q: Why Factory for `Vehicle` creation here, mirroring `ParkingLot`'s `VehicleFactory`?**
+**Short:** callers shouldn't need to know which concrete subclass a `VehicleType` maps to; centralizing it makes new tiers additive.
+
+`VehicleFactory.create(VehicleType, plate)` maps `ECONOMY -> EconomyVehicle`, `PREMIUM -> PremiumVehicle`, `XL -> XLVehicle` in one place, so the matching engine, driver onboarding, and test setup never call `new EconomyVehicle(...)` directly and never need to know the mapping themselves. Adding a fourth tier (`MOTO`) means one new subclass and one new case in the factory — no changes to matching code or anywhere else `Vehicle` objects are consumed — the identical structural justification `ParkingLot.md` gives for its own `VehicleFactory` over Motorcycle/Car/Truck.
+
+**Q: Walk the illegal transition example from the Sample Output — why does `CANCELLED -> ACCEPTED` fail?**
+**Short:** `CANCELLED` is a terminal state in `RideState.canTransitionTo()`, so no transition out of it is ever legal.
+
+Both `COMPLETED` and `CANCELLED` are terminal states — once a ride reaches either, `canTransitionTo()` returns false for every possible target state, because a completed or cancelled ride represents a closed business event that should never be reopened (re-accepting a cancelled ride, or re-billing a completed one, would corrupt the ride's audit trail). The Sample Output demonstrates exactly this: after `RIDE-1002` is cancelled, attempting `acceptRide` throws `IllegalStateException` naming both the current state and the attempted target, which is `requestTransition()`'s guard doing precisely what it's there for — refusing the illegal jump loudly rather than silently corrupting state.
+
+**Q: Why is driver location stored as simple `(x, y)` coordinates instead of lat/long with haversine distance?**
+**Short:** it simplifies the demo's distance math to Euclidean while keeping the same method signatures for a later swap.
+
+Using plain Cartesian coordinates lets the demo compute distance with straightforward Euclidean math (`sqrt(dx² + dy²)`) instead of the more involved haversine formula that accounts for Earth's curvature, which matters for real-world lat/long but adds complexity that isn't the point of an LLD exercise focused on matching and lifecycle logic. Because the distance calculation is isolated behind a single method, swapping to haversine later is a one-method change — the surrounding matching logic, the `Rider`/`Driver` classes, and every caller stay identical, since they only ever call "compute distance between two locations," not the formula itself.
+
+**Q: How would ride pooling (shared rides) change the relationship between `Ride` and `FareStrategy`?**
+**Short:** `Ride` needs multiple riders with independent pickup/dropoffs, and a `PoolFareStrategy` splitting cost proportionally.
+
+Pooling means a single `Ride` can no longer assume exactly one rider with one pickup and one dropoff — it needs to hold multiple riders, each with their own pickup and dropoff point along a shared route. `FareStrategy` gains a new implementation, `PoolFareStrategy`, that splits the total trip cost proportionally to the distance each individual rider actually traveled, rather than charging each rider the full-trip fare `StandardFareStrategy` would compute. The Strategy boundary absorbs this cleanly — `RideSharingSystem` and the lifecycle state machine don't need to change, since a pooled ride still moves through the same `REQUESTED -> ... -> COMPLETED` sequence, just with more riders attached to one `Ride`.
+
+**Q: How would you weigh driver rating into matching priority without changing the Strategy/Factory pattern?**
+**Short:** extend `findNearestDriver()`'s scoring function to combine distance and rating; the pattern boundaries are unaffected.
+
+The Follow-Up Extensions describe weighing distance against `driver.getRating()` so a slightly farther 4.9-star driver can be preferred over a very close 3.0-star driver — this changes only the scoring function inside `findNearestDriver()` (from "pick minimum distance" to "pick minimum weighted score combining distance and inverse rating"), which is entirely internal to the matching method. `VehicleFactory`, `FareStrategy`, and `RideObserver` are untouched, because rating-aware matching is purely a refinement of *which driver gets selected*, not a change to how vehicles are created, how fares are calculated, or how status changes are broadcast.
+
+**Q: How does `RideState.canTransitionTo()` enforced in-process map to event-sourced ride-state coordination at HLD scale?**
+**Short:** each transition becomes an immutable event appended to a log; current state becomes a derived projection.
+
+In this LLD, `Ride`'s state is a single mutable field guarded by the transition table, living entirely in one process's memory. At HLD scale, that becomes event sourcing: every transition (`ACCEPTED`, `DRIVER_ARRIVED`, `COMPLETED`, ...) is appended as an immutable event to a durable log — typically Kafka — and the "current state" any service reads is a projection derived by replaying or caching those events, not a single shared mutable object multiple services could race to update directly. This enables audit trails, replay for dispute resolution, and multi-service consistency without any service needing exclusive write access to one shared `Ride` row — the same event-sourcing mapping `ChessGame.md`'s Command history draws for its own move log.
+
+**Q: How does driver matching become a geospatial service at Uber scale?**
+**Short:** the linear scan becomes a quadtree/geohash/H3 query against a dedicated proximity service that ingests live location updates.
+
+`findNearestDriver()`'s O(n) scan over all available drivers works when n is small, but at city scale with thousands of concurrently available drivers, that scan needs to become a geospatial index query — a quadtree, a geohash grid, or Uber's own H3 hexagonal indexing system — served by a dedicated proximity/location service rather than computed inline inside the matching call. That service continuously ingests live GPS updates from every driver's app (a high-volume write path) and serves low-latency "nearest N drivers to this point" queries (a separate, optimized read path) — a genuinely different architecture from a single in-process method, but one the LLD's isolated `findNearestDriver()` interface boundary is specifically designed to be swapped in behind without touching `Ride` or the rest of `RideSharingSystem`.

@@ -7,7 +7,7 @@ Agent-to-agent (A2A) communication protocols define how autonomous AI agents dis
 
 Three major open specifications emerged in 2024-2025, and the field has since consolidated around one of them:
 
-- **A2A** (Agent2Agent, Google, April 2025): task-oriented, agent cards for capability advertisement, explicit task lifecycle state machine. Google donated A2A to the **Linux Foundation on 2025-06-23**, and the specification reached **v1.0.0** under that governance. This is the survivor — treat it as the default.
+- **A2A** (Agent2Agent, Google, April 2025): task-oriented, agent cards for capability advertisement, explicit task lifecycle state machine. Google donated A2A to the **Linux Foundation on 2025-06-23**, and the specification reached **v1.0.0** on 2026-03-12 under that governance, with a **v1.0.1** bug-fix patch (HTTP content-type preference, transcoding error corrections) released May 2026. This is the survivor — treat it as the default.
 - **ACP** (Agent Communication Protocol, BeeAI/IBM, March 2025): REST-based, synchronous and asynchronous message threading. **ACP merged into A2A under the Linux Foundation in August 2025 and its repository is archived**; the BeeAI platform now speaks A2A. It is covered here for historical context and because its design choices (message threads, REST idioms) are still worth contrasting — not as a live alternative to pick.
 - **ANP** (Agent Network Protocol): decentralized peer-to-peer agent discovery via Decentralized Identifiers (DID), no central registry dependency. Still an early specification with a much smaller ecosystem.
 
@@ -49,7 +49,7 @@ Key insight: The hardest problems are not the happy path (send task, get result)
 
 ### 4.1 A2A — Agent2Agent Protocol (Google, 2025; Linux Foundation since June 2025)
 
-A2A is an open specification published by Google in April 2025 and donated to the Linux Foundation on 2025-06-23, where it now sits at **v1.0.0**. It defines:
+A2A is an open specification published by Google in April 2025 and donated to the Linux Foundation on 2025-06-23, where it reached **v1.0.0** on 2026-03-12 and now sits at **v1.0.1**, a May 2026 bug-fix patch release (HTTP content-type preference handling, transcoding-related error corrections, and a documentation pass standardizing `TaskState` references — no wire-format change). It defines:
 
 **Agent Card**: A JSON document served at the RFC 8615 well-known path **`/.well-known/agent-card.json`** advertising the agent's capabilities, supported input/output modalities, authentication requirements, and endpoint URLs. (Early drafts used `/.well-known/agent.json`; code written against that path will 404 against a current server.)
 
@@ -93,6 +93,8 @@ A2A is an open specification published by Google in April 2025 and donated to th
 **Transport**: A2A v1.0 defines three bindings — **JSON-RPC 2.0**, **gRPC**, and **HTTP+JSON/REST**. Under the JSON-RPC binding the core methods are `a2a.message.send`, `a2a.message.sendStreaming`, `a2a.tasks.get`, `a2a.tasks.list`, `a2a.tasks.cancel`, `a2a.tasks.subscribe`, the `a2a.tasks.pushNotificationConfig.*` family, and `a2a.agent.getExtendedAgentCard`. Server-Sent Events (SSE) carry streaming responses; webhook callbacks carry push notifications on long tasks.
 
 **Multi-turn conversations**: When an agent reaches `input-required` state, it returns a question. The caller submits a follow-up message to the same task ID, resuming the conversation without losing context.
+
+**Extension mechanism**: A2A v1.0's Layer 1 data model (AgentCard, AgentSkill, Task, Message, Part, Artifact) includes a formal `AgentExtension` object so vendors and working groups can add new data, requirements, RPC methods, or state-machine behavior without forking the core spec. An agent advertises support via an `extensions` array on its Agent Card, each entry a `uri` identifying the extension plus an optional human-readable `description` and a `required` flag; a client declares which extensions it understands via an `A2A-Extensions` request parameter. A caller checks the advertised array before relying on extension-specific fields, the same way MCP clients check declared capabilities before calling an undeclared method. The two production examples are **AP2** (Google's Agent Payments Protocol, for agent-initiated payment mandates) and the **x402** crypto-payments extension — both are built as A2A extensions rather than changes to the core task/message model, which is the pattern the mechanism exists to enable.
 
 ### 4.2 ACP — Agent Communication Protocol (BeeAI/IBM) — merged into A2A, August 2025
 
@@ -724,7 +726,7 @@ event ends up with only the final fragment of a streamed report.
 
 ## 7. Real-World Examples
 
-**A2A reference implementations** (2025): Google published reference servers and clients in Python and TypeScript alongside the A2A specification, and transferred them to the Linux Foundation with the spec in June 2025 — they now live under the `a2aproject` GitHub organization, not `google`. Seven companies including AWS, Microsoft, Cisco and Salesforce joined as founding members of the Linux Foundation project.
+**A2A reference implementations** (2025): Google published reference servers and clients in Python and TypeScript alongside the A2A specification, and transferred them to the Linux Foundation with the spec in June 2025 — they now live under the `a2aproject` GitHub organization, not `google`. At its one-year mark (April 2026) the Linux Foundation reported the project had grown past **150 supporting organizations**, deep integration across Google, Microsoft and AWS cloud platforms, and production deployments in supply chain, financial services, insurance and IT operations — well beyond the handful of companies (including AWS, Microsoft, Cisco and Salesforce) that joined as founding members when the project moved under Linux Foundation governance.
 
 **Enterprise HR automation**: An orchestrator agent receives a "onboard new employee" task. Via A2A it delegates to: an IT provisioning agent (creates accounts), an identity agent (sets up SSO), a payroll agent (initializes compensation), and a facilities agent (assigns desk). Each delegation uses JWT scoped to the minimum required operation. The orchestrator tracks four concurrent A2A tasks and combines results.
 
@@ -751,7 +753,7 @@ event ends up with only the final fragment of a streamed report.
 | Push notifications | Yes | Yes | Yes (via DID service) | No |
 | Multi-turn | Yes (input-required state) | Yes (message threads) | Yes (message exchange) | No |
 | Decentralization | Central registry | Central directory | Fully decentralized | Central config |
-| Standard maturity | Published April 2025; donated to the Linux Foundation June 2025; spec at v1.0.0 | **Merged into A2A August 2025; repo archived** | Early specification | Published Nov 2024 |
+| Standard maturity | Published April 2025; donated to the Linux Foundation June 2025; spec at v1.0.1 (May 2026); 150+ supporting organizations at the April 2026 one-year mark | **Merged into A2A August 2025; repo archived** | Early specification | Published Nov 2024 |
 | Best for | Structured task delegation | Historical reference — migrate to A2A | Cross-org open networks | Tool invocation |
 
 ### Latency Characteristics

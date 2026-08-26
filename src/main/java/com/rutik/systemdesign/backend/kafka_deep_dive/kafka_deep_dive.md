@@ -64,6 +64,100 @@ Every node sets `process.roles` to one of three values, and the choice is the ma
 
 Because metadata is a Raft log rather than an external store, partition counts scale far past what an external coordinator allowed: Confluent's lab test ran 2 million partitions on a single KRaft cluster.
 
+### Storage Tiers — Local, Tiered, and Diskless
+
+Retention used to be bounded by what fit on broker disks, which is why "Kafka is not a database"
+was good advice. Three tiers now exist and they are chosen per topic.
+
+| Tier | Where segments live | Rebalance cost | Read latency for cold data | Status |
+|------|--------------------|----------------|---------------------------|--------|
+| Local | Broker disk (`log.dirs`) | Full segment copy on reassignment | Page-cache fast | Always |
+| Tiered (KIP-405) | Local hot segments + closed segments in S3/GCS/Azure Blob | Only the local hot set moves | Object-store fetch, tens to hundreds of ms | **GA since Kafka 3.9** |
+| Diskless (KIP-1150) | Object store is the primary log; brokers hold no partition data | Effectively zero — brokers are stateless | Object-store fetch, higher write latency | KIP **Accepted** (2026-03-02); it is a requirements KIP, with implementation in follow-ups KIP-1163 and KIP-1164 — not in 4.3 |
+
+**Tiered storage** is the one you can use today. Enable it at the cluster level and then per topic:
+
+```properties
+# broker
+remote.log.storage.system.enable=true
+remote.log.storage.manager.class.name=org.apache.kafka.server.log.remote.storage.<Plugin>
+```
+```bash
+kafka-configs.sh --bootstrap-server broker:9092 --alter --entity-type topics --entity-name orders \
+  --add-config remote.storage.enable=true,local.retention.ms=86400000,retention.ms=7776000000
+```
+
+That keeps 1 day local and 90 days total. The arithmetic is the whole point: 90 days of a
+50 MB/s topic at RF=3 is `50 MB/s × 86400 × 90 × 3 ≈ 1.17 PB` of provisioned EBS; with tiered
+storage the local set is `50 × 86400 × 1 × 3 ≈ 13 TB` and the remaining ~389 TB (unreplicated —
+the object store handles its own durability) sits in S3 at roughly 1/10th the cost per GB.
+**Clients need no change** — a consumer that seeks past the local retention window transparently
+reads remote segments. The real behavioural change is that a rewind to the start of a 90-day
+topic now issues object-store GETs, so a badly-reset consumer group can generate a surprising S3
+bill and a latency cliff rather than just heavy disk I/O.
+
+**Diskless topics** (KIP-1150) go further: object storage becomes the primary log and brokers
+become stateless, eliminating cross-AZ replication traffic — the single largest line item in a
+cloud Kafka bill. It was accepted by the community on 2 March 2026, the first time the project
+endorsed object storage as the data layer rather than a tier behind it. It is not shipped;
+today the same shape is available from Redpanda, WarpStream and AutoMQ (see §11).
+
+### Consumption Models — Consumer Groups vs Share Groups
+
+Kafka has two consumption models, and picking the wrong one is the most common design error in
+this area.
+
+| | Consumer group | Share group (KIP-932) |
+|---|---|---|
+| Assignment | Partition-exclusive: one consumer per partition per group | Cooperative: many consumers read the *same* partition |
+| Parallelism ceiling | Partition count | Unbounded by partitions |
+| Ordering | Per-partition, guaranteed | **None** — records are handed out as capacity frees |
+| Acknowledgement | Offset commit (a watermark) | Per-record `ACCEPT` / `RELEASE` / `REJECT`, plus `RENEW` for long work |
+| Redelivery | Replay from committed offset | Per-record delivery counter, then to a rejected state |
+| Client class | `KafkaConsumer` | `KafkaShareConsumer` |
+| Status | Always | Early access in 4.0, **production-ready in 4.2** (Feb 2026) |
+
+```java
+// KIP-932 share consumer — queue semantics, no partition ownership
+Properties props = new Properties();
+props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "broker:9092");
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "invoice-renderers");   // a SHARE group id
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+
+try (KafkaShareConsumer<String, String> consumer = new KafkaShareConsumer<>(props)) {
+    consumer.subscribe(List.of("render-jobs"));
+    while (running) {
+        ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(500));
+        for (ConsumerRecord<String, String> record : records) {
+            try {
+                render(record.value());
+                consumer.acknowledge(record, AcknowledgeType.ACCEPT);   // done, never redelivered
+            } catch (TransientException e) {
+                consumer.acknowledge(record, AcknowledgeType.RELEASE);  // hand to another consumer now
+            } catch (PoisonException e) {
+                consumer.acknowledge(record, AcknowledgeType.REJECT);   // never redeliver, goes to rejected
+            }
+        }
+        consumer.commitSync();
+    }
+}
+```
+
+Use a share group when the work is a **task queue** — image rendering, email sending, webhook
+delivery — where each record is independent, processing time varies wildly, and you want 200
+workers on a 12-partition topic. Use a consumer group when **order matters**, when you need
+exactly-once with transactions, or when Kafka Streams is involved: share groups deliberately
+give up per-key ordering, and there is no share-group equivalent of a read-process-write
+transaction. The delivery counter is the DLQ mechanism — after
+`group.share.delivery.attempt.limit` attempts (broker config, default **5**) the record is
+archived instead of blocking the partition, which is exactly the poison-pill handling a consumer
+group forces you to hand-roll. The other two knobs worth knowing:
+`share.record.lock.duration.ms` (default **30s**) is how long a record is held by one consumer
+before it becomes available again — set it above your p99 processing time or you will
+double-process, and use `RENEW` for work that legitimately runs longer — and
+`group.share.partition.max.record.locks` caps in-flight records per topic-partition.
+
 ### Topic Retention Strategies
 
 **Delete policy (default)**
@@ -753,6 +847,11 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 - **Amazon MSK** — managed Kafka on AWS. MSK Serverless for unpredictable workloads.
 - **Aiven for Kafka** — managed Kafka across AWS, GCP, Azure.
 
+**Kafka-Protocol-Compatible Alternatives** — same client libraries, different storage architecture. All three implement the object-store-as-primary-log shape that KIP-1150 is bringing to Apache Kafka itself, so evaluate them when cross-AZ replication cost or broker statefulness is your actual problem, not when you want a faster Kafka.
+- **Redpanda** — C++ broker, no JVM and no page-cache tuning, thread-per-core with a Raft-per-partition design; tiered storage to object stores. The migration cost is operational tooling, not client code.
+- **WarpStream** — brokers are stateless agents that write directly to S3; zero inter-AZ traffic and zero local disk, paid for with materially higher produce latency (hundreds of ms) since a batch must land in object storage before acknowledgement. Right for high-throughput logs and telemetry, wrong for a request-path RPC replacement.
+- **AutoMQ** — Apache-Kafka codebase on a shared-storage (S3 + EBS WAL) layer, so it keeps Kafka's exact semantics while making brokers reassignable in seconds.
+
 **Monitoring**
 - **Confluent Control Center** — commercial UI for consumer lag, broker health, Schema Registry. Ships separately from Confluent Platform as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and stores its metrics in Prometheus rather than an internal Kafka Streams pipeline.
 - **Kafdrop** — open-source web UI for topic/message inspection.
@@ -857,6 +956,16 @@ These two settings jointly control when the producer sends a batch. `batch.size`
 **Short:** Consumer lag is the gap between the log end offset and the committed offset, monitored via JMX and alerted against an SLA.
 
 Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor it via JMX (`kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*,attribute=records-lag-max`), Burrow (LinkedIn's consumer lag monitor), or by querying the Kafka Admin API. Export to Prometheus via the Kafka JMX Exporter. Set Grafana alerts: warn at 10,000 records lag, critical at 100,000. For Kubernetes deployments, use KEDA (Kubernetes Event-Driven Autoscaling) with the Kafka scaler to automatically scale consumer pod count based on lag. Treat lag as a latency SLA — if your SLA is 30-second processing freshness, 300,000 records at 10,000 records/sec processing speed means 30 seconds of lag before SLA breach.
+
+**Q: You have a 12-partition topic of independent render jobs and need 200 concurrent workers. How?**
+**Short:** Use a share group (KIP-932), which lets many consumers read the same partition with per-record acknowledgement, so parallelism is no longer capped by partition count.
+
+Use a share group, not a consumer group. In a consumer group the assignment is partition-exclusive, so 12 partitions means at most 12 useful consumers and the other 188 sit idle — the historical answer was to over-partition to 200, which permanently inflates metadata, rebalance time and per-partition memory just to buy transient parallelism. A share group (KIP-932, early access in 4.0 and production-ready in **4.2**, February 2026) lets many `KafkaShareConsumer` instances cooperatively read the *same* partition: the broker hands out individual records under a lock and each is acknowledged separately with `ACCEPT`, `RELEASE` or `REJECT`, plus `RENEW` to extend the lock for legitimately long work. The price is ordering — share groups give up per-key order entirely, so this is only correct because render jobs are independent; anything with a per-entity sequence still needs a consumer group. Two configs decide whether it behaves: `share.record.lock.duration.ms` (default 30s) must exceed your p99 processing time or a slow job gets handed to a second worker and runs twice, and `group.share.delivery.attempt.limit` (default 5) is the built-in poison-pill escape — a record that fails five times is archived rather than blocking the partition, which is the DLQ machinery a consumer group makes you build yourself.
+
+**Q: Your team wants 90-day retention on a 50 MB/s topic. What do you propose?**
+**Short:** Enable tiered storage (KIP-405, GA since Kafka 3.9) so closed segments move to object storage and only a short local retention window stays on broker disks.
+
+Enable tiered storage rather than buying disk. Do the arithmetic first, because it is the argument: 90 days at 50 MB/s with RF=3 is `50 × 86400 × 90 × 3 ≈ 1.17 PB` of provisioned block storage, which is both expensive and operationally miserable — a single broker replacement has to copy a terabyte before the partition is in-sync again. With `remote.storage.enable=true` on the topic, `local.retention.ms=1d` and `retention.ms=90d`, the local set drops to `50 × 86400 × 3 ≈ 13 TB` and the remaining ~389 TB (unreplicated, since the object store handles its own durability) lands in S3 at roughly a tenth the cost per GB. Clients need no change at all: a consumer that seeks past the local window transparently fetches remote segments. The gotchas are on the read side — a consumer group reset to the earliest offset now issues object-store GETs across 90 days, which is a latency cliff and a real S3 bill rather than merely heavy disk I/O, so gate offset resets and alert on remote fetch rate. Looking ahead, KIP-1150 diskless topics (Accepted 2 March 2026, but a requirements KIP whose implementation lives in follow-ups KIP-1163/1164, so nothing has shipped) makes object storage the *primary* log and brokers stateless; Redpanda, WarpStream and AutoMQ already offer that shape today.
 
 ---
 

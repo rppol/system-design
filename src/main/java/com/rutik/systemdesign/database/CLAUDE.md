@@ -5,24 +5,24 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 31 Modules (7 Phases)
+## Module List — 33 Modules (7 Phases)
 
 ### Phase 1 — Foundations
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `database_fundamentals/` | Intermediate | 15 | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
+| `database_fundamentals/` | Intermediate | 16 | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
 | `storage_engines_internals/` | Expert | 17 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
-| `indexing_deep_dive/` | Advanced | 18 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
-| `concurrency_control_and_locking/` | Advanced | 15 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
+| `indexing_deep_dive/` | Advanced | 19 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
+| `concurrency_control_and_locking/` | Advanced | 16 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
 
 ### Phase 2 — Relational Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `postgresql_internals/` | Expert | 17 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
+| `postgresql_internals/` | Expert | 18 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
 | `mysql_innodb_internals/` | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
-| `sql_query_optimization/` | Advanced | 15 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
+| `sql_query_optimization/` | Advanced | 16 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
 | `schema_design_and_normalization/` | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — sub-file: `surrogate_vs_natural_keys` |
 | `database_migrations_zero_downtime/` | Intermediate | 16 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
@@ -30,54 +30,56 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `document_databases/` | Advanced | 16 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
+| `document_databases/` | Advanced | 17 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
 | `key_value_stores/` | Expert | 17 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the CATEGORY; Redis product internals belong in `redis_internals/` |
-| `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the eight eviction policies + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, Redis 8 vs Valkey 9 |
-| `wide_column_databases/` | Advanced | 13 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
-| `search_engines/` | Advanced | 13 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
+| `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the eight eviction policies + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, vector sets (`VADD`/`VSIM`, HNSW + filtered ANN), Redis 8 vs Valkey 9 |
+| `wide_column_databases/` | Advanced | 22 | Cassandra ring, partition key, compaction (STCS/LCS/TWCS/UCS), consistency levels, tombstones, SAI vs legacy 2i, `VECTOR` + ANN, trie memtables/BTI, Accord `[6.0-alpha]`, HBase/Bigtable lineage, ScyllaDB shard-per-core |
+| `search_engines/` | Advanced | 16 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | `elasticsearch_internals/` | Expert | 38 | Lucene segments and file extensions, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 norms, per-shard IDF, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ — the PRODUCT internals; the category lives in `search_engines/` |
-| `graph_databases/` | Intermediate | 11 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
-| `time_series_databases/` | Intermediate | 12 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
+| `graph_databases/` | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher 25, GQL (ISO/IEC 39075:2024), PostgreSQL 19 SQL/PGQ, fraud detection |
+| `time_series_databases/` | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
+| `analytical_databases_and_olap/` | Columnar storage, vectorized execution, MergeTree parts, sort keys vs indexes, ClickHouse/Druid/Pinot/DuckDB | 18 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 
 ### Phase 4 — Emerging Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `vector_databases/` | Advanced | 16 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
+| `vector_databases/` | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | `newsql_and_distributed_sql/` | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
 | `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| `lakehouse_and_table_formats/` | ACID on object storage, snapshot isolation, time travel, Iceberg vs Delta vs Hudi, CoW vs MoR, compaction | 18 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
 
 ### Phase 5 — Distributed Database Concepts
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `replication_and_high_availability/` | Expert | 16 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
+| `replication_and_high_availability/` | Expert | 17 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
 | `sharding_and_partitioning/` | Expert | 16 | Consistent hashing, shard key selection, Vitess, hotspot, resharding |
-| `distributed_transactions/` | Expert | 17 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks |
-| `consistency_models_and_consensus/` | Expert | 15 | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
-| `database_caching_patterns/` | Advanced | 16 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
+| `distributed_transactions/` | Expert | 20 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks, Percolator/Spanner/CockroachDB Parallel Commits/Calvin |
+| `consistency_models_and_consensus/` | Expert | 16 | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
+| `database_caching_patterns/` | Advanced | 17 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
 
 ### Phase 6 — Production Operations
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `connection_pool_management/` | Advanced | 12 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
-| `database_performance_tuning/` | Expert | 14 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
-| `backup_recovery_and_disaster_recovery/` | Intermediate | 12 | PITR, WAL-G, pg_basebackup, RPO/RTO, restore drills |
-| `database_security_and_compliance/` | Intermediate | 12 | RLS, scram-sha-256, pgAudit, Vault, GDPR erasure, TDE |
+| `connection_pool_management/` | Advanced | 16 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
+| `database_performance_tuning/` | Expert | 16 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
+| `backup_recovery_and_disaster_recovery/` | Intermediate | 16 | PITR, WAL-G, pg_basebackup, RPO/RTO, restore drills |
+| `database_security_and_compliance/` | Intermediate | 16 | RLS, scram-sha-256, pgAudit, Vault, GDPR erasure, TDE |
 
 ### Phase 7 — Architecture & Selection
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `database_selection_framework/` | Expert | 16 | Selection matrix, benchmark traps, TCO, migration risk, vertical vs horizontal |
-| `polyglot_persistence_patterns/` | Advanced | 13 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
+| `database_selection_framework/` | Expert | 18 | Selection matrix, benchmark traps, TCO, migration risk, vertical vs horizontal |
+| `polyglot_persistence_patterns/` | Advanced | 16 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
 
 ---
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 31 modules — the 7-phase order in
+`README.md` documents the **Full Path** (all 33 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
 **Senior** (21 modules) and **Principal** (14). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
@@ -97,7 +99,7 @@ and a 6-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 6 Total
+## Case Studies — 8 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
@@ -135,12 +137,15 @@ and a 6-week Study Plan (prose; no path impact).
 
 | Database | Version |
 |----------|---------|
-| PostgreSQL | 18 (2025) |
-| MySQL | 9.7 (2026 LTS) |
+| PostgreSQL | 18 (2025) — 19 in beta (beta 1 June 2026, feature-frozen July 2026, GA expected Sept/Oct 2026) |
+| MySQL | 9.7 LTS (2026) — the last sequential version; Innovation and LTS now use `YY.M` calendar versioning (26.7 = July 2026) |
 | MongoDB | 8.3 (2026) |
 | Redis | 8.10 (2026) |
 | Valkey | 9.1 (2026) |
-| Cassandra | 5.0 (2024) |
+| Cassandra | 5.0 (Sept 2024 GA); 6.0 is alpha only — Accord, not production-ready |
+| ScyllaDB | separate C++ shard-per-core codebase, Cassandra wire-compatible — not a Cassandra version |
+| Neo4j | 2026.07 (calendar versioning since 2025.01); Cypher 25 is the shipped default from 2026.02 |
+| GQL | ISO/IEC 39075:2024 (April 2024) — the ISO standard graph query language |
 | Elasticsearch | 9.5 (2026), Lucene 10.5 — OpenSearch 3.7, forked at 7.10.2 |
 | ClickHouse | 26.x (2026) |
 

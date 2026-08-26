@@ -153,6 +153,26 @@ A Debezium connector is a Java class implementing Kafka Connect's `SourceTask`. 
 
 The trap in the non-Kafka runtimes is that **the offset store degrades quietly**. Connect stores offsets in a replicated compacted Kafka topic. Debezium Server's default is a file on local disk, which on a Kubernetes pod without a persistent volume means the offset is destroyed on every reschedule, and the connector re-snapshots. Configure Redis or a Kafka offset store, or mount a real volume — this is the most common Debezium Server production defect.
 
+### 4.1a The Debezium Management Platform — the control plane the runtime table only gestures at
+
+The fourth row above fuses two things that deploy separately, and the second one is the lead item of the `[3.6]` release this page pins. The **Debezium Operator** reconciles a `DebeziumServer` CR; the **Debezium Management Platform** is a control plane *over* those CRs, in two components:
+
+| Component | What it is | What it owns |
+|---|---|---|
+| **Conductor** | A backend service with a REST API | Pipeline definitions, source and destination configuration, connection validation, and the metrics API |
+| **Stage** | The React front end | Building a pipeline, watching it, and the monitoring dashboard |
+
+What it manages is **Debezium Server pipelines, not Kafka Connect connectors** — the distinction §1's disambiguation table already flags as the one that catches people, and it is worth restating here because the Platform is what a team finds when they go looking for "the Debezium UI". The archived `debezium-ui` project was the Connect-hosted UI, and it has no successor; for Kafka Connect the management surface remains the Connect REST API plus whatever console your Kafka distribution ships.
+
+`[3.6]` is the release that made the Platform genuinely operable rather than a config editor:
+
+- **Monitoring.** A monitoring tab on the pipeline overview renders multiple metric panels from Conductor's metrics API, with a shared time range and refresh rate across panels and per-panel failure isolation, so one failing panel does not blank the dashboard. This is the first time Debezium's own JMX metrics (§6.16) have had a first-party UI.
+- **JDBC sink pipelines.** The Platform can now build an end-to-end pipeline terminating in the **Debezium JDBC sink connector**, which makes database-to-database replication and migration a Platform-native flow with no Kafka anywhere in it.
+- **Connection validators.** Source and destination connectivity can be checked from the UI before the pipeline is created, which moves the most common configuration failure from "the pipeline starts and immediately dies" to a red field in a form.
+- **Helm.** The Platform chart supports extra volumes and volume mounts on the Conductor container, which is how a custom truststore reaches it at runtime.
+
+The honest positioning: the Platform is the answer for a **Debezium Server** estate — several pipelines, non-Kafka sinks, a team that wants a UI and an API rather than a properties file per pipeline. It is not an answer for a Kafka Connect estate, and adopting it is therefore a runtime decision (§8.4) before it is a tooling one.
+
 ### 4.2 The capture-mechanism taxonomy — how each database exposes its log
 
 The connector families differ because the databases differ, and the differences drive real operational consequences.
@@ -611,6 +631,37 @@ FROM pg_replication_slots;
 
 **`max_slot_wal_keep_size`** (PostgreSQL 13+, default `-1` meaning unlimited) is the safety valve: past that many bytes, PostgreSQL invalidates the slot rather than filling the disk. It converts an outage of the database into a re-snapshot of the pipeline, which is almost always the trade you want. Set it. [`database/replication_and_high_availability`](../../database/replication_and_high_availability/replication_and_high_availability.md) and [`database/postgresql_internals`](../../database/postgresql_internals/postgresql_internals.md) own the general slot primitive and the xmin horizon; what this page adds is what *Debezium* does to those three numbers.
 
+**A slot does not follow a failover — unless you make it one.** Historically this was the sharpest edge in the whole PostgreSQL story: a slot exists only on the primary, so promoting a standby left the new primary with no slot at all, and a fresh slot starts at the *current* LSN. Every change between the old `restart_lsn` and the promotion is gone from the log — the fifth case in §6.12, arriving not from an operator mistake but from ordinary HA doing its job. Two PostgreSQL releases and one Debezium property closed it:
+
+- **PostgreSQL 16** added logical decoding **on a standby**, which made it possible to hold a slot on the replica at all. It does not synchronise anything for you; it is the prerequisite that makes a hand-rolled failover procedure buildable rather than impossible.
+- **PostgreSQL 17** added **failover slots**, which do the synchronising. A slot marked for failover is propagated to the standbys and kept advancing in step with the upstream slot, so a promoted replica already holds a slot at the same LSN and the connector resumes across the promotion with no gap.
+
+Create one by passing the final `failover` argument, or let Debezium do it:
+
+```sql
+-- the fifth positional argument is `failover`
+SELECT pg_create_logical_replication_slot('debezium', 'pgoutput', false, false, true);
+SELECT * FROM pg_replication_slots;   -- `failover` column is now true
+```
+
+```properties
+slot.failover=true      # [3.0.5] Debezium creates the slot as a failover slot itself
+```
+
+`slot.failover` is silently a no-op unless **both** conditions hold: the server is PostgreSQL **17 or newer**, and the connector is pointed at the **primary**. Against PG16 or a standby, Debezium creates an ordinary slot and logs nothing you will notice — which is the same shape as every other quiet defect on this page, a setting that appears to be applied and is not. Verify with the `failover` column in `pg_replication_slots`, never with the connector config.
+
+The standby side needs setup too, and it is where this usually fails in practice:
+
+| Setting | Where | Why |
+|---|---|---|
+| `sync_replication_slots = on` | standby | starts the worker that propagates slot state from the primary |
+| `hot_standby_feedback = on` | standby | a hard requirement; without it the primary can remove rows the standby's slot still needs |
+| `primary_conninfo` **including `dbname=`** | standby | the sync worker connects to a specific database; omitting `dbname` is the single most common reason nothing syncs. On RDS set `rds.logical_slot_sync_dbname` instead |
+
+`pg_sync_replication_slots()` forces a synchronisation on demand and is what you call in a controlled-switchover runbook to guarantee both sides sit at exactly the same LSN before promoting.
+
+What this changes for the four-quadrant table in §6.12: **nothing in the grid itself**, because failover slots address slot survival, not offset or schema-history survival. What it removes is the *fifth case* arriving from planned maintenance and routine HA events — which was the most common way teams met it.
+
 ### 6.4 Keeping the slot moving — `flush.lsn.source`, heartbeats and the idle-table trap
 
 This is the mechanism that produces the most confusing Debezium incident, so it is worth walking slowly.
@@ -841,6 +892,8 @@ And the fifth case, which is not in the grid because it is not the same kind of 
 > **The PostgreSQL slot is dropped or invalidated: that is DATA LOSS, not inconvenience.** Dropping a slot releases the WAL, PostgreSQL recycles it, and a newly created slot begins at the *current* LSN. Every change between the old `restart_lsn` and now is gone from the log permanently. A re-snapshot restores the current *row values*, so a store that only needs current state recovers — but any consumer that needed the individual **transitions** (an audit trail, an event-sourced projection, an incrementing counter, a downstream that reacts to `status: PENDING -> SHIPPED`) has lost events that cannot be reconstructed from anywhere.
 
 The same shape applies elsewhere: MySQL binlogs expired past `binlog_expire_logs_seconds`, a MongoDB resume token older than the oplog window, Oracle archive logs deleted by RMAN. In every case the log is the only copy, and the connector's position is only useful while the log behind it still exists.
+
+**One route into that fifth case is now closable, and it is the most common one: failover.** A slot used to live only on the primary, so every promotion — planned switchover included — destroyed the position. PostgreSQL 17 **failover slots** plus Debezium's `slot.failover=true` keep the slot synchronised onto the standbys so a promoted replica resumes at the same LSN (§6.3). That leaves the fifth case for what it should have been all along: an operator dropping a slot, or `max_slot_wal_keep_size` invalidating one — deliberate acts and configured limits, not ordinary HA.
 
 **The `recovery` precondition deserves emphasis** because it is the one that produces silent wrongness rather than a loud failure. "No DDL since the last offset" is a claim about the source database that Debezium cannot verify. Check it against your migration history before reaching for `recovery`; when in doubt, re-snapshot.
 
@@ -1601,7 +1654,7 @@ The split is worth internalising because it predicts the triage path. A "where d
 
 - **Core:** **Debezium**, **Debezium MongoDB connector** — the Apache 2.0 connector family at 3.6.0.Final, built against Apache Kafka 4.3.0, with the MongoDB connector called out separately because change streams behave unlike a write-ahead log in almost every operational respect.
 - **Runtimes:** **Debezium Server**, **Debezium Engine**, **Debezium Operator** — a standalone Quarkus process for non-Kafka sinks, the embedded library for in-process capture, and the Kubernetes operator reconciling a `DebeziumServer` custom resource. All three require Java 21, and all three default to an offset store far less durable than Kafka Connect's.
-- **Debezium Platform** — the Conductor backend and Stage front end that replaced the archived `debezium-ui` project on 2025-09-17. It manages Debezium Server pipelines rather than Kafka Connect, which is the single most common expectation mismatch in this ecosystem.
+- **Debezium Platform** — the Conductor backend and Stage front end that replaced the archived `debezium-ui` project on 2025-09-17. It manages Debezium Server pipelines rather than Kafka Connect, which is the single most common expectation mismatch in this ecosystem; `[3.6]` added a monitoring dashboard over Conductor's metrics API, JDBC-sink pipelines and pre-flight connection validators (§4.1a).
 - **Debezium JDBC sink connector** — the project's own sink, consuming Debezium's envelope and applying upserts and deletes to a relational target, so a source-to-relational-sink pipeline needs no third-party connector.
 - **Debezium Quarkus Outbox Extension** — the write-side counterpart to the `EventRouter` transform: fire a CDI event and the extension inserts and immediately deletes the outbox row inside your transaction, so the WAL carries the event while the table stays empty.
 
@@ -1610,7 +1663,7 @@ The split is worth internalising because it predicts the triage path. A "where d
 - **Log-based sources:** **PostgreSQL**, **MySQL**, **MongoDB**, **Oracle Database**, **SQL Server**, **Cassandra**, **Vitess** — logical decoding through a replication slot, the row binlog, a resumable change stream, LogMiner against redo logs, vendor change tables, commit-log capture and a sharded MySQL topology respectively. Each one's log-retention policy is the real limit on how long a connector may be down.
 - **OpenLogReplicator** — an open-source C++ Oracle redo-log reader that Debezium can drive as the `OLR` adapter, and the way out of LogMiner's CPU cost without buying a licence.
 - **Oracle GoldenGate** — Oracle's own replication product, whose XStream API the Debezium Oracle connector can use instead of LogMiner. Note the commercial consequence: XStream requires a GoldenGate licence, which frequently decides the adapter choice on cost rather than on technical merit.
-- **PostgreSQL high availability:** **Patroni** — worth naming here because a failover moves the primary and a replication slot does not follow it by default. Slot failover must be arranged deliberately, or the connector points at a server that is no longer the source of truth.
+- **PostgreSQL high availability:** **Patroni** — worth naming here because a failover moves the primary and a replication slot does not follow it by default. On PostgreSQL 17 arrange it with a failover slot (`slot.failover=true` plus `sync_replication_slots` on the standby, §6.3); below that, the slot is lost on promotion and the connector points at a server that is no longer the source of truth.
 
 ### 11.3 Transport, runtimes and packaging
 
@@ -1784,6 +1837,14 @@ Write `INSERT ... ON CONFLICT (pk) DO UPDATE SET ... WHERE stored.version <= EXC
 **Q: You are the first person to deploy Debezium at this company. Which alerts do you set on day one?**
 **Short:** Retained WAL per slot, `wal_status != 'reserved'`, `SnapshotRunning` unexpectedly true, connector task state, capture lag, and consumer lag on the CDC topics.
 Retained WAL — `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` — is the one that prevents an outage, and it must page well below the free-disk figure. `wal_status` is the categorical companion that needs no threshold tuning. `SnapshotRunning` going true when nobody ordered a snapshot is always an incident, because it means the connector lost its position. Task state `FAILED` is the loud failure and the easiest to get right. `MilliSecondsBehindSource` catches falling behind, and consumer lag on the topics catches the back-pressure that will become slot lag in an hour. The organising insight: **the connector's own metrics can all be green while the database heads for a disk-full outage**, so the database-side slot metrics and the connector metrics must live on one dashboard, owned by one team.
+
+**Q: Your Postgres cluster fails over to a standby and Debezium re-snapshots 4 TB. Is that unavoidable?**
+**Short:** Not on PostgreSQL 17 — a failover slot synchronises onto the standbys, so the promoted primary already holds the slot at the same LSN.
+Not any more, and until recently it was. A replication slot lived only on the primary, so a promotion left the new primary with no slot, and a fresh slot starts at the *current* LSN — every change since the old `restart_lsn` gone from the log, and a full re-snapshot the only recovery. PostgreSQL 16 made logical decoding on a standby possible, and PostgreSQL 17 added **failover slots**, which propagate the slot to the standbys and keep it advancing in step, so a promoted replica resumes with no gap. Set `slot.failover=true` on the connector (`[3.0.5]`) or pass the fifth `failover` argument to `pg_create_logical_replication_slot`. The catch is that `slot.failover` is a **silent no-op** on PostgreSQL 16 or when pointed at a standby, so verify the `failover` column in `pg_replication_slots` rather than trusting the connector config — and on the standby side set `sync_replication_slots = on`, `hot_standby_feedback = on`, and a `primary_conninfo` that includes `dbname=`, whose absence is the usual reason nothing syncs.
+
+**Q: A team asks for "the Debezium UI" for their Kafka Connect deployment. What do you tell them?**
+**Short:** There is none — the Debezium Management Platform drives Debezium Server pipelines, and the archived `debezium-ui` had no successor for Connect.
+That it does not exist for their runtime. The **Debezium Management Platform** — a **Conductor** backend plus a **Stage** front end — is a control plane over **Debezium Server** pipelines, not over Kafka Connect connectors, and teams routinely find it, deploy it, and only then discover it drives a different runtime. The old `debezium-ui` project was the Connect-hosted UI and it was archived with no replacement, so for Kafka Connect the management surface is the Connect REST API plus whatever console the Kafka distribution ships. If they genuinely want the Platform's affordances — a monitoring dashboard over the metrics API, connection validators that fail in a form rather than at pipeline start, `[3.6]`'s JDBC-sink pipelines for database-to-database replication with no Kafka at all — that is an argument for moving to Debezium Server, which is a runtime decision with real consequences for offset durability and supervision, not a tooling choice.
 
 ---
 ## 13. Best Practices

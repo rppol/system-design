@@ -806,7 +806,9 @@ server.start();   // non-blocking: do NOT wrap in try-with-resources, which woul
 ## See Also
 
 - [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — cgroups, namespaces, OOM killer, /proc/sched, perf
-- [`java/concurrency`](../../java/concurrency/concurrency.md) — JVM thread model, virtual threads, happens-before, volatile, synchronized
+- [memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) — the memory model itself: happens-before, DRF-SC, SC/TSO/weak hardware ordering, acquire-release, linearizability
+- [Async I/O and Event Loops](./async_io_and_event_loops.md) — readiness (epoll/kqueue) vs completion (io_uring/IOCP), the futex under every mutex, the vDSO, and the event loop this module's threads are the alternative to
+- [`java/concurrency`](../../java/concurrency/concurrency.md) — JVM thread model, virtual threads, the Java spelling of the memory model (`volatile`, `synchronized`), AQS and `ReentrantLock`
 - [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) — GIL mechanics, multiprocessing, asyncio applied depth
 - [deadlocks_and_synchronization](../deadlocks_and_synchronization/deadlocks_and_synchronization.md) — mutex, semaphore, Coffman conditions
 - [cpu_scheduling_algorithms](../cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) — how the OS scheduler decides which thread runs next

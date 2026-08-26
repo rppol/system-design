@@ -103,6 +103,35 @@ Production feedback can be repurposed as preference data for RLHF or DPO (see [A
 - Use correction submissions as chosen/rejected pairs
 - Apply DPO directly on (prompt, chosen, rejected) triplets without training a reward model
 - Filter pairs where the margin of preference is clear; discard ambiguous cases
+- Beyond one-shot offline DPO, treat production traces as a continuously-refreshed preference
+  dataset: re-mine (prompt, chosen, rejected) pairs from the latest window of traffic each
+  iteration (iterative DPO) so the policy keeps training against its *current* failure modes
+  rather than a preference snapshot from months ago — see [Alignment & RLHF](../alignment_and_rlhf/alignment_and_rlhf.md)
+  §3 for the online-vs-offline distinction and why the gap between them is exactly this staleness.
+
+### 4.5 Agentic Flywheels — Tool-Call Failures as Training Signal
+
+The classic flywheel above scores a single chat turn. An agentic product (tool-calling assistant,
+coding agent, browser agent) produces a much richer signal per episode, and treating it as one
+opaque "thumbs up/down" throws most of it away:
+
+- **Tool-call outcome** — did the call succeed, error, or return results the agent then
+  discarded/retried? A failed call followed by a successful retry with corrected arguments is a
+  labeled (bad call, good call) pair for free, with no human annotation needed.
+- **Plan-level failure vs execution-level failure** — did the agent pick the wrong tool/strategy
+  (a planning error, fixable with better few-shot examples or a planning-stage fine-tune) or call
+  the right tool with malformed arguments (a formatting error, often fixable with stricter schema
+  validation before it ever reaches training data)? Conflating the two pollutes the training
+  signal with the wrong fix.
+- **Task-level outcome** — did the overall episode complete the user's goal, independent of
+  whether individual tool calls succeeded? This is the agentic equivalent of resolution rate and
+  is the metric that should gate promotion, not per-call success alone.
+
+Curate agentic flywheel data by keying each training example to the full trajectory (state, tool
+calls, observations, final outcome), not a single response — a trajectory that fails late still
+contains correct early steps worth keeping. See [Agents and Tool Use](../agents_and_tool_use/agents_and_tool_use.md)
+for how to build this trajectory-with-verifiable-outcome format, and [Alignment & RLHF](../alignment_and_rlhf/grpo_and_rlvr.md)
+for GRPO/RLVR-style training on exactly this kind of verifiable, episode-level reward.
 
 ---
 
@@ -474,7 +503,7 @@ The flywheel requires production data to improve the model, but a new product ha
 ```
 Phase 1 — Pre-launch (weeks -4 to -2):
   Approach A: Synthetic data seeding
-    - Use a strong model (GPT-4, Claude) to generate 500-2000 initial training pairs
+    - Use a strong frontier model (e.g. GPT-5.6, Claude Opus 5) to generate 500-2000 initial training pairs
     - Cover expected query types based on product requirements and competitor analysis
     - Quality: good enough to launch but not production-grade
 
@@ -652,7 +681,7 @@ A team implemented daily fine-tuning on the previous day's feedback. After three
 | Data versioning | DVC (Data Version Control) | Version datasets alongside code; reproduce training pipelines | Works with S3, GCS, Azure Blob; integrates with Git |
 | Feature store / feedback store | Feast | Open-source feature store; can store feedback signals as features | Useful for joining feedback signals to model inference records |
 | Fine-tuning | Hugging Face PEFT | LoRA, QLoRA, and other parameter-efficient fine-tuning methods | Standard library for fine-tuning LLMs on curated feedback data |
-| A/B testing | Optimizely / custom | Traffic splitting and experiment assignment | Most LLM teams build custom A/B routing at the inference gateway |
+| A/B testing | Optimizely | Traffic splitting and experiment assignment | Off-the-shelf assignment; most LLM teams instead hand-roll A/B routing at the inference gateway |
 | PII scrubbing | Microsoft Presidio | Open-source PII detection and anonymization | Supports 40+ entity types; customizable recognizers |
 | Annotation platform | Prodigy | Spacy-integrated annotation tool with built-in active learning | Efficient for NLP tasks; recipes for text classification, NER, ranking |
 
@@ -681,6 +710,14 @@ A data flywheel is a self-reinforcing feedback loop where production usage gener
 **Q: What is the difference between implicit and explicit feedback, and when would you rely on each?**
 **Short:** Implicit feedback like regeneration clicks is high-volume but noisy, while explicit feedback like thumbs-down is lower-volume but higher-signal.
 Implicit feedback is derived from user behavior without requiring any deliberate rating action — examples include regeneration clicks, conversation abandonment, task completion rate, and follow-up query rate. Explicit feedback requires the user to take a deliberate action — thumbs up/down, star rating, or correction submission. Implicit feedback is high-volume and low-cost but noisy and subject to interpretation (a regeneration may reflect style preference, not correctness). Explicit feedback is lower-volume but higher-signal. In practice, use outcome-based implicit signals (task completion, escalation rate) as the primary metric, explicit ratings as a secondary signal, and correction submissions as the highest-quality but lowest-volume signal for fine-tuning.
+
+**Q: Why is one-shot offline DPO on production feedback not enough, and what does an iterative or online setup add?**
+**Short:** One-shot DPO trains against a frozen preference snapshot that ages, while iterative DPO re-mines pairs from recent traffic each cycle so training tracks the model's current failure modes.
+A: A single offline DPO run treats production preference pairs as a fixed dataset — accurate the day they were mined, increasingly stale afterward, because the deployed policy keeps changing and its failure modes drift away from what the snapshot captured. Iterative (semi-online) DPO closes that gap by re-mining (prompt, chosen, rejected) triplets from the latest window of production traffic every cycle (commonly every 1-2 epochs or every deployment), so each round trains against the policy's *current* mistakes rather than an old one's. This is cheaper than full online RLHF/PPO, which needs live generation and reward scoring during training, but it still needs the same safeguards as any flywheel iteration: outcome-verified pairs only, a frozen anchor set to prevent drift, and a regression gate before promotion. See [Alignment & RLHF](../alignment_and_rlhf/alignment_and_rlhf.md) for the online-vs-offline mechanics and why the reference model changes what "iterative" costs.
+
+**Q: How does an agentic flywheel differ from a chat flywheel, and what new signal does it capture?**
+**Short:** An agentic flywheel scores whole tool-call trajectories, not single turns, so a failed call followed by a corrected retry becomes a labeled training pair with no human annotation.
+A: A chat flywheel scores one response per turn — thumbs up/down, a correction, a regeneration. An agentic product (tool-calling assistant, coding agent, browser agent) produces a trajectory: a sequence of tool calls, observations, and a final outcome, and collapsing that into one binary label throws away most of the signal. The richer approach curates at three levels: tool-call outcome (did the call succeed, error, or get discarded — a failed call followed by a corrected successful retry is a free (bad, good) preference pair); failure locus (a wrong tool/strategy choice is a planning error, fixable with better planning examples, while a right tool called with malformed arguments is a formatting error, often fixable with stricter schema validation before it reaches training data at all); and task-level outcome (did the episode achieve the user's goal, independent of individual call success — this is what should gate promotion). Key each training example to the full trajectory so a run that fails late still contributes its correct early steps. See [Agents and Tool Use](../agents_and_tool_use/agents_and_tool_use.md) for building this trajectory format and [GRPO and RLVR](../alignment_and_rlhf/grpo_and_rlvr.md) for training on episode-level verifiable rewards.
 
 **Q: How does active learning reduce annotation cost in a data flywheel?**
 **Short:** Active learning prioritizes uncertain or failed examples for annotation, cutting the labeling budget needed for a given quality gain by 50-80%.
@@ -720,7 +757,7 @@ Online learning updates model weights continuously or after every small batch of
 
 **Q: How do you bootstrap a data flywheel when you have zero production data?**
 **Short:** Bootstrapping with zero data combines synthetic seed pairs with a soft launch that routes low-confidence queries to humans whose fixes become training data.
-The cold start problem requires a deliberate bootstrapping phase before the flywheel can engage. The most common approach combines synthetic data seeding (use GPT-4 or Claude to generate 500-2000 initial training pairs covering expected query types) with a soft-launch strategy (deploy with a strong base model plus few-shot prompting, instrument all interactions from day one, and route low-confidence queries to human agents whose resolutions become training data). The minimum viable dataset for the first LoRA fine-tune is typically 500-1000 high-quality examples, which most products accumulate within 2-4 weeks of production traffic at modest scale. For regulated domains where quality is critical from day one, invest in human-annotated seed data (hire 3-5 domain experts for 2 weeks to create gold-standard examples). Red-team bootstrapping — where the internal team stress-tests the system pre-launch and every correction becomes training data — simultaneously validates the product and seeds the flywheel. The key principle: launch fast with a strong base model, collect data aggressively, and do not attempt fine-tuning until you have accumulated sufficient high-quality examples.
+The cold start problem requires a deliberate bootstrapping phase before the flywheel can engage. The most common approach combines synthetic data seeding (use a strong frontier model such as GPT-5.6 or Claude Opus 5 to generate 500-2000 initial training pairs covering expected query types) with a soft-launch strategy (deploy with a strong base model plus few-shot prompting, instrument all interactions from day one, and route low-confidence queries to human agents whose resolutions become training data). The minimum viable dataset for the first LoRA fine-tune is typically 500-1000 high-quality examples, which most products accumulate within 2-4 weeks of production traffic at modest scale. For regulated domains where quality is critical from day one, invest in human-annotated seed data (hire 3-5 domain experts for 2 weeks to create gold-standard examples). Red-team bootstrapping — where the internal team stress-tests the system pre-launch and every correction becomes training data — simultaneously validates the product and seeds the flywheel. The key principle: launch fast with a strong base model, collect data aggressively, and do not attempt fine-tuning until you have accumulated sufficient high-quality examples.
 
 **Q: How do you distinguish concept drift from covariate shift in production, and why does the distinction matter?**
 **Short:** Covariate shift changes the query distribution while concept drift changes the correct answer for the same query, and each needs a different fix.
@@ -971,11 +1008,11 @@ class FeedbackCollector:
 
 **Additional interview Q&As:**
 
-**What is the cold start problem in a data flywheel and how do you overcome it for a new LLM product?** The cold start problem: the flywheel needs user feedback to improve the model, but without a high-quality initial model, users won't engage enough to generate useful feedback. Solutions: (1) use a strong frontier model (GPT-4o, Claude) for the first 3-6 months — this generates positive user engagement and collects high-quality implicit feedback even before an open-source model is ready; (2) seed the feedback dataset with human-labeled examples (100-500 expert annotations bootstrap the reward model); (3) collect implicit signals (time-on-response, follow-up questions asked) that don't require explicit user action. Never launch a weak model and hope the flywheel fixes it — the flywheel amplifies the baseline quality, it doesn't replace it.
+**What is the cold start problem in a data flywheel and how do you overcome it for a new LLM product?** The cold start problem: the flywheel needs user feedback to improve the model, but without a high-quality initial model, users won't engage enough to generate useful feedback. Solutions: (1) use a strong frontier model (e.g. GPT-5.6, Claude Opus 5) for the first 3-6 months — this generates positive user engagement and collects high-quality implicit feedback even before a fine-tuned or open-weight model is ready; (2) seed the feedback dataset with human-labeled examples (100-500 expert annotations bootstrap the reward model); (3) collect implicit signals (time-on-response, follow-up questions asked) that don't require explicit user action. Never launch a weak model and hope the flywheel fixes it — the flywheel amplifies the baseline quality, it doesn't replace it.
 
 **How do you prevent distribution shift from causing feedback flywheel collapse over time?** Feedback flywheel collapse: the model becomes better at generating responses that receive positive feedback (which may diverge from actual quality) rather than better at serving users. Prevention: (1) evaluate the reward model on a held-out set of human preference labels that are refreshed quarterly — if reward model accuracy on fresh human labels declines, the reward model is overfit to gamed or shifted signals; (2) maintain a "canary" intent category where you manually review 100% of responses and score them against a rubric — if canary scores diverge from thumbs-up rate, the feedback signal is drifting; (3) add explicit "I'm not sure" or "I need to check" response options and track whether their frequency stays calibrated over time.
 
-**What is the typical ROI calculation for investing in a continuous learning flywheel vs staying on a static model?** Calculate: (1) baseline LLM API cost per month (e.g., $50K/month on GPT-4o); (2) cost of self-hosted fine-tuned model (training: $5K/run monthly; serving: $8K/month for GPU cluster); (3) quality improvement from fine-tuning (measure as resolution rate increase or CSAT improvement, then convert to revenue impact: 5% resolution rate improvement × $200 avg ticket cost × 10,000 tickets/month = $100K/month saved in human agent costs). Flywheel ROI is typically positive at >10,000 queries/day and measurable quality improvement >5%. Below 1,000 queries/day, the signal volume is too low for reliable reward model training, and the flywheel does not converge.
+**What is the typical ROI calculation for investing in a continuous learning flywheel vs staying on a static model?** Calculate: (1) baseline LLM API cost per month (e.g., $50K/month on a frontier API model like GPT-5.6 sol); (2) cost of self-hosted fine-tuned model (training: $5K/run monthly; serving: $8K/month for GPU cluster); (3) quality improvement from fine-tuning (measure as resolution rate increase or CSAT improvement, then convert to revenue impact: 5% resolution rate improvement × $200 avg ticket cost × 10,000 tickets/month = $100K/month saved in human agent costs). Flywheel ROI is typically positive at >10,000 queries/day and measurable quality improvement >5%. Below 1,000 queries/day, the signal volume is too low for reliable reward model training, and the flywheel does not converge.
 
 **Quick-reference table:**
 

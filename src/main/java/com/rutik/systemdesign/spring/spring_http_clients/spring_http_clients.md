@@ -699,6 +699,55 @@ try {
 ```
 See [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md) for the full `ProblemDetail` (RFC 9457) contract this pattern assumes on the server side.
 
+### Pitfall 7: `InetAddressFilter` never runs because the client bypassed injection
+
+`InetAddressFilter` (`org.springframework.boot.http.client.InetAddressFilter`, new in Boot 4.1.0) is Boot's SSRF guard: declare a bean and `HttpClientAutoConfiguration` feeds it into `HttpClientSettings`/`ClientHttpRequestFactorySettings` for every client Boot builds for you. The trap is that it only ever reaches clients built from an **injected** `RestClient.Builder`/`WebClient.Builder` — a client built with the static `RestClient.create()`/`WebClient.create()` factory method never goes through Boot's auto-configured builder, so the filter bean is silently never consulted.
+
+**Broken:** an endpoint takes a user-supplied callback/webhook URL and fetches it to validate reachability. A filter bean exists in the context, but the fetch itself never touches it.
+```java
+@Configuration
+class SsrfConfig {
+    @Bean
+    InetAddressFilter inetAddressFilter() {
+        // intent: block link-local/loopback/site-local targets (169.254.0.0/16, 127.0.0.0/8, RFC 1918, ...)
+        return InetAddressFilter.externalAddresses();
+    }
+}
+
+@Service
+class WebhookValidator {
+    // BUG: RestClient.create() builds a bare client with no autoconfiguration behind it at all --
+    // HttpClientAutoConfiguration, and therefore the InetAddressFilter bean above, never runs.
+    private final RestClient client = RestClient.create();
+
+    void verifyReachable(String callbackUrl) {
+        client.head().uri(callbackUrl).retrieve().toBodilessEntity();
+        // an attacker-supplied http://169.254.169.254/latest/meta-data/ sails straight through
+    }
+}
+```
+
+**Fixed:** take the injected `RestClient.Builder` — the one Boot's autoconfiguration actually wires the filter into — instead of calling the static factory method.
+```java
+@Service
+class WebhookValidator {
+    private final RestClient client;
+
+    WebhookValidator(RestClient.Builder builder) {   // Boot-managed builder, InetAddressFilter attached
+        this.client = builder.build();
+    }
+
+    void verifyReachable(String callbackUrl) {
+        try {
+            client.head().uri(callbackUrl).retrieve().toBodilessEntity();
+        } catch (FilteredHostException ex) {
+            throw new IllegalArgumentException("Callback URL resolves to a disallowed address", ex);
+        }
+    }
+}
+```
+`InetAddressFilter.externalAddresses()` and `internalAddresses()` are ready-made factories; `of(String...)` accepts IP literals and CIDR ranges for a custom allow/deny list, and filters compose with `and()`/`or()`/`negate()`/`andNot()` for cases like "external addresses, but never this one partner's private IP". A blocked target throws `FilteredHostException` from inside the call, not from some separate pre-flight check, so the catch site is exactly where the request would otherwise have gone out. No bean means no filtering at all — declaring the bean is what turns the guard on, and only for clients that were actually built through the injected builder.
+
 ---
 
 ## 11. Technologies & Tools
@@ -810,6 +859,10 @@ A larger pool lets more concurrent requests reach an already-struggling downstre
 **Q: Why does `SimpleClientHttpRequestFactory` have no pool-acquisition timeout to configure at all?**
 **Short:** It relies on the JDK's small built-in keep-alive cache instead of implementing real application pooling.
 It does not implement real, application-managed pooling in the first place. Instead it relies on the JDK's own built-in keep-alive connection cache (`http.maxConnections`, default 5 idle connections per destination), which is a JVM-wide system property, not a per-factory, Spring-configurable pool. Once that small cache is full, `HttpURLConnection` simply opens a fresh, non-reused connection rather than making the caller wait for one to free up, which avoids an indefinite pool-acquisition hang but trades it for unbounded raw socket/file-descriptor growth under sustained concurrent load. This is one more reason `SimpleClientHttpRequestFactory` is treated as a bare fallback rather than a production transport for any service with meaningful outbound HTTP volume.
+
+**Q: Why does declaring an `InetAddressFilter` bean fail to stop an SSRF attack against a `RestClient` built with `RestClient.create()`?**
+**Short:** The filter only reaches clients built from an injected RestClient.Builder, never a statically created one.
+`HttpClientAutoConfiguration` only wires an `InetAddressFilter` bean into the `HttpClientSettings`/`ClientHttpRequestFactorySettings` that back the `RestClient.Builder`/`WebClient.Builder` Boot injects into your beans. `RestClient.create()` (and `WebClient.create()`) is a static factory method that builds a client entirely outside that autoconfiguration path, so the filter bean is never consulted and a request to an attacker-supplied internal address — `169.254.169.254`, a loopback target, an RFC 1918 range — goes straight out. The fix is to take the injected `RestClient.Builder` in the constructor and call `.build()` on it, since that builder is the one Boot actually attaches the filter to; a caller relying on `.create()` needs to wire the filter manually. A blocked target throws `FilteredHostException` from the call site itself once the filter is actually in the request path.
 
 ---
 

@@ -15,6 +15,39 @@ See also: [Testcontainers and test strategy](./cross_cutting/testcontainers_and_
 
 ---
 
+## Intuition
+
+A batch job is not one long-running program executing a for-loop over ten million rows — it
+is a relay race broken into laps, where each lap's baton-pass is written down by a race
+official before the next lap starts. The official is the `JobRepository`: every chunk commit
+is itself a durable database transaction, so if a runner drops the baton mid-lap (the JVM
+crashes at record 7.5 million), the next relaunch does not restart the race from lane one. It
+looks up the log, finds the last completed lap, and sends the next runner in from exactly
+there. That is the entire value Spring Batch adds over a hand-rolled loop: the loop has no
+memory of where it got to when the process dies; Spring Batch does, because the framework
+never lets "processed" and "recorded as processed" drift apart.
+
+The mental model that makes the rest of this design fall out: throughput and restartability
+are two independent knobs, and they only look coupled if you conflate them. Partitioning eight
+workers across eight CPU cores is a private negotiation with wall-clock time — it changes
+nothing about what "resuming" means. Restartability is a private negotiation with the
+`JobRepository` — it does not care whether a step ran on one thread or eight. Get chunk-commit
+right (the unit of restart) and partitioning right (the unit of parallelism) separately, and
+they compose for free. Get restart *identity* wrong — a fresh `run.id` on every relaunch, as
+in War Story 2 — and no amount of parallelism saves the job from reprocessing all ten million
+rows after a crash at minute forty.
+
+The other thing worth internalizing before reading the rest of this file: at this scale (10M
+rows, a 3-hour window, one 8-core box) the interesting failures are almost never algorithmic —
+they are operational. A connection pool sized one increment too small. A `@Component` the
+framework treats as a singleton holding a field that should have been a local variable. An
+incrementer added to solve last month's incident, which quietly breaks this month's restart.
+Every war story in §9 is a piece of correctly-documented Spring Batch machinery used in a way
+that defeats the exact guarantee it exists to provide — which is why §4 pairs nearly every
+mechanism with the broken form next to the fix, not just the fix alone.
+
+---
+
 ## 1. Requirements Clarification
 
 **Functional requirements:**
@@ -421,6 +454,99 @@ public void runNightly() throws Exception {
 // Relaunch after failure: pass the SAME run.date -> Spring Batch finds FAILED instance -> resume
 ```
 
+### 4.6 JobOperator — The Modern Launch/Restart API (Spring Batch 6)
+
+Spring Batch 6 deprecates `JobLauncher` (`@Deprecated(since = "6.0", forRemoval = true)`,
+slated for removal in 6.2 or later) in favor of `JobOperator`, which now *extends*
+`JobLauncher` and adds the operator actions this pipeline's runbooks already perform by hand
+against the database: `restart(JobExecution)`, `startNextInstance(Job)`, `stop(JobExecution)`,
+`abandon(JobExecution)`, and `recover(JobExecution)`. `JobRepository` similarly now extends
+`JobExplorer`, so the job configuration needs neither a separate `JobLauncher` bean nor a
+separate `JobExplorer` bean — one `JobOperator` bean, autoconfigured by
+`spring-boot-starter-batch` on Boot 4.1, covers launching, querying, and recovering.
+
+```java
+// Spring Batch 6: JobOperator replaces the JobLauncher + JobExplorer bean pair.
+// start() replaces JobLauncher#run(); the identifying-parameter discipline from
+// §4.5 is unchanged -- only the API surface that launches the job moves.
+@Component
+public class EtlJobOperatorScheduler {
+
+    private final JobOperator jobOperator;
+    private final Job customerEtlJob;
+
+    public EtlJobOperatorScheduler(JobOperator jobOperator, Job customerEtlJob) {
+        this.jobOperator = jobOperator;
+        this.customerEtlJob = customerEtlJob;
+    }
+
+    @Scheduled(cron = "0 0 2 * * *")
+    public void runNightly() throws Exception {
+        JobParameters params = new JobParametersBuilder()
+            .addString("run.date", LocalDate.now().toString())
+            .addLong("attempt", System.currentTimeMillis(), false)
+            .toJobParameters();
+        jobOperator.start(customerEtlJob, params);
+    }
+
+    // Runbook 3's manual restart, expressed as code an on-call engineer can invoke
+    // from an admin endpoint instead of hand-editing BATCH_JOB_EXECUTION:
+    public void recoverAndRestart(JobExecution failedExecution) throws Exception {
+        jobOperator.recover(failedExecution);   // reconciles state across the job repository
+        jobOperator.restart(failedExecution);   // resumes from the last completed chunk
+    }
+}
+```
+
+For scripted / cron-outside-the-JVM invocation, `CommandLineJobRunner` is replaced by
+`CommandLineJobOperator` (same package, `org.springframework.batch.core.launch.support`):
+
+```bash
+# Spring Batch 6: CommandLineJobRunner -> CommandLineJobOperator
+java -cp app.jar org.springframework.batch.core.launch.support.CommandLineJobOperator \
+    com.example.CustomerEtlJobConfig customerEtlJob run.date=2026-08-25
+```
+
+**Migration notes that bite when upgrading this exact job from Batch 5 to 6:**
+- The item-reader/writer types used in §4.1 and §4.3 (`FlatFileItemReader`,
+  `BatchPreparedStatementSetter`) move from `org.springframework.batch.item.*` to
+  `org.springframework.batch.infrastructure.item.*` — the whole `spring-batch-infrastructure`
+  module was relocated under one root package.
+- `JobParameter` is now a record; `JobParameters` is backed by a `Set<JobParameter>` rather
+  than a `Map<String, JobParameter>`. Code that calls `.getString("run.date")` is unaffected;
+  code that iterated the parameter map directly needs to move to the `Set`-based accessors.
+  `RunIdIncrementer` itself moved to `org.springframework.batch.core.job.parameters`.
+- `JobRepositoryFactoryBean` is renamed `JdbcJobRepositoryFactoryBean`, and
+  `JobExplorerFactoryBean` is renamed `JdbcJobExplorerFactoryBean` (and deprecated —
+  `JobExplorer` itself is deprecated now that `JobRepository` subsumes it).
+- `@EnableBatchProcessing` still works, but the store-specific `@EnableJdbcJobRepository`
+  is the more precise replacement, and `DefaultBatchConfiguration` now defaults to a
+  *resourceless* repository — use `JdbcDefaultBatchConfiguration` explicitly for a job like
+  this one that needs restart state to survive a process crash.
+- The custom `SystemCommandTasklet` some ops teams use for pre/post-file-move shell steps
+  had `setJobExplorer()` renamed to `setJobRepository()`.
+
+The `TaskletStep` this job's `workerStep` compiles down to is not itself deprecated in 6.0 —
+only its no-arg and name-only constructors are, in favor of `TaskletStep(JobRepository)`. For
+a *new* chunk-oriented step written directly against the 6.0 API rather than through
+`StepBuilder.chunk(...)`, the underlying type is `ChunkOrientedStep`, built with
+`ChunkOrientedStepBuilder<I, O>` — `ChunkOrientedTasklet` is gone. Existing jobs built with
+`StepBuilder.chunk(...)` (as in §4.1) do not need to change; the builder is still the supported
+entry point and now assembles a `ChunkOrientedStep` under the hood.
+
+### 4.7 Observability Bean Requirement (Spring Batch 6)
+
+Spring Batch 6 removes reliance on Micrometer's global static meter registry — an explicit
+`ObservationRegistry` bean is now required for the framework's own `spring.batch.job` and
+`spring.batch.step` timers (referenced in §11's progress-API Q&A) to record anywhere. Boot
+4.1's autoconfiguration supplies one by default, so most applications need nothing extra; the
+trap is a project that customized Micrometer setup pre-6.0 by registering meters against the
+static global registry directly, which now silently stops feeding Batch's own metrics (they
+still exist as no-op observations rather than failing to start). Spring Batch 6 also adds JFR
+(Java Flight Recorder) events for job and step execution — a useful second signal when
+diagnosing a slow partition in production, since a JFR recording can be attached to a running
+JVM and inspected after the fact without querying the `JobRepository` tables at all.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -433,6 +559,7 @@ public void runNightly() throws Exception {
 | Skip vs fail-fast | `.skipLimit(100_000)` for `ValidationException` | Fail the whole job on first bad record | Business requirement: 1% malformed records are expected; silent skip with audit log is the correct tradeoff |
 | ItemProcessor enrichment | Pre-load country cache (250 entries) at startup | DB lookup per record | 250 countries × 10M lookups = 250M DB reads if not cached; pre-load at startup adds ~50ms, saves ~500s |
 | Partition strategy | File-per-partition | Line-range within a single file | File-per-partition is simpler and needs no line counting. Line-range partitioning IS supported — `FlatFileItemReader` inherits `setCurrentItemCount()`/`setMaxItemCount()`, so each partition can be given a start/end offset — and is the fallback when the drop is one large file instead of many |
+| Launch/operator API | `JobOperator` (Spring Batch 6, §4.6) | `JobLauncher` (deprecated `forRemoval=true` since 6.0) | `JobOperator` extends `JobLauncher` and adds `restart()`/`stop()`/`recover()` used directly by Runbooks 3 and 5 — no reason for new code to depend on the deprecated interface when the superset is a drop-in bean rename |
 
 ### @JobScope vs @StepScope lifecycle
 
@@ -455,6 +582,19 @@ public void runNightly() throws Exception {
 **Healthcare clearinghouses (EDI 835 processing):** Medical claim remittance processing (EDI 835 files) is one of the oldest Spring Batch use cases. A single payer can send 100k+ claim records in one nightly 835 file. The skip-and-log pattern is mandated by CMS compliance: invalid claims must be rejected with an audit record rather than failing the entire remittance.
 
 **E-commerce platforms (catalog refresh):** Major e-commerce platforms run Spring Batch jobs to nightly sync product catalog from ERP systems (~5M SKUs, ~2 GB CSV). The key pattern: skip-and-alert for missing required fields (product ID, GTIN), upsert for price/inventory fields that update daily. Parallel partitioning is by category hierarchy so cache warm-up is partition-local.
+
+**Capital One (modernization talks):** Capital One has publicly discussed moving large batch
+and file-processing estates onto Spring Batch as part of its shift to cloud-native Java on
+AWS — job/step/chunk semantics and a durable `JobRepository` replacing bespoke checkpoint
+files that home-grown batch frameworks had reinvented independently at each team.
+
+**Telecom billing (CDR reconciliation):** Call-detail-record reconciliation between a
+telecom's switch data and its billing system is structurally the same problem as this file's
+customer import — millions of fixed-format records nightly, a small but nonzero malformed-record
+rate from switch firmware quirks, and a hard requirement that a partial run never double-bill
+a subscriber. The idempotent-upsert pattern from §4.3 is the standard fix: a CDR keyed by
+`(subscriber_id, call_start_ts, switch_id)` can be reprocessed safely on restart because the
+UPSERT makes reprocessing a no-op rather than a duplicate charge line.
 
 **AWS Glue (managed equivalent):** AWS Glue ETL provides a managed equivalent: DynamicFrames for schema inference, Job Bookmarks for restart (equivalent to `JobRepository`), and Worker nodes for parallelism (equivalent to remote partitioning). For on-prem or non-AWS workloads, Spring Batch provides equivalent functionality without managed infrastructure costs.
 
@@ -481,6 +621,19 @@ public void runNightly() throws Exception {
 - `batch.job.duration{job=customerEtlJob,status=COMPLETED}`: alert if > 2.5 hours (approaching window limit)
 - Prometheus: `batch_step_execution_write_count` per partition — if one partition is significantly behind others, it has a hot partition or DB connection starvation issue
 - PostgreSQL: `pg_stat_activity` — check for long-running batch transactions; a stuck partition holds a lock for the entire chunk duration
+- `hikaricp.connections.pending{pool=batch}`: alert if > 0 for more than 30s — the diagnostic signal for War Story 3's silent serialization
+- `jvm.gc.pause{gc="G1 Young Generation"}`: alert if p99 > 200ms sustained — approaching the `-XX:MaxGCPauseMillis` target means the heap is undersized for the live chunk working set
+- `batch.step.partition.lag` (custom gauge: `max(write_count) - min(write_count)` across the 8 partitions): alert if any partition falls more than 15% behind its siblings — the earliest signal of a hot partition before it threatens the window
+
+### Alert Thresholds Reference
+
+| Metric | Threshold | Action |
+|---|---|---|
+| `batch.records.skipped` / `batch.records.read` | > 2% | Page on-call; inspect `rejected.csv` for a systemic pattern (Runbook 2) |
+| `batch.job.duration{status=COMPLETED}` | > 2.5 h | Page on-call; approaching the 3h window (§2) |
+| `hikaricp.connections.pending{pool=batch}` | > 0 for > 30 s | Partition threads blocked on connection acquisition (War Story 3) |
+| `jvm.gc.pause{gc="G1 Young Generation"}` p99 | > 200 ms sustained | Heap undersized for chunk working set; check recent chunk-size changes (War Story 5) |
+| `batch.step.partition.lag` | > 15% of average `write_count` | Hot partition or DB contention on one partition (Runbook 1) |
 
 ### (b) Job Status Inspection
 
@@ -524,6 +677,37 @@ ORDER BY step_name;
 - Mitigate: if the previous run is healthy, let it complete; if it is stuck, mark `BATCH_JOB_EXECUTION` status manually to `ABANDONED` and relaunch after root cause is fixed
 - Resolve: investigate why the previous run exceeded window; tune chunk size, partition count, or DB connection pool
 
+**Runbook 5: Rollback after a bad deploy mid-window**
+- Symptom: a new deploy went out at 2 AM alongside the nightly trigger; the job is failing
+  or behaving differently than the previous night (e.g., skip rate jumped from 0.3% to 4%,
+  or the job hangs with no progress)
+- Diagnose: compare the failing `JobExecution`'s `exit_message` against the previous
+  successful run; check the deploy timestamp against `BATCH_JOB_EXECUTION.create_time` to
+  confirm the new build is implicated, not a data-quality change
+- Mitigate: `jobOperator.stop(jobExecution)` to request a graceful stop (Batch 6 added
+  graceful shutdown of a running job rather than only a hard kill); once stopped, roll the
+  deployment back to the previous artifact via the standard blue/green or rolling-update
+  path (see [Zero-Downtime Deploys and Config](./cross_cutting/zero_downtime_deploys_and_config.md))
+- Resolve: relaunch with the *same* `run.date` on the rolled-back build — completed
+  partitions from before the bad deploy are still marked `COMPLETED` in the `JobRepository`
+  and are skipped, so the rollback does not cost a full reprocess
+- Postmortem action: add the job's skip-rate and duration metrics to the deploy's automated
+  canary check, so a regression like this pages before 2 AM rather than after the SLA window
+  starts ticking
+
+### (d) Rollback Procedure Summary
+
+1. `jobOperator.stop(jobExecution)` — Batch 6's graceful stop lets the in-flight chunk finish
+   and commit before the step halts, so no chunk is left half-committed.
+2. Roll back the application artifact (previous container image / JAR).
+3. Verify `BATCH_STEP_EXECUTION.status` for each partition — anything `COMPLETED` stays that
+   way; only `STOPPED`/`FAILED` partitions reprocess on the next launch.
+4. Relaunch with the identical `run.date` used by the failed run. Never generate a new
+   `run.date` to "start clean" — that abandons every already-committed partition (see War
+   Story 2).
+5. Watch `batch.records.written` climb from where it left off, not from zero, as confirmation
+   the rollback preserved progress.
+
 ---
 
 ## 9. Common Pitfalls & War Stories
@@ -551,6 +735,30 @@ A team provisioned a HikariCP pool of 8 connections for a job with `gridSize=8`.
 After a job ran twice due to a scheduling misconfiguration, a developer added `.preventRestart()` to the `JobBuilder` to prevent re-runs. This was deployed without review. Three weeks later, the nightly job failed at midnight, and no restart was possible — `preventRestart()` causes Spring Batch to throw `JobRestartException` on any relaunch of a non-`COMPLETED` instance. The only recovery was deleting the `BATCH_JOB_EXECUTION` row manually and reprocessing from scratch.
 
 **Fix:** Never call `.preventRestart()` on a job that processes large volumes — restartability is the primary operational safety net. Use ShedLock or `@SchedulerLock` to prevent duplicate launches instead.
+
+### War Story 5: Chunk Size Raised to 10,000 Without Re-Testing Under Partitioning (OOM)
+
+Six months after launch, an engineer raised the chunk size from 1,000 to 10,000 to chase the
+marginal throughput gain noted in §10's benchmark table, reasoning that "bigger batches, fewer
+round trips." The change was tested single-threaded, where it worked. In production, all 8
+partitions held a 10,000-item chunk simultaneously: 8 × 10,000 × ~2 KB = 160 MB of live chunk
+data, plus a JDBC batch buffer of comparable size building up inside the driver before
+`batchUpdate()` flushed it, plus retry buffering for the fault-tolerant step (`.retryLimit(3)`
+keeps a failed chunk's items in memory across retry attempts). Under a G1GC heap sized for the
+1,000-row working set (`-Xmx8g`), the combined pressure triggered a full GC storm and then an
+`OutOfMemoryError` in partition 3 at 1:47 AM. The job failed, the on-call engineer manually
+restarted at 2:15 AM without diagnosing the cause, hit the same OOM in a different partition at
+2:50 AM, and the job missed its 5 AM SLA by 40 minutes before someone reverted the chunk size.
+**Impact:** 3 failed launches, 68 minutes of SLA breach, and a downstream reporting job that
+depended on the customer table delayed its own 6 AM run.
+
+**Root cause:** chunk size interacts multiplicatively with partition count for memory, not
+additively — an engineer tuning it in isolation (§10's benchmark table) without re-running the
+*partitioned* memory budget (§2's memory budget, §10's GC budget) reintroduced the exact
+sizing mismatch the original design avoided. **Fix:** any chunk-size or grid-size change is
+re-validated against both budgets before deploy, and a canary run against a full-size staging
+dataset — not just a single-threaded smoke test — is required for any tuning change to either
+parameter.
 
 ---
 
@@ -598,6 +806,35 @@ JDBC batch benchmark:
   -> Chunk 1,000 is the optimum: high throughput, manageable rollback scope
 ```
 
+### Three-year growth projection
+
+```
+Year 0 (today):    10,000,000 records, 8 partitions, 23 min actual runtime
+Year 1 (+40%):     14,000,000 records, 8 partitions -> 14,000,000 / 7,200 = 32 min
+Year 2 (+40%):     19,600,000 records, 8 partitions -> 19,600,000 / 7,200 = 45 min
+Year 3 (+40%):     27,440,000 records, 8 partitions -> 27,440,000 / 7,200 = 64 min
+
+All four years stay comfortably inside the 3h window on unchanged hardware -- the
+bottleneck is DB write throughput (§2), not CPU, so the fix when growth eventually
+does threaten the window is more partitions plus a proportionally larger HikariCP
+pool (formula below), not a bigger box. Re-run the sizing formula, don't guess:
+gridSize=12 at Year 3's 27.4M rows -> 27,440,000 / (12 x 1,200 x 0.6) = 53 min,
+buying back a decade of the same 40%/year growth before remote partitioning is needed.
+```
+
+### Cost-of-ownership arithmetic (single-machine deployment)
+
+```
+Reserved 8-core/32GB instance (representative on-demand equivalent): ~$0.35/hr
+Job runs 23-64 min/night -> billed for the reserved instance 24/7 regardless
+  (it also serves the read-only progress API in §11 between runs), so nightly
+  marginal cost is near zero; the number that matters is whether ONE box is
+  enough, not per-run cost.
+Rejected-records file growth: 100,000 rows/night x ~120 bytes/row = 12 MB/night
+  -> 4.4 GB/year if never rotated; add a 90-day retention cron alongside the job,
+  since nothing in the batch job itself expires rejected.csv.
+```
+
 ---
 
 ## 11. Interview Discussion Points
@@ -641,3 +878,23 @@ A: The `CustomerPartitioner` throws `IllegalStateException` if no files exist, f
 **Q: How does Spring Batch implement exactly-once processing at the database level, and what is the role of the `JobRepository`?**
 
 A: Spring Batch uses optimistic locking on `StepExecution` rows — the `JobRepository` stores every chunk commit as a database transaction that increments a `version` column. If two concurrent executions try to commit the same step, the second update fails (`ObjectOptimisticLockingFailureException`) and the job fails safely. This prevents duplicate writes even under at-least-once chunk retry. The `JobRepository` also stores the exact last committed read count; on restart, the `FlatFileItemReader` skips that many records to resume exactly at the failure point, achieving effectively-once semantics for file-sourced jobs.
+
+**Q: What changed between JobLauncher and JobOperator in Spring Batch 6, and which one should new code use?**
+
+A: `JobLauncher` is deprecated as of 6.0 (`forRemoval = true`, scheduled for 6.2+) but not yet removed. `JobOperator` now extends `JobLauncher` and adds `restart()`, `startNextInstance()`, `stop()`, `abandon()`, and `recover()` — the operator actions this file's runbooks previously performed by hand-editing `BATCH_JOB_EXECUTION`. New code should depend on `JobOperator` exclusively and drop the separate `JobLauncher`/`JobExplorer` beans, since `JobRepository` now extends `JobExplorer` too. See §4.6.
+
+**Q: If you're migrating this job from Spring Batch 5 to 6, what is the highest-risk change to miss?**
+
+A: The `spring-batch-infrastructure` package relocation — `FlatFileItemReader`, `BatchPreparedStatementSetter`, and every other item reader/writer type moved from `org.springframework.batch.item.*` to `org.springframework.batch.infrastructure.item.*`. It is a compile-time break, so the build catches it, but it touches every file in §4.1 and §4.3. The riskier *silent* change is `JobParameters` moving from a `Map<String, JobParameter>` to a `Set<JobParameter>` backing a now-record `JobParameter` — code using the standard `getString()`/`getLong()` accessors is unaffected, but code that iterated the parameter map directly compiles against a different shape and needs a manual rewrite, not just a package rename.
+
+**Q: What does Spring Batch 6's ChunkOrientedStep change about how this job's workerStep executes?**
+
+A: Nothing observable for a job configured through `StepBuilder.chunk(...)`, as this one is (§4.1) — the builder now assembles a `ChunkOrientedStep` (built internally via `ChunkOrientedStepBuilder<I, O>`) instead of the old `ChunkOrientedTasklet`-wrapped `TaskletStep`, but that is an implementation detail behind the same builder API. It matters only if you were bypassing the builder and constructing a chunk step from lower-level types directly, since `ChunkOrientedTasklet` itself is gone in 6.0.
+
+**Q: Graceful stop was added to JobOperator in Spring Batch 6 — how does it change the "stuck partition" runbook (Runbook 1)?**
+
+A: Before 6.0, stopping a hung job meant either waiting out the stuck partition or killing the process outright, risking a chunk left half-committed. `JobOperator.stop(jobExecution)` requests a graceful stop: the in-flight chunk is allowed to finish and commit before the step halts, so the `JobRepository` never records a partially-written chunk as complete. Runbook 5 (§8) uses exactly this to make deploy rollbacks safe without losing partition progress — stop gracefully, roll back the artifact, then restart with the same `run.date`.
+
+**Q: A colleague upgrades to Spring Batch 6, and the nightly job's restart stops working — every relaunch reprocesses from scratch even with the same `run.date`. What's the most likely cause?**
+
+A: Check whether `DefaultBatchConfiguration` is in play. Spring Batch 6 changed its default job repository to `ResourcelessJobRepository` — an in-memory, non-durable implementation — rather than defaulting to a JDBC-backed one as earlier versions effectively did through autoconfiguration. A job that relies on `@EnableBatchProcessing`'s defaults without switching to `JdbcDefaultBatchConfiguration` (or the store-specific `@EnableJdbcJobRepository`) gets a repository that forgets every `StepExecution` the moment the JVM exits — which looks exactly like a restart bug, because functionally it is one: there is nothing durable left to restart from. This job's entire design depends on `JobRepository` durability (§1, §4.1), so `JdbcDefaultBatchConfiguration` against the same PostgreSQL instance as the business data is not optional configuration, it is the mechanism the whole restart story rests on.

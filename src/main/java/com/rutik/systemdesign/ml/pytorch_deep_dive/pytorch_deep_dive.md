@@ -1902,7 +1902,7 @@ buffer the DMA has not filled. This is intermittent — it works when the GPU ha
 - **torch.func** — composable transforms: `grad`, `vmap`, `jacrev`, `jacfwd`, `hessian`, `functional_call`, `stack_module_state`.
 - **torch.ao.quantization** — the quantization surface; **torchao** is where the modern fp8 and low-bit recipes live.
 - **TORCH_LOGS** — the diagnostic entry point: `recompiles`, `graph_breaks`, `output_code`, `+dynamo`.
-- **Adjacent runtimes and servers:** **TorchServe**, **NVIDIA Triton**, **ONNX Runtime**, **TensorRT**, **OpenVINO**, **ExecuTorch**, **vLLM**, **SGLang**
+- **Adjacent runtimes and servers:** **NVIDIA Triton**, **ONNX Runtime**, **TensorRT**, **OpenVINO**, **ExecuTorch**, **vLLM**, **SGLang**
 - **Training frameworks above it:** **PyTorch Lightning**, **accelerate**, **transformers Trainer**, **DeepSpeed**, **torchtitan**, **torchtune**, **Ray Train**
 - **Profiling and observability:** **NVIDIA Nsight Systems**, **Nsight Compute**, **Holistic Trace Analysis**, **TensorBoard**, **MLflow**, **Weights & Biases**
 - **Alternatives:** **JAX** with **XLA**, **TensorFlow**, **MLX**

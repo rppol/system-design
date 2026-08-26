@@ -1,6 +1,6 @@
 # Apache Airflow
 
-> **Version pin:** This module targets the **Airflow 3 line, current stable 3.3.0 (July 2026)**. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**; a **[3.0]** / **[3.1+]** / **[3.3]** tag marks which 3.x release first shipped the feature.
+> **Version pin:** This module targets the **Airflow 3 line, current stable 3.3.1 (2026-08-12)**; 3.3.0 shipped 2026-07-06. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**; a **[3.0]** / **[3.1+]** / **[3.2]** / **[3.3]** tag marks which 3.x release first shipped the feature.
 
 Airflow is the de-facto open-source **batch workflow orchestrator**: you declare pipelines as Python, and a control plane schedules, retries, and observes them. It runs your business logic on a schedule with dependency awareness — it does not run the logic itself.
 
@@ -486,6 +486,62 @@ def downstream(): ...
 
 Deeper features: **asset aliases** let a task decide *at run time* which asset it produced (dynamic outlets); **asset watchers** ([3.0]) trigger a DAG on an *external* event (e.g. a message on a queue) rather than another DAG's task; **asset events** are the rows recording each update, and a consumer can require *multiple* assets (`schedule=(a & b)`) or *any* (`a | b`). This is how you decompose a mega-DAG into small, independently-scheduled DAGs wired by data (§8).
 
+**Asset partitioning ([3.2], substantially expanded in [3.3]).** A plain asset is a single logical object, so "the customers table was updated" is the only fact it can carry. A **partitioned** asset carries *which slice* was updated, and downstream runs are keyed by that slice — the difference between re-running a whole consumer because one day landed, and running exactly one consumer instance for that day. Partition keys flow through a **partition mapper**, which is the rule translating an upstream key into the downstream key(s) it should trigger:
+
+| Mapper | Shape | Use |
+|---|---|---|
+| `RollupMapper` | many upstream keys → one downstream key | daily partitions rolling into a month |
+| `FanOutMapper` | one upstream key → many downstream keys | a monthly drop exploding into per-day work |
+| `FixedKeyMapper` + `SegmentWindow` | every upstream key → one fixed key | categorical rollup into a single target slice |
+
+Time-window partitions cover day, week, month, quarter and year with a forward/backward direction, so "the week ending this day" and "the week starting this day" are both expressible. A consumer states how much of its upstream it needs before it fires with a **wait policy** — `WaitForAll` (every mapped upstream key present) or `MinimumCount(n)` (fire once *n* have landed, for pipelines that tolerate partial coverage).
+
+**[3.3]** also adds the `PartitionedAtRuntime` timetable, which lets a DAG declare that its partition key is decided **when the run starts** rather than mapped from an upstream event — the escape hatch for a pipeline whose slice is chosen by a parameter or an external system rather than by the calendar.
+
+The blast radius here is a fan-out, so it is bounded globally: `[scheduler] partition_mapper_max_downstream_keys` caps how many downstream keys one upstream event may trigger. Leave it at its default until you have a mapper that legitimately exceeds it; raising it is how a single mis-specified `FanOutMapper` turns one asset event into thousands of runs.
+
+### 6.10a The task and asset state store ([3.3], AIP-103)
+
+Before 3.3, a task had no durable memory of its own: anything it needed to survive a retry had to go into XCom (visible to the whole DAG, sized for KB), into an Airflow Variable (global, unscoped), or into an external store you operated yourself. **AIP-103** adds a first-class key-value store with two scopes, both reached through the task context:
+
+```python
+@task
+def ingest(**context):
+    store = context["task_state_store"]          # scoped to THIS task instance
+    cursor = store.get("cursor", default=None)   # survives retries and reruns
+    page = fetch_since(cursor)
+    store.set("cursor", page.next_cursor)
+
+    assets = context["asset_state_store"]        # scoped to the ASSET
+    assets.set("last_watermark", page.max_ts)    # shared by every producer/consumer of it
+```
+
+`task_state_store` is scoped to the individual task instance and is the right place for resume cursors and partial-progress markers. `asset_state_store` is scoped to the asset itself and is shared by any task that produces or consumes it, which makes it the place for a watermark several DAGs must agree on.
+
+Configuration lives under `[state_store]`:
+
+```ini
+[state_store]
+backend = airflow.state.metastore.MetastoreBackend
+default_retention_days = 30        # periodic GC; state is not kept forever
+clear_on_success = False           # set True for state that is only a retry aid
+max_value_storage_bytes = 65535    # a state store, not a data store
+```
+
+`[workers] state_store_backend` overrides the backend worker-side, so state can live somewhere other than the metadata DB on a fleet where the metadata DB is already the bottleneck (§4.1).
+
+The first operator to build on this is `SparkSubmitOperator`, which now mixes in `ResumableJobMixin`: with `durable=True` it records the submitted application id in the task state store, so a worker that dies mid-job **reconnects to the running Spark application** on retry instead of resubmitting it. That is the pattern to copy — the state store's value is not "somewhere to stash a variable", it is that an at-least-once retry (§3) can become effectively idempotent for work that has already started on an external system.
+
+Read `max_value_storage_bytes` as a design statement: the ceiling is 64 KB because this is a cursor store. Putting a payload in it recreates the XCom-bloat pitfall in §10 with a new table.
+
+### 6.10b Pluggable retry policies ([3.3], AIP-105)
+
+`retries` plus `retry_delay` plus `retry_exponential_backoff` is a *count and a curve* — it cannot express "retry a rate-limit error for an hour but fail a schema error immediately", which is the distinction that actually matters in production. **AIP-105** makes the retry decision pluggable: a policy object decides **whether** to retry and **when**, per exception, instead of the scheduler applying one fixed rule to every failure.
+
+The immediate payoff is that a transient dependency failure and a deterministic bug stop being treated identically. A `429` or a connection reset is worth a long backoff; a `KeyError` in your own transform will fail identically on all three retries, so retrying it only delays the page and burns three worker slots. The provider ecosystem has already started shipping policies too — the Common AI provider (0.3.0+) includes an `LLMRetryPolicy` that classifies the failure with a model before deciding, which is either exactly what you want for a messy third-party API or an expensive way to guess, depending on how well-typed the upstream errors are.
+
+The pitfall to avoid is the one this feature makes newly possible: a policy that retries indefinitely on a class of error that is not actually transient. Bound every policy with a hard attempt ceiling or an `execution_timeout`, because a task that never gives up is a slot leak with better manners (§10).
+
 ### 6.11 Backfill and catchup
 
 `catchup` decides whether Airflow fills in every missed interval between `start_date` and now:
@@ -579,7 +635,31 @@ def test_no_import_errors():
 
 **Operator unit tests** instantiate an operator and call `.execute(context)` with a stubbed context. **`dag.test()`** ([2.5+]) runs a whole DAG end-to-end in-process against a local/ephemeral DB — the fastest way to validate a pipeline locally without a running scheduler. Together these catch the parse-time and logic errors that otherwise only surface in production.
 
-### 6.20 DAG versioning and the Task SDK / edge executor ([3.0])
+### 6.20 DAG bundles, DAG versioning, and the Task SDK / edge executor ([3.0])
+
+**DAG bundles** ([3.0]) replace the flat DAGs folder, and they are the mechanism DAG versioning is built on. In 2.x every DAG had to be a file on local disk under `dags_folder`, and getting it there — a sidecar `git-sync`, an image rebuild, an S3 mount — was entirely the deployment manager's problem, invisible to Airflow. A **bundle** is a named collection of DAG files *plus their supporting files*, sourced from somewhere Airflow itself understands, declared in config:
+
+```ini
+[dag_processor]
+dag_bundle_config_list = [
+    {
+      "name": "analytics-dags",
+      "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+      "kwargs": {"git_conn_id": "dags_repo", "subdir": "dags", "tracking_ref": "main"}
+    }
+  ]
+```
+
+| Bundle | Class path | Versioned |
+|---|---|---|
+| `LocalDagBundle` | `airflow.dag_processing.bundles.local.LocalDagBundle` | **no** (the default) |
+| `GitDagBundle` | `airflow.providers.git.bundles.git.GitDagBundle` | **yes** — each run records the commit |
+| `S3DagBundle` | `airflow.providers.amazon.aws.bundles.s3.S3DagBundle` | no |
+| `GCSDagBundle` | `airflow.providers.google.cloud.bundles.gcs.GCSDagBundle` | no |
+
+The DAG processor refreshes each bundle on its own interval (`refresh_interval`, overridable per bundle in `kwargs`) rather than restatting one directory, and multiple bundles can coexist — which is how two teams ship DAGs from two repositories into one Airflow without sharing a filesystem.
+
+**The versioning consequence is the part people miss: only `GitDagBundle` is versioned.** The default `LocalDagBundle` is not, and neither are the S3 and GCS bundles. So a deployment that keeps the 2.x shape — sync files onto disk, point `LocalDagBundle` at the folder — gets Airflow 3 and gets *no* code-version history, while believing DAG versioning is on because it is a 3.0 feature. If you want a past run's grid view to reflect the code it actually ran, the DAGs must come from a Git bundle.
 
 **DAG versioning** ([3.0]) records the exact code a run used, so the grid/graph view of a *past* run reflects the DAG as it was *then* — not the latest edited version. This fixes the long-standing confusion where editing a DAG retroactively rewrote history in the UI. The **Task Execution API** ([3.0]) decouples task execution from the scheduler internals — tasks talk to a versioned REST API over HTTP instead of touching the metadata DB — and that boundary is what makes non-Python task execution *possible*, not something Airflow 3.0 shipped outright: the Python **Task SDK** is the first client of that API, the **EdgeExecutor** (AIP-69) ships separately as an **experimental provider package** letting workers run in remote/on-prem/edge locations over the same API, and Go/Java task runtimes did not arrive until **3.3**, as experimental Coordinator-based SDKs (a JVM coordinator and a native-binary coordinator) that still declare the DAG shape in Python via `@task.stub`. Together these make Airflow 3 a distributed control plane with a stable worker contract rather than a monolith where workers reach into the DB.
 
@@ -851,6 +931,20 @@ Splitting a mega-DAG into asset-wired DAGs is the modern refactor: producers dec
 
 **Poke vs reschedule vs deferrable** is the single most consequential per-task choice at scale — the §5.4 chart quantifies it: for 1,000 concurrent waits the slot cost is 1,000 vs ~100 vs 0.
 
+**The orchestrator field, and what each one is actually arguing:**
+
+| Tool | Its core claim | Where it genuinely beats Airflow | What you give up |
+|---|---|---|---|
+| **Airflow** | the graph of *tasks* is the artifact | ubiquity — 90+ providers, every managed cloud offers it, every data engineer has already used it | asset-first modelling is bolted on ([3.0] assets), and the data-interval model fights you below minute latency |
+| **Dagster** | the graph of *assets* is the artifact and tasks are derived | typed inputs/outputs, materialization as the unit of thought, genuinely good local testing | smaller provider surface; you model the world its way or not at all |
+| **Prefect** | flows are ordinary Python, decided at runtime | dynamic graphs that need no DAG-shape declaration; least ceremony to a first working flow | less structure to lean on when the pipeline is large and owned by many teams |
+| **Kestra** | pipelines are declarative YAML, not code | non-Python teams and a plugin-per-integration model; the pipeline is reviewable by people who do not write Python | you lose the Python DSL that makes dynamic generation trivial |
+| **Argo Workflows** | a workflow is a Kubernetes CRD | container-native step execution with no scheduler of its own to operate; natural if the platform is already K8s | no data awareness at all — no assets, no lineage, no backfill semantics |
+| **Databricks Workflows / Jobs** | orchestration belongs next to the compute | zero infrastructure when the work is already Spark/dbt on Databricks | it orchestrates *that* platform; heterogeneous pipelines leave it quickly |
+| **Temporal** | durable execution of *application* code | ms latency, month-long human-in-the-loop workflows, per-step state | not a batch-analytics tool; see [temporal_durable_execution](../temporal_durable_execution/temporal_durable_execution.md) |
+
+The honest summary is that Airflow's moat in 2026 is **not** technical superiority on any single axis — Dagster models data better, Prefect is more dynamic, Argo is more Kubernetes-native. It is that Airflow is the one every provider, every cloud, and every candidate already supports, and 3.0's assets closed enough of the modelling gap that the ubiquity argument usually wins.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -910,6 +1004,7 @@ The tell that you have outgrown cron and need Airflow: your jobs have **dependen
 - **Autoscaling:** **KEDA** scales Celery worker replicas on broker queue depth (down to zero); the **official Helm chart** deploys the whole stack on Kubernetes.
 - **Observability:** **StatsD** and **OpenTelemetry** metrics/traces; Prometheus via the StatsD exporter; Grafana dashboards for the §6.16 metrics.
 - **Secrets:** **HashiCorp Vault**, **AWS Secrets Manager**, **GCP Secret Manager** backends.
+- **[3.0] DAG delivery:** DAGs reach the DAG processor as *DAG bundles* declared in `[dag_processor] dag_bundle_config_list` — `GitDagBundle` (the only versioned one), `S3DagBundle`, `GCSDagBundle`, or the unversioned default `LocalDagBundle`. This replaces the 2.x pattern of a sidecar `git-sync` writing into a shared `dags_folder`.
 - **[3.0] Platform:** rewritten **React UI** on a **FastAPI-based API server**, and the **Task Execution API** brokering all worker↔DB access — the foundation the Python **Task SDK** builds on, with the **EdgeExecutor** (AIP-69, experimental provider) and the **[3.3, experimental]** Go/Java Coordinator SDKs following on top of that same API.
 - **Managed:** **Amazon MWAA**, **Google Cloud Composer**, **Astronomer Astro** — run Airflow as a service.
 - **Plugins & extension points:** custom operators/hooks (subclass `BaseOperator`/`BaseHook`), timetables (`Timetable`), listeners (`hookimpl`), Notifier classes, and XCom/secrets/executor backends — Airflow is extensible at every layer.
@@ -1007,6 +1102,30 @@ One earlier run of that task failed, or was manually cleared and never re-run, a
 **Q: What replaced SLAs in Airflow 3, and how do Deadline Alerts differ from the old sla_miss_callback?**
 **Short:** Deadline Alerts attach a time threshold to the whole DAG run, unlike the old per-task sla_miss_callback.
 `sla` and `sla_miss_callback` were removed outright in Airflow 3.0, and **Deadline Alerts** (AIP-86) arrived later, in 3.1, as their experimental replacement. The old SLA was per-task and only checked once the scheduler evaluated that task, so a run that simply hung was never flagged; a Deadline Alert attaches a reference point plus interval to the **DAG run** as a whole, and every scheduler pass compares that deadline against now, firing the callback within about one `scheduler_heartbeat_sec` of expiry regardless of whether the run ever finishes. Migrate SLA-based alerting to a `DeadlineAlert` on `DeadlineReference.DAGRUN_QUEUED_AT` or `DAGRUN_LOGICAL_DATE` rather than assuming the old per-task callback still exists.
+
+**Q: You upgraded to Airflow 3 for DAG versioning, but past runs still show today's DAG. What did you miss?**
+**Short:** Only GitDagBundle is versioned; the default LocalDagBundle records no code version, so DAG versioning has nothing to pin.
+Your DAGs are still coming from the default `LocalDagBundle`, which is not versioned, so there is no commit for a run to record. DAG bundles ([3.0]) replaced the flat DAGs folder, and of the four built-ins only `GitDagBundle` supports versioning — each run stores the Git commit it was created with; `LocalDagBundle`, `S3DagBundle` and `GCSDagBundle` do not. A deployment that kept the 2.x shape of syncing files onto local disk gets Airflow 3 and silently gets no code history, which is why this reads as a broken feature rather than a configuration choice. Declare a `GitDagBundle` in `[dag_processor] dag_bundle_config_list` if you want a past run's grid view to reflect the code it actually ran.
+
+**Q: A task needs to remember a cursor across retries. Why not XCom, and what does Airflow 3.3 give you instead?**
+**Short:** The task state store (AIP-103) gives a task instance its own durable key-value scope, which XCom's DAG-wide KB-sized rows never were.
+XCom is a DAG-wide hand-off sized for kilobytes, so using it as private task memory leaks an implementation detail to every other task and adds rows to the table that already bloats the metadata DB. **[3.3]** AIP-103 adds a proper state store in two scopes reached from the task context: `task_state_store` is private to the task instance and survives retries, while `asset_state_store` is shared by every task producing or consuming that asset, which is where a watermark several DAGs must agree on belongs. It is configured under `[state_store]` with `default_retention_days`, `clear_on_success` and a deliberate 64 KB `max_value_storage_bytes` ceiling — that cap is a design statement that this is a cursor store, not a data store. Reach for it for resume cursors and partial-progress markers, and keep passing pointers, not payloads, through XCom.
+
+**Q: `SparkSubmitOperator` with `durable=True` — what problem does that actually solve?**
+**Short:** It records the Spark application id in the task state store so a retry reconnects to the running job instead of resubmitting it.
+It makes an at-least-once retry effectively idempotent for work that has already started on an external system. The operator mixes in `ResumableJobMixin` and writes the submitted application id into the task state store, so when a worker is OOM-killed or a pod is evicted mid-job, the retry finds that id and **reconnects to the still-running Spark application** rather than submitting a second copy of an hour-long job. Without it the classic failure is a zombie reaped after `scheduler_zombie_task_threshold`, a retry, and two identical Spark applications competing for the same cluster and the same output path. Treat it as the reference pattern for any operator that triggers long-running external work: persist the external job's identity before you start waiting on it.
+
+**Q: What does asset partitioning buy you over a plain asset, and what is a partition mapper?**
+**Short:** A partitioned asset says which slice was updated, and a partition mapper translates that upstream key into the downstream keys it triggers.
+A plain asset can only carry "this was updated", so any change re-triggers the whole consumer; a partitioned asset ([3.2], expanded in [3.3]) carries *which slice* changed and keys downstream runs by it, so one day landing runs exactly one consumer instance for that day. The translation rule is a **partition mapper**: `RollupMapper` folds many upstream keys into one (days into a month), `FanOutMapper` explodes one into many (a monthly drop into per-day work), and `FixedKeyMapper` with `SegmentWindow` maps every upstream key onto one fixed target. Time windows cover day through year with forward/backward direction, and a consumer states how much coverage it needs with `WaitForAll` or `MinimumCount(n)`. Bound the fan-out with `[scheduler] partition_mapper_max_downstream_keys` before you ship a `FanOutMapper`, because that is the setting standing between one asset event and thousands of runs.
+
+**Q: Your pipeline hammers a flaky API and also has a `KeyError` in its own transform. Why is one `retries` setting wrong for both?**
+**Short:** Pluggable retry policies (AIP-105) decide per exception whether and when to retry, which a single count-and-curve cannot express.
+Because `retries` plus `retry_delay` is a count and a curve applied identically to every failure, and those two failures deserve opposite treatment: a `429` or a connection reset is worth a long backoff, while a `KeyError` in your own code will fail the same way on all three attempts and only delays the page while burning three worker slots. **[3.3]** AIP-105 makes the decision pluggable — a policy object decides whether and when to retry per exception, so transient and deterministic failures stop being conflated. The provider ecosystem is already building on it; the Common AI provider (0.3.0+) ships an `LLMRetryPolicy` that classifies the failure with a model first, which is either exactly right for a badly-typed third-party API or an expensive guess. Whatever policy you write, bound it with a hard attempt ceiling or an `execution_timeout` — a task that never gives up is a slot leak with better manners.
+
+**Q: In 2026, why would a team still pick Airflow over Dagster, Prefect, Kestra or Argo Workflows?**
+**Short:** Ubiquity, not technical superiority: 90+ providers, every managed cloud, and every candidate has already used it.
+Rarely because it wins on any single axis — Dagster models data better with typed assets as the artifact, Prefect is more dynamic with runtime-decided graphs, Kestra is reviewable by teams that do not write Python, and Argo Workflows is more Kubernetes-native as a plain CRD with no scheduler of its own to operate. Airflow wins on ubiquity: 90+ provider packages, a managed offering from AWS, Google and Astronomer, and a hiring pool that has already used it. What made that argument hold rather than merely convenient is that **[3.0]** assets closed enough of the data-modelling gap that Dagster's central claim is no longer unanswerable. The honest counter-cases stay narrow: Databricks Workflows when the compute is already Databricks, and Temporal when the workload is durable execution rather than batch analytics.
 
 ---
 

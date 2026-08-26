@@ -92,7 +92,7 @@ PyCUDA is a thin binding directly onto the CUDA **driver API**: explicit context
 
 ### 4.4 PyTorch Custom CUDA/C++ Extensions
 
-When an operation does not exist in ATen (PyTorch's operator library) and cannot be expressed as a composition of existing ops without extra HBM round-trips, a **custom extension** is the escape hatch: write the kernel in a real `.cu` file, write a thin C++ launcher function, bind it to Python with `pybind11`, and compile the pair via `torch.utils.cpp_extension.load()` (JIT, no manual `setup.py`) or `CUDAExtension` (ahead-of-time, `pip install`-able). The result is an ordinary Python-callable op that participates in autograd like any built-in PyTorch function, provided you also supply (or wrap in) a backward pass.
+When an operation does not exist in ATen (PyTorch's operator library) and cannot be expressed as a composition of existing ops without extra HBM round-trips, a **custom extension** is the escape hatch: write the kernel in a real `.cu` file, write a thin C++ launcher function, bind it to Python with `pybind11`, and compile the pair via `torch.utils.cpp_extension.load()` (JIT, no manual `setup.py`) or `CUDAExtension` (ahead-of-time, `pip install`-able). The result is an ordinary Python-callable op that participates in autograd like any built-in PyTorch function, provided you also supply (or wrap in) a backward pass. A `pybind11` binding on its own is invisible to `torch.compile`'s tracer, though — see §4.7 for the `torch.library` contract that keeps a kernel bound this way from forcing a graph break.
 
 ### 4.5 `torch.compile` / TorchInductor — Automatic Kernel Generation
 
@@ -101,6 +101,56 @@ When an operation does not exist in ATen (PyTorch's operator library) and cannot
 ### 4.6 DLPack — Zero-Copy Tensor Interchange
 
 DLPack is a small, framework-neutral in-memory tensor descriptor (device pointer, shape, strides, dtype, device type/id) that CuPy, PyTorch, JAX, TensorFlow, and (via the buffer protocol) NumPy all understand. Passing an array through DLPack does not serialize or copy its data — it hands the consumer a capsule describing *where the existing GPU bytes already are* so the consumer can construct its own view over the same allocation. Modern versions of each framework implement the `__dlpack__`/`__dlpack_device__` dunder protocol directly, so `torch.from_dlpack(cupy_array)` and `cupy.from_dlpack(torch_tensor)` work without an explicit `to_dlpack()` call.
+
+### 4.7 Making a Custom Kernel Survive `torch.compile`
+
+A kernel bound the §4.4 way — `pybind11` plus `torch.utils.cpp_extension.load()` — is an opaque Python callable as far as `torch.compile`'s Dynamo tracer is concerned. Dynamo has no schema, no shape rule, and no way to reason about the call without running it, which leaves it exactly two bad options: **graph-break** around the call (the compiled region gets cut in two, and whatever fusion `torch.compile` was buying evaporates on both sides of the cut), or — worse, for a kernel that happens to be reachable as plain Python rather than a genuinely opaque C++ symbol — **trace into it** and bake the observed input shapes into the compiled graph as constants, silently producing a graph that is wrong the moment a different shape shows up. What Dynamo actually needs is a **contract**: a name, a schema, and a rule for shape and dtype it can consult without executing the kernel. `torch.library.custom_op` is that contract.
+
+```python
+import torch
+
+@torch.library.custom_op("myapp::rmsnorm", mutates_args=())
+def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    return my_cuda_ext.rmsnorm(x, weight, eps)   # the pybind11-bound kernel from §4.4
+```
+
+`mutates_args` is not optional decoration — it is how the compiler knows whether it may reorder or common-subexpression-eliminate calls to this op. An op that writes into an out-parameter must name it, e.g. `mutates_args={"out"}`; declaring it wrong doesn't raise an error, it produces a silent miscompile the first time the scheduler reorders around a write it didn't know about.
+
+The op still needs a **fake (meta) implementation** before Dynamo can trace through it:
+
+```python
+@rmsnorm.register_fake
+def _(x, weight, eps):
+    return torch.empty_like(x)   # shape/dtype/device only -- must never touch data
+```
+
+`register_fake` runs under symbolic tracing against `FakeTensor`s, which carry shape, dtype, and device but no real storage. Its only job is to return a tensor of the right shape/dtype/device — `torch.empty_like`/`x.new_empty(...)`, never the real computation — and that is precisely what lets Dynamo trace *through* the op and keep fusing on both sides of it instead of breaking.
+
+Gradients need one more registration:
+
+```python
+def setup_context(ctx, inputs, output):
+    x, weight, eps = inputs
+    ctx.save_for_backward(x, weight)
+    ctx.eps = eps
+
+def rmsnorm_backward(ctx, grad_output):
+    x, weight = ctx.saved_tensors
+    grad_x, grad_weight = my_cuda_ext.rmsnorm_backward(grad_output, x, weight, ctx.eps)
+    return grad_x, grad_weight, None   # one gradient per input; None for the non-tensor eps
+
+rmsnorm.register_autograd(rmsnorm_backward, setup_context=setup_context)
+```
+
+`setup_context` saves whatever the backward needs off the forward's inputs and output; the backward function returns exactly one gradient per forward input, `None` for any input that isn't a tensor.
+
+**Always register under a namespace you own** (`myapp::`, never `aten::` or someone else's library) — re-registering an existing op name raises `RuntimeError`. The lower-level `torch.library.Library("myapp", "FRAGMENT")` API is available for adding to an existing namespace incrementally, but `custom_op` is the right default: it wires up fake-tensor tracing, autograd, and functionalization together instead of leaving each as a separate manual registration.
+
+**The tradeoff is a measured one, not a vague "the decorator is slow."** `@torch.library.custom_op` carries roughly 36 microseconds of per-call dispatch overhead versus roughly 10 microseconds for registering the same op through the low-level `torch.library.Library` API directly. For nearly every op that overhead is noise next to the kernel it wraps, and it buys fake-tensor tracing, autograd, and functionalization for free — so `custom_op` is the correct default and the raw `Library` API is the hot-path escape hatch for a tiny op called in a tight loop where the extra ~26 microseconds of dispatch actually shows up in the profile.
+
+Worth naming alongside `load()`: **`torch.utils.cpp_extension.load_inline`** takes the CUDA/C++ source as a Python string directly, skipping the separate `.cu`/`.cpp` files entirely — useful for the thirty-second edit-compile-run loop while a kernel is still being iterated on, before it graduates to real source files.
+
+**A custom op used under `torch.compile(mode="reduce-overhead")` also has to be CUDA-graph safe**: it must not allocate memory or synchronize inside the captured region, since either one breaks graph capture. Let the fake impl's shape declare the output and have the caller own the allocation (or route it through the allocator's graph-safe pool) rather than allocating inside the kernel launcher itself.
 
 ---
 
@@ -788,6 +838,75 @@ The vectorized version replaces 100,000 launches with one (or a small constant n
 - **Pinning `numba` in a requirements file and expecting `@cuda.jit` to work.** The CUDA target ships in the separate NVIDIA-maintained `numba-cuda` package now, so an environment built from `numba` alone has no working `numba.cuda`. Depend on `numba-cuda` (with the `[cu12]`/`[cu13]` extra matching your toolkit) in anything whose GPU path is load-bearing — the import line stays `from numba import cuda`, which is exactly why the omission is easy to miss in review.
 - **Forgetting that DLPack sharing requires the same device.** A CuPy array on GPU 0 cannot zero-copy-share with a PyTorch tensor expected on GPU 1 — cross-device sharing still requires an explicit copy; DLPack only removes the copy that was never necessary in the first place.
 
+**BROKEN — a `pybind11`-only custom kernel graph-breaks `torch.compile` and kills the fusion around it:**
+
+```python
+import torch
+from torch.utils.cpp_extension import load
+
+fused_ext = load(
+    name="fused_bias_gelu_ext",
+    sources=["fused_bias_gelu.cpp", "fused_bias_gelu_kernel.cu"],
+)
+
+def block(x, bias, residual):
+    v = fused_ext.fused_bias_gelu(x, bias)   # opaque pybind11 call -- no schema, no fake impl
+    return v + residual                      # would fuse WITH the line above if Dynamo could see through it
+
+compiled_block = torch.compile(block)
+x = torch.randn(4096, 1024, device="cuda")
+bias = torch.randn(1024, device="cuda")
+residual = torch.randn(4096, 1024, device="cuda")
+out = compiled_block(x, bias, residual)
+```
+
+```
+# TORCH_LOGS="graph_breaks" python this_script.py -- illustrative shape of what it prints:
+#
+#   Graph break in user code at block (this_script.py:10)
+#   Reason: Unsupported: call to opaque/unregistered custom op
+#           fused_ext.fused_bias_gelu -- no operator schema registered under torch.ops
+#
+#   Compiled region 1: [x, bias entering block]        -- runs, nothing to fuse yet
+#   fused_ext.fused_bias_gelu(x, bias)                  -- executes EAGERLY, un-fused
+#   Compiled region 2: [+ residual]                     -- separate compiled kernel
+```
+
+The bias-add-plus-GELU kernel and the residual-add were written to be one fusion opportunity, but the graph break severs them: `torch.compile` still runs, but it compiles two small kernels on either side of an eager call instead of the single fused kernel the whole point of using `torch.compile` was to get. The profile shows three kernel launches and two extra HBM round trips for the intermediate `v` where a fully traceable graph would show one — the "compiled" model can end up no faster, or even slower, than eager mode once the extra launches are counted, and nothing in the source code looks wrong.
+
+**FIX — register the same kernel with `torch.library.custom_op` so Dynamo can trace through it:**
+
+```python
+import torch
+from torch.utils.cpp_extension import load
+
+fused_ext = load(
+    name="fused_bias_gelu_ext",
+    sources=["fused_bias_gelu.cpp", "fused_bias_gelu_kernel.cu"],
+)
+
+@torch.library.custom_op("myapp::fused_bias_gelu", mutates_args=())
+def fused_bias_gelu(x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    return fused_ext.fused_bias_gelu(x, bias)
+
+@fused_bias_gelu.register_fake
+def _(x, bias):
+    return torch.empty_like(x)   # shape/dtype only -- lets Dynamo trace through, not around
+
+def block(x, bias, residual):
+    v = fused_bias_gelu(x, bias)   # torch.ops.myapp.fused_bias_gelu -- has a schema now
+    return v + residual
+
+compiled_block = torch.compile(block)
+out = compiled_block(x, bias, residual)   # one compiled region, no break
+
+# Verify the registration is self-consistent (schema, fake impl, and autograd
+# agree with each other) before trusting the compiled output:
+torch.library.opcheck(fused_bias_gelu, (x, bias))
+```
+
+The diagnostic recipe is two commands, in order: `TORCH_LOGS="graph_breaks"` to find where a graph is being cut and why, and `torch.library.opcheck(op, args)` to check that a `torch.library.custom_op` registration's schema, fake implementation, and autograd rule are mutually consistent before blaming the compiler for a bug that is actually in the registration.
+
 ---
 
 ## 11. Technologies & Tools
@@ -799,6 +918,7 @@ The vectorized version replaces 100,000 launches with one (or a small constant n
 | **PyCUDA** | Thin Python bindings onto the CUDA driver API; `SourceModule` compiles inline CUDA C via NVRTC; explicit context/memory management |
 | **`torch.utils.cpp_extension`** | JIT (`load()`) or ahead-of-time (`CUDAExtension`/`setup.py`) compilation of hand-written `.cu`/`.cpp` sources into a PyTorch-callable, `pybind11`-bound op |
 | **TorchInductor** (`torch.compile`) | PyTorch 2.x's default GPU compiler backend; traces the FX graph and emits fused Triton (or C++) kernels automatically |
+| **`torch.library`** (`custom_op`, `register_fake`, `register_autograd`) | Registers a hand-written kernel (from `torch.utils.cpp_extension` or elsewhere) under a schema Dynamo can trace through, so it participates in a `torch.compile`d graph instead of forcing a graph break |
 | **Triton** | Python-embedded kernel DSL that both hand-authored kernels and Inductor's codegen increasingly target instead of raw CUDA C++ — full treatment in `../triton_and_kernel_dsls/` |
 | **DLPack** (`__dlpack__`/`__dlpack_device__`, `to_dlpack`/`from_dlpack`) | Cross-framework zero-copy tensor-interchange protocol shared by CuPy, PyTorch, JAX, TensorFlow |
 | **`__cuda_array_interface__`** | An older, simpler zero-copy interchange protocol (numba/CuPy/RAPIDS) predating widespread DLPack adoption; still seen in RAPIDS interop code |
@@ -872,6 +992,18 @@ It carries a device pointer, shape, strides, dtype, and device type/id — enoug
 **Q: Why is arithmetic-intensity/roofline awareness still relevant even when writing GPU code entirely at the CuPy or Numba level?**
 **Short:** A friendlier Python API changes how much code you write to launch a kernel, not whether it's memory-bound or compute-bound — roofline reasoning still applies.
 Wrapping a kernel in a friendlier Python API changes how much code you had to write to launch it, not whether the kernel is memory-bound or compute-bound. The same roofline reasoning from `../cuda_math_and_dnn_libraries/` still determines what optimization actually moves the needle.
+
+**Q: Why does a custom kernel bound only with `pybind11` and `torch.utils.cpp_extension` graph-break under `torch.compile`, and what fixes it?**
+**Short:** Dynamo has no schema for an opaque pybind11 call and graph-breaks around it; registering it as a `torch.library.custom_op` with a fake impl fixes it.
+Dynamo's tracer has no operator schema and no shape rule for a plain `pybind11`-bound function, so it cannot reason about the call without running it — its only option is to cut the compiled graph in two around the call, which kills whatever fusion `torch.compile` was supposed to buy for the ops on either side. The fix is to register the same kernel under `torch.library.custom_op` with a `register_fake` implementation, giving Dynamo a name, schema, and shape/dtype rule it can trace through instead of around.
+
+**Q: What is `register_fake` for on a `torch.library.custom_op`, and why must it never touch the input tensors' data?**
+**Short:** `register_fake` supplies a shape/dtype-only meta implementation Dynamo runs under symbolic tracing, using `FakeTensor`s that carry no real storage.
+`register_fake` supplies the "meta" implementation Dynamo runs while symbolically tracing the graph, and it executes against `FakeTensor`s that carry shape, dtype, and device but no actual data. Its only job is to return an output of the correct shape/dtype/device using something like `torch.empty_like` — touching real data would either crash (there is none) or silently corrupt the trace, since the fake impl runs in place of the real kernel during compilation, not alongside it.
+
+**Q: What does `mutates_args` control on a `torch.library.custom_op`, and what goes wrong if it's declared wrong?**
+**Short:** `mutates_args` tells the compiler which arguments the op writes in place; getting it wrong causes silent miscompiles, not errors.
+`mutates_args` names the input arguments the op writes into (an out-parameter, for example, via `mutates_args={"out"}`), which is how the compiler knows whether it is safe to reorder, deduplicate, or eliminate calls to this op. Declaring it wrong — omitting a mutated argument, or marking a pure op as mutating — doesn't raise an exception; it lets the scheduler make a reordering decision that is invalid for what the kernel actually does, producing a silent miscompile that only shows up as a wrong numerical result.
 
 ---
 

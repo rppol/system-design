@@ -371,3 +371,82 @@ The decision tree tells you which pattern fits. This table tells you what you pa
 | Visitor | 1 visitor interface + `accept` on every element; each new element type edits every visitor | Double dispatch | Cheap addition of element types, in exchange for cheap addition of operations |
 
 Read the table for the two structural inversions, because they are the classic interview question. **Abstract Factory** makes adding a family cheap and adding a product type expensive; **Visitor** makes adding an operation cheap and adding an element type expensive. In both cases the pattern is right only if the axis it makes cheap is the axis your system actually changes along — and choosing the wrong axis leaves you with the full class-count cost and none of the benefit.
+
+---
+
+## Interview Questions with Answers
+
+**Q: What is the classic interview question hiding in the Abstract Factory and Visitor rows of the Tradeoffs table?**
+**Short:** Both make one axis of change cheap and the opposite axis expensive — you must match the axis to what actually changes.
+
+Abstract Factory makes adding a new product FAMILY cheap (one new concrete factory) but adding a new product TYPE expensive (every existing factory must be edited). Visitor inverts this exactly: adding a new OPERATION is cheap (one new visitor), but adding a new ELEMENT TYPE is expensive (every existing visitor must be edited). The pattern is only the right choice if the axis it makes cheap is the axis your system genuinely changes along — picking either pattern for the wrong axis gets you the full structural cost with none of the benefit.
+
+**Q: According to the Technologies and Tools table, when should you still hand-write a Singleton in a DI-managed application?**
+**Short:** Never — in a DI application, let the container own the instance instead of hand-rolling Singleton.
+
+The table's guidance for Singleton is blunt: "Never in a DI application — let the container own the instance," pointing instead to Spring's singleton bean scope, Guice's `@Singleton`, or Jakarta CDI's `@ApplicationScoped`. Hand-rolled Singletons resist mocking and testing, while container-managed singletons remain injectable and swappable in tests. This is the same anti-pattern flagged separately under "Singleton + Dependency Injection" clashes elsewhere in this directory.
+
+**Q: Why does the Technologies table say Strategy is "always fine to write — the cheapest pattern to own"?**
+**Short:** Strategy costs just one interface plus one type per algorithm and one virtual call at runtime, with almost nothing to lose.
+
+Looking at the Tradeoffs table, Strategy's structural cost is "1 interface + 1 type per algorithm," runtime cost is "One virtual call," and what you lose is "Very little — prefer lambdas to keep the class count down." Compare that to Abstract Factory or Visitor, which both carry real structural liabilities on one axis. This is why Strategy is the pattern interviewers expect you to reach for readily, while patterns like Abstract Factory or Interpreter warrant more justification before use.
+
+**Q: When does the Technologies table say you should still write your own Command instead of using Runnable/Callable plus ExecutorService?**
+**Short:** Write your own Command when you need undo with custom state capture, which ExecutorService cannot provide.
+
+`Runnable`/`Callable` plus `ExecutorService`, Quartz `Job`, `UndoManager`, and Axon's command bus already cover most queued/deferred-execution needs. The table's stated exception is "You need undo with custom state capture" — none of those platform tools capture the domain-specific pre-state a custom `undo()` would need to reverse a business operation. This mirrors the general rule across the table: reach for your own implementation only when the domain logic genuinely can't be expressed by the platform's built-in tool.
+
+**Q: What does the Pattern Combinations Matrix in this file say about combining Command with Chain of Responsibility?**
+**Short:** Each handler in the chain can itself be a Command, and the chain can be structured as a Composite.
+
+The matrix entry for Chain of Responsibility lists "Command, Composite" with the note "Each handler is a Command; chain can be built as a Composite." This means a CoR pipeline's individual handlers can be represented as executable Command objects (making them loggable/replayable), and the chain's own structure — a sequence of handlers — can itself be modeled as a Composite tree if handlers need to be grouped or nested. It's a distinct combination from the "CoR routes, Command executes" idiom shown in the dedicated `ChainOfResponsibility_vs_Command.md` file.
+
+**Q: According to the Common Design Scenarios, which two patterns combine for a Permission/Authorization system, and what does each contribute?**
+**Short:** Proxy intercepts every call as the single entry point; Chain of Responsibility runs the request through a series of guards.
+
+Proxy acts as the sole entry point that intercepts every call to the real service, while internally it delegates to a Chain of Responsibility of guards — auth check, role check, rate limit — any one of which can short-circuit the chain with a rejection before the real service is ever reached. This division of labor mirrors the Permission/Authorization sequence diagram in this file: the client only ever talks to the Proxy, and the guard chain's internal structure stays invisible to the caller.
+
+**Q: What does "Golden Hammer" have to do with the Pattern Selection Decision Tree's structure?**
+**Short:** The tree exists specifically to force starting from the problem (creation/structure/behavior), preventing habitual pattern reuse.
+
+The Intuition section explicitly names Golden Hammer — using familiar patterns regardless of fit — as the failure mode the decision tree is built to prevent. By requiring you to first classify your concern (creation, structure, or behavior) and then answer a specific yes/no question about the problem, the tree structurally blocks jumping straight to a favorite pattern before establishing whether it actually matches the requirement.
+
+**Q: Why does the "Decorator Hell" anti-pattern warning recommend limiting stack depth rather than banning Decorator outright?**
+**Short:** Decorator itself is sound; the problem is unbounded stacking making the active call chain impossible to trace.
+
+The anti-pattern warning identifies the misuse as "stacking so many Decorators that the call stack becomes impossible to debug," not the use of Decorator itself. The fix offered is to limit decorator depth or switch to a Pipeline/Chain of Responsibility with explicit, visible ordering once the number of layers grows unmanageable. This distinguishes a legitimate pattern used carelessly from the pattern being wrong for the job.
+
+**Q: What does the "God Mediator" anti-pattern warn against, and how does the fix relate to SRP?**
+**Short:** God Mediator warns against putting all business logic inside the Mediator, which the fix corrects by keeping it thin.
+
+The misuse described is loading the Mediator with business logic until it becomes a God Object and a bottleneck, which directly violates the Single Responsibility Principle by making one class responsible for both coordination AND domain logic. The prescribed fix is to keep the Mediator strictly to coordination — routing messages between colleagues — and push business logic back into the components themselves, restoring each class's single responsibility.
+
+**Q: According to the anti-pattern warnings, why is "Command Without Undo Design" a design-order problem rather than an implementation bug?**
+**Short:** Retrofitting undo() after execute() already discarded prior state is a design-sequencing mistake, not a coding error.
+
+The misuse is using Command purely for queueing without designing `undo()` from the start, and the stated problem is that "state needed for undo is already discarded by execution time" — no amount of careful coding after the fact can recover data that was never captured. The fix is to design `execute()` and `undo()` together from day one, capturing pre-state in the Command before executing, which is a sequencing decision made at design time, not something fixable by better implementation later.
+
+**Q: Why does the file's Problem-to-Pattern Mapping route "share a huge number of similar objects efficiently in memory" to Flyweight and not Prototype?**
+**Short:** Flyweight shares intrinsic state across many objects to save memory; Prototype clones a full object, which doesn't save memory.
+
+Flyweight's mapping entry states it "shares intrinsic state; stores extrinsic state outside the object" — the whole point is memory efficiency through sharing, achieved by splitting state into what's common (shared) and what's per-instance (kept external). Prototype instead solves "I need a new object that is a copy of an existing one," which creates a full independent copy rather than sharing anything — cloning is about avoiding expensive re-instantiation, not about reducing the memory footprint of many similar objects. Confusing the two is a common interview trap because both involve "many similar objects."
+
+**Q: What is the Event System scenario's three-pattern combination, and what does each pattern own?**
+**Short:** Observer wires pub/sub, Command wraps event payloads for replay, and Mediator can decouple producers from consumers further.
+
+Observer handles the raw pub/sub mechanics — subjects notifying registered listeners. Command wraps each individual event's payload so it can be serialized, queued, replayed, or logged independently of the notification mechanism. Optionally, Mediator is layered on top to avoid direct coupling between event producers and consumers when the wiring itself grows complex. This three-pattern stack shows how a single "event system" requirement decomposes into three genuinely distinct concerns.
+
+**Q: Per the Technologies table, what is the platform-native replacement for hand-writing Visitor in modern Java, and when should you still write your own?**
+**Short:** Sealed types plus switch pattern matching (Java 21+) replace hand-written Visitor; write your own for a closed hierarchy predating sealed types.
+
+The table lists "Sealed types plus `switch` patterns (Java 21+); `FileVisitor`; ASM; ANTLR generated visitors" as what the platform already provides, since exhaustive `switch` over a sealed hierarchy achieves double-dispatch-like behavior without a separate Visitor interface. The stated exception for writing your own is "a closed hierarchy predating sealed types" — legacy code that can't be migrated to sealed interfaces still benefits from the classic Visitor structure.
+
+**Q: How does the Pattern Combinations Matrix explain why State often coexists with Command, using the ATM example logic?**
+**Short:** The current State determines which Commands are valid, while Commands trigger the actual state transitions.
+
+The matrix entry for State lists "Command, Strategy, Singleton" with the note "Each State can be a Singleton; Strategy vs State differs in who drives change." Applied to an ATM, `PINVerifiedState.process(cmd)` checks whether the incoming `Command` (withdrawal, balance check) is valid in the current state before executing it — State provides the context-sensitive validation gate, and Command supplies the actual unit of work to run once validated.
+
+**Q: Why does the file caution against combining Factory, Abstract Factory, and Builder all at once for a single object?**
+**Short:** Mixing all three creation patterns for one object adds confusion; pick the simplest pattern that solves the actual problem.
+
+The anti-combination warning states this directly: use Builder if the object has many optional fields, use Factory if you need polymorphism, and use Abstract Factory only if you need whole families of related objects — but never reach for all three simultaneously on the same object, since each addresses a distinct axis of complexity (assembly steps, subclass selection, family consistency) that rarely all apply to one type at once. Picking the single pattern that matches the actual axis of variation keeps the design legible.

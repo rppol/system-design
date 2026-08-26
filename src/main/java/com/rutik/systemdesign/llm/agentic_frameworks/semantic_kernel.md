@@ -8,8 +8,10 @@ Semantic Kernel (SK) is Microsoft's enterprise-grade SDK for building AI applica
 
 Semantic Kernel is the foundation of Microsoft's Copilot Stack, powering GitHub Copilot, Microsoft 365 Copilot, and Bing Chat. This gives it production credibility at scale that few other frameworks match.
 
-**Current version**: semantic-kernel 1.x (Python), 1.x (C#) (2024)
-**Production adoption signal**: Powers GitHub Copilot Enterprise, Microsoft 365 Copilot, Bing Chat integration. Salesforce uses SK for Einstein AI. Thousands of enterprise deployments.
+**Semantic Kernel's successor is Microsoft Agent Framework 1.0**, which reached general availability on 2026-04-03 as the single, direct successor to both Semantic Kernel and AutoGen (docs: https://learn.microsoft.com/en-us/agent-framework/overview/). Microsoft describes it as combining Semantic Kernel's enterprise-grade plumbing — session-based state management, type safety, filters, telemetry, and broad model/embedding support — with AutoGen's simple agent abstractions, plus new graph-based workflows for explicit multi-agent orchestration. Semantic Kernel continues to receive updates but is no longer where new Microsoft-stack capability lands; Microsoft publishes a Semantic Kernel -> Agent Framework migration guide. This file now documents Semantic Kernel as **lineage**: the DI/plugin/planner/filter enterprise patterns that carried forward, and what breaks if you migrate an existing `semantic-kernel` 1.x codebase. For the sibling migration, see [AutoGen](autogen.md); for the underlying multi-agent orchestration ideas, see [Magentic-One and AutoGen v0.4](../multi_agent_systems/magentic_one_and_autogen_v04.md).
+
+**Current version**: `semantic-kernel` 1.44.1 (Python; C# tracks its own 1.x line) — the last widely-used release line before the framework moved into Agent Framework
+**Production adoption signal**: Powered GitHub Copilot Enterprise, Microsoft 365 Copilot, and Bing Chat integration historically. Salesforce used SK for Einstein AI. Thousands of enterprise deployments; new Microsoft-stack work should target Agent Framework instead.
 
 ---
 
@@ -546,17 +548,19 @@ over-decomposed plan; you have to not generate it.
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `semantic-kernel` (Python) | Framework | `pip install semantic-kernel>=1.0` |
+| `semantic-kernel` (Python) | Framework | `pip install semantic-kernel>=1.0` (current: 1.44.1) |
 | `Microsoft.SemanticKernel` (NuGet) | Framework | C# package |
+| `agent-framework` (Python) | Successor | Microsoft Agent Framework 1.0 — where new Microsoft-stack agent work goes |
+| `Microsoft.Agents.AI` (NuGet) | Successor | Microsoft Agent Framework 1.0, C# package |
 | Azure OpenAI | LLM provider | Native SK integration |
 | Azure Cognitive Search | Vector store | Semantic Memory backend |
 | `semantic-kernel-azure-ai-inference` | Azure AI integration | Phi-3, Llama 3 via Azure |
-| `sk-nightly` | Nightly builds | Latest features (unstable) |
 
 **Version notes:**
 - SK 0.x (2023): preview, frequent breaking changes
 - SK 1.0.x (early 2024): stable API for C# and Python
-- SK 1.x Python: `semantic_kernel.functions` module structure, async-first
+- SK 1.x Python (current: 1.44.1): `semantic_kernel.functions` module structure, async-first; 1.38+ adds `KernelFunction.as_agent_framework_tool()` for incremental migration
+- Microsoft Agent Framework 1.0 (2026-04-03): direct successor to both Semantic Kernel and AutoGen; no `Kernel` object, no planners — plain-function tools and graph-based Workflows
 
 ---
 
@@ -626,6 +630,14 @@ Semantic Kernel plugins are strongly typed classes with annotated methods (Kerne
 **Q: How do you implement multi-step planning with Semantic Kernel's Planner?**
 **Short:** It generates a function-call sequence from a goal and available plugins, and quality degrades sharply past around 50 exposed functions.
 SK's planner takes a user goal and available plugins, then generates a plan (sequence of function calls) to achieve it. The Handlebars planner generates a Handlebars template with function calls; the Stepwise planner executes functions iteratively with ReAct-style reasoning. Key configuration: limit the number of available functions presented to the planner (exposing 50+ functions degrades plan quality), set max iterations (default 10), and implement plan validation before execution. The planner works best with well-described function parameters and clear function names.
+
+**Q: What replaces the Kernel, plugins, and Kernel filters in Microsoft Agent Framework?**
+**Short:** Agent Framework drops the `Kernel` object entirely — agents wrap a chat client directly, plain functions are tools, and middleware replaces filters.
+There is no `Kernel` to construct or pass around: an agent is built directly from a chat client, e.g. `agent = client.as_agent(instructions=..., tools=[...])`. Plugins disappear as a concept — a tool is just a plain Python function with type-hinted parameters and a docstring (no `@kernel_function` decorator or Plugin wrapper class required), passed straight to `tools=`. Kernel filters are replaced by Agent Framework's middleware, which intercepts agent actions the same way filters intercepted function invocations. Migration is not all-or-nothing: `KernelFunction.as_agent_framework_tool()` (semantic-kernel >= 1.38) converts an existing semantic or native `KernelFunction` — including a VectorStore's `create_search_function()` result — directly into an Agent Framework tool, so a codebase can adopt Agent Framework incrementally while still calling into SK plugins.
+
+**Q: What breaks when you migrate an existing Semantic Kernel 1.x codebase to Agent Framework?**
+**Short:** Planners disappear in favor of explicit graph-based Workflows, agent types consolidate into one class, and the invocation API is renamed.
+Four concrete breaks: (1) No planners — `SequentialPlanner` and `FunctionCallingStepwisePlanner`'s LLM-improvised plans are replaced by explicit, graph-based Workflows (the same shift AutoGen's `GroupChat` users hit — see [AutoGen](autogen.md)), so multi-step orchestration logic needs re-architecting, not renaming; (2) Agent-type consolidation — SK's per-provider classes (`ChatCompletionAgent`, `AzureAIAgent`, `OpenAIAssistantAgent` in C#) collapse into one client-agnostic `Agent`/`ChatClientAgent` built on any compatible chat client; (3) Invocation API rename — `agent.invoke()`/`invoke_stream()` become `agent.run()`/`agent.run(..., stream=True)`, returning `AgentResponse`/`AgentResponseUpdate` instead of an async iterator of `ChatMessageContent`; (4) Thread creation — SK requires picking a provider-specific thread type (`ChatHistoryAgentThread`, `AzureAIAgentThread`, ...) manually; Agent Framework's `agent.create_session()` creates the right session type for you. Options configuration also changes from `KernelArguments`/`PromptExecutionSettings` objects to a TypedDict-based `options=` parameter.
 
 ---
 

@@ -1,6 +1,15 @@
 # Database Engineering — Case Studies
 
-Six end-to-end database design case studies, each covering a real-world scenario with production-grade architecture decisions, schema design, implementation details, tradeoffs, and interview discussion points.
+Eight end-to-end database design case studies, all on the repo's 11-section principal template:
+Intuition, requirements clarification, derived scale estimation, high-level architecture,
+component deep dives (with executable schema/code and at least one broken-then-fixed pair),
+design decisions and tradeoffs, real-world implementations at named companies, technologies and
+tools, an operational playbook with alert thresholds and runbooks, quantified war stories,
+capacity planning with cost arithmetic, and 10+ interview discussion points.
+
+**Case-study Q&As never enter the MCQ bank** (`extract.py` skips every `case_studies/` path) —
+they are discussion prompts tied to one scenario. They do power the game's separate Case Studies
+tab, and every file here is readable in the reader.
 
 ---
 
@@ -11,8 +20,8 @@ If you only have time for three case studies, read these first:
 | File | Why |
 |------|-----|
 | [Banking Ledger](design_banking_ledger/design_banking_ledger.md) | The hardest database problem: SERIALIZABLE isolation, double-entry bookkeeping, RPO=0, and immutable audit trail. Patterns here apply to any financial system. |
-| [Monolith to Polyglot Migration](design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) | Teaches the CDC (Debezium) + dual-write migration pattern that every senior engineer needs for zero-downtime database migrations. |
-| [Multi-Tenant SaaS Database](design_multitenant_saas_database/design_multitenant_saas_database.md) | Covers all three isolation tiers (row/schema/database), RLS, and connection pooling at SaaS scale — comes up in nearly every platform-engineering interview. |
+| [Monolith to Polyglot Migration](design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) | Teaches the transactional-outbox + Debezium CDC migration pattern every senior engineer needs for zero-downtime moves — and shows concretely why the obvious application-level dual-write is the wrong answer. |
+| [Multi-Tenant SaaS Database](design_multitenant_saas_database/design_multitenant_saas_database.md) | Covers all three isolation tiers (row/schema/database), RLS, and connection pooling at SaaS scale — comes up in nearly every platform-engineering interview, and carries the `SET` vs `SET LOCAL` cross-tenant leak that is the single highest-consequence bug in this whole section. |
 
 ---
 
@@ -30,7 +39,7 @@ Grouped by primary engineering concern:
 
 | Case Study | Primary Concern | What It Teaches |
 |------------|----------------|----------------|
-| [Multi-Tenant SaaS Database](design_multitenant_saas_database/design_multitenant_saas_database.md) | Row-level security, schema isolation, connection pooling | When to choose row-per-tenant vs schema-per-tenant vs database-per-tenant; PostgreSQL RLS policy design with `SET app.tenant_id`; PgBouncer session pooling for schema-per-tenant; connection storm prevention in K8s. |
+| [Multi-Tenant SaaS Database](design_multitenant_saas_database/design_multitenant_saas_database.md) | Row-level security, schema isolation, connection pooling | When to choose row-per-tenant vs schema-per-tenant vs database-per-tenant, with a cost model rather than a list; PostgreSQL RLS policy design including `FORCE ROW LEVEL SECURITY`; **why a plain `SET app.tenant_id` is a cross-tenant data leak under PgBouncer transaction pooling and `SET LOCAL` / `set_config(..., true)` is the fix**; tenant_id-first composite indexes; noisy-neighbour containment; per-tenant backup, restore and GDPR erasure per tier; migrating a tenant between tiers. |
 
 ### Polyglot Persistence & Read Scalability
 
@@ -49,9 +58,21 @@ Grouped by primary engineering concern:
 
 | Case Study | Primary Concern | What It Teaches |
 |------------|----------------|----------------|
-| [Monolith to Polyglot Migration](design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) | CDC, dual-write, zero-downtime migration | How to migrate 5 TB MySQL monolith without downtime: Debezium CDC for change capture; dual-write phase with shadow reads for validation; strangler fig at the database layer; cutover checklist with rollback plan. |
+| [Monolith to Polyglot Migration](design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) | CDC, transactional outbox, zero-downtime migration | How to migrate a 5 TB MySQL monolith without downtime: **why the naive application-level dual-write silently diverges the two stores and the transactional outbox plus Debezium CDC is the fix**; keyset rather than `LIMIT/OFFSET` backfill; reconciling backfill with live CDC via idempotent version-keyed upserts; shadow reads for validation; strangler fig at the *data* layer; per-phase rollback cost and the point of no return. |
 
 ---
+
+### Global Distribution & Multi-Region
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Global Multi-Region OLTP](design_global_multiregion_oltp/design_global_multiregion_oltp.md) | Consensus latency, per-row locality, data residency | Why the write floor is one RTT to the *nearest quorum* and nothing beats it; `REGIONAL BY ROW` vs `GLOBAL` as the decision that turns a 70 ms commit into a 2 ms one; follower and stale reads as the read escape hatch; why a hot inventory row in a global quorum is a serialization point, not a throughput problem; reconciling `SURVIVE REGION FAILURE` with strict EU residency. |
+
+### Vector Search & Retrieval
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Vector Search Platform](design_vector_search_platform/design_vector_search_platform.md) | ANN indexing economics, filtered search, multi-tenancy | Why sizing starts with dimensions x bytes x count and everything else shrinks it; the overfiltering silent failure — a post-filtered ANN query returning 3 rows for `LIMIT 50` with no error — and the three fixes; hybrid BM25 + dense fused by reciprocal rank fusion and why scores cannot be added; the quantization ladder and why binary is never used without rescoring; HNSW graph degradation from deletes. |
 
 ## Cross-Cutting / Shared Primitives
 
@@ -59,8 +80,9 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
-| SERIALIZABLE isolation + advisory locks | Banking Ledger | `../concurrency_control_and_locking/concurrency_control_and_locking.md` | 1 — Foundations |
-| Idempotency (request + consumer) | all six | `../distributed_transactions/distributed_transactions.md` | 5 — Distributed |
+| SERIALIZABLE isolation + advisory locks | Banking Ledger (the only file that uses it) | `../concurrency_control_and_locking/concurrency_control_and_locking.md` | 1 — Foundations |
+| Idempotency (request + consumer) | Banking Ledger (core), Feed Storage, Real-Time Analytics, Migration, Global Multi-Region OLTP | `../distributed_transactions/distributed_transactions.md` | 5 — Distributed |
+| Transactional outbox | Banking Ledger, Migration, Feed Storage, Global Multi-Region OLTP | `../distributed_transactions/distributed_transactions.md` | 5 |
 | Immutable event log / double-entry | Banking Ledger | `../schema_design_and_normalization/schema_design_and_normalization.md` | 2 — Relational |
 | RLS + `SET app.tenant_id` | Multi-Tenant SaaS | `../database_security_and_compliance/database_security_and_compliance.md` | 6 — Production Ops |
 | PgBouncer pooling at scale | Multi-Tenant SaaS | `../connection_pool_management/connection_pool_management.md` | 6 |
@@ -84,24 +106,39 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    %% source case studies (teach a pattern reused elsewhere)
-    BL("Banking<br/>Ledger") -->|"SERIALIZABLE<br/>isolation"| MSDB(["Multi-Tenant<br/>SaaS DB"])
-    BL -.->|"idempotency pattern<br/>reused everywhere"| OTH(["All Other<br/>Case Studies"])
-    SMFS("Social Media<br/>Feed Storage") -->|"Redis patterns<br/>(inventory counters)"| ECOM("Ecommerce<br/>Catalog")
-    SMFS -->|"Cassandra<br/>wide-row model"| RTAP(["Realtime<br/>Analytics"])
+    %% every edge below is checked against both files' actual content
+    BL("Banking<br/>Ledger") -->|"transactional outbox<br/>+ idempotency keys"| MPM("Monolith to<br/>Polyglot Migration")
+    SMFS("Social Media<br/>Feed Storage") -->|"Redis counters<br/>and sorted sets"| ECOM("Ecommerce<br/>Catalog")
+    ECOM -->|"CDC pipeline<br/>Postgres to Elasticsearch"| MPM
+    ECOM -->|"Kafka ingest +<br/>read-model split"| RTAP(["Realtime<br/>Analytics"])
+    MPM -->|"backfill and cutover<br/>reused for tenant tier moves"| MSDB(["Multi-Tenant<br/>SaaS DB"])
 
-    %% hub case studies (both reuse and re-teach a pattern)
-    ECOM -->|"CDC / polyglot<br/>sync patterns"| MPM("Monolith to<br/>Polyglot Migration")
-    ECOM -->|"Kafka ingestion<br/>concepts"| RTAP
-    MPM -->|"migration techniques<br/>(tenant onboarding)"| MSDB
+    %% the two newest are real citations, not concept-prerequisites
+    BL -->|"claim-check-complete<br/>idempotency, cited by name"| GMRO(["Global Multi-Region<br/>OLTP"])
+    MSDB -->|"isolation tiers +<br/>SET LOCAL under PgBouncer"| VSP(["Vector Search<br/>Platform"])
 
     %% semantic coloring
     class BL,SMFS base
     class ECOM,MPM mathOp
-    class MSDB,RTAP,OTH frozen
+    class MSDB,RTAP frozen
+    class GMRO,VSP req
 ```
 
-*Arrows point from the case study that originates a pattern to the one that reuses it. The dotted edge marks the banking ledger's idempotency pattern threading through every other case study, while the solid chain from ecommerce_catalog through monolith_to_polyglot_migration into multitenant_saas_database shows how CDC and migration techniques compound.*
+*Read this as a concept-prerequisite order, not as a citation graph: **the original six case
+studies do not link to one another**, so those arrows are claims about what you already understand
+rather than references one file makes to another. The two newest are the exception and are drawn
+as real citations — `design_global_multiregion_oltp` reuses the banking ledger's
+claim-check-complete idempotency protocol by name, and `design_vector_search_platform` cites the
+multi-tenant study's isolation tiers and its `SET LOCAL`-under-PgBouncer trap. Each edge was checked against both files' actual content
+before being drawn — the banking ledger is where the transactional outbox and idempotency keys are
+introduced, and the migration case study assumes both; the feed-storage Redis counter and
+sorted-set patterns recur as ecommerce inventory counters; the ecommerce CDC pipeline
+(Postgres → Debezium → Kafka → Elasticsearch) is the steady-state version of the migration's
+one-off CDC cutover, and its Kafka ingest is the smaller sibling of the analytics platform's;
+and the migration's backfill-and-cutover machinery is exactly what moving a tenant between
+isolation tiers needs. Two edges that used to appear here have been removed as unsupported: the
+analytics platform contains no Cassandra at all (it is Kafka + ClickHouse + Redis + S3), and
+`SERIALIZABLE` appears in the banking ledger and nowhere else.*
 
 ---
 
@@ -119,6 +156,10 @@ flowchart LR
 | Design a CDC pipeline | [design_monolith_to_polyglot_migration](design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) |
 | Design a leaderboard / trending system | [design_social_media_feed_storage](design_social_media_feed_storage/design_social_media_feed_storage.md) |
 | Design a time-series / metrics storage system | [design_realtime_analytics_platform](design_realtime_analytics_platform/design_realtime_analytics_platform.md) |
+| Design a globally distributed database / multi-region OLTP | [design_global_multiregion_oltp](design_global_multiregion_oltp/design_global_multiregion_oltp.md) |
+| Design a system with data-residency (GDPR) constraints | [design_global_multiregion_oltp](design_global_multiregion_oltp/design_global_multiregion_oltp.md) |
+| Design a vector search / semantic search platform | [design_vector_search_platform](design_vector_search_platform/design_vector_search_platform.md) |
+| Design the retrieval layer of a RAG system | [design_vector_search_platform](design_vector_search_platform/design_vector_search_platform.md) |
 
 ---
 

@@ -48,28 +48,28 @@ This section covers:
 | 17 | [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
 | 18 | [spring_transactions](spring_transactions/spring_transactions.md) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
 | 19 | [spring_caching](spring_caching/spring_caching.md) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
-| 20 | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
-| 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
+| 20 | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS, passkeys/WebAuthn, one-time-token login, factor-aware MFA |
+| 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, DPoP, OAuth 2.1, Spring Authorization Server |
 | 22 | [spring_cloud_config](spring_cloud_config/spring_cloud_config.md) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
 | 23 | [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker — with 1 deep-dive sub-file ([gateway server webmvc](spring_cloud_patterns/gateway_server_webmvc.md)) |
 | 24 | [spring_messaging](spring_messaging/spring_messaging.md) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
-| 25 | [spring_batch](spring_batch/spring_batch.md) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
+| 25 | [spring_batch](spring_batch/spring_batch.md) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobOperator, JobRepository, ChunkOrientedStep, partitioning, skip/retry (Batch 6) |
 | 26 | [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
-| 27 | [spring_ai](spring_ai/spring_ai.md) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
+| 27 | [spring_ai](spring_ai/spring_ai.md) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, ToolCallingAdvisor, MCP server/client, model routing via beans (Spring AI 2.0) |
 | 28 | [spring_integration](spring_integration/spring_integration.md) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
 | 29 | [spring_testing](spring_testing/spring_testing.md) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
-| 30 | [spring_performance](spring_performance/spring_performance.md) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads, GraalVM native, connection pools |
+| 30 | [spring_performance](spring_performance/spring_performance.md) | 8 — Testing & Production | Advanced | Startup time, lazy init, CDS, JDK AOT cache (Leyden), CRaC, virtual threads, GraalVM native, connection pools |
 | 31 | [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
 | 32 | [spring_native_graalvm](spring_native_graalvm/spring_native_graalvm.md) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
 | 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
 | 34 | [spring_grpc](spring_grpc/spring_grpc.md) | 4 — Spring Web | Advanced | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor, Status↔exception mapping, deadlines, streaming, security + tracing |
-| 35 | [spring_session](spring_session/spring_session.md) | 6 — Security | Advanced | SessionRepositoryFilter, Redis/JDBC/Hazelcast backends, session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
+| 35 | [spring_session](spring_session/spring_session.md) | 6 — Security | Advanced | SessionRepositoryFilter, Redis and JDBC backends (Boot 4.0 dropped Hazelcast/MongoDB), session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
 | 36 | [spring_data_nosql](spring_data_nosql/spring_data_nosql.md) | 5 — Data & Transactions | Intermediate | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
 | 37 | [database_migrations](database_migrations/database_migrations.md) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
 | 38 | [spring_websocket_stomp](spring_websocket_stomp/spring_websocket_stomp.md) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
 | 39 | [spring_http_clients](spring_http_clients/spring_http_clients.md) | 4 — Spring Web | Intermediate | RestClient vs WebClient vs @HttpExchange, `@ImportHttpServices` groups, connection pooling, timeouts, error handling, MockRestServiceServer |
 
-**Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
+**Deep-dive sub-files — 4 total** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_aop/pointcut_designators.md](spring_aop/pointcut_designators.md) — every pointcut designator, `javap`-backed proxy analysis, benchmarked matching cost; [spring_cloud_patterns/gateway_server_webmvc.md](spring_cloud_patterns/gateway_server_webmvc.md) — the servlet Gateway flavour's route DSL, filter signature and threading model; [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
 ---
 
@@ -271,6 +271,9 @@ case_studies
   design_oauth2_authorization_server.md      principal
   design_event_driven_microservice.md        principal
   design_idempotent_payment_api.md           principal
+  design_mcp_tool_platform.md  principal
+spring_boot_4_migration
+  spring_boot_4_migration.md  principal
 -->
 ## Learning Paths
 
@@ -311,7 +314,7 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#3-8-
 | 36 | [spring_testing](spring_testing/spring_testing.md) | module page only |
 | 37 | [spring_performance](spring_performance/spring_performance.md) | module page only |
 
-**Not in this path** (14 of 39, Full Path only): `spring_modulith`, `spring_graphql`, `spring_hateoas_rest_maturity`, `spring_grpc`, `spring_data_nosql`, `database_migrations`, `spring_session`, `spring_cloud_config`, `spring_websocket_stomp`, `spring_batch`, `spring_ai`, `spring_integration`, `observability_and_tracing`, `spring_native_graalvm`
+**Not in this path** (15 of 40, Full Path only): `spring_modulith`, `spring_graphql`, `spring_hateoas_rest_maturity`, `spring_grpc`, `spring_data_nosql`, `database_migrations`, `spring_session`, `spring_cloud_config`, `spring_websocket_stomp`, `spring_batch`, `spring_ai`, `spring_integration`, `observability_and_tracing`, `spring_native_graalvm`, `spring_boot_4_migration`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior Spring / Spring Boot interview** actually probes — the container internals, the proxy mechanics behind `@Transactional`/`@Cacheable`, the MVC request pipeline, and the data/security stack. Same learning order, a strict subset of the Full Path. Each group says why it earns senior time.
@@ -328,7 +331,7 @@ A ruthless cut to what a **senior Spring / Spring Boot interview** actually prob
 | Testing | `@SpringBootTest` vs slice tests, `@MockitoBean`, MockMvc, Testcontainers |
 
 <!-- study-path-table principal -->
-### Principal Path (18 modules)
+### Principal Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -350,8 +353,9 @@ A ruthless cut to what a **senior Spring / Spring Boot interview** actually prob
 | 37 | [spring_performance](spring_performance/spring_performance.md) | module page only |
 | 38 | [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) | module page only |
 | 39 | [spring_native_graalvm](spring_native_graalvm/spring_native_graalvm.md) | module page only |
+| 40 | [spring_boot_4_migration](spring_boot_4_migration/spring_boot_4_migration.md) | module page only |
 
-**Not in this path** (21 of 39, Full Path only): `ioc_container`, `bean_lifecycle`, `dependency_injection`, `spring_configuration`, `spring_proxies`, `spring_aop`, `spring_mvc_architecture`, `request_handling`, `filters_and_interceptors`, `spring_webflux`, `spring_graphql`, `spring_grpc`, `validation_and_error_handling`, `spring_data_jpa`, `spring_data_nosql`, `spring_caching`, `spring_websocket_stomp`, `spring_batch`, `spring_events_and_scheduling`, `spring_ai`, `spring_integration`
+**Not in this path** (21 of 40, Full Path only): `ioc_container`, `bean_lifecycle`, `dependency_injection`, `spring_configuration`, `spring_proxies`, `spring_aop`, `spring_mvc_architecture`, `request_handling`, `filters_and_interceptors`, `spring_webflux`, `spring_graphql`, `spring_grpc`, `validation_and_error_handling`, `spring_data_jpa`, `spring_data_nosql`, `spring_caching`, `spring_websocket_stomp`, `spring_batch`, `spring_events_and_scheduling`, `spring_ai`, `spring_integration`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes platform-level Spring judgment: transaction and boundary design, how a service is deployed and rolled back safely, and which framework magic a team should be forbidden from using. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -417,11 +421,14 @@ The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0
 | Synchronous HTTP client | `RestClient` | `RestClient` (`RestTemplate` still ships un-annotated; `@Deprecated` is scheduled for 7.1, removal for 8.0) |
 | HTTP interface clients | `@HttpExchange` + `HttpServiceProxyFactory` | `@ImportHttpServices` group registration + Boot auto-configuration |
 | API versioning | Hand-rolled (URI segment / custom header) | First-class: `@RequestMapping(version = "1.2")`, `spring.mvc.apiversion.*` |
-| Resilience | Spring Retry (separate project) | `@Retryable` / `@ConcurrencyLimit` in core via `@EnableResilientMethods` |
-| Proxying | CGLIB default in Boot | CGLIB default framework-wide, per-bean opt-out with `@Proxyable` |
+| Resilience | Spring Retry (separate project) | `@Retryable` (`maxRetries`) / `@ConcurrencyLimit` in `org.springframework.resilience.annotation`, enabled by `@EnableResilientMethods` — taught in [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| Proxying | CGLIB in Boot, JDK interface proxies in plain Framework | Same split of defaults; Framework 7 adds `@Proxyable` for a per-bean override in either direction (`INTERFACES` / `TARGET_CLASS`) |
 | Observability | Micrometer Tracing + OTLP | Micrometer 1.17 / Tracing 1.7, `spring-boot-starter-opentelemetry` |
-| Native image support | GraalVM native (stable) | GraalVM 25, unified "exact reachability metadata" format |
+| Native image support | GraalVM native (stable) | GraalVM 25 required; unified `reachability-metadata.json`, improved `--exact-reachability-metadata` |
 | Virtual threads | `spring.threads.virtual.enabled=true` | `spring.threads.virtual.enabled=true` |
+| Startup options | Plain JVM, CDS | Adds the **JDK AOT cache** (Leyden, `-XX:AOTCache`, Java 25+) as the cheap step before native image — see [spring_performance](spring_performance/spring_performance.md) |
+| Modern authentication | Password, OAuth2/OIDC, SAML | Adds passkeys (`webAuthn()`), one-time-token login, factor-aware MFA (`@EnableMultiFactorAuthentication`), DPoP — see [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) |
+| AI / agents | Spring AI 1.0 | **Spring AI 2.0** — tool loop in the advisor chain, MCP server and client (`@McpTool`) — see [spring_ai](spring_ai/spring_ai.md) |
 | Problem Details (RFC 9457) | `ProblemDetail` | `ProblemDetail` |
 | Testing | `MockMvc`, `WebTestClient`, `@ServiceConnection` | Adds `RestTestClient` (non-reactive `WebTestClient`), JUnit 6 |
 
@@ -522,7 +529,7 @@ For a guided learning path through all 9 case studies, see [case_studies/case_st
 | [Design a Spring Batch ETL Pipeline](case_studies/design_batch_pipeline.md) | Spring Batch chunk model, Job/Step orchestration, ItemReader/Processor/Writer, restartability, partitioning | Advanced |
 | [Design a Distributed Caching Layer](case_studies/design_distributed_caching.md) | Spring Cache abstraction, Redis CacheManager, cache stampede prevention, multi-level caching, eviction policies | Advanced |
 | [Design a Distributed Rate Limiter](case_studies/design_distributed_rate_limiter_spring.md) | Redis Lua token bucket, atomic check-and-decrement, OncePerRequestFilter, fail-open fallback | Advanced |
-| [Design an OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server 1.x, PKCE, refresh token rotation, dual-key JWKS rollover | Advanced |
+| [Design an OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server 7.1 (inside Spring Security), PKCE, refresh token rotation, dual-key JWKS rollover | Advanced |
 | [Design an Idempotent Payment API](case_studies/design_idempotent_payment_api.md) | Idempotency keys, pg_advisory_xact_lock, outbox pattern, exactly-once semantics | Advanced |
 | [Design a Real-Time Notification Service](case_studies/design_realtime_notification_service.md) | WebSocket fan-out, Redis Pub/Sub, ZSET history, virtual threads, backpressure | Advanced |
 

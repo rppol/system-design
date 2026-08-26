@@ -608,7 +608,172 @@ Spring Boot also integrates with `MessageSource` — configure `spring.validatio
 
 See the Spring case study: [Design a Multi-Tenant API](../case_studies/design_multitenant_api.md)
 
-**Quick scenario:** An enterprise SaaS API validates request bodies at the HTTP layer with `@Valid` + `ProblemDetail`. Service-layer methods use `@Validated` to catch invalid tenant configurations before DB writes. A custom `@ActiveTenant` constraint validator checks that the `tenantId` parameter references a non-suspended tenant (DB lookup). All validation errors return `application/problem+json` responses with a `violations` extension field listing all constraint failures.
+### Scenario: One Validation Contract, Three Kinds of Client
+
+**Context.** An enterprise SaaS platform exposes a single Orders API to three consumers
+with incompatible expectations: a React SPA that renders errors inline next to form
+fields, a partner integration that machine-parses failures to decide whether to retry,
+and an internal batch job that submits 5,000 orders per run and must know exactly which
+rows failed. One controller, one validation layer, three consumers who each need
+something different out of a 400.
+
+The naive version ships a different error shape per client and a `@ExceptionHandler`
+per exception type, and drifts within a quarter. The design below ships **one**
+contract — RFC 9457 `application/problem+json` — and lets each client read the part it
+needs.
+
+**Requirements.**
+
+| Consumer | Needs from a 400 | Consequence if missing |
+|---|---|---|
+| SPA | Field path per violation, so it can highlight the input | Renders one generic banner; user cannot tell which field is wrong |
+| Partner | A stable machine code, and retryable vs terminal | Retries a permanently invalid payload forever |
+| Batch | **Every** violation in one response, with row identity | 5,000 submit-fix-resubmit round trips instead of one |
+
+**The contract.**
+
+```json
+{
+  "type": "https://api.acme.com/problems/validation-failed",
+  "title": "Validation failed",
+  "status": 400,
+  "detail": "3 constraint violations",
+  "instance": "/orders",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "violations": [
+    { "field": "items[0].quantity", "code": "Min",        "message": "must be at least 1" },
+    { "field": "shippingAddress.postcode", "code": "Pattern", "message": "not a valid UK postcode" },
+    { "field": "tenantId", "code": "ActiveTenant",       "message": "tenant is suspended" }
+  ]
+}
+```
+
+`type` is the partner's stable code — a URI that never changes even when the wording
+does. `violations[].field` is the SPA's hook. Returning **all** violations rather than
+the first is what makes the batch case one round trip instead of thousands.
+
+**Implementation.**
+
+```java
+@RestControllerAdvice
+class ValidationProblemHandler {
+
+    private static final URI VALIDATION_TYPE =
+            URI.create("https://api.acme.com/problems/validation-failed");
+
+    // Request-body failures: @Valid on a @RequestBody
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    ProblemDetail onBodyInvalid(MethodArgumentNotValidException ex) {
+        List<Violation> violations = ex.getBindingResult().getFieldErrors().stream()
+                .map(fe -> new Violation(fe.getField(), fe.getCode(), fe.getDefaultMessage()))
+                .toList();
+        return problem(violations);
+    }
+
+    // Service-layer failures: @Validated on a bean, constraints on method parameters
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    ProblemDetail onMethodInvalid(HandlerMethodValidationException ex) {
+        List<Violation> violations = ex.getAllValidationResults().stream()
+                .flatMap(r -> r.getResolvableErrors().stream()
+                        .map(e -> new Violation(r.getMethodParameter().getParameterName(),
+                                                e.getCodes() == null ? null : e.getCodes()[0],
+                                                e.getDefaultMessage())))
+                .toList();
+        return problem(violations);
+    }
+
+    private ProblemDetail problem(List<Violation> violations) {
+        ProblemDetail pd = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        pd.setType(VALIDATION_TYPE);
+        pd.setTitle("Validation failed");
+        pd.setDetail(violations.size() + " constraint violations");
+        pd.setProperty("violations", violations);     // the extension field
+        pd.setProperty("traceId", currentTraceId());  // ties the 400 to the trace
+        return pd;
+    }
+
+    record Violation(String field, String code, String message) {}
+}
+```
+
+**The custom constraint that needs a database.** `tenantId` must reference a
+non-suspended tenant, which is a lookup, not a regex:
+
+```java
+@Target({ ElementType.FIELD, ElementType.PARAMETER })
+@Retention(RetentionPolicy.RUNTIME)
+@Constraint(validatedBy = ActiveTenantValidator.class)
+public @interface ActiveTenant {
+    String message() default "tenant is suspended";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+
+@Component
+class ActiveTenantValidator implements ConstraintValidator<ActiveTenant, String> {
+
+    private final TenantCache tenants;   // Caffeine, 60s TTL -- NOT a repository call
+
+    ActiveTenantValidator(TenantCache tenants) { this.tenants = tenants; }
+
+    @Override
+    public boolean isValid(String tenantId, ConstraintValidatorContext ctx) {
+        return tenantId == null || tenants.isActive(tenantId);   // null -> @NotNull's job
+    }
+}
+```
+
+Two rules are doing real work there. **`null` returns `true`** — nullability is
+`@NotNull`'s concern, and a validator that also rejects null produces two violations for
+one mistake. And the lookup goes through a **cache, not a repository**: a validator runs
+on every request, so an uncached DB call inside one turns validation into a per-request
+query on the hot path. The batch job submitting 5,000 orders would issue 5,000 tenant
+lookups for a value that changes twice a year.
+
+**Broken -> fixed: validating in the wrong place.**
+
+```java
+// BROKEN: validation as a service-layer if-statement
+@Transactional
+public Order place(OrderRequest req) {
+    if (req.quantity() < 1) throw new IllegalArgumentException("bad quantity");
+    // -> 500, no field path, no machine code, one violation at a time,
+    //    and it fires INSIDE the transaction, so the rollback is pure waste
+    ...
+}
+
+// FIXED: constraints declared on the type, enforced before the transaction opens
+public record OrderRequest(
+        @NotNull @ActiveTenant String tenantId,
+        @NotEmpty @Valid List<Item> items) {
+
+    public record Item(@NotBlank String sku, @Min(1) int quantity) {}
+}
+
+@PostMapping("/orders")
+ResponseEntity<OrderResponse> place(@Valid @RequestBody OrderRequest req) { ... }
+```
+
+`@Valid` on the nested `List<Item>` is what makes `items[0].quantity` appear as a path
+rather than the whole list being reported as one opaque failure — omit it and the SPA
+loses its field highlighting for every nested object in the payload.
+
+**Results.**
+
+| Metric | Before | After |
+|---|---|---|
+| Batch round trips for a 5,000-row file with 40 bad rows | up to 40 submit-fix cycles | 1 |
+| Tenant lookups per request | 1 (uncached DB call in the validator) | 0.0002 (60 s cache, ~1 per 5,000) |
+| Partner retry storms on permanently-invalid payloads | recurring | none — `type` distinguishes terminal from retryable |
+| Error-shape variants across the API | 6 | 1 |
+
+**What still requires judgement.** `ProblemDetail` will happily serialise whatever you
+put in an extension field, and a validation message is one of the easiest places to leak
+data — "value `4111111111111111` does not match pattern" is a card number in a log
+aggregator. Never interpolate the rejected value into a message for a field that could
+hold a secret. And `type` is a **permanent** identifier: once a partner branches on
+`.../problems/validation-failed`, changing that URI is a breaking API change even though
+nothing about the code changed.
 
 **Cross-links:**
 - [Request Handling](../request_handling/request_handling.md) — `@RequestMapping`, `@ControllerAdvice`, MVC exception handling

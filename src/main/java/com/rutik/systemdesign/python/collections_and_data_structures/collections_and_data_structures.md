@@ -84,7 +84,7 @@ This module covers:
 
 ## 5. Architecture Diagrams
 
-### `list` Memory Layout (64-bit CPython 3.11)
+### `list` Memory Layout (64-bit CPython 3.14)
 
 ```
 list object
@@ -350,6 +350,28 @@ diverge immediately. The `BadHash` class above is the pathological case that no 
 perturbation can save: all 1,000 instances return hash `42`, so `perturb` is identical too,
 every key retraces the same probe path, and the lookup degrades to the O(n) linear scan the
 comment warns about.
+
+**Merging dicts: `|` and `|=` [3.9].** PEP 584 gave `dict` the union operators, and they are
+the idiomatic merge today.
+
+```python
+defaults = {"timeout": 30, "retries": 3}
+overrides = {"retries": 5}
+
+merged = defaults | overrides       # {'timeout': 30, 'retries': 5} -- a NEW dict
+defaults |= overrides               # in-place update of defaults, returns None
+```
+
+Three things to know about them. **Right-hand side wins** on a duplicate key, matching
+`dict.update()` and `{**a, **b}`. **`|` allocates a new dict, `|=` does not** — in a loop
+that merges N dicts, repeated `|` is O(N^2) in total copying while `|=` is O(N), the same
+trap as `list` concatenation versus `extend`. And **`|=` is more permissive than `|`**: it
+accepts any iterable of key-value pairs, so `d |= [("a", 1)]` works while `d | [("a", 1)]`
+raises `TypeError` because both operands of `|` must be mappings.
+
+Against the older spellings: `{**a, **b}` builds the same new dict and still reads fine
+inside a literal, but `a | b` is clearer as a standalone expression; `a.update(b)` mutates
+and returns `None`, which is exactly why chaining it is a common bug.
 
 ---
 
@@ -991,7 +1013,8 @@ def add_item(item: str, container: list[str] | None = None) -> list[str]:
 | `array` (stdlib) | Typed C arrays | `array.array('d')` for float64; no boxing overhead |
 | `sortedcontainers.SortedList` | Sorted dynamic list | O(log n) add + O(log n) search; pure Python but fast |
 | `sortedcontainers.SortedDict` | Sorted dict by key | Iteration in key order; O(log n) ops |
-| `lru_cache` / `cache` (functools) | Memoization | Uses `dict` internally; O(1) cache hit |
+| `functools.lru_cache` | Bounded memoization | Uses `dict` internally; O(1) cache hit |
+| `functools.cache` | Unbounded memoization | `lru_cache(maxsize=None)`, added 3.9 |
 | `dataclasses` | Structured data | `@dataclass` replaces `namedtuple` for mutable records |
 | `attrs` | Structured data | More powerful than dataclasses; validators, converters |
 | `numpy.ndarray` | Numerical arrays | Contiguous C memory; vectorized BLAS/LAPACK ops |
@@ -1085,6 +1108,11 @@ Because `*` on a list repeats references, not objects — all three "rows" are t
 **Short:** array.array saves about 4.5x memory over a list of floats by storing raw doubles with no boxing.
 
 About 4.5x: roughly 8 MB versus roughly 36 MB for 1 million floats. The `array` stores raw 8-byte IEEE 754 doubles in a single contiguous C buffer with no per-element Python object, whereas the `list` pays about 8 MB of pointers plus about 28 MB of separately allocated boxed `float` objects. The savings come from eliminating "boxing" — a `list` element is a pointer to a heap-allocated `PyObject`, while an `array.array` element is the raw value packed inline. `array.array` only supports a single declared C type (`'i'` for int32, `'d'` for float64, etc.), so it cannot mix types the way a `list` can. Use `array.array` for large, single-typed numeric buffers, and reach for `numpy.ndarray` once you need vectorized math on top of that memory layout.
+
+**Q: What is the difference between `a | b`, `a |= b`, and `a.update(b)` for dicts?**
+**Short:** `a | b` builds a new merged dict, while `a |= b` and `a.update(b)` both mutate `a` in place and return None.
+
+`a | b` (PEP 584, added in 3.9) returns a **new** dict; `a |= b` and `a.update(b)` mutate `a` and return `None`. All three resolve a duplicate key the same way — the right-hand side wins — so the choice is about allocation and mutation, not semantics. The allocation difference bites in a loop: merging N dicts with repeated `a = a | b` copies the accumulated dict every iteration for O(N^2) total work, while `a |= b` is O(N). There is also an asymmetry worth knowing, because it shows up as a `TypeError` in review: `|=` accepts any iterable of key-value pairs, so `d |= [("a", 1)]` works, while both operands of `|` must be mappings. Reach for `|` when you want an expression that leaves the inputs alone — configuration layering is the classic case — and `|=` or `update()` when you genuinely own the dict and want to avoid the copy.
 
 ---
 

@@ -16,6 +16,8 @@ Modern Python (3.11+) provides a layered toolkit:
 - **`struct`** — precise binary packing for protocols and file formats
 - **`tempfile`** — safe scratch space for ephemeral processing
 - **`io.StringIO` / `io.BytesIO`** — in-memory file-like objects for testing and streaming
+- **`tomllib`** — stdlib TOML reader for configuration files (read-only)
+- **`zipfile` / `tarfile`** — archive creation, inspection, and extraction
 
 FastAPI integrates these primitives through `UploadFile`, `StreamingResponse`, and `BackgroundTasks`,
 making file I/O understanding critical for building production upload, export, and ETL endpoints.
@@ -157,6 +159,8 @@ os.path.exists(p)         Path(p).exists()
 os.path.splitext(p)       Path(p).stem, .suffix
 os.makedirs(p, exist_ok)  Path(p).mkdir(parents=True, exist_ok=True)
 open(p).read()            Path(p).read_text(encoding="utf-8")
+shutil.copy(a, b)         Path(a).copy(b)            # [3.14]
+shutil.move(a, b)         Path(a).move(b)            # [3.14], works across filesystems
 ```
 
 ---
@@ -251,6 +255,11 @@ uploads.mkdir(parents=True, exist_ok=True)
 py_files: list[Path] = list(BASE_DIR.glob("*.py"))
 all_md: list[Path] = list(BASE_DIR.rglob("**/*.md"))
 
+# full_match [3.13]: glob-style match against the WHOLE path, ** included.
+# match() matches from the right and cannot handle a "**" recursive segment.
+Path("src/pkg/mod.py").full_match("**/pkg/*.py")   # True
+Path("src/pkg/mod.py").match("**/pkg/*.py")        # False — match() has no ** support
+
 # Stat
 size_bytes: int = CONFIG_FILE.stat().st_size
 
@@ -258,6 +267,14 @@ size_bytes: int = CONFIG_FILE.stat().st_size
 tmp = CONFIG_FILE.with_suffix(".tmp")
 tmp.write_text(new_content, encoding="utf-8")
 tmp.replace(CONFIG_FILE)  # replace() is atomic; rename() raises if target exists
+
+# Native copy/move [3.14] — supersede shutil.copy/shutil.move, including cross-device
+BACKUP_DIR = Path("/mnt/backup")
+CONFIG_FILE.copy(BACKUP_DIR / "settings.json")   # copy bytes + metadata to an exact target
+CONFIG_FILE.copy_into(BACKUP_DIR)                # copy, keeping the original filename
+work_file = Path("/tmp/work.tmp")
+work_file.move(Path("/data/output.csv"))         # works even across filesystems
+work_file.move_into(Path("/data"))               # move, keeping the original filename
 
 # Read / write convenience methods
 text: str = CONFIG_FILE.read_text(encoding="utf-8")
@@ -394,6 +411,36 @@ def safe_load(path: str) -> object:
         raise ValueError("Pickle file signature mismatch — possible tampering")
     return pickle.loads(data)   # safe: signature verified
 ```
+
+**Protocol 5's headline feature: out-of-band buffers.** Protocol 5 (default since 3.14) lets a
+large buffer-protocol object — a `numpy` array, a `memoryview` — travel *beside* the pickle
+byte stream instead of being copied into it. Pass `buffer_callback` on dump and `buffers` on
+load; this is what makes zero-copy IPC between processes possible.
+
+```python
+import pickle
+
+def dump_with_buffers(obj: object) -> tuple[bytes, list[pickle.PickleBuffer]]:
+    collected: list[pickle.PickleBuffer] = []
+    data = pickle.dumps(obj, protocol=5, buffer_callback=collected.append)
+    return data, collected   # `data` does NOT contain a copy of the large buffer bytes
+
+
+def load_with_buffers(data: bytes, buffers: list[pickle.PickleBuffer]) -> object:
+    return pickle.loads(data, buffers=buffers)
+
+
+import numpy as np
+arr = np.zeros((10_000, 10_000), dtype="float64")   # 800 MB
+data, buffers = dump_with_buffers(arr)
+restored = load_with_buffers(data, buffers)
+```
+
+Without `buffer_callback`, `dumps()` serializes every buffer inline into `data`, doubling peak
+memory (the original array plus its serialized copy) and copying 800 MB of bytes it did not
+need to copy. With it, `data` is a small opcode stream and the 800 MB stays as a single
+`PickleBuffer` referencing the array's existing memory — nothing is copied unless the receiving
+process is on another machine and must go over a socket.
 
 ### 6.6 `io.StringIO` and `io.BytesIO`
 
@@ -568,6 +615,68 @@ def with_temp_example() -> None:
         f.flush()
         # file auto-deleted when CM exits (delete=True default)
 ```
+
+### 6.9 `tomllib` — Reading TOML Configuration
+
+```python
+import tomllib  # [3.11] stdlib TOML reader — read-only, no writer
+
+# tomllib.load() requires BINARY mode — the classic first mistake.
+# Text mode ("r") raises TypeError; TOML is defined as UTF-8 and the
+# module decodes it internally, the same reason json.load() does not care
+# but tomllib does.
+with open("pyproject.toml", "rb") as f:
+    config: dict = tomllib.load(f)
+
+# tomllib.loads() parses a string directly
+toml_text = """
+[tool.app]
+debug = true
+max_connections = 100
+started = 2024-06-04T09:15:42Z
+"""
+parsed = tomllib.loads(toml_text)
+assert parsed["tool"]["app"]["max_connections"] == 100
+
+# There is no stdlib TOML writer — use tomli-w to write
+# import tomli_w
+# with open("pyproject.toml", "wb") as f:
+#     tomli_w.dump(config, f)
+```
+
+**Why TOML instead of JSON for config.** TOML supports `#` comments, native `date`/`datetime`
+values (parsed straight into Python `datetime` objects, no manual `isoformat()` round trip),
+and `[section.subsection]` headers for unambiguous nesting — none of which `json` has. JSON
+also has the trailing-comma trap: a stray comma after the last array or object element is a
+hard parse error with no forgiving mode. TOML is why `pyproject.toml` (not `pyproject.json`)
+is the standard Python project config file.
+
+### 6.10 `zipfile` and `tarfile` — Archives
+
+```python
+import zipfile
+import tarfile
+
+# zipfile: read and write ZIP archives
+with zipfile.ZipFile("bundle.zip", "w") as zf:
+    zf.write("report.csv")
+    zf.writestr("manifest.json", '{"version": 1}')
+
+with zipfile.ZipFile("bundle.zip") as zf:
+    names: list[str] = zf.namelist()
+    zf.extractall("extracted/")   # zipfile has no filter= — validate names yourself
+
+# tarfile: extraction now filters what it will write.
+# filter="data" is the DEFAULT since 3.14 (PEP 706): it rejects path-traversal
+# entries (e.g. "../../etc/passwd"), absolute paths, device files, and
+# permission bits that would let an entry escape the destination directory.
+with tarfile.open("archive.tar.gz", "r:gz") as tf:
+    tf.extractall("extracted/", filter="data")
+```
+
+Code that must also run on interpreters older than 3.14 should still pass `filter="data"`
+explicitly rather than rely on the default, since pre-3.14 defaults to the equivalent of
+`filter="fully_trusted"` — no filtering at all.
 
 ---
 
@@ -864,12 +973,13 @@ content = buf.read()    # b"important data"
 ### Pitfall 6 — `Path.rename()` vs `Path.replace()` cross-device
 
 ```python
-# BROKEN: rename() raises OSError if src and dst are on different filesystems
+# BROKEN: rename() raises OSError: [Errno 18] EXDEV if src and dst are on
+# different filesystems — rename is only a metadata operation within one FS
 Path("/tmp/work.tmp").rename("/data/output.csv")
 
-# FIX: use shutil.move() for cross-device moves, or replace() within same FS
-import shutil
-shutil.move("/tmp/work.tmp", "/data/output.csv")  # copies + unlinks if needed
+# FIX: Path.move() [3.14] is the native cross-device answer, or use
+# replace() when src and dst are known to share a filesystem
+Path("/tmp/work.tmp").move("/data/output.csv")  # copies + unlinks if needed
 ```
 
 ---
@@ -885,7 +995,9 @@ shutil.move("/tmp/work.tmp", "/data/output.csv")  # copies + unlinks if needed
 | `protobuf` | ~500 MB/s | No (binary) | Schema-enforced | Safe | Yes |
 | `struct` | Memory speed | No (binary) | Fixed-width numerics | Safe | Yes |
 
-**`pathlib`** (stdlib, 3.4+) — preferred for all path manipulation.
+**`pathlib`** (stdlib, 3.4+) — preferred for all path manipulation. `Path.copy()` /
+`Path.move()` [3.14] supersede `shutil.copy()` / `shutil.move()`, including the cross-device
+case; `Path.full_match()` [3.13] matches `**` against the whole path, unlike `match()`.
 
 **`chardet` / `charset-normalizer`** — encoding detection for files from unknown sources.
 `charset-normalizer` is faster and `requests`-compatible.
@@ -898,6 +1010,17 @@ messaging where JSON is too verbose.
 
 **`lz4` / `zstd`** — combine with `pickle` or `msgpack` for fast compressed caching.
 
+**`tomllib`** (stdlib, 3.11) — read-only TOML parser for config files; expects the file opened
+in binary mode.
+
+**`tomli-w`** — writes TOML files. `tomllib` has no writer, so a config round-trip needs both.
+
+**`zipfile`** (stdlib) — read and write ZIP archives; `extractall()` has no `filter=` argument,
+so validate member names before extracting untrusted archives.
+
+**`tarfile`** (stdlib) — read and write tar archives; `extractall()` defaults to `filter="data"`
+[3.14, PEP 706], rejecting path-traversal and absolute-path entries by default.
+
 ---
 
 ## 12. Interview Questions with Answers
@@ -908,7 +1031,7 @@ The default encoding is `locale.getpreferredencoding(False)`, which varies by OS
 
 **Q2: What is the difference between `Path.rename()` and `Path.replace()`?**
 **Short:** `Path.replace()` atomically overwrites the destination on every platform; `rename()` may raise.
-`rename()` raises `FileExistsError` if the destination exists (on Windows; POSIX allows overwrite). `replace()` atomically overwrites the destination on all platforms. Use `replace()` for atomic file writes: write to a `.tmp` file, then `replace()` into the final path. This pattern prevents readers from observing a partially-written file.
+`rename()` raises `FileExistsError` if the destination exists (on Windows; POSIX allows overwrite). `replace()` atomically overwrites the destination on all platforms. Use `replace()` for atomic file writes: write to a `.tmp` file, then `replace()` into the final path. This pattern prevents readers from observing a partially-written file. Both raise `OSError` when source and destination are on different filesystems; for that case use `Path.move()` [3.14] instead.
 
 **Q3: Why is `pickle.loads(untrusted_bytes)` a critical security vulnerability?**
 **Short:** `pickle.loads()` on untrusted bytes can execute arbitrary code, enabling remote code execution.
@@ -951,8 +1074,8 @@ FastAPI's default `JSONResponse` uses the stdlib `json` encoder, which raises `T
 `Path` overrides `__truediv__` (the `/` division operator) to return a new `Path` representing the concatenated path: `Path("/data") / "uploads" / "file.csv"` returns `Path("/data/uploads/file.csv")`. This uses Python's operator overloading mechanism. The result is always a `Path` object regardless of which side is a string, as long as the left operand is a `Path`.
 
 **Q13: What happens when you call `Path.rename()` across two different filesystems, and what is the fix?**
-**Short:** `Path.rename()` fails across filesystems; `shutil.move()` falls back to a non-atomic copy-then-delete.
-`Path.rename()` raises `OSError` when the source and destination are on different filesystems because a rename is only a metadata operation within one filesystem. `shutil.move()` detects this case and falls back to copying the file's bytes to the destination then deleting the source, which works across devices but is not atomic and costs O(file size) time instead of O(1). Use `Path.replace()` only when source and destination share a filesystem — same directory tree or mounted volume — and reach for `shutil.move()` whenever the destination might be a different mount, such as a separate Docker volume or network share.
+**Short:** `Path.rename()` fails across filesystems with EXDEV; `Path.move()` [3.14] is the native fix.
+`Path.rename()` raises `OSError: [Errno 18] EXDEV` when the source and destination are on different filesystems because a rename is only a metadata operation within one filesystem. `Path.move()` [3.14] detects this case and falls back to copying the file's bytes to the destination then deleting the source, which works across devices but is not atomic and costs O(file size) time instead of O(1). Use `Path.replace()` only when source and destination share a filesystem — same directory tree or mounted volume — and reach for `Path.move()` whenever the destination might be a different mount, such as a separate Docker volume or network share.
 
 **Q14: What happens to an open file descriptor when an exception occurs between `open()` and a manual `close()` call, without a `with` block?**
 **Short:** Without a `with` block, a leaked file descriptor stays open until reference counting frees it.
@@ -965,6 +1088,22 @@ The file descriptor stays open until CPython's reference-counting garbage collec
 **Q16: How do you handle a file whose encoding is unknown, such as a CSV uploaded by an external partner?**
 **Short:** `charset_normalizer.detect()` statistically guesses an unknown file's encoding from raw bytes.
 Use `charset_normalizer.detect(raw_bytes)` (or the older `chardet` library) to statistically guess the encoding from the raw byte distribution before decoding. Read the file in binary mode first, run detection on a sample of the bytes, then decode with the returned encoding key. `charset-normalizer` is the modern, faster choice and is what `requests` uses internally as of version 2.26. Never guess `latin-1` as a fallback — it decodes every byte sequence without raising, silently turning a corrupted or misidentified file into garbage text instead of surfacing the real mismatch.
+
+**Q17: How do you choose among `Path.move()`, `Path.rename()`, and `Path.replace()`?**
+**Short:** Use `rename()`/`replace()` on the same filesystem, `Path.move()` [3.14] whenever the destination might be a different one.
+All three relocate a file, but they differ in what they tolerate. `rename()` is the strictest: it is a pure metadata operation, so it is O(1) but raises `FileExistsError` on Windows if the target exists and raises `OSError: [Errno 18] EXDEV` on any platform if source and destination are on different filesystems. `replace()` relaxes the first restriction — it atomically overwrites an existing target on every platform — but still fails with `EXDEV` across filesystems. `Path.move()` [3.14] relaxes the second restriction too: it detects the cross-device case and transparently falls back to copy-then-delete, at the cost of losing atomicity and O(1) time for that fallback path. Default to `replace()` when you know source and destination share a filesystem (the common `.tmp` -> final-path pattern), and reach for `Path.move()` whenever the destination might be a different mount — a separate Docker volume, a network share, or an external drive.
+
+**Q18: What does pickle protocol 5's out-of-band buffer support actually avoid?**
+**Short:** Out-of-band buffers let large numpy/memoryview data skip being copied into the pickle byte stream.
+Without `buffer_callback`, `pickle.dumps()` serializes every buffer-protocol object (a `numpy` array, a `memoryview`) inline into the returned `bytes`, which means the data is copied at least once and the process briefly holds both the original object and its serialized copy in memory. Passing `buffer_callback` on `dumps()` and `buffers` on `loads()` routes those buffers around the byte stream instead, so a large array can be handed to another process via shared memory or `multiprocessing` with zero extra copies. This is what makes protocol 5, the default since 3.14, meaningfully faster than earlier protocols for numeric-heavy payloads rather than just a version bump.
+
+**Q19: Why does `tomllib.load()` require the file to be opened in binary mode, and why can't it write TOML?**
+**Short:** `tomllib` decodes UTF-8 itself so it needs raw bytes, and it ships as a reader only — use `tomli-w` to write.
+`tomllib.load()` takes a binary file object and decodes UTF-8 internally per the TOML spec, rather than trusting `open()`'s text-mode decoding, which could silently use the wrong encoding on a misconfigured system; opening in text mode raises a `TypeError` telling you to switch to `"rb"`. `tomllib` was added in 3.11 (PEP 680) as a reader only — there is no `tomllib.dump()` — because the standard library committed to parsing the increasingly common `pyproject.toml` format without taking on the larger commitment of also owning a writer. To write TOML, use the third-party `tomli-w` package (`tomli_w.dump(config, f)`, also opened in binary mode).
+
+**Q20: What does the tarfile `filter="data"` default prevent, and why was it changed in 3.14?**
+**Short:** `filter="data"` blocks path-traversal and absolute-path tar entries that could write outside the extraction directory.
+A malicious or corrupted tar archive can contain an entry named something like `../../../etc/passwd` or an absolute path; extracting it naively lets the archive write files anywhere the process has permission to, outside the intended destination directory — the classic "tarbomb" / path-traversal attack. `filter="data"` rejects such entries, along with device files and permission bits that would escape the destination, before they are written. Prior to 3.14, `extractall()` defaulted to the equivalent of `filter="fully_trusted"` — no filtering — so any code extracting archives from an untrusted source had to remember to pass `filter="data"` explicitly; PEP 706 made the safe behavior the default instead of an opt-in.
 
 ---
 

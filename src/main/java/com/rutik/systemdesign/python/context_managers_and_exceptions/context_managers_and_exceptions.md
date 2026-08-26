@@ -491,6 +491,27 @@ flowchart LR
 
 Explicit chaining (green) is the recommended pattern for library boundaries that deliberately wrap an error; bare re-raise (teal) is what happens automatically if you do nothing special; `from None` (purple) locks the original cause away entirely, so use it only at stable API boundaries.
 
+**Adding context without wrapping: `add_note()` [3.11].** Chaining has a cost — `raise NewError(...) from e` replaces the exception type, so every `except OriginalError` upstream stops matching. When all you want is to attach *context* to the exception already in flight, `Exception.add_note()` (PEP 678, the same 3.11 wave as `ExceptionGroup`) appends a string to the exception's `__notes__` list, and the interpreter prints every note after the traceback.
+
+```python
+def process_batch(records: list[dict], batch_id: str) -> None:
+    for i, record in enumerate(records):
+        try:
+            validate(record)
+        except ValidationError as e:
+            e.add_note(f"batch={batch_id} record_index={i}")
+            e.add_note(f"record_id={record.get('id', '<missing>')}")
+            raise            # same exception, same type, now carrying the context
+```
+
+```
+ValidationError: field 'email' is required
+batch=2026-08-25T14:03Z record_index=417
+record_id=cust_88231
+```
+
+The notes travel with the exception object, so a handler far up the stack still sees them, and `e.__notes__` is a plain list you can read programmatically. This matters most inside a `TaskGroup`: when several tasks fail, every sub-exception in the resulting `ExceptionGroup` prints its own notes, which is usually the only way to tell *which* of twenty concurrent requests produced a given traceback. Reach for `add_note()` when you are enriching a diagnostic; reach for `raise ... from e` when you are genuinely translating an error across an API boundary and callers should be catching your type instead.
+
 ### 6.6 `ExceptionGroup` and `except*` [3.11]
 
 ```python
@@ -775,6 +796,45 @@ except* TypeError as eg:
 
 ---
 
+### Pitfall 7: `return` inside `finally` silently swallows the in-flight exception
+
+This module's whole mental model is that `__exit__` is a `finally`-equivalent, so it is worth
+knowing the one way a `finally` block can destroy an exception without any `except` in sight.
+
+```python
+# BROKEN: the ValueError vanishes, and load_config() returns {} as if nothing happened
+def load_config(path: str) -> dict:
+    try:
+        return parse(open(path).read())   # raises ValueError on malformed input
+    finally:
+        return {}                         # this return DISCARDS the in-flight exception
+```
+
+A `return`, `break`, or `continue` that leaves a `finally` block **cancels whatever was
+propagating through it** — the exception, or the original `return` value. The caller sees a
+successful call returning `{}`, monitoring records no error, and the malformed config is
+treated as an empty one. This is the same class of bug as a `__exit__` that returns a truthy
+value, except there is no `__exit__` to review.
+
+```python
+# FIX: let finally do cleanup only, and never transfer control out of it
+def load_config(path: str) -> dict:
+    try:
+        return parse(open(path).read())
+    except ValueError:
+        logger.exception("malformed config at %s", path)
+        raise                              # deliberate, visible, and re-raised
+    finally:
+        metrics.increment("config.load.attempted")
+```
+
+Python 3.14 makes this findable: **PEP 765** emits a `SyntaxWarning` when `return`, `break`,
+or `continue` would exit a `finally` block. Run CI with `-W error::SyntaxWarning` to turn the
+warning into a build failure, which is the only way it gets fixed in a codebase that has
+learned to ignore warnings.
+
+---
+
 ## 11. Technologies & Tools
 
 | Tool / Library | Purpose | Notes |
@@ -914,6 +974,16 @@ It is a context manager whose `__exit__` returns `True` only when the raised exc
 **Short:** Catching BaseException in rollback logic ensures Ctrl-C and sys.exit() still roll back the transaction.
 
 So that Ctrl-C and `sys.exit()` still roll the transaction back. `KeyboardInterrupt` and `SystemExit` inherit directly from `BaseException`, so an `except Exception` clause never sees them and the rollback would be skipped. A database transaction left open when the process receives Ctrl-C or a graceful shutdown signal can hold locks or leave partial writes uncommitted, so the case study treats "the block did not finish cleanly" as more important than "what kind of exception ended it." This is one of the few legitimate uses of `except BaseException` — general-purpose code and HTTP middleware should still catch only `Exception` (see Q7) so signals and interpreter exit are not accidentally intercepted. The trade-off is scoped narrowly to the rollback path, which re-raises immediately after cleanup rather than swallowing the signal.
+
+**Q: What happens when a `finally` block executes a `return`, and how does Python 3.14 help you find it?**
+**Short:** A return in a finally block discards whatever was propagating through it, silently swallowing the in-flight exception; PEP 765 raises a SyntaxWarning for it.
+
+The `return` **cancels whatever was propagating through the `finally`** — an in-flight exception, or the `try` block's own return value — so the function completes normally and the caller never learns anything went wrong. `try: return parse(...) finally: return {}` swallows a `ValueError` and hands back `{}` as though the parse succeeded; monitoring sees a healthy call and the bad input flows downstream. `break` and `continue` that exit a `finally` do the same thing, which is why a `finally` inside a loop is worth a second look. It is the same failure mode as an `__exit__` that returns a truthy value, with the difference that there is no `__exit__` for a reviewer to notice. Python 3.14 added **PEP 765**, which emits a `SyntaxWarning` whenever `return`, `break`, or `continue` would leave a `finally` block; run CI with `-W error::SyntaxWarning` so it fails the build rather than scrolling past. Keep `finally` for cleanup that transfers no control, and put any deliberate error handling in an explicit `except` clause where it is visible.
+
+**Q: When should you use `add_note()` instead of raising a new exception from the original?**
+**Short:** Use add_note to attach diagnostic context while keeping the exception's type and identity; use raise-from when you are genuinely translating an error across an API boundary.
+
+Use `add_note()` when you want to attach *context* without changing what the exception **is**. `raise NewError(...) from e` replaces the type, so every upstream `except OriginalError` stops matching — a real cost when you only wanted to record which record in a batch failed. `Exception.add_note(str)` (PEP 678, added in 3.11) appends to the exception's `__notes__` list and the interpreter prints each note after the traceback, so `e.add_note(f"batch={bid} index={i}"); raise` re-raises the identical exception object now carrying the breadcrumb. The notes accumulate as the exception travels, so several layers can each add what they know, and `__notes__` is a plain list a handler can read programmatically. It pays off most inside a `TaskGroup`, where an `ExceptionGroup` prints notes per sub-exception and that is often the only way to tell which of twenty concurrent operations produced a given traceback. Reserve `raise ... from e` for a genuine translation at an API boundary where callers should be catching your type.
 
 ---
 

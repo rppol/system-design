@@ -1,38 +1,6 @@
 # Database Sharding
 
-## Table of Contents
-1. [What is Sharding?](#what-is-sharding)
-2. [Why Shard?](#why-shard)
-3. [Sharding vs Replication vs Partitioning](#sharding-vs-replication-vs-partitioning)
-4. [Shard Key Selection](#shard-key-selection)
-5. [Sharding Strategies](#sharding-strategies)
-   - [Range-Based Sharding](#range-based-sharding)
-   - [Hash-Based Sharding](#hash-based-sharding)
-   - [Directory-Based Sharding](#directory-based-sharding)
-   - [Geographic / Zone-Based Sharding](#geographic--zone-based-sharding)
-6. [Cross-Shard Queries](#cross-shard-queries)
-7. [Resharding](#resharding)
-8. [Hotspot Handling](#hotspot-handling)
-9. [Real-World Examples](#real-world-examples)
-10. [Shard Proxies](#shard-proxies)
-11. [Interview Questions](#interview-questions)
-12. [Best Practices](#best-practices)
-
----
-
-## Intuition
-
-> **One-line analogy**: Database sharding is like splitting a huge phone book into volumes A-M and N-Z — each volume is smaller and can be accessed independently, but you need to know which volume to look in.
-
-**Mental model**: A single database server has limits — CPU, disk, memory. When your dataset hits tens of TBs, no single machine suffices. Sharding splits the data horizontally across multiple databases (shards), each owning a partition of the data. The shard key (e.g., user_id, geographic region) determines which shard a given record lives on. Queries to a specific user/record go directly to the right shard. Cross-shard queries are expensive — avoid them by choosing the shard key that makes the most common queries single-shard.
-
-**Why it matters**: Sharding is the primary technique for scaling writes beyond what a single database can handle. Read replicas scale reads; sharding scales writes and storage. Instagram, Twitter, and most large-scale databases use horizontal sharding.
-
-**Key insight**: Shard key selection is the most consequential decision — the wrong key leads to hotspots (one shard handling 90% of traffic) and expensive cross-shard queries. Design for your dominant access patterns, not theoretical flexibility.
-
----
-
-## What is Sharding?
+## 1. Concept Overview
 
 Sharding is a database scaling technique that horizontally partitions data across multiple independent database instances (shards). Each shard holds a subset of the total data set and is hosted on a separate server. Together, the shards hold the complete dataset.
 
@@ -71,7 +39,21 @@ flowchart LR
 
 ---
 
-## Why Shard?
+## 2. Intuition
+
+> **One-line analogy**: Database sharding is like splitting a huge phone book into volumes A-M and N-Z — each volume is smaller and can be accessed independently, but you need to know which volume to look in.
+
+**Mental model**: A single database server has limits — CPU, disk, memory. When your dataset hits tens of TBs, no single machine suffices. Sharding splits the data horizontally across multiple databases (shards), each owning a partition of the data. The shard key (e.g., user_id, geographic region) determines which shard a given record lives on. Queries to a specific user/record go directly to the right shard. Cross-shard queries are expensive — avoid them by choosing the shard key that makes the most common queries single-shard.
+
+**Why it matters**: Sharding is the primary technique for scaling writes beyond what a single database can handle. Read replicas scale reads; sharding scales writes and storage. Instagram, Twitter, and most large-scale databases use horizontal sharding.
+
+**Key insight**: Shard key selection is the most consequential decision — the wrong key leads to hotspots (one shard handling 90% of traffic) and expensive cross-shard queries. Design for your dominant access patterns, not theoretical flexibility.
+
+---
+
+## 3. Core Principles
+
+### Why Shard?
 
 ### Single Database Limits
 
@@ -115,7 +97,7 @@ flowchart LR
 
 ---
 
-## Sharding vs Replication vs Partitioning
+### Sharding vs Replication vs Partitioning
 
 | Technique | Definition | Primary Goal | Data Distribution |
 |-----------|------------|-------------|------------------|
@@ -168,7 +150,7 @@ flowchart LR
 
 ---
 
-## Shard Key Selection
+### Shard Key Selection
 
 The shard key is the most important architectural decision in a sharded system. It determines which shard a piece of data belongs to. A poor shard key choice leads to hotspots, uneven distribution, and expensive cross-shard queries.
 
@@ -272,7 +254,7 @@ xychart-beta
 
 ---
 
-## Sharding Strategies
+## 4. Types / Architectures / Strategies
 
 ### Range-Based Sharding
 
@@ -612,7 +594,76 @@ quadrantChart
 
 ---
 
-## Cross-Shard Queries
+## 5. Architecture Diagrams
+
+### Where the Router Sits
+
+```mermaid
+flowchart LR
+    classDef app     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef route   fill:#c678dd,stroke:#9b59b6,color:#fff,font-weight:bold
+    classDef shard   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef meta    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef rep     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    app(["Application"])
+    router(["Shard router<br/>Vitess VTGate / Citus coordinator"])
+    map[["Shard map<br/>key range to shard"]]
+    s1(["Shard 1<br/>users 0-999"])
+    s2(["Shard 2<br/>users 1000-1999"])
+    s3(["Shard 3<br/>users 2000-2999"])
+    r1(["Replica"])
+
+    app -->|"query with shard key"| router
+    router -->|"lookup"| map
+    router --> s1
+    router --> s2
+    router --> s3
+    s2 -.->|"async replication"| r1
+
+    class app app
+    class router route
+    class map meta
+    class s1,s2,s3 shard
+    class r1 rep
+```
+
+The shard key is the only thing that lets the router avoid fanning out. A query that does not
+carry it becomes a scatter-gather across every shard (§6), which is why shard-key choice and
+query patterns have to be designed together. Sharding and replication are orthogonal: each
+shard is independently replicated for availability.
+
+### A Split, Step by Step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Application
+    participant R as Shard router
+    participant S1 as Shard 1 (source)
+    participant S4 as Shard 4 (target)
+
+    Note over S1: Shard 1 is at 80% capacity
+    R->>S4: provision empty shard
+    S1->>S4: backfill copy of the range being moved
+    S1->>S4: stream ongoing changes (CDC / VReplication)
+    Note over S1,S4: catch up until replication lag is near zero
+    R->>R: freeze writes for the moved range (seconds)
+    S1->>S4: drain the final changes
+    R->>R: flip the shard map, unfreeze
+    App->>R: subsequent writes route to Shard 4
+    Note over S1: old range dropped after a bake period
+```
+
+Online resharding is a backfill plus a change stream plus a short write freeze at the cutover —
+not a maintenance window. The bake period before dropping the source range is what makes the
+operation reversible.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Cross-Shard Queries
 
 Cross-shard queries are one of the most significant operational challenges of sharding. Any query that cannot be satisfied by a single shard requires a more complex approach.
 
@@ -729,7 +780,7 @@ and it is how Q11's hardest query — "all orders for a product", when orders ar
 
 ---
 
-## Resharding
+### Resharding
 
 Resharding is the process of redistributing data across a different number of shards. It is unavoidable as systems grow but is operationally complex and risky.
 
@@ -811,7 +862,7 @@ stateDiagram-v2
 
 ---
 
-## Hotspot Handling
+### Hotspot Handling
 
 ### The Celebrity Problem
 
@@ -970,7 +1021,7 @@ Sharding divides the load; it never removes it. That is why the production answe
 
 ---
 
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Instagram: PostgreSQL Sharding
 
@@ -1025,7 +1076,80 @@ flowchart LR
 
 ---
 
-## Shard Proxies
+## 8. Tradeoffs
+
+| Dimension | Single database | Sharded fleet |
+|---|---|---|
+| Write throughput | Bounded by one primary | Scales roughly linearly with shard count |
+| Dataset size | Bounded by one machine's disk and memory | Effectively unbounded |
+| Cross-entity queries | A single SQL join | Scatter-gather, or denormalize (§6) |
+| Transactions | Local ACID, free | Cross-shard needs 2PC or a saga — slow and complex |
+| Secondary indexes | Global, maintained by the engine | Either local (must scatter) or a separately maintained global index |
+| Schema change | One `ALTER` | Coordinated across every shard, usually via an online-change tool |
+| Operational cost | One thing to back up, monitor, restore | N of everything, plus a shard map that must never be wrong |
+| Failure blast radius | Whole system | One shard, if the application degrades gracefully |
+| Rebalancing | Not applicable | An ongoing operational discipline (§6) |
+
+The honest summary: sharding buys write throughput and capacity, and pays for them in query
+expressiveness and operational surface. Everything expensive on this page is a consequence of
+one fact — data that used to be in one place is now in many, and the database no longer knows
+about all of it.
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### When to Use
+
+- **Write throughput exceeds what one primary can absorb.** Read load is not a reason to shard — add replicas or a cache first. Only writes force the split.
+- **The working set no longer fits in memory** and the buffer-cache hit rate has fallen off a cliff, so latency is now disk-bound.
+- **The dataset is beyond comfortable operation on one machine** — multi-terabyte tables where a restore takes days and an index rebuild takes hours.
+- **The access pattern has a natural partition key** — a tenant, a user, a region — that most queries already carry.
+- **Regulatory data residency** requires rows to live in a specific jurisdiction, which is geographic sharding whether you call it that or not.
+
+### When NOT to Use
+
+- **You have not exhausted the cheaper options.** A bigger instance, read replicas, a cache, connection pooling, and query and index tuning routinely buy an order of magnitude and cost days rather than quarters.
+- **The load is read-heavy.** Replicas solve reads; sharding solves writes. Sharding a read-heavy system adds all the cost and none of the benefit.
+- **There is no good shard key.** If queries arrive with many different access keys, every choice makes most queries scatter-gather, and you have bought fan-out latency instead of throughput.
+- **Strong cross-entity transactions are core to the product.** Ledgers and inventory systems that need multi-row atomicity across the whole dataset suffer badly; consider a distributed SQL engine (CockroachDB, Spanner, Vitess with care) that owns the problem instead of hand-rolling 2PC.
+- **The team cannot operate it.** A sharded fleet needs a resharding runbook, per-shard monitoring, and someone who can answer "which shard is this row on" at 3 a.m.
+
+---
+
+## 10. Common Pitfalls
+
+### 1. Choosing a Monotonic Shard Key
+
+*Broken:* sharding by an auto-increment `id` or by `created_at` with range-based sharding. Every new row goes to the highest range, so the newest shard takes 100% of writes and the others idle — you have N machines and one machine's write capacity.
+
+*Fix:* hash the key, or shard by an entity id whose values are spread across the keyspace (`user_id`, `tenant_id`). If the query pattern genuinely needs time ranges, compose the key — hash prefix plus time — so a scan is bounded but writes still spread.
+
+### 2. A Shard Key That Is Not Immutable
+
+Changing a row's shard key means deleting it from one shard and inserting it in another — a cross-shard transaction, plus every foreign reference that assumed the old location. Treat the shard key as part of the row's identity and pick something that cannot change (`user_id`, never `email` or `country`).
+
+### 3. Sharding Before Exhausting One Machine
+
+Modern single-node hardware handles far more than most teams assume. Sharding a system that a larger instance and a cache would have carried buys a permanent operational tax against a problem that had not arrived. Measure the actual bottleneck first.
+
+### 4. Forgetting That Secondary Indexes Do Not Span Shards
+
+A query on a non-shard-key column has no routing information, so it hits every shard. At 100 shards, one such query becomes 100 queries and its latency becomes the slowest shard's latency. Either maintain a global secondary index as its own sharded structure, or denormalize so the lookup carries the shard key.
+
+### 5. Uniform Shards, Non-Uniform Tenants
+
+Hash sharding distributes *keys* evenly, not *bytes* or *load*. One enterprise tenant with a thousand times the data of an average tenant lands on one shard and overwhelms it. Isolate large tenants onto their own shards explicitly — the shard map exists precisely so placement can be a decision, not only a hash.
+
+### 6. No Resharding Plan Until It Is Needed
+
+Resharding under load, for the first time, during an incident, is the worst possible time to learn the procedure. Write the runbook, rehearse it in staging, and keep logical shards well ahead of physical ones (Instagram's few thousand logical shards on far fewer machines, §14) so growth is a move rather than a split.
+
+---
+
+## 11. Technologies & Tools
+
+### Shard Proxies
 
 Shard proxies sit between the application and the database shards, abstracting the routing logic. Applications connect to the proxy using a standard DB protocol.
 
@@ -1060,7 +1184,7 @@ Shard proxies sit between the application and the database shards, abstracting t
 
 ---
 
-## Interview Questions
+## 12. Interview Questions with Answers
 
 **Q1: What is the difference between sharding and replication?**
 **Short:** Replication copies identical data for availability; sharding splits distinct data across nodes for write scale.
@@ -1149,18 +1273,7 @@ A: A local index is partitioned by the table's shard key, so lookups by the inde
 
 ---
 
-## Cross-Perspective: LLD Connections
-
-**LLD View — Design Patterns That Implement Database Sharding**
-
-- **Strategy** — Sharding strategies (hash sharding, range sharding, directory/lookup sharding, geographic sharding) are the textbook Strategy pattern: each encapsulates a shard assignment algorithm behind a `ShardingStrategy` interface — swappable as requirements evolve.
-- **Proxy** — Shard proxies (ProxySQL, Vitess) are Proxy pattern: applications connect to the proxy with a standard connection string; the proxy routes queries to the correct shard transparently based on the shard key in the query.
-- **Factory** — A `ShardConnectionFactory` creates and manages connections to the correct shard given a shard key, hiding connection pool management and shard topology from service code.
-- **Observer** — Resharding events (adding nodes, rebalancing) broadcast to Observer subscribers: connection pool managers refresh their routing tables; cache invalidators clear stale shard-local caches; monitoring systems update topology dashboards.
-
----
-
-## Best Practices
+## 13. Best Practices
 
 ### 1. Shard Key Immutability
 The shard key should never change for a record's lifetime. Changing the shard key requires deleting the record from the old shard and inserting it in the new one — this is a distributed transaction and extremely difficult to do safely at scale. Design your data model so the natural identifier is immutable.
@@ -1188,11 +1301,24 @@ Putting sharding logic in application code creates a maintenance nightmare as ro
 
 ---
 
+### Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement Database Sharding**
+
+- **Strategy** — Sharding strategies (hash sharding, range sharding, directory/lookup sharding, geographic sharding) are the textbook Strategy pattern: each encapsulates a shard assignment algorithm behind a `ShardingStrategy` interface — swappable as requirements evolve.
+- **Proxy** — Shard proxies (ProxySQL, Vitess) are Proxy pattern: applications connect to the proxy with a standard connection string; the proxy routes queries to the correct shard transparently based on the shard key in the query.
+- **Factory** — A `ShardConnectionFactory` creates and manages connections to the correct shard given a shard key, hiding connection pool management and shard topology from service code.
+- **Observer** — Resharding events (adding nodes, rebalancing) broadcast to Observer subscribers: connection pool managers refresh their routing tables; cache invalidators clear stale shard-local caches; monitoring systems update topology dashboards.
+
+---
+
+---
+
 **Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) (shard-key selection, resharding mechanics, hotspot mitigation), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/newsql_and_distributed_sql.md) (Vitess, CockroachDB, Spanner-style auto-sharding).
 
 ---
 
-## Case Study: Instagram Photo Database Sharding
+## 14. Case Study: Instagram Photo Database Sharding
 
 ### Problem Statement
 

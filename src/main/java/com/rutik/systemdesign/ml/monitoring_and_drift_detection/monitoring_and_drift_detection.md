@@ -81,7 +81,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    traffic([Production traffic]) --> serve["Serving layer\nFastAPI / TorchServe"]
+    traffic([Production traffic]) --> serve["Serving layer\nFastAPI / BentoML"]
     serve -->|"log features, score, version"| log["Event log\nKafka topic / S3"]
     log --> detect["Drift detector\nPSI · KS · Chi-squared"]
     ref["Reference dataset\ntraining or healthy window"] --> detect

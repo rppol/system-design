@@ -16,7 +16,7 @@ The natural entry point from single-GPU CUDA is [`streams_events_and_concurrency
 
 > **One-line analogy**: Eight people each holding one page of a ten-thousand-page report need to agree on the grand total of a column of numbers — instead of every person walking their page to every other person (N² trips), they stand in a circle and pass partial sums to their one neighbor, N-1 times, until everyone holds the same final answer. That circle-passing is a ring all-reduce, and NVLink is the very fast, very short table between neighboring seats.
 
-**Mental model**: Think of a multi-GPU system as a small city of workers connected by roads of wildly different quality. The road inside one GPU (registers, shared memory) is a hallway. The road between GPUs on the same NVSwitch is a private freeway carrying ~450 GB/s in each direction (the 900 GB/s you see on the datasheet is both directions added together). The road between GPUs across PCIe to the host is a crowded two-lane street at ~64 GB/s each way — 7x slower per trip, and a host-staged copy has to make the trip twice. The road between GPUs on different physical *nodes* goes through the network card and, if you are lucky, GPUDirect RDMA lets it skip the host's lane entirely. NCCL's entire job is to know this road map (the "topology") and route every collective the fastest way that road map allows, using a ring when bandwidth matters and a tree when latency matters.
+**Mental model**: Think of a multi-GPU system as a small city of workers connected by roads of wildly different quality. The road inside one GPU (registers, shared memory) is a hallway. The road between GPUs on the same NVSwitch is a private freeway carrying ~900 GB/s in each direction (the 1.8 TB/s you see on the datasheet is both directions added together). The road between GPUs across PCIe to the host is a crowded two-lane street at ~64 GB/s each way — 14x slower per trip, and a host-staged copy has to make the trip twice. The road between GPUs on different physical *nodes* goes through the network card and, if you are lucky, GPUDirect RDMA lets it skip the host's lane entirely. NCCL's entire job is to know this road map (the "topology") and route every collective the fastest way that road map allows, using a ring when bandwidth matters and a tree when latency matters.
 
 **Why it matters**: Every large model training run and every high-throughput multi-GPU inference deployment is bottlenecked, sooner or later, by communication rather than compute — a training step that computes a gradient in 40 ms but takes 60 ms to all-reduce it across 8 GPUs is a system that is 60% wasted. Understanding P2P, NVLink topology, and the ring all-reduce is what separates "I called `DistributedDataParallel`" from "I know why my 8-GPU job only gets 5.5x speedup and how to fix it."
 
@@ -49,22 +49,22 @@ The natural entry point from single-GPU CUDA is [`streams_events_and_concurrency
 
 ### 4.2 Peer access and copy paths
 
-| Path | Mechanism | Bandwidth (H100-class) |
+| Path | Mechanism | Bandwidth (B200-class) |
 |------|-----------|--------------------------|
 | Host-staged copy | `cudaMemcpy` device→host, then host→device | Bounded by PCIe, and paid twice: ~64 GB/s per direction, plus two hops of latency |
 | P2P over PCIe | `cudaDeviceEnablePeerAccess` + `cudaMemcpyPeer`, no NVLink present | PCIe Gen5 x16: ~64 GB/s per direction (128 GB/s bidirectional aggregate), one hop |
-| P2P over NVLink | Same API, GPUs connected via NVLink | H100 SXM5 NVLink 4: ~900 GB/s bidirectional aggregate per GPU, i.e. ~450 GB/s in each direction |
+| P2P over NVLink | Same API, GPUs connected via NVLink | B200 SXM NVLink 5: ~1,800 GB/s bidirectional aggregate per GPU, i.e. ~900 GB/s in each direction |
 | GPUDirect RDMA | NIC DMAs straight into/out of GPU memory, no host buffer | Network-limited (e.g. 400 Gb/s InfiniBand NDR ≈ 50 GB/s per direction per link) |
 
 ```mermaid
 xychart-beta
-    title "Peer-to-peer bandwidth per direction by interconnect (H100-class, GB/s)"
-    x-axis ["100G Ethernet", "InfiniBand NDR", "PCIe Gen5 x16", "NVLink 4"]
-    y-axis "Bandwidth per direction (GB/s)" 0 --> 500
-    bar [12.5, 50, 64, 450]
+    title "Peer-to-peer bandwidth per direction by interconnect (B200-class, GB/s)"
+    x-axis ["100G Ethernet", "InfiniBand NDR", "PCIe Gen5 x16", "NVLink 5"]
+    y-axis "Bandwidth per direction (GB/s)" 0 --> 1000
+    bar [12.5, 50, 64, 900]
 ```
 
-*Compared like for like — one direction at a time — NVLink 4 beats every off-chip path by 7-36x. The entire point of P2P, NVSwitch, and GPUDirect is keeping traffic on the tallest bar instead of falling back to the PCIe or network bars beneath it.*
+*Compared like for like — one direction at a time — NVLink 5 beats every off-chip path by 14-72x. The entire point of P2P, NVSwitch, and GPUDirect is keeping traffic on the tallest bar instead of falling back to the PCIe or network bars beneath it.*
 
 **In plain terms.** "Every step down this ladder is not a few percent — it is a
 multiple, and the host-staged path pays that multiple twice."
@@ -74,13 +74,13 @@ mistakes creep in, and there are **two** conversions to get right, not one. Netw
 are sold in **gigabits** per second and interconnects in **gigabytes** per second — a
 factor of 8. And NVIDIA quotes NVLink as a **bidirectional aggregate** while PCIe lane
 tables are usually quoted **per direction** — another factor of 2. Comparing NVLink's
-headline 900 GB/s against PCIe's per-direction 64 GB/s mixes both conventions and
+headline 1,800 GB/s against PCIe's per-direction 64 GB/s mixes both conventions and
 overstates the gap by exactly 2x.
 
 | Symbol | What it is |
 |--------|------------|
-| `~900 GB/s` | NVLink 4 aggregate **bidirectional** bandwidth per H100 SXM5 GPU — 18 links x 25 GB/s each way |
-| `~450 GB/s` | The same link **per direction** — the number a one-way copy or a ring hop actually sees |
+| `~1,800 GB/s` | NVLink 5 aggregate **bidirectional** bandwidth per B200 SXM GPU — 18 links x 50 GB/s each way |
+| `~900 GB/s` | The same link **per direction** — the number a one-way copy or a ring hop actually sees |
 | `~64 GB/s` | PCIe Gen5 x16 per direction (NVIDIA's H100 datasheet quotes the bidirectional pair as 128 GB/s) |
 | `400 Gb/s` | InfiniBand NDR link rate, quoted in gigaBITS per second |
 | `Gb/s / 8` | Conversion to gigaBYTES per second — 8 bits to a byte |
@@ -92,24 +92,24 @@ overstates the gap by exactly 2x.
   100G Ethernet  : 100 Gb/s / 8            =  12.5 GB/s
   InfiniBand NDR : 400 Gb/s / 8            =  50   GB/s
   PCIe Gen5 x16  :                            64   GB/s
-  NVLink 4       : 900 GB/s bidir / 2      = 450   GB/s
+  NVLink 5       : 1,800 GB/s bidir / 2    = 900   GB/s
 
-  NVLink vs PCIe        : 450 / 64         =  7.03x
-  NVLink vs InfiniBand  : 450 / 50         =  9.00x
-  NVLink vs 100G Ether  : 450 / 12.5       = 36.00x   <- the "7-36x" range above
+  NVLink vs PCIe        : 900 / 64         = 14.06x
+  NVLink vs InfiniBand  : 900 / 50         = 18.00x
+  NVLink vs 100G Ether  : 900 / 12.5       = 72.00x   <- the "14-72x" range above
 
   Host-staged copy of 1 GB between two GPUs:
     hop 1 (GPU0 -> host RAM) : 1 GB / 64 GB/s   = 15.6 ms
     hop 2 (host RAM -> GPU1) : 1 GB / 64 GB/s   = 15.6 ms
     total                                        = 31.2 ms
 
-  Same 1 GB over NVLink P2P  : 1 GB / 450 GB/s  =  2.2 ms
-  speedup = 31.2 / 2.2                           = 14.1x
+  Same 1 GB over NVLink P2P  : 1 GB / 900 GB/s  =  1.11 ms
+  speedup = 31.2 / 1.11                          = 28.1x
 ```
 
-A single hop is 7x, but the host-staged path takes two of them, so the real end-to-end
-penalty for forgetting `cudaDeviceEnablePeerAccess` is about 14x — which is what the
-Section 10 pitfall means by "10-15x slower."
+A single hop is 14x, but the host-staged path takes two of them, so the real end-to-end
+penalty for forgetting `cudaDeviceEnablePeerAccess` is about 28x — which is what the
+Section 10 pitfall means by "25-30x slower."
 
 ### 4.3 NCCL collectives
 
@@ -322,7 +322,7 @@ group grows.
 
 *The reduce-scatter phase turns "N copies of a partial sum" into "N different fully-reduced shards, one per GPU"; the all-gather phase turns those N shards back into N full copies. `ncclAllReduce` is exactly these two phases fused into one call.*
 
-**Worked example**: a 7B-parameter model's gradient buffer in FP32 is `7e9 × 4 bytes ≈ 28 GB`. Across 8 GPUs, the ring all-reduce formula `2·(N-1)/N · size` gives `2 · 7/8 · 28 GB ≈ 49 GB` moved per GPU, split across 14 sequential steps (7 reduce-scatter + 7 all-gather). Those bytes cross NVLink one direction at a time, so the divisor is H100 NVLink 4's ~450 GB/s per direction, not its 900 GB/s bidirectional headline: roughly 109 ms of pure transfer time per step-set in the ideal case — the number every "why is my step time X ms" investigation starts from before looking for overlap or topology problems.
+**Worked example**: a 7B-parameter model's gradient buffer in FP32 is `7e9 × 4 bytes ≈ 28 GB`. Across 8 GPUs, the ring all-reduce formula `2·(N-1)/N · size` gives `2 · 7/8 · 28 GB ≈ 49 GB` moved per GPU, split across 14 sequential steps (7 reduce-scatter + 7 all-gather). Those bytes cross NVLink one direction at a time, so the divisor is B200 NVLink 5's ~900 GB/s per direction, not its 1,800 GB/s bidirectional headline: roughly 54 ms of pure transfer time per step-set in the ideal case — the number every "why is my step time X ms" investigation starts from before looking for overlap or topology problems.
 
 **What this actually says.** "No matter how many GPUs join, each one ships slightly under
 two copies of the buffer — never more — because the ring makes every GPU responsible for
@@ -358,8 +358,8 @@ cancellation is the entire reason data-parallel training scales past a handful o
   bytes per GPU = 14 hops x 3.5 GB           = 49 GB
   cross-check   = 2 x (7/8) x 28 GB          = 49 GB     MATCHES
 
-  time at ~450 GB/s NVLink per direction
-                          = 49 / 450         = 0.1089 s = 108.9 ms  (the ~109 ms above)
+  time at ~900 GB/s NVLink per direction
+                          = 49 / 900         = 0.0544 s =  54.4 ms  (the ~54 ms above)
 
   Naive "everyone sends the whole buffer to everyone":
     bytes per GPU = (N-1) x size = 7 x 28 GB = 196 GB
@@ -412,10 +412,10 @@ sequenceDiagram
           +------+------+------+------+------+------+------+
                  (PCIe/NIC uplink to host CPU, storage, network)
 
-  GPU <-> NVSwitch link (H100, NVLink 4): ~900 GB/s aggregate bidirectional,
-                                          i.e. ~450 GB/s in each direction
+  GPU <-> NVSwitch link (B200, NVLink 5): ~1,800 GB/s aggregate bidirectional,
+                                          i.e. ~900 GB/s in each direction
   Any GPU reaches any other GPU at full NVLink bandwidth -- no hop penalty
-  Host uplink (PCIe Gen5 x16): ~64 GB/s per direction -- ~7x slower per
+  Host uplink (PCIe Gen5 x16): ~64 GB/s per direction -- ~14x slower per
   direction than the NVLink mesh, and a host-staged copy crosses it twice
 ```
 
@@ -451,7 +451,7 @@ flowchart LR
     class host frozen
 ```
 
-*Every GPU is exactly one NVSwitch hop from every other GPU at ~900 GB/s bidirectional — the "ring" a collective walks is really 4 identical full-bandwidth crossbar hops, not a degraded chain. The host's PCIe uplink (dashed) is a slow side path the collective never needs to cross.*
+*Every GPU is exactly one NVSwitch hop from every other GPU at ~1.8 TB/s bidirectional — the "ring" a collective walks is really 4 identical full-bandwidth crossbar hops, not a degraded chain. The host's PCIe uplink (dashed) is a slow side path the collective never needs to cross.*
 
 ### Host-staged copy vs. GPUDirect/P2P — where the host disappears from the path
 
@@ -466,7 +466,7 @@ BROKEN path -- host CPU and host RAM sit in the middle of every GPU-to-GPU byte:
 FIXED path -- GPUDirect P2P (intra-node) / GPUDirect RDMA (inter-node):
 
   GPU0 memory ------------------ DMA ------------------> GPU1 memory
-            (~450 GB/s per direction NVLink, intra-node)
+            (~900 GB/s per direction NVLink, intra-node)
                           -- or, across nodes --
   GPU0 memory --DMA--> NIC --RDMA over InfiniBand/RoCE--> NIC --DMA--> GPU1 memory
   One hop (intra-node) or one network transit (inter-node); the host CPU and
@@ -641,7 +641,7 @@ talking — send each 25 MB slab of gradients the moment it is ready, so the wir
 while the GPU is still computing."
 
 Bucketing does not make the collective faster; the total bytes are identical. What it
-changes is *when* those bytes move. Without it, communication is a 109 ms block appended
+changes is *when* those bytes move. Without it, communication is a 54 ms block appended
 after compute; with it, all but the final bucket's transfer hides underneath compute that
 was going to happen anyway. The bucket size is the tuning knob for that hiding: too small
 and per-collective launch overhead dominates, too large and the first bucket is not ready
@@ -655,26 +655,26 @@ until most of the backward pass is done.
 | `2(N-1)/N` | The same ring multiplier from Section 5, applied per bucket instead of once |
 | exposed cost | Only the final bucket's all-reduce — everything earlier hides under compute |
 
-**Walk one example.** The 28 GB gradient buffer, 8 GPUs, ~450 GB/s NVLink per direction:
+**Walk one example.** The 28 GB gradient buffer, 8 GPUs, ~900 GB/s NVLink per direction:
 
 ```
   buckets = 28,000 MB / 25 MB                        = 1,120 collectives per step
 
   per-bucket bytes on the wire = 2 x (7/8) x 25 MB   = 43.75 MB
-  per-bucket time  = 43.75 MB / 450 GB/s             = 97.2 us
+  per-bucket time  = 43.75 MB / 900 GB/s             = 48.6 us
 
-  1,120 buckets x 97.2 us                            = 108.9 ms  <- same total as
+  1,120 buckets x 48.6 us                            =  54.4 ms  <- same total as
                                                                     the single 49 GB
                                                                     all-reduce above
 
-  Unbucketed : 108.9 ms of communication AFTER the backward pass ends (fully exposed)
+  Unbucketed :  54.4 ms of communication AFTER the backward pass ends (fully exposed)
   Bucketed   : 1,119 buckets overlap with compute, only the last is exposed
-               exposed cost = 97.2 us
-               hidden fraction = 1 - (97.2 us / 108.9 ms) = 99.91%
+               exposed cost = 48.6 us
+               hidden fraction = 1 - (48.6 us / 54.4 ms)  = 99.91%
 ```
 
-The totals match exactly — 108.9 ms either way — which is the point. Bucketing buys no
-bandwidth; it converts 108.9 ms of serial communication into 97.2 us of exposed
+The totals match exactly — 54.4 ms either way — which is the point. Bucketing buys no
+bandwidth; it converts 54.4 ms of serial communication into 48.6 us of exposed
 communication, and that conversion is what makes an 8-GPU job scale near 8x instead of
 stalling on the wire every step.
 
@@ -786,28 +786,28 @@ it is running at roughly half its rated speed.
   size  = 1,073,741,824 B (1 GiB),  N = 8 GPUs
 
   algbw = size / time
-        = 1,073,741,824 B / 5,220 us
-        = 2.06e11 B/s = 205.7 GB/s      -> printed as 2.06e+02
+        = 1,073,741,824 B / 2,610 us
+        = 4.11e11 B/s = 411.4 GB/s      -> printed as 4.11e+02
 
   correction = 2(N-1)/N = 2 x 7/8       = 1.75
 
   busbw = algbw x 1.75
-        = 205.7 x 1.75 = 359.9 GB/s     -> printed as 3.60e+02
+        = 411.4 x 1.75 = 719.9 GB/s     -> printed as 7.20e+02
 
-  The ceiling to judge that against is NVLink 4 PER DIRECTION, ~450 GB/s -- not the
-  900 GB/s bidirectional headline. 360 of a possible 450 is a healthy ring.
+  The ceiling to judge that against is NVLink 5 PER DIRECTION, ~900 GB/s -- not the
+  1,800 GB/s bidirectional headline. 720 of a possible 900 is a healthy ring.
 
   After a P2P misdetection drops the fabric to PCIe Gen5 (64 GB/s per direction):
     busbw ceiling            =  64 GB/s
     algbw = 64 / 1.75        =  36.6 GB/s
-    ratio to the healthy 205.7 GB/s = 5.6x slower -> unmistakable in the output
+    ratio to the healthy 411.4 GB/s = 11.2x slower -> unmistakable in the output
 ```
 
 The takeaway for debugging is that the `busbw`/`algbw` gap is a fixed, known constant for
 a given `N` — so if `busbw` is far below the fabric's rating, the problem is the
 transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
 
-`busbw` (bus bandwidth) is the number to compare against the hardware ceiling — ~450 GB/s for a ring on H100 NVLink 4, since a ring hop uses one direction at a time. A result well below that on an NVSwitch node usually means P2P is disabled, the wrong GPUs are paired, or a driver/topology misdetection is silently falling back to a slower path — exactly the class of problem `NCCL_DEBUG=INFO` (Section 4.6) is built to expose. A busbw *above* 450 GB/s is not an error either: NVLS reduces inside the switch, so it delivers ring-equivalent throughput while moving fewer bytes, and the correction factor `nccl-tests` applies is a ring correction.
+`busbw` (bus bandwidth) is the number to compare against the hardware ceiling — ~900 GB/s for a ring on B200 NVLink 5, since a ring hop uses one direction at a time. A result well below that on an NVSwitch node usually means P2P is disabled, the wrong GPUs are paired, or a driver/topology misdetection is silently falling back to a slower path — exactly the class of problem `NCCL_DEBUG=INFO` (Section 4.6) is built to expose. A busbw *above* 900 GB/s is not an error either: NVLS reduces inside the switch, so it delivers ring-equivalent throughput while moving fewer bytes, and the correction factor `nccl-tests` applies is a ring correction.
 
 ---
 
@@ -816,7 +816,7 @@ transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
 - **PyTorch DDP** wraps every model in production single-node and multi-node training with bucketed `ncclAllReduce` calls overlapped with backpropagation — the default multi-GPU training strategy for the entire PyTorch ecosystem.
 - **Horovod** (Uber) was an early standalone ring-all-reduce library built directly on NCCL/MPI, predating native `torch.distributed` NCCL support, and still used in some TensorFlow/MXNet pipelines.
 - **Megatron-LM / DeepSpeed** layer tensor- and pipeline-parallel `ncclSend`/`ncclRecv` and reduced-scope `ncclAllReduce` calls (within a tensor-parallel group) on top of the same primitives this module covers, to train models too large for data parallelism alone.
-- **NVIDIA DGX H100 / HGX H100** systems ship 8 GPUs fully connected through NVSwitch, specifically so that a ring or NCCL's tree algorithm sees uniform ~900 GB/s bandwidth to every other GPU — the hardware exists because the software (NCCL) can exploit it.
+- **NVIDIA DGX B200 / HGX B200** systems ship 8 GPUs fully connected through NVSwitch, specifically so that a ring or NCCL's tree algorithm sees uniform ~1.8 TB/s bandwidth to every other GPU — the hardware exists because the software (NCCL) can exploit it.
 - **Multi-node LLM pretraining clusters** (e.g. AWS P5/P5e, Azure ND H100 v5) combine intra-node NVSwitch with inter-node GPUDirect RDMA over InfiniBand, so the same `ncclAllReduce` call transparently spans hundreds of GPUs across racks.
 - **JAX's `pjit`/GSPMD** and **Ray Train** both compile down to NCCL collectives on GPU backends despite exposing very different, higher-level sharding APIs to the user — a reminder that "which framework" rarely changes "which wire protocol."
 - **vLLM and TensorRT-LLM tensor-parallel inference** issue `ncclAllReduce` after every sharded attention/FFN block to recombine partial activations across GPUs, on the *inference* side of the same primitives this module teaches for training.
@@ -830,7 +830,7 @@ transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
 
 | Choice | Pros | Cons |
 |--------|------|------|
-| Host-staged copy (`cudaMemcpy` D2H→H2D) | Works everywhere, no peer-access setup | ~10-15x slower than NVLink P2P; extra host memory pressure |
+| Host-staged copy (`cudaMemcpy` D2H→H2D) | Works everywhere, no peer-access setup | ~25-30x slower than NVLink P2P; extra host memory pressure |
 | P2P / `cudaMemcpyPeer` | Direct GPU-to-GPU, full NVLink bandwidth, low latency | Requires topology support (not all GPU pairs are P2P-capable, e.g. across NUMA/PCIe-switch boundaries without NVLink) |
 | Raw NCCL API (C/C++) | Maximum control, no framework overhead, usable from any language with bindings | You own rank bookkeeping, stream management, error handling |
 | `torch.distributed`/DDP | A few lines of Python, automatic bucketing/overlap, battle-tested | Less control over exact collective scheduling; Python-process overhead per GPU |
@@ -872,7 +872,7 @@ transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
 **BROKEN: routing a hot inter-GPU copy through host memory when NVLink is available**
 
 ```cpp
-// BROKEN -- ~14x slower than necessary on an NVLink-connected pair
+// BROKEN -- ~28x slower than necessary on an NVLink-connected pair
 float* h_buf = (float*)malloc(N * sizeof(float));
 cudaSetDevice(0);
 cudaMemcpy(h_buf, d_src, N * sizeof(float), cudaMemcpyDeviceToHost);   // GPU0 -> host
@@ -881,7 +881,7 @@ cudaMemcpy(d_dst, h_buf, N * sizeof(float), cudaMemcpyHostToDevice);   // host -
 free(h_buf);
 ```
 
-This pays for two PCIe hops (~64 GB/s per direction each, plus host-buffer allocation and two synchronization points) when the two GPUs sit on the same NVSwitch and could move the bytes in one hop at ~450 GB/s.
+This pays for two PCIe hops (~64 GB/s per direction each, plus host-buffer allocation and two synchronization points) when the two GPUs sit on the same NVSwitch and could move the bytes in one hop at ~900 GB/s.
 
 ```cpp
 // FIX -- enable P2P once, then copy directly GPU-to-GPU over NVLink
@@ -943,6 +943,7 @@ The fix is structural: never gate a collective call behind rank-specific `if` lo
 | **NVLink / NVSwitch** | High-bandwidth GPU interconnect — 900 GB/s bidirectional per GPU on H100 (NVLink 4), 1.8 TB/s on Blackwell B200 (NVLink 5) — plus the all-to-all crossbar fabric that turns a set of GPUs into one NVLink domain: 8 in an HGX chassis, 72 in a GB200 NVL72 rack, up to 576 through an external NVLink Switch |
 | **NVLS / NVLink SHARP** | In-switch reduction on NVLink 4 NVSwitch fabrics and later; NCCL selects it automatically for `ncclAllReduce`/`ncclReduceScatter`/`ncclAllGather`, and `NCCL_ALGO=NVLS` / `NVLSTree` pins it for benchmarking |
 | **`ncclCommInitRankConfig` / `ncclCommSplit`** | Initialize a communicator with an explicit `ncclConfig_t` (non-blocking init, `blocking=0`, split-share, CGA cluster size), and carve sub-communicators out of an existing one without a second rendezvous — the tensor-parallel/pipeline-parallel sub-group pattern |
+| **NCCL device API** | Communication primitives callable from inside your own CUDA kernel over a symmetric-memory window registered with `ncclCommWindowRegister()`. Three modes: **LSA** (`ncclGetLsaPointer()`) for peers reachable by plain load/store over NVLink or P2P-capable PCIe; **Multimem** (`ncclGetLsaMultimemPointer()`) for NVLink SHARP hardware multicast; **GIN** (`ncclGin::put()` / `ncclGin::get()`) for GPU-initiated networking across nodes. `ncclLsaBarrierSession` synchronizes threads and ranks. This is how you fuse communication into a compute kernel instead of alternating between them |
 | **NVSHMEM** | PGAS-style one-sided GPU-to-GPU `put`/`get` addressed straight from inside a kernel, rather than stream-ordered collectives; the substrate under fine-grained overlap in tensor-parallel inference kernels where a whole NCCL collective is too coarse |
 | **`torch.distributed`** | PyTorch's process-group abstraction; NCCL is its default GPU backend, with Gloo as a CPU/fallback backend |
 | **`DistributedDataParallel` / `FullyShardedDataParallel`** | PyTorch's framework-level wrappers that emit the NCCL calls this module teaches |
@@ -963,8 +964,8 @@ In practice the choice of layer is dictated by altitude, not preference: reach f
 The job deadlocks silently — NCCL collectives are barriers across the whole communicator, so a rank waiting on a collective that a peer never issues blocks forever with no error message. Always structure code so every rank calls the identical sequence of collectives; gate data content on rank, never the collective call itself.
 
 **Q: Why is a host-staged `cudaMemcpy` D2H-then-H2D wasteful when NVLink is available?**
-**Short:** It pays for two PCIe hops at ~64 GB/s each versus one NVLink 4 hop at ~450 GB/s per direction, about 14x slower than enabling peer access and using cudaMemcpyPeer.
-It pays for two PCIe hops at ~64 GB/s per direction each, plus host-buffer overhead, when a direct P2P copy over NVLink 4 could move the same bytes in one hop at ~450 GB/s — about 14x faster end to end. Enable peer access with `cudaDeviceEnablePeerAccess` (both directions) and use `cudaMemcpyPeer` instead.
+**Short:** It pays for two PCIe hops at ~64 GB/s each versus one NVLink 5 hop at ~900 GB/s per direction, about 28x slower than enabling peer access and using cudaMemcpyPeer.
+It pays for two PCIe hops at ~64 GB/s per direction each, plus host-buffer overhead, when a direct P2P copy over NVLink 5 could move the same bytes in one hop at ~900 GB/s — about 28x faster end to end. Enable peer access with `cudaDeviceEnablePeerAccess` (both directions) and use `cudaMemcpyPeer` instead.
 
 **Q: What does `ncclAllReduce` actually do internally?**
 **Short:** ncclAllReduce runs a reduce-scatter phase leaving each GPU one fully-reduced shard, then an all-gather phase collecting every shard, moving 2(N-1)/N * size bytes per GPU.
@@ -983,8 +984,8 @@ Peer access is directional — enabling it on GPU0 only lets GPU0 read/write GPU
 `all_reduce` with `ReduceOp.SUM` returns the *sum* of gradients across all ranks, not the mean, so skipping the division silently multiplies the effective gradient (and thus the effective learning rate) by the GPU count. This can look like instability or divergence with no obvious root cause in the loss curve alone.
 
 **Q: What is the concrete bandwidth gap between NVLink and PCIe that makes P2P matter?**
-**Short:** NVLink 4 on an H100 runs at ~450 GB/s per direction against ~64 GB/s per direction for PCIe Gen5 x16, a 7x gap per hop and roughly 14x end to end for a host-staged copy.
-Compared in the same units, NVLink 4 on an H100 SXM5 runs at ~450 GB/s per direction (the familiar 900 GB/s figure is the bidirectional aggregate) against ~64 GB/s per direction for PCIe Gen5 x16 — a 7x gap per hop, and a host-staged copy crosses PCIe twice, so end to end it is roughly 14x. Mixing the conventions — NVLink's bidirectional 900 against PCIe's per-direction 64 — is the classic way to quote a 14x gap as 14x per hop and overstate it by 2x.
+**Short:** NVLink 5 on a B200 runs at ~900 GB/s per direction against ~64 GB/s per direction for PCIe Gen5 x16, a 14x gap per hop and roughly 28x end to end for a host-staged copy.
+Compared in the same units, NVLink 5 on a B200 SXM runs at ~900 GB/s per direction (the familiar 1.8 TB/s figure is the bidirectional aggregate) against ~64 GB/s per direction for PCIe Gen5 x16 — a 14x gap per hop, and a host-staged copy crosses PCIe twice, so end to end it is roughly 28x. Mixing the conventions — NVLink's bidirectional 1,800 against PCIe's per-direction 64 — is the classic way to quote the 14x per-hop gap as 28x and overstate it by exactly 2x.
 
 **Q: Ring vs. tree all-reduce — when does NCCL pick which?**
 **Short:** Ring is bandwidth-optimal with O(N) latency and wins for large messages, while tree has O(log N) latency and wins for small messages, with NCCL picking automatically by size and topology.
@@ -1033,6 +1034,14 @@ It prints the topology NCCL detected and the ring/tree algorithm and transport i
 **Q: Why do tensor-parallel inference deployments care more about all-reduce latency than data-parallel training does?**
 **Short:** Inference's all-reduce runs once per sharded layer on every forward pass with nothing to overlap it against, while training's all-reduce hides behind the next step's compute.
 Inference's all-reduce runs once per sharded layer on every forward pass, adding directly to per-token latency with nothing to overlap it against, while training's all-reduce hides behind the next step's compute. That is why NCCL favors the low-latency tree/protocol path for the small, frequent messages typical of tensor-parallel inference.
+
+**Q: How do you overlap communication with compute at a finer granularity than one NCCL call?**
+**Short:** Use the NCCL device API to issue transfers from inside your own kernel over a symmetric-memory window, so a tile is sent the moment it is produced rather than after the whole kernel ends.
+Call NCCL's device API from inside the compute kernel itself. A host-launched `ncclAllReduce` is stream-ordered, so the earliest it can start is when the producing kernel has fully retired — the granularity of overlap is one whole kernel. The device API instead lets a thread block push its own tile the instant that tile is finished: you register the buffer as a symmetric-memory window with `ncclCommWindowRegister()`, then inside the kernel use `ncclGetLsaPointer()` to load and store directly into a peer's memory over NVLink, `ncclGetLsaMultimemPointer()` to hit an NVLink SHARP multicast address so the switch does the reduction, or `ncclGin::put()` to reach a rank on another node, with `ncclLsaBarrierSession` synchronizing threads and ranks. This is what fused dispatch/combine kernels in mixture-of-experts serving are built on, where a whole collective per layer is far too coarse. The cost is that you now own the synchronization and the memory registration, so reach for it only when profiling shows exposed communication that a stream-level overlap cannot hide.
+
+**Q: Why is a ring all-reduce's ceiling the per-direction NVLink number rather than the datasheet headline?**
+**Short:** A ring hop sends on one direction at a time, so the ceiling is half the bidirectional aggregate — ~900 GB/s of NVLink 5's 1.8 TB/s, not the headline figure.
+Because a ring hop uses one direction at a time. NVIDIA quotes NVLink as a bidirectional aggregate — 1.8 TB/s per GPU on NVLink 5 — while PCIe lane tables are usually quoted per direction, so comparing the two headline numbers mixes conventions and overstates the gap by exactly 2x. The number a ring hop actually sees is ~900 GB/s, which is what `nccl-tests` `busbw` should be judged against: 720 GB/s of a possible 900 is a healthy ring, whereas a busbw far below it means NCCL fell back to a slower transport. Always restate both sides of any interconnect comparison in the same convention before drawing a conclusion from the ratio.
 
 ---
 

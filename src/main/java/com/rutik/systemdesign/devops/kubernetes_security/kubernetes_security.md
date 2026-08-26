@@ -2,6 +2,8 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
+> **Version anchor (2026-08-25).** **Kubernetes v1.36 "Haru"** (2026-04-22) is current. **User namespaces** (`hostUsers: false`) reached **stable/GA in v1.36** (beta and on-by-default since v1.33). `ValidatingAdmissionPolicy` has been **stable since v1.30**; `MutatingAdmissionPolicy` reached **stable and enabled-by-default in v1.36**, removing the feature gate. The OCI **image volume source** (mounting an OCI artifact as a read-only volume) reached **GA in v1.36** (alpha v1.31, beta v1.32). Every version-tagged claim on this page is checked against these anchors.
+
 A Kubernetes cluster is a large attack surface: an API server, thousands of credentials (ServiceAccount tokens), Secrets, a shared kernel across tenants, and a network where everything talks to everything by default. Securing it means defense in depth across four planes — **authentication/authorization (RBAC)**, **workload hardening (Pod Security, securityContext)**, **network segmentation (NetworkPolicy)**, and **secrets + admission control**. This is among the most-tested DevOps interview areas.
 
 ---
@@ -273,6 +275,61 @@ kubectl auth can-i --list --as=system:serviceaccount:shop:orders-sa  # what can 
 kubectl get clusterrolebindings -o wide | grep cluster-admin         # who is cluster-admin?
 ```
 
+### User namespaces — isolation stronger than `runAsNonRoot`
+
+`runAsNonRoot` only forbids UID 0 *inside* the container — the container's UID namespace is still the **host's** UID namespace, so a container running as UID 1000 genuinely is host UID 1000, and any capability leak or kernel exploit acts with that real host identity. A pod-level **user namespace** (`hostUsers: false`, stable/GA in v1.36) is a different, stronger control: it gives the pod its own UID/GID namespace mapped to a range of **unprivileged host UIDs**, so a container can run as UID 0 *inside* the container while that UID resolves to something like host UID 165536 outside it — root in the container buys nothing on the node.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata: {name: build-job, namespace: ci}
+spec:
+  hostUsers: false                      # opt in to a pod-level user namespace
+  containers:
+    - name: builder
+      image: registry/builder@sha256:...
+      securityContext:
+        runAsUser: 0                    # root INSIDE the container...
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+# ...but the kubelet maps this pod's UIDs to an unprivileged, non-overlapping
+# 65536-wide range on the host — UID 0 in-container never means UID 0 on the node.
+```
+
+**UID-mapping mechanics.** By default each pod using user namespaces is mapped to **65,536 UIDs/GIDs** (the full 0-65535 in-container range), and the kubelet hands out non-overlapping 65536-wide blocks per pod from a node-level subordinate range — a node provisioned for the default 110-pod maximum needs `65536 x 110 = 7,208,960` subordinate IDs reserved for the `kubelet` user (`/etc/subuid` / `/etc/subgid`). Two pods on the same node never share a mapping, so a container escape from one pod cannot reach another pod's files even though both are "unprivileged" on the host.
+
+**Requirements — this is why it isn't on by default everywhere.** A container runtime that understands user namespaces (containerd 2.0+ or CRI-O 1.25+ — an older runtime silently ignores `hostUsers: false` rather than rejecting it, so verify with `kubectl describe pod` that the mapping actually applied) and a kernel new enough for idmapped mounts to work cleanly on the volume filesystem (5.19+ recommended, 6.3+ for full overlayfs idmap support). A pod using a user namespace cannot also set any other `hostX` namespace option (`hostNetwork`, `hostPID`, `hostIPC`) — the two are mutually exclusive, because sharing a host namespace while your UIDs are remapped defeats the isolation.
+
+### Admission webhook timeout budgets — and the fail-open/fail-closed choice
+
+Every `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` entry defaults to **`timeoutSeconds: 10`** when unset, and the API server rejects any value outside **1-30 seconds** — there is no "wait forever" option. A request can pass through several webhooks in the same admission phase (Gatekeeper, an image-policy webhook, a sidecar injector), and their timeouts are **additive**, not shared: three webhooks at the 10-second default is up to 30 seconds of added latency on every write before the operator even reaches etcd. Budget for it explicitly — set `timeoutSeconds` per webhook to the lowest value the policy logic actually needs (2-5s is typical for an in-cluster CEL-backed check) rather than leaving every webhook at the 10-second default, and prefer expressing what you can as a `ValidatingAdmissionPolicy`/`MutatingAdmissionPolicy` (stable since v1.30 / v1.36) precisely because CEL evaluated inside the API server has no network hop and no timeout budget to spend at all.
+
+The `failurePolicy` choice on each webhook is the other half of the tradeoff: `Fail` (the safer default for security-critical policy) means a slow or crashed webhook blocks **every** matching write cluster-wide, turning a webhook outage into a cluster-wide outage; `Ignore` means the same outage silently admits everything the webhook would have rejected. Neither is free — choose per webhook based on whether "reject writes" or "silently stop enforcing" is the safer failure mode for that specific policy, and keep `Fail`-policy webhooks highly available and fast enough that their timeout is never the thing that fires.
+
+### KMS v2 envelope encryption — why it replaced v1
+
+KMS v1 called out to the external KMS plugin on **every** Secret write to encrypt a fresh Data Encryption Key (DEK), which is why it needed a configurable DEK cache (`cacheSize`) just to keep write latency and KMS API cost bounded. **KMS v2** removes that tradeoff structurally: it generates one 32-byte random **DEK seed** on API server startup and again only when the KMS plugin reports the remote Key Encryption Key (KEK) has rotated — not on every write. Each individual write still gets its own unique derived key (via HKDF-Expand from that seed, keyed by a per-write random nonce), so no two Secrets ever share literal key material, but deriving a key from an in-memory seed is a cheap, deterministic, memoized CPU operation rather than a network call — which is also why KMS v2 has **no `cacheSize` knob**: there is nothing sized to tune, the seed just lives in memory until the next KEK rotation.
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: ["secrets"]
+    providers:
+      - kms:
+          apiVersion: v2                          # v1 is legacy; v2 is what production clusters run
+          name: aws-kms
+          endpoint: unix:///var/run/kmsplugin/socket.sock
+          timeout: 3s
+      - identity: {}                              # fallback (unencrypted) for migration
+```
+
+### Certificate and token TTLs — the numbers that matter
+
+- **Bound ServiceAccount tokens** default to `expirationSeconds: 3600` (1 hour) via the `TokenRequest` API and the projected-volume mechanism every Pod uses; the kubelet proactively rotates a token once it has lived past 80% of its TTL, or after 24 hours, whichever comes first. The API server refuses to issue a token with `expirationSeconds` below **600 (10 minutes)** — there is a floor on how short-lived a token can be, so "rotate every few seconds" is not an available knob.
+- Treat a `TokenRequest` audience-bound token (scoped to one API via `audiences:`) as the default for any workload that calls an external service — an unaudienced token is valid wherever the issuer is trusted, while an audience-scoped one is worthless if exfiltrated to anywhere else.
+- Client-certificate authentication (kubeadm-issued control-plane and kubelet client certs) has no equivalent short default — treat any long-lived cert credential as the weaker option versus a bound, auto-rotated token wherever the client can use one.
+
 ---
 
 ## 7. Real-World Examples
@@ -417,6 +474,22 @@ Run `kube-bench` for CIS Benchmark compliance (control-plane and node config); e
 **Q15: What's "assume breach" and how does it shape design?**
 **Short:** It architects the cluster to minimize what a compromised container can achieve, layering non-root, least-privilege RBAC, default-deny networking, and runtime detection.
 It's the assumption that a container *will* be compromised, so you architect to minimize what that achieves rather than only trying to prevent it. Concretely: non-root + read-only + dropped caps (limit local damage), least-privilege RBAC + no auto-mounted token (limit cluster access), default-deny NetworkPolicy (limit lateral movement), encrypted/external secrets (limit data theft), and runtime detection (catch what gets through). Defense in depth so no single failure is catastrophic.
+
+**Q16: Three admission webhooks each set `timeoutSeconds: 10`. What's actually at risk, and how do you budget for it?**
+**Short:** Webhook timeouts in the same admission phase are additive, so three webhooks at the 10-second default can add up to 30 seconds of latency, or an outage, to every write.
+Each webhook's timeout applies independently and they run in sequence within their phase (mutating, then validating), so the worst case is additive: three webhooks at the unset default of 10 seconds is up to 30 seconds of added latency on a single write, and any one of them stalling or crashing hits whatever `failurePolicy` says — `Fail` blocks every matching write cluster-wide, `Ignore` silently stops enforcing the policy the webhook exists to check. Budget by setting each webhook's `timeoutSeconds` (1-30 range) to the smallest value its own logic needs, choosing `failurePolicy` per webhook based on which failure mode — a blocked cluster or a silently unenforced policy — is worse for that specific check, and moving what you can to a `ValidatingAdmissionPolicy`/`MutatingAdmissionPolicy`, which has no timeout budget to spend because it never leaves the API server process.
+
+**Q17: Why did Kubernetes replace KMS v1 with KMS v2 for Secrets encryption?**
+**Short:** KMS v1 called the external KMS on every write to get a fresh key, while KMS v2 derives a per-write key locally from a seed cached until the next KEK rotation.
+KMS v1 generated a brand-new Data Encryption Key (DEK) for every Secret write and had to call the external KMS plugin over the network each time, which is why it needed a configurable DEK cache just to bound latency and KMS API cost. KMS v2 generates one random DEK seed at API server startup (and again only on a reported Key Encryption Key rotation), then derives a unique per-write key from that seed locally via HKDF — a cheap, deterministic, memoized computation instead of a network round trip — which is also why KMS v2 has no `cacheSize` knob to tune. The practical effect: KMS v2 removes the KMS-call-per-write bottleneck entirely while still giving every Secret its own unique key material.
+
+**Q18: Why is a pod-level user namespace a stronger control than `runAsNonRoot`, and what does it require?**
+**Short:** runAsNonRoot only blocks UID 0 in the host's own UID space, while a user namespace maps in-container UIDs to unprivileged host UIDs, so even root-in-container has no host privilege.
+`runAsNonRoot` forbids UID 0 inside the container, but the container's UID namespace is still the host's — a container running as UID 1000 is genuinely host UID 1000. `hostUsers: false` (stable in v1.36) instead gives the pod its own UID/GID namespace, mapping a 65,536-wide block per pod to unprivileged host UIDs, so a container can run as UID 0 internally while that UID resolves to an unprivileged, non-overlapping host identity — a kernel exploit or capability leak inherits no real host privilege. It needs a runtime that understands the mapping (containerd 2.0+/CRI-O 1.25+ — an older runtime silently ignores the field) and a kernel new enough for idmapped mounts (5.19+, 6.3+ for full overlayfs support), and it cannot be combined with `hostNetwork`/`hostPID`/`hostIPC` on the same pod.
+
+**Q19: Pods can now mount an OCI artifact directly as a volume. What's the new security surface, and how do you treat it?**
+**Short:** An OCI-artifact volume is pulled and trusted the same way a container image is, so it needs the same pull-auth, provenance, and admission-policy coverage as any container image.
+The `image` volume source (GA in v1.36) lets a Pod mount an OCI artifact — config, model weights, static data — as a read-only volume without baking it into the container image, which means whoever controls that registry entry controls what the workload sees on disk just as surely as whoever controls a container image controls what it runs. Treat it identically: require pull secrets/registry auth the same as any image reference, verify signatures/provenance before trusting it, and confirm your admission policy actually inspects `spec.volumes[].image` — a policy engine that only scans `spec.containers[].image` has a blind spot for artifacts arriving through this newer path, and coverage there deserves the same audit as image-pull policy gets everywhere else.
 
 ---
 

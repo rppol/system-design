@@ -655,6 +655,51 @@ The **Status DB** (Cassandra/DynamoDB, partitioned by `notification_id`) is the 
 
 ---
 
+### 4.7 Platform Realities That Change the Numbers
+
+Three platform behaviours sit outside this design's control and invalidate its arithmetic if
+they are ignored. Each one changes either the addressable audience or the meaning of
+"delivered", so each belongs in §2's estimation rather than as a footnote.
+
+**RCS as a channel, not a better SMS.** RCS (Rich Communication Services) is the carrier
+messaging successor to SMS: rich cards and carousels, images, suggested-reply chips,
+branded sender identity with verification, and — the operationally important part — **typing
+and read receipts**, so for the first time an SMS-class channel reports whether the message
+was actually read. Apple added RCS support in iOS 18, so it is no longer Android-only, and
+the GSMA's Universal Profile has since brought end-to-end encryption into scope for
+cross-platform RCS. What it means for this design:
+
+- It is a **third state per recipient**, not a replacement rail. Capability varies by device, carrier, and region, so the channel worker (§4.4) must resolve capability first and fall back: RCS if reachable, otherwise SMS. That fallback is a per-recipient lookup with its own cache and its own failure mode.
+- **The delivery-tracking model in §4.6 changes shape.** SMS gives you "submitted to carrier"; RCS gives read receipts, which means the Status DB gains states SMS never had, and campaign metrics computed across a mixed RCS/SMS audience are comparing two different definitions of success unless you normalise them.
+- Cost and rate limits differ per rail, so the per-provider rate limiter and circuit breaker in §4.4 need separate budgets for RCS and SMS rather than one "SMS provider" bucket.
+
+**Android 13+ runtime notification permission.** Before Android 13, an installed app could
+post notifications by default. Since Android 13, `POST_NOTIFICATIONS` is a **runtime
+permission the user must grant**, exactly like camera or location. This materially changes the
+denominator in every estimate in §2 — an app's push-addressable audience is no longer "users
+with the app installed" but "users who granted the permission", and opt-in rates for a prompt
+shown at a bad moment are substantially lower than the near-100% the pre-13 model implied. The
+design consequences are concrete: the preference service (§4.2) must treat "OS permission
+denied" as a distinct state from "user unsubscribed from this category", because they need
+different handling and different re-engagement paths; the fan-out must not enqueue work for
+devices that cannot receive it, which is wasted queue depth and distorted delivery metrics;
+and the channel-selection logic needs an explicit fallback (email, SMS, or in-app) for users
+who are push-unreachable rather than silently dropping them.
+
+**iOS scheduled summary changes what "delivered" means.** iOS lets a user route
+non-time-sensitive notifications into a **scheduled summary** delivered at chosen times rather
+than on arrival. Such a notification is delivered — APNs accepted it, the device received it —
+but the user may not see it for hours. Two implications: the interruption level
+(`time-sensitive`, `active`, `passive`, `critical`) declared on the payload is now a
+first-class field the notification API must expose and the priority queueing in §4.3 must
+carry through, since it decides whether an OTP bypasses the summary; and a delivery-latency
+SLA measured to the device is no longer a proxy for user-visible latency, so an "open rate
+within 5 minutes" metric will look broken for passive notifications when nothing is wrong.
+Declaring everything time-sensitive to escape the summary is the obvious abuse and the obvious
+mistake — users turn the channel off entirely, which costs more than the summary ever did.
+
+---
+
 ## 5. Design Decisions & Tradeoffs
 
 ### Push (Kafka -> Worker) vs. Pull/Poll

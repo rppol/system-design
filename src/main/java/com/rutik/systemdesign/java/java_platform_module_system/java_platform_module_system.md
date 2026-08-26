@@ -28,7 +28,7 @@ This module covers the full directive set (`requires`, `requires transitive`, `r
 - **Two independent visibility axes**: readability (`requires`) gates whether a module can see another module at all; accessibility (`exports`) gates whether it can reference a specific package's public types. Missing either produces a different failure — missing `requires` fails module resolution at launch, missing `exports` fails compilation with "package is not visible."
 - **Reflective accessibility is a third, separate gate**: `opens` is required for `setAccessible(true)` deep reflection, independent of `exports`. A package can be `exports`ed but not `opens`ed (normal API, no reflection), `opens`ed but not `exports`ed (reflection-only, e.g. entity classes only ever touched by an ORM), or both.
 - **Reliable configuration**: the full dependency graph is validated when the JVM boots — a missing module, a duplicate module name, or a split package fails fast with a diagnostic before `main()` runs, instead of surfacing as a runtime `ClassNotFoundException` deep in a call stack.
-- **Strong encapsulation by default**: only `exports`ed packages are accessible outside a module; everything else — including formerly-reflectable JDK internals such as the package behind `sun.misc.Unsafe` — is invisible unless explicitly opened.
+- **Strong encapsulation by default**: only `exports`ed packages are accessible outside a module; everything else — including formerly-reflectable JDK internals such as the package behind `sun.misc.Unsafe` — is invisible unless explicitly opened. This is [Effective Java Item 15: "Minimize the accessibility of classes and members"] enforced one level up the granularity ladder: `exports` is `public` for a whole package, the compiler rejects any access the module descriptor doesn't grant, and a package left off the `exports` list is genuinely unreachable rather than merely discouraged by convention.
 - **The readability graph must be acyclic**: two named modules cannot directly or transitively `requires` each other (the compiler rejects it as a cyclic dependency); `uses`/`provides` (services) is the escape hatch for genuinely circular-feeling relationships because it resolves at runtime, not compile time.
 - **Automatic modules and the unnamed module are bridges, not goals**: they exist so an unmodularized JAR (automatic module, on the module path) or the entire classpath (unnamed module) can participate in the graph while a codebase migrates incrementally.
 
@@ -78,6 +78,61 @@ An automatic module's name comes from the JAR manifest's `Automatic-Module-Name`
 - **Bottom-up**: modularize the artifacts with no dependencies on the rest of your own codebase first (shared "commons"/utility libraries), then work upward through the dependency graph until the top-level application module is modularized last. Every step produces a real, fully-encapsulated module, but progress stalls the moment a leaf dependency is a third-party JAR that isn't modularized yet — bridge it with an automatic module in the meantime.
 - **Top-down**: modularize your own entry-point application module first, put every unmodularized dependency on the module path as an automatic module, and start writing real `requires`/`exports` for your own code immediately. Replace each automatic-module dependency with the library's real module once it ships one. This is the more common path in practice, because most teams do not control the majority of their dependency graph.
 - **Hybrid / unnamed-module bridge**: run with both `--class-path` and `--module-path` at once. Some artifacts sit on the module path (named or automatic), the rest stay on the classpath (unnamed module) — this is how most real migrations actually proceed, module by module, over quarters rather than as a single cutover.
+
+### 4.5 Module Import Declarations (JEP 511, Java 25)
+
+`import module com.foo;` is a source-file directive, not a `module-info.java` directive — it
+reads the module graph's export edges to bring packages into scope on demand, so it belongs
+next to `requires`/`exports` conceptually even though it lives in ordinary `.java` files. It
+imports every package the named module `exports`, and — because it is walking the same
+readability graph the table in §4.2 describes — transitively every package exported by every
+module that one `requires transitive`s. So `import module java.sql;` also brings in whatever
+`java.sql` re-exports via its own `requires transitive` directives, which is usually more than
+a reader expects from one line.
+
+Two things make this different from a convenience shorthand for a pile of `import` lines. It
+works in an **ordinary compilation unit**, not just a compact source file (§4.4 of
+[Core Language](../core_language/core_language.md) covers that companion Java 25 feature) —
+and critically, the importing code does **not** need to live in a named module itself; you can
+write `import module java.base;` in a plain classpath class with no `module-info.java` at all.
+The unnamed module's usual read-everything relationship (§6, "The Unnamed Module") is what
+makes that legal.
+
+**The gotcha is ambiguity, and it is a compile error, not a silent pick.** If two module
+imports each export a type with the same simple name, using that simple name without
+qualification fails to compile. The textbook collision is `java.util.List` vs `java.awt.List`
+when both `java.base` and `java.desktop` are imported:
+
+```java
+import module java.base;
+import module java.desktop;
+
+List<String> names = new ArrayList<>();   // COMPILE ERROR: List is ambiguous
+```
+
+The fix is a single-type import, which always wins over a module import:
+
+```java
+import module java.base;
+import module java.desktop;
+import java.util.List;     // resolves the List ambiguity in favour of java.util
+
+List<String> names = new ArrayList<>();   // OK
+```
+
+Note the ambiguity is only reported where the simple name is actually *used* — the two
+`import module` lines coexist without error until something in the file writes a bare `List`.
+The full precedence order, most specific wins: a **single-type import** (`import
+java.util.List;`) beats a **module import** (`import module java.base;`), which beats a plain
+**on-demand import** (`import java.util.*;`).
+
+The honest tradeoff: `import module` is a genuine readability win for scripts, notebooks-style
+exploration, and small teaching programs — one line instead of a dozen. In a large codebase it
+can be a readability *loss*: explicit per-type imports double as documentation of exactly what
+a file depends on, and a reviewer scanning a diff loses that signal the moment the import list
+collapses to `import module java.base;`. Reach for it in compact source files and quick
+utilities; keep explicit imports in library and application code where the import list is part
+of what a reader relies on.
 
 ---
 
@@ -275,7 +330,7 @@ for (DiscountStrategy strategy : loader) {
 }
 ```
 
-`uses` exists because `ServiceLoader.load()` is itself implemented with reflection; declaring `uses` is how a module tells the module system "yes, I intend this specific reflective lookup, permit it" without opening the package to arbitrary reflection. Discovery is source-dependent: a **named module**'s providers must be declared with `provides ... with` in its `module-info.java` — a legacy `META-INF/services/com.acme.orders.spi.DiscountStrategy` file bundled inside a named module's JAR is silently ignored. An **automatic module** or classpath JAR still uses the classic `META-INF/services/<interface>` file, because it has no `module-info.java` to declare `provides` in. `ServiceLoader.load()` transparently discovers providers through whichever mechanism applies, which is exactly why migrating a plugin system to JPMS requires zero changes to the consumer's `ServiceLoader.load()` call site — only to how providers register themselves.
+`uses`/`provides` plus `ServiceLoader` is the JDK's built-in **service provider framework** — the pattern [Effective Java Item 1: "Consider static factory methods instead of constructors"] describes (a service interface, a provider registration mechanism, and a service access API decoupling clients from concrete implementations) and explicitly points readers at `java.util.ServiceLoader` for, rather than hand-rolling the same thing. `uses` exists because `ServiceLoader.load()` is itself implemented with reflection; declaring `uses` is how a module tells the module system "yes, I intend this specific reflective lookup, permit it" without opening the package to arbitrary reflection. Discovery is source-dependent: a **named module**'s providers must be declared with `provides ... with` in its `module-info.java` — a legacy `META-INF/services/com.acme.orders.spi.DiscountStrategy` file bundled inside a named module's JAR is silently ignored. An **automatic module** or classpath JAR still uses the classic `META-INF/services/<interface>` file, because it has no `module-info.java` to declare `provides` in. `ServiceLoader.load()` transparently discovers providers through whichever mechanism applies, which is exactly why migrating a plugin system to JPMS requires zero changes to the consumer's `ServiceLoader.load()` call site — only to how providers register themselves.
 
 ### `jlink` — Building a Custom Runtime Image
 
@@ -358,7 +413,7 @@ Both modules declare `com.acme.util`. At launch the resolver detects the collisi
 
 - **The JDK itself**: `rt.jar` became roughly 95 platform modules (`java.base`, `java.sql`, `java.xml`, `java.logging`, `java.net.http`, `java.desktop`, and more) — the modularization that makes `jlink` possible in the first place.
 - **`jlink` in containerized deployments**: teams building microservice images use `jlink` to ship a custom runtime instead of a full-JDK base image, shrinking image size and attack surface (fewer JDK classes present means fewer potential CVEs to patch).
-- **Frameworks that need `opens`**: Spring (constructor/field injection via reflection), Hibernate/JPA (private-field access on entities, lazy-loading proxies), Jackson (private-field (de)serialization), and Mockito (mocking, historically via `sun.misc.Unsafe`/Objenesis) all require deep reflection into application code they don't own, which is precisely what `opens` exists to grant safely.
+- **Frameworks that need `opens`**: Spring (constructor/field injection via reflection), Hibernate/JPA (private-field access on entities, lazy-loading proxies), Jackson (private-field (de)serialization), and Mockito (mocking, historically via `sun.misc.Unsafe`/Objenesis) all require deep reflection into application code they don't own — exactly the cost [Effective Java Item 65: "Prefer interfaces to reflection"] warns about, that JPMS does not eliminate. What `opens` changes is that each such dependency now has to be an explicit, auditable grant in a `module-info.java` instead of an invisible runtime assumption.
 - **`jdeps` in upgrade projects**: run in CI ahead of an LTS-to-LTS jump (11 to 17, 17 to 21) to catch usage of internal, unsupported APIs before it becomes a startup failure.
 - **`ServiceLoader`/SPI in the JDK itself**: JDBC 4+ driver auto-registration (`java.sql.Driver`), JCA/JCE cryptography providers, and `javax.sound` providers all predate JPMS but map directly onto `uses`/`provides` once modularized.
 
@@ -525,6 +580,16 @@ Before Java 9, the classpath gave zero compiler-enforced encapsulation — any p
 **Short:** Publishing Automatic-Module-Name early pins a stable name before the library's real module ships.
 
 Because the filename-derived automatic module name consumers would otherwise depend on can silently change later. Once the library ships its own real module name, every downstream `requires` statement written against the old, derived name breaks at once. Declaring `Automatic-Module-Name` early pins the name the library intends to use permanently, so the eventual transition to a fully named module is invisible to consumers who already wrote `requires` against that name.
+
+**Q: What does `import module java.sql;` actually bring into scope, and why does `requires transitive` make the answer bigger than you'd expect?**
+**Short:** It imports every package java.sql exports, plus every package re-exported by whatever java.sql requires transitively.
+
+`import module java.sql;` (JEP 511, Java 25) imports, on demand, every package `java.sql` itself `exports` — but it doesn't stop there. It also transitively imports every package exported by any module `java.sql` names in a `requires transitive` directive of its own, because that's exactly what implied readability means: any reader of `java.sql`, including a module-import statement, also reads what `java.sql` re-exports. So a single `import module java.sql;` line can silently pull in far more types than the packages you'd list if you were writing `java.sql`'s own API surface from memory — you have to know the module's `requires transitive` graph, not just its own `exports` list, to know everything a module import puts in scope.
+
+**Q: You write `import module java.base;` and `import module java.desktop;` in the same file, and it stops compiling wherever you write `List`. Why, and what's the one-line fix?**
+**Short:** Both modules export a type named List — java.util.List and java.awt.List — so the bare name is ambiguous; add a single-type import.
+
+Both `java.base` and `java.desktop` export a package containing a type named `List` — `java.util.List` and `java.awt.List` — so once both modules are imported, the bare simple name `List` no longer resolves to one type; it's a compile error the moment the name is actually used (the two `import module` lines alone don't trigger it). The fix is a single-type import naming the one you mean: adding `import java.util.List;` resolves the ambiguity in favour of `java.util.List`, because single-type imports take precedence over module imports and on-demand imports. No renaming or qualifying every use is required — the one explicit import line is enough.
 
 ---
 

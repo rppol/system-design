@@ -1515,7 +1515,7 @@ own `requirements.txt`. Pin the image digest alongside the model version, valida
 - **Backend stores:** **PostgreSQL**, **MySQL**, **SQLite**
 - **Artifact stores:** **S3**, **MinIO**, **GCS**, **Blob Storage**
 - **Environment managers:** **virtualenv**, **conda**, **uv**
-- **Serving handoff:** **KServe**, **NVIDIA Triton**, **Seldon Core**, **BentoML**, **Ray Serve**, **TorchServe**
+- **Serving handoff:** **KServe**, **NVIDIA Triton**, **Seldon Core**, **BentoML**, **Ray Serve**
 - **Packaging and CI:** **Docker**, **GitHub Actions**, **pytest**
 - **Orchestrators that run above it:** **Airflow**, **Argo Workflows**, **Kubeflow Pipelines**, **Ray**, **Metaflow**
 - **Autologged training frameworks:** **scikit-learn**, **XGBoost**, **LightGBM**, **PyTorch Lightning**, **Apache Spark**, **transformers**

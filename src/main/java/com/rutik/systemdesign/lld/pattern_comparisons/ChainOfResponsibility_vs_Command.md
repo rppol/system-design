@@ -519,3 +519,82 @@ flowchart LR
 ```
 
 This pattern is common in event-driven architectures, workflow engines, and API gateway implementations where requests must first be routed and then reliably executed.
+
+---
+
+## Interview Questions with Answers
+
+**Q: Both Chain of Responsibility and Command decouple sender from receiver — what's the real distinguishing question?**
+**Short:** CoR decouples by not knowing WHO will handle the request; Command decouples by not knowing WHEN it executes.
+
+CoR's sender fires a request into a chain without knowing which handler, if any, will claim it — the decoupling is about identity of the handler. Command's invoker knows exactly which receiver a command targets, but the command object can be stored, queued, or delayed before `execute()` ever runs — the decoupling is about timing. Confusing the two leads to using CoR when you actually need deferred execution, or Command when you actually need dynamic routing. Ask "does my sender know the target?" — if no, CoR; if yes but timing is flexible, Command.
+
+**Q: What happens in Chain of Responsibility if no handler in the chain claims the request?**
+**Short:** The request falls off the end of the chain unhandled, unlike Command where execute() always runs once invoked.
+
+In CoR, each handler either processes the request or forwards it to `nextHandler`; if the chain runs out of handlers, the request is silently dropped or logged as unhandled — this is a legitimate, designed-for outcome. Command has no equivalent gap: once `pressButton(command)` is called, `execute()` always fires against a known receiver. This asymmetry is why CoR chains typically end in a catch-all handler (like `L3Support` in the escalation example) to guarantee something eventually happens.
+
+**Q: Why does the Command pattern's invoker never reference concrete receiver types like Light or Thermostat directly?**
+**Short:** The invoker only depends on the Command interface, so new receiver types never require invoker changes.
+
+`RemoteControl` stores commands in a `Deque<Command>` and calls only `execute()`/`undo()` — it has no knowledge of `Light`, `Thermostat`, or any future receiver. Each `ConcreteCommand` holds its own reference to the specific receiver it targets and translates the generic `execute()` call into the receiver-specific method (`light.turnOn()`, `thermostat.setTemperature()`). This is what lets you add a new smart-home device without touching `RemoteControl` at all — pure Open/Closed compliance.
+
+**Q: What structural feature lets Command support undo when a plain method call cannot?**
+**Short:** A Command object can capture prior state before execute() runs, so undo() can restore exactly that state.
+
+A plain method call like `thermostat.setTemperature(24)` discards the previous temperature the moment it runs. `SetThermostatCommand` instead stores `previousTemp` inside `execute()` before mutating the receiver, giving `undo()` something concrete to restore. This is only possible because Command turns the action into a stateful object with a lifetime longer than a single call — a bare method invocation has nowhere to keep that state.
+
+**Q: When would you compose Chain of Responsibility with Command instead of using CoR alone?**
+**Short:** Combine them when you need CoR's dynamic routing plus Command's execute/undo/audit capability.
+
+If all you need is "find the right handler," plain CoR is enough. But when the routed action also needs to be logged, replayed, or undone — like the `SupportOrchestrator` example where `AutomatedRouter`/`HumanRouter` return a `Command` instead of handling the ticket directly — composing the two gives you dynamic handler selection AND a reversible audit trail. The orchestrator only ever calls `execute()` on whatever Command comes back, then pushes it onto an `auditLog` for later rollback.
+
+**Q: What is the key ordering difference between how CoR handlers behave and how an Invoker calls Commands?**
+**Short:** CoR handlers are strictly sequenced and typically only one acts; an Invoker can execute many independent Commands.
+
+A CoR chain enforces a fixed traversal order (L1 -> L2 -> L3), and once a handler claims the request, traversal stops — only one handler acts per request. An Invoker like `RemoteControl` has no such constraint: it can call `execute()` on many unrelated commands in any sequence the client chooses, and each command runs independently of the others. This is why CoR is described as "routing to exactly one," while Command is "executing however many, in whatever order."
+
+**Q: Give a real system example each of Chain of Responsibility and Command that are easy to confuse.**
+**Short:** Servlet/Spring Security filter chains use Chain of Responsibility, while job queues like Sidekiq use Command.
+
+`jakarta.servlet.Filter` chains and Spring Security's filter chain are canonical CoR — each filter decides to handle the request or call `chain.doFilter()` to forward it. Job queues (Celery tasks, Sidekiq jobs, RabbitMQ messages) are canonical Command — each job is a serialized object with parameters baked in, executed later by a worker, and often loggable or retryable. Both "handle a request" conceptually, but one is about routing through middleware and the other is about capturing deferred work.
+
+**Q: In the combined CoR + Command example, what does AutomatedRouter return when it can't resolve the ticket itself?**
+**Short:** It delegates to the next handler by calling next.route(ticket) and returns whatever that produces.
+
+`AutomatedRouter.route()` only auto-resolves severity-1 tickets by returning an `AutoResolveCommand`; for anything else it calls `next != null ? next.route(ticket) : Optional.empty()`, forwarding the decision down the chain to `HumanRouter`. This preserves normal CoR semantics — delegation on non-match — while still returning a `Command` object as the eventual payload instead of directly performing an action. The chain decides WHO handles it; the returned Command decides WHAT happens.
+
+**Q: Why is a macro command (composite of commands) a capability unique to Command, not CoR?**
+**Short:** Command objects can be grouped and replayed together as one unit; CoR handlers only ever route one request each.
+
+Because a Command is a first-class object, several of them can be collected into a list and executed as a single logical operation — a macro. CoR handlers have no equivalent: each handler processes a single incoming request and either claims or forwards it, with no notion of bundling multiple requests into one replayable unit. This is a direct consequence of Command's "encapsulate the action as an object" intent versus CoR's "route a single request" intent.
+
+**Q: What does the request object represent differently in CoR versus Command?**
+**Short:** In CoR the request is a parameter handlers inspect; in Command the request IS the object with parameters baked in.
+
+`SupportTicket` in the CoR example is passed as an argument to `handle(ticket)` — handlers read it but don't own it. In the Command example, `SetThermostatCommand` doesn't receive a separate request object at all; the command instance itself is the request, with `newTemp` and `previousTemp` stored as its own fields. This is why Command objects can be queued and replayed later — the request has been absorbed into the object's identity, whereas a CoR request is just transient input to a method call.
+
+**Q: Why might a Chain of Responsibility be hard to debug once it grows large in production?**
+**Short:** A long or dynamically reordered chain hides which handler actually processed a request without extra logging.
+
+As more handlers are added or reordered at runtime, tracing which handler ultimately claimed (or dropped) a given request requires stepping through every intermediate `nextHandler.handle()` call. Unlike a Command's single, self-contained `execute()`, a CoR chain's behavior is emergent from the combination and order of all handlers, so a bug can hide in handler ordering rather than in any one handler's logic. Production systems mitigate this by logging every escalation step, as the `L1Support`/`L2Support` example does with its "escalating..." messages.
+
+**Q: What's the risk of using Command purely for queueing without designing undo() from the start?**
+**Short:** The state needed for undo may already be discarded by the time undo() is retrofitted later.
+
+If a command's `execute()` only performs the forward action and never captures prior state, adding `undo()` afterward has nothing to restore from — the previous value is gone the moment `execute()` overwrote it. `SetThermostatCommand` avoids this by capturing `previousTemp` inside `execute()` itself, before mutating the receiver. The lesson generalizes: design `execute()` and `undo()` together, because undo's data dependency is created at execution time, not afterward.
+
+**Q: How would you decide between CoR and Command when the correct handler is always known in advance?**
+**Short:** If the handler is always known, skip CoR's dynamic routing and use Command directly against a fixed receiver.
+
+CoR's entire value proposition is resolving an unknown handler at runtime by trying candidates in sequence; if you already know which receiver should act, that machinery is pure overhead. In that case, wrap the action as a Command targeting the known receiver directly — you get encapsulation, undo, and logging without paying for chain traversal you'll never need. Reach for CoR only when "who handles this" is genuinely a runtime decision.
+
+**Q: What is the practical difference between how CoR and Command achieve testability?**
+**Short:** CoR is tested by feeding requests through the whole chain; Command is tested by invoking one object in isolation.
+
+Testing a CoR handler in isolation is awkward because its behavior includes "does it forward correctly to the next handler," which requires either a real or mock `nextHandler` in the chain. A Command object, by contrast, is self-contained — you can construct one directly with a mock receiver and assert on `execute()`/`undo()` without any invoker or chain involved. This is one reason Command-based designs (job objects, macro recording) tend to have simpler unit tests than deep CoR chains.
+
+**Q: Why does Command support logging and replay more naturally than Chain of Responsibility does?**
+**Short:** A Command is a serializable object capturing exactly what happened, while a CoR request is transient input.
+
+Because a `ConcreteCommand` bundles the action, its parameters, and (via `undo()`) enough state to reverse it, the whole object can be serialized, persisted, and replayed later — this is exactly how event-sourced systems and job queues work. A CoR request, once it passes through the chain, leaves no durable trace unless a handler explicitly logs it; the chain itself has no notion of "this is a record I could replay." That durability gap is the practical reason audit trails and undo/redo systems are built on Command, not CoR.

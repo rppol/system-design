@@ -620,6 +620,119 @@ cooperative sync, which is why this primitive is shown C++-only here and
 deferred in full to
 [warp_level_primitives_and_cooperative_groups](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md).
 
+### 6.6 The asynchronous barrier — `cuda::barrier` and mbarrier phase parity
+
+Every barrier so far is a **rendezvous**: a thread that calls it does nothing else until
+every other thread arrives too. `cuda::barrier<cuda::thread_scope_block>` breaks that
+coupling in two: "I am done" (`arrive()`) becomes a separate call from "I need everyone
+else to be done" (`wait()`), so a thread can do independent work in between. This is the
+primitive underneath every modern pipelined-copy kernel — it is what lets a warp issue a
+bulk asynchronous copy and let *hardware*, not a thread, report completion.
+
+```cuda
+#include <cuda/barrier>
+
+__global__ void asyncBarrierExample(const float* __restrict__ src,
+                                     float* __restrict__ dst, int n) {
+    __shared__ float tile[256];
+    __shared__ cuda::barrier<cuda::thread_scope_block> bar;
+
+    if (threadIdx.x == 0) {
+        init(&bar, blockDim.x);      // one thread inits; expected arrival count = blockDim.x
+    }
+    __syncthreads();                  // init() must be visible before anyone touches bar
+
+    // Producer: an asynchronous bulk copy that signals `bar` itself when the
+    // transfer lands -- no thread has to poll or block to report this arrival.
+    cuda::memcpy_async(tile, src + blockIdx.x * blockDim.x,
+                        sizeof(float) * blockDim.x, bar);
+
+    // The split API: arrive() says "my part is issued," and hands back a TOKEN
+    // tied to the barrier's current phase; wait() blocks until every arrival
+    // for THAT token's phase has landed. Anything between the two calls runs
+    // fully overlapped with the pending copy.
+    auto token = bar.arrive();
+    float partial = precomputeSomethingIndependentOf(tile);   // overlaps the copy
+    bar.wait(std::move(token));       // now block until the whole phase completes
+
+    dst[blockIdx.x * blockDim.x + threadIdx.x] = tile[threadIdx.x] + partial;
+}
+```
+
+`arrive_and_wait()` is the fused convenience form — `bar.arrive_and_wait();` is exactly
+`__syncthreads()`'s all-in-one semantics when every thread's arrival is also what everyone
+is waiting on. The split form is strictly more expressive: `__syncthreads()` has no way to
+say "signal that I'm done, then keep computing, then block" — it collapses those into one
+instruction. The async barrier's real value is that the **arrival itself need not come from
+a thread at all**: a `cuda::memcpy_async`/TMA copy engine can complete the expected-arrival
+count on the barrier's behalf, which is the mechanism that decouples a producer warp
+issuing copies from a consumer warp computing on the previous tile — see
+[warp_level_primitives_and_cooperative_groups](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md)
+for the full producer/consumer warp-specialization structure built on top of this.
+
+**Phase parity — the trap underneath the C++ wrapper.** The PTX object beneath
+`cuda::barrier` is `mbarrier`, and an `mbarrier` is a **reusable, alternating** counter: it
+carries a phase bit that flips every time the expected number of arrivals lands, then the
+arrival count resets and the next round begins on the opposite phase. `mbarrier.try_wait.parity`
+takes the phase you expect to have completed, not "is the barrier done" — there is no such
+thing as globally "done," only "has phase 0 completed" or "has phase 1 completed." In a
+pipelined mainloop that reuses `NUM_STAGES` barriers round-robin, the parity a consumer
+must ask for at iteration `i` is `(i / NUM_STAGES) & 1` — it flips only once every
+`NUM_STAGES` laps through that slot, not every iteration.
+
+The C++ `arrive()`/`wait(token)` pair sidesteps this for a single thread by encoding the
+expected phase inside the token. But a **consumer that never calls `arrive()` itself** —
+exactly the warp-specialized case, where the producer's async copy supplies the arrival on
+the consumer's behalf — has no token to wait on, and must track the phase parity bit
+explicitly and poll `try_wait(parity)` directly. Getting that bit wrong is not a hang: a
+stale parity means `try_wait` reports the *previous* phase as complete, so the wait returns
+immediately and the consumer reads whatever `tile[stage]` held from the prior lap — a
+silent data race that looks like a numerical bug, not a synchronization one. See the
+BROKEN -> FIX pair in §10.
+
+```mermaid
+stateDiagram-v2
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    [*] --> ParityZero: init(bar,<br/>expected)
+    ParityZero --> CountingZero: arrive() or<br/>copy signals
+    CountingZero --> CountingZero: count below<br/>expected
+    CountingZero --> FlipToOne: count reaches<br/>expected
+    FlipToOne --> ParityOne: phase bit set to 1,<br/>waiters released,<br/>count resets
+    ParityOne --> CountingOne: arrive() or<br/>copy signals
+    CountingOne --> CountingOne: count below<br/>expected
+    CountingOne --> FlipToZero: count reaches<br/>expected
+    FlipToZero --> ParityZero: phase bit set to 0,<br/>waiters released,<br/>count resets
+
+    class ParityZero,ParityOne req
+    class CountingZero,CountingOne mathOp
+    class FlipToOne,FlipToZero train
+```
+
+Caption: the mbarrier never reaches a final "done" state — it alternates between two
+phases forever, and a waiter must name the phase it is waiting for (`try_wait.parity`);
+naming the phase that already completed is why a stale-parity wait returns instantly
+instead of blocking.
+
+Finally, a thread that has no more work to contribute — the epilogue of a warp-specialized
+loop, or a warp that finishes early — must formally leave the pipeline with
+`arrive_and_drop()` rather than simply stop calling `arrive()`:
+
+```cuda
+if (threadHasMoreWork) {
+    bar.arrive_and_wait();
+} else {
+    bar.arrive_and_drop();    // decrements the expected arrival count for EVERY future
+                               // phase, not just this one -- the barrier is told this
+                               // thread is permanently gone, not merely late
+}
+```
+
+Without `arrive_and_drop()`, the barrier keeps expecting an arrival from a thread that will
+never send one again, and every subsequent phase deadlocks one arrival short.
+
 ---
 
 ## 7. Real-World Examples
@@ -801,6 +914,45 @@ reproducibility; see
 [case_studies/cross_cutting/numerical_precision_and_determinism.md](../case_studies/cross_cutting/numerical_precision_and_determinism.md)
 for when that matters and how to bound it (fixed-order tree reduction
 instead of atomics, when determinism is a requirement).
+
+**Pitfall 6 — waiting on the wrong mbarrier phase parity in a pipelined loop.**
+
+```cuda
+// BROKEN: a warp-specialized consumer that polls the barrier directly (it never
+// calls arrive() itself -- the producer's async copy supplies that arrival) but
+// never advances the phase parity it polls with.
+constexpr int NUM_STAGES = 4;
+__shared__ cuda::barrier<cuda::thread_scope_block> stageBar[NUM_STAGES];
+int consumerParity[NUM_STAGES] = {0, 0, 0, 0};
+
+for (int i = 0; i < numTiles; ++i) {
+    int stage = i % NUM_STAGES;
+    // BUG: the correct parity is (i / NUM_STAGES) & 1 -- it flips only once
+    // every NUM_STAGES laps through this slot, but consumerParity[stage] is
+    // never updated, so every call after the first asks about a phase that
+    // already completed.
+    while (!stageBar[stage].try_wait(consumerParity[stage])) { /* spin */ }
+    consume(tile[stage]);   // silently reads the PREVIOUS lap's tile -- looks
+                             // like a numerical bug, not a race, and never hangs
+}
+```
+
+```cuda
+// FIX: derive the expected parity from the iteration count instead of a
+// stale local, exactly as an mbarrier's phase bit actually flips.
+for (int i = 0; i < numTiles; ++i) {
+    int stage  = i % NUM_STAGES;
+    int parity = (i / NUM_STAGES) & 1;             // FIX: recomputed every iteration
+    while (!stageBar[stage].try_wait(parity)) { /* spin, or __nanosleep backoff */ }
+    consume(tile[stage]);   // guaranteed to be THIS lap's data
+}
+```
+
+This bug is nastier than a missed `__syncthreads()`: a divergent barrier hangs loudly, but
+a wrong parity makes `try_wait` return `true` immediately, so the kernel runs to completion
+and produces plausible-looking, silently wrong numbers. `compute-sanitizer` does not catch
+this class of bug today — the only reliable defense is deriving the parity arithmetically
+from the loop index, never tracking it by hand with a variable that can fall out of sync.
 
 ---
 
@@ -986,6 +1138,35 @@ flags shared-memory races (the missing-barrier class of bug), and
 every kernel that stages data through shared memory or coordinates across
 threads. Neither replaces testing, but both catch classes of bug that
 "the output looked right on my test run" will not.
+
+**Q: What does `cuda::barrier::arrive()` give you that `__syncthreads()` cannot?**
+**Short:** A token you can hold while doing independent work before calling `wait()`, splitting "I am done" from "I need everyone else done" into two separate calls.
+`arrive()` signals this thread's arrival and returns immediately with a phase token, instead
+of blocking the way `__syncthreads()` does; the thread can then do useful independent work
+before later calling `wait(std::move(token))` to block until the rest of the phase
+completes. `arrive_and_wait()` is the fused form that matches `__syncthreads()` exactly —
+the split form only pays off when there is real work to overlap with the wait, most notably
+when a copy engine, not a thread, is the one completing the arrival.
+
+**Q: What actually happens if a consumer waits on the wrong mbarrier phase parity?**
+**Short:** `try_wait` reports the stale phase as already complete and returns immediately, so the consumer reads the previous iteration's data — a silent race, not a hang.
+The wait does not block and does not error — `try_wait.parity` reports whichever phase you
+named as already completed, so if that phase is the *previous* one, the call returns
+instantly and the consumer reads shared memory left over from the prior lap of the pipeline.
+The result is wrong numbers that look like a precision or algorithm bug, with no crash and
+no sanitizer flag, which is what makes it more dangerous than a missing `__syncthreads()`:
+that fails loudly (a hang), this fails silently. The fix is always to derive the expected
+parity arithmetically from the loop index (`(i / num_stages) & 1`), never to track it with a
+hand-updated variable.
+
+**Q: What does `arrive_and_drop()` do, and why does a pipeline need it?**
+**Short:** It withdraws a thread from the barrier permanently, decrementing the expected arrival count for every future phase, not just the current one.
+It tells the barrier that this thread is leaving the pipeline for good — the expected
+arrival count is reduced for every future phase, not merely the current one, the way a
+plain missed `arrive()` would be interpreted. It is needed in the epilogue of a
+warp-specialized loop: once a warp has no more tiles to produce or consume, it must
+formally drop out, or every subsequent phase deadlocks one arrival short of the count the
+barrier still expects from a thread that will never call `arrive()` again.
 
 ---
 

@@ -433,4 +433,74 @@ A: The classic one is a notification service with a `switch (type)` over EMAIL, 
 
 ---
 
+**Q: How did Meyer's original 1988 formulation of OCP differ from Martin's modern version?**
+**Short:** Meyer's OCP extended behavior via inheritance; Martin's modern OCP extends it via interfaces and polymorphism.
+
+A: Meyer's original OCP (1988) treated implementation inheritance as the extension mechanism — you subclassed to extend behavior. Martin's modern OCP (1996 onward) uses polymorphism and interfaces as the primary mechanism instead. Modern Java OCP almost always means depending on interfaces, adding new implementations, and never touching the interface or its callers, rather than subclassing a concrete base. Knowing this history explains why "extension via inheritance" answers sound dated in an interview compared to "extension via interfaces."
+
+---
+
+**Q: What's the classic code smell that signals an OCP violation before you even read the logic?**
+**Short:** instanceof checks and switch statements on type or enum inside business logic.
+
+A: `instanceof` checks and `switch` statements on `getType()`, `getClass()`, or an enum value in non-trivial business logic are the textbook OCP smell — each new variant forces you to reopen and edit that same method. Other tells are a comment like `// Added for feature X` recurring in the same method, or a class that has been modified in every sprint for the past year. Spotting the smell early is cheaper than refactoring an established type-switch after a dozen cases have accumulated.
+
+---
+
+**Q: In the `AreaCalculator` `instanceof`-chain example, what specifically goes wrong as new shapes are added?**
+**Short:** Every new shape forces reopening AreaCalculator, risking a break in an existing shape's calculation.
+
+A: Every new shape — Hexagon, Pentagon, and so on — requires opening `AreaCalculator` and adding another branch, and the risk of accidentally breaking `Circle`'s calculation while adding `Triangle` is real because they now share one method body. The class also accumulates dead branches for deprecated shapes since it never shrinks, and unit tests for every existing shape must be re-run whenever a new one is added. The OCP-compliant fix extracts a `Shape` interface so `AreaCalculator` sums areas polymorphically and never needs to change again.
+
+---
+
+**Q: How does the Decorator pattern embody OCP?**
+**Short:** Decorator wraps an existing object with new behavior while leaving the original class completely untouched.
+
+A: Decorator adds new behavior by wrapping an existing object rather than modifying its class — the original implementation stays closed for modification while the system stays open for extension via new wrapper types. This is the same mechanism Java's I/O stream classes use (`BufferedInputStream` wrapping a `FileInputStream`). Contrast it with Strategy, which swaps out an entire algorithm rather than layering additional behavior on top of one.
+
+---
+
+**Q: What's YAGNI's role as the counterforce to OCP?**
+**Short:** Don't build an abstraction for extension until you've seen the same kind of variation requirement twice.
+
+A: YAGNI (You Aren't Gonna Need It) says: build the plain if-else first, and only refactor to an OCP abstraction once the second variant of that same kind of change actually arrives. Abstracting on the first occurrence risks guessing the wrong abstraction, since you don't yet know the real shape of the variation. This is the pragmatic answer to "isn't OCP over-engineering for small projects?" — OCP is earned by observed recurrence, not applied preemptively everywhere.
+
+---
+
+**Q: When is a sealed class hierarchy a better fit than an open OCP extension point?**
+**Short:** When you intentionally want a closed, exhaustive set of types known and checked at compile time.
+
+A: Sealed classes (Java 17+) are for when the set of types is meant to be *closed* by design — you want the compiler to force exhaustive handling of every known subtype via pattern matching, rather than leaving the hierarchy open for arbitrary future extensions. This is the opposite intent of OCP's usual "add new implementations freely" goal, and it is the right call whenever the domain genuinely has a fixed, known set of variants rather than an unbounded one. Choosing between sealed classes and an open interface hierarchy is itself a design decision, not a default.
+
+---
+
+**Q: Does OCP mean you should never modify existing code?**
+**Short:** No — bug fixes and structural improvements are fine; OCP only forbids editing code to add new behavior.
+
+A: No, that's a common misconception. You can and should modify code to fix bugs or make structural improvements. OCP specifically means that adding *new behavior* should not require modifying existing, already-correct, already-tested code — it says nothing about correcting code that was wrong to begin with. Conflating the two leads people to treat OCP as an excuse to avoid necessary refactoring, which was never the intent.
+
+---
+
+**Q: Does OCP require using inheritance?**
+**Short:** No, modern practice prefers composition and interface implementation over inheritance for extension.
+
+A: No — that's false in modern practice. Composition and interface implementation are the preferred mechanisms for achieving OCP today; inheritance can achieve it too, but it brings the risk of Liskov Substitution violations that composition avoids. A `Shape` interface implemented by independent classes is generally safer than a base `Shape` class extended by subclasses, because there's no shared mutable state or overridden-method contract to accidentally break.
+
+---
+
+**Q: How does event-driven architecture apply OCP at the HLD level?**
+**Short:** Publishing a domain event lets new consumers react to it without modifying the publishing service.
+
+A: Publishing a domain event like `OrderPlaced` lets new consumers — analytics, recommendations, an email service — subscribe and react without any change to the order service that publishes it. The order service stays closed for modification while the system as a whole stays open for extension via new event consumers. This is the same OCP mechanism as the `Shape` interface, applied at the scale of services communicating over an event bus instead of classes communicating over a method call.
+
+---
+
+**Q: How does schema evolution in Protobuf or Avro relate to OCP?**
+**Short:** Adding optional fields extends a data contract without modifying or breaking any existing consumer.
+
+A: Adding new optional fields to a Protobuf or Avro schema extends the contract without breaking the consumers that were already reading the old shape — the schema is open for extension but closed for modification of the fields already in use. Existing consumers keep working unmodified against the new schema version, exactly as `AreaCalculator` keeps working unmodified when a new `Shape` implementation is added. This is OCP applied to data contracts rather than to classes.
+
+---
+
 **Interview Tip:** Many interviewers ask about OCP and expect "use interfaces." Go deeper — explain why the abstraction must be at the right level, mention YAGNI as the counterforce, and name specific design patterns (Strategy, Decorator). Candidates who mention tradeoffs are seen as senior-level thinkers.

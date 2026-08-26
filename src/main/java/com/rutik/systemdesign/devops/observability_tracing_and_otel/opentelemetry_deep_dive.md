@@ -1304,7 +1304,7 @@ Two directions, and they behave differently.
 
 1. The **`prometheus` exporter** on the Collector, which exposes a `/metrics` endpoint for Prometheus to scrape. Pull model preserved.
 2. The **`prometheusremotewrite` exporter**, pushing to any remote-write endpoint (Prometheus, Mimir, Thanos Receive, Cortex).
-3. **Prometheus's own OTLP receiver**, enabled with `--web.enable-otlp-receiver`, serving `POST /api/v1/otlp/v1/metrics`. This is the route that removes the Collector's Prometheus-specific exporter from the picture entirely.
+3. **Prometheus's own OTLP receiver**, enabled with `--web.enable-otlp-receiver`, serving `POST /api/v1/otlp/v1/metrics`. This is the route that removes the Collector's Prometheus-specific exporter from the picture entirely. The receiving side of it — `otlp.translation_strategy` and the `out_of_order_time_window` a push pipeline needs and a scrape pipeline never did — is owned by [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md) §6; change either page's account of this flag and check the other.
 
 **The translation is where the surprises live**, because OTel's naming rules and Prometheus's are different:
 

@@ -465,10 +465,10 @@ def _choose_monitoring(req: MLSystemRequirements) -> str:
 
 | Category | Options | Notes |
 |----------|---------|-------|
-| Feature Store | Feast, Tecton, Vertex AI Feature Store, Hopsworks | Feast is open-source; Tecton is managed |
+| Feature Store | Feast, Databricks-Tecton, Vertex AI Feature Store, Hopsworks | Feast (open-source, self-hosted) / Databricks-Tecton (managed, real-time) / Hopsworks / cloud-native (Vertex AI Feature Store, SageMaker Feature Store) |
 | Training Orchestration | Kubeflow Pipelines, Airflow, Prefect, Metaflow | Kubeflow tightly integrated with K8s |
 | Experiment Tracking | MLflow, Weights & Biases, Neptune | MLflow is open-source standard |
-| Model Serving | TorchServe, TF Serving, NVIDIA Triton, BentoML, Ray Serve | NVIDIA Triton best for multi-framework GPU serving |
+| Model Serving | TF Serving, NVIDIA Triton, BentoML, Ray Serve | NVIDIA Triton best for multi-framework GPU serving |
 | ANN Search | FAISS, ScaNN, Milvus, Weaviate, Pinecone | FAISS for self-hosted; Pinecone managed |
 | Stream Processing | Apache Flink, Kafka Streams, Spark Structured Streaming | Flink lowest latency |
 | Batch Processing | Apache Spark, Dask, BigQuery | Spark most widely used |

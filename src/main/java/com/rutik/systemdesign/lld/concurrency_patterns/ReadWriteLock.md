@@ -9,6 +9,8 @@
 
 **Key insight**: Watch out for writer starvation in highly read-heavy systems — the `ReentrantReadWriteLock` javadoc warns that the default non-fair mode "may indefinitely postpone one or more reader or writer threads." Constructing it with the fair flag (`new ReentrantReadWriteLock(true)`) switches to an approximately arrival-order policy, under which a new reader blocks if a writer is already queued — which is what rescues the writer.
 
+**Full runnable implementation:** [`ReadWriteLock.java`](ReadWriteLock.java) — 428 lines, one file, `main()` at the bottom. It demonstrates a read-write lock built from scratch, `ReadWriteCache` on `ReentrantReadWriteLock`, `StampedLock.tryOptimisticRead()` with its validate-and-fall-back retry, and `HotReloadableConfig` as the read-heavy real case.
+
 ---
 
 ## Intent
@@ -270,3 +272,73 @@ Acquiring a read lock while holding a write lock, then releasing the write lock.
 **Q: How do you prevent writer starvation?**
 **Short:** Fair mode grants the lock in approximately arrival order, so a new reader blocks while a writer is already queued, trading throughput for predictability.
 Use fair mode (`new ReentrantReadWriteLock(true)`), which grants entry by an approximately arrival-order policy so a new reader blocks while a writer is already queued. Or manually prioritize writers by making new readers wait when a writer is queued. The default non-fair mode has higher throughput but the javadoc explicitly allows it to postpone a reader or writer indefinitely.
+
+---
+
+**Q: What is the throughput tradeoff of switching a ReentrantReadWriteLock to fair mode?**
+**Short:** Fair mode blocks new readers once a writer is queued, trading raw throughput for a starvation guarantee.
+
+A: Fair mode's approximately arrival-order policy means a new reader blocks whenever a writer is already waiting, even though that reader could otherwise have joined the existing readers with no conflict. This serializes some reads that non-fair mode would have let through concurrently, so fair mode normally has lower throughput than the default. The tradeoff is deliberate: you're paying throughput to guarantee the writer is not postponed indefinitely, which non-fair mode's javadoc explicitly does not promise.
+
+---
+
+**Q: What's the decision rule for choosing between synchronized, ReadWriteLock, and StampedLock?**
+**Short:** Use synchronized for write-heavy or sub-100ns sections, ReadWriteLock past a 5:1 read ratio, StampedLock when writes are under 1%.
+
+A: Stay with `synchronized` when most operations are writes or the critical section is under roughly 100 nanoseconds, since lock overhead would dominate any benefit from allowing concurrent reads. Move to `ReadWriteLock` once the read:write ratio exceeds about 5:1 and reads take non-trivial time with real contention. Graduate to `StampedLock` only when extreme performance is needed and writes are rare (under 1%), and only if the team can handle its added complexity — no reentrancy, no condition variables.
+
+---
+
+**Q: How does tryOptimisticRead() avoid acquiring a lock at all on the happy path?**
+**Short:** It returns a stamp immediately without blocking; the reader validates the stamp afterward to detect a concurrent write.
+
+A: `tryOptimisticRead()` returns a stamp value immediately with no blocking and no memory barrier acquired — the reader then reads the shared fields directly and calls `validate(stamp)` afterward. If no write occurred during the read, `validate()` returns true and the reader is done, having paid no locking cost at all. If a write did happen, `validate()` returns false and the reader falls back to a real `readLock()`, re-reads, and unlocks — the "optimistic" path costs nothing except in the rare case it has to retry.
+
+---
+
+**Q: What throughput advantage does StampedLock have over ReentrantReadWriteLock at a 99:1 read:write ratio?**
+**Short:** Published benchmarks put StampedLock at roughly 3x the throughput of ReentrantReadWriteLock at about 1% writes.
+
+A: At around 1% writes, published JMH-style comparisons put `StampedLock`'s throughput at roughly 3x that of `ReentrantReadWriteLock`, because most optimistic reads succeed without acquiring anything at all. That ratio should be treated as an order of magnitude rather than a guarantee — it shifts with thread count, write share, and how long the critical section actually is. The advantage only materializes under the conditions optimistic reads are built for: high read:write ratio, short reads, low contention.
+
+---
+
+**Q: Why is forgetting the finally block a classic Read-Write Lock pitfall?**
+**Short:** If the protected call throws, the lock is never released, since only a finally block guarantees unlock runs on every path.
+
+A: `lock.readLock().lock(); return doSomething();` releases the lock only if `doSomething()` returns normally — if it throws, `unlock()` never executes and the lock is held forever. Wrapping the call in `try { ... } finally { lock.readLock().unlock(); }` guarantees the unlock runs whether the protected code succeeds, throws, or returns early. This is the same discipline `ReentrantLock` requires, since neither type releases automatically the way `synchronized` does on an exception.
+
+---
+
+**Q: Why is modifying data while holding only a read lock dangerous?**
+**Short:** Other readers can be running concurrently and would observe a torn or inconsistent write, since a read lock grants no exclusivity.
+
+A: A read lock is explicitly meant to be shared — multiple readers hold it simultaneously and none of them expects the data to change underneath them. Writing to shared state while holding a read lock is a data race against every other concurrent reader, since none of them acquired any exclusivity guarantee. If a value needs to be both read and then mutated, the correct sequence is to release the read lock and acquire the write lock (or use lock downgrade in the other direction: write, then downgrade to read).
+
+---
+
+**Q: Why should you never hold a Read-Write Lock across an I/O call?**
+**Short:** I/O takes far too long relative to a lock hold, causing excessive contention on both readers and writers.
+
+A: A database call or an HTTP request can take milliseconds to seconds, while a lock is meant to guard a critical section measured in microseconds — holding either the read or write lock across that I/O call means every other reader or the waiting writer is blocked for the entire external call duration. This turns what should be a brief coordination point into a major throughput bottleneck, and under fair mode it can also amplify writer-starvation-adjacent delays for every reader queued behind it. The fix is always to do the I/O outside the locked section, holding the lock only for the in-memory read or write itself.
+
+---
+
+**Q: How do database read replicas apply the Read-Write Lock pattern at the HLD level?**
+**Short:** Many replicas serve concurrent reads while one primary handles writes, propagated asynchronously to replicas.
+
+A: Read replicas implement Read-Write Lock at infrastructure scale: many replicas serve concurrent read queries exactly as multiple threads hold a shared read lock, while a single primary processes all writes exactly as one thread holds the exclusive write lock. The write is propagated to replicas asynchronously, making this an eventually-consistent variant of the pattern rather than the strict mutual exclusion a single-process `ReentrantReadWriteLock` provides. The read-write asymmetry is the same justification in both cases: reads vastly outnumber writes, so the system is built to optimize for reads.
+
+---
+
+**Q: How is CQRS a Read-Write Lock pattern applied architecturally?**
+**Short:** The command side handles writes with exclusive-access semantics while the query side serves concurrent reads from projections.
+
+A: Command Query Responsibility Segregation splits the write model (command handlers, optimized for consistency) from the read model (query projections, optimized for query performance) — the same read/write asymmetry a `ReentrantReadWriteLock` exploits inside one process, applied at the scale of separate services or separate data stores. The write side behaves like the exclusive write lock: one consistent path for mutations. The read side behaves like the shared read lock: many concurrent, independently-scaled query paths reading denormalized data.
+
+---
+
+**Q: What Java feature makes StampedLock less flexible than ReentrantReadWriteLock despite being faster?**
+**Short:** StampedLock is not reentrant and has no condition-variable support, unlike ReentrantReadWriteLock.
+
+A: `StampedLock` is not reentrant — a thread that already holds a stamp cannot safely re-acquire the lock the way `ReentrantReadWriteLock` allows a thread to re-enter its own lock — and it provides no `Condition` support for the wait/signal patterns `ReentrantReadWriteLock` supports through its lock objects. It also has no fair mode. These gaps are the price of its speed: `StampedLock` trades away reentrancy, condition variables, and fairness in exchange for the optimistic-read fast path, which is why the choice between it and `ReentrantReadWriteLock` is a genuine tradeoff and not a strict upgrade.

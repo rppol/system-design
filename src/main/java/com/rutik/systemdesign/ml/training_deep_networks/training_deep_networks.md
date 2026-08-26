@@ -679,9 +679,9 @@ class EarlyStopping:
 ## 9. When to Use / When NOT to Use
 
 **Use mixed precision when:**
-- Training on Volta (V100), Turing (T4/RTX 20xx), Ampere (A100/RTX 30xx) or newer GPU
+- Training on Volta (V100), Turing (T4/RTX 20xx), Ampere (A100/RTX 30xx), Hopper (H100/H200), or Blackwell (B200) GPUs
 - Memory is the primary bottleneck (enables larger batches or models)
-- Prefer bfloat16 on Ampere+ GPUs (wider dynamic range, no overflow risk)
+- Prefer bfloat16 on Ampere and newer GPUs (wider dynamic range, no overflow risk); Hopper and Blackwell additionally support FP8 via the Transformer Engine for further throughput
 
 **Use gradient accumulation when:**
 - GPU memory limits batch size but theory or empirical results suggest larger batches help

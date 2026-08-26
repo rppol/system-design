@@ -228,7 +228,7 @@ backup_agent = Agent(model=fallback_model, tools=[...])
 | Multi-provider | Yes (LiteLLM) | Yes | OpenAI-leaning | Single provider |
 | Multi-agent | agent_as_tool | Subgraphs | handoff() | Custom |
 | Observability | OTEL → AWS native | LangSmith (paid) | OpenAI native | Manual |
-| Maturity | Newer (2025) | Mature | New (2025) | N/A |
+| Maturity | GA since Jun 2026 | Mature | Newer | N/A |
 | Learning curve | Low | Steep | Low | Low |
 | Best for | AWS-centric stacks | Complex stateful | OpenAI-centric | Cost-critical |
 
@@ -371,8 +371,8 @@ BedrockModel auto-retries on `ThrottlingException` with exponential backoff. For
 Use a conversation manager — Strands ships a sliding-window conversation manager that truncates the oldest turns once history exceeds a configured size, preserving the system prompt and recent turns. Without it, a long-running agent accumulates every tool result in history; a single large tool output (like the 50 KB document cap in `get_document` above) then gets re-sent as input tokens on every subsequent turn, inflating both latency and cost since Bedrock bills the full input each call. Truncate or summarize bulky tool results at the tool boundary, and cap history length before the model caps it for you.
 
 **Q: Is Strands actively developed?**
-**Short:** Yes -- AWS maintains it with regular releases and considers it production-stable, though the API still adds features.
-Yes — AWS commitment, regular releases. As of 2025, considered stable for production but expect API additions. Pin version in production.
+**Short:** Yes -- `strands-agents` is at 1.53.0, past its June 2026 production GA, with AWS shipping regular releases.
+Yes — AWS reached general availability for Strands Agents 1.0 in June 2026 (announced at AWS Summit New York alongside native multi-agent primitives), and the package has continued shipping regular releases past that point (current: 1.53.0). It is production-stable, not a preview; several AWS internal teams (Amazon Q Developer, AWS Glue) already run it in production. Still pin an exact version — the API keeps adding features even post-GA.
 
 ---
 

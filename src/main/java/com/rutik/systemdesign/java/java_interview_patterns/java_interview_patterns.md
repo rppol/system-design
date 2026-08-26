@@ -136,6 +136,111 @@ Server s = new Server.Builder("localhost", 8080)
 
 ## 6. How It Works — Detailed Mechanics
 
+### When a `record` Replaces the Recipe — and When It Doesn't
+
+Every rule in the Immutable Class Recipe above — `final` class, `final` fields, a canonical constructor, accessors, and a correct `equals`/`hashCode`/`toString` — is exactly what `record` (JEP 395, final in Java 16) generates from one declaration. The forty-line class collapses to one line:
+
+```java
+// The hand-written recipe, in full:
+public final class ImmutablePoint {
+    private final int x;
+    private final int y;
+    private final String label;
+
+    public ImmutablePoint(int x, int y, String label) {
+        this.x = x;
+        this.y = y;
+        this.label = Objects.requireNonNull(label);
+    }
+    public int x() { return x; }
+    public int y() { return y; }
+    public String label() { return label; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof ImmutablePoint)) return false;
+        ImmutablePoint that = (ImmutablePoint) o;
+        return x == that.x && y == that.y && Objects.equals(label, that.label);
+    }
+    @Override
+    public int hashCode() { return Objects.hash(x, y, label); }
+    @Override
+    public String toString() {
+        return "ImmutablePoint[x=" + x + ", y=" + y + ", label=" + label + "]";
+    }
+}
+
+// The same type, as a record:
+public record ImmutablePoint(int x, int y, String label) { }
+```
+
+What you get free is exactly what the hand-written version routinely gets wrong: a correct `equals`/`hashCode` pair over *every* component — not the three of five a developer remembered to include — and a `toString` that stays in sync automatically the moment a component is added. The classic hand-written bug is a new field added to the constructor and the fields but forgotten in `equals`/`hashCode`/`toString`; it compiles clean and silently breaks `HashSet` membership or an incident-report log line.
+
+**Where it stops being a drop-in replacement — the part worth knowing, not the collapse above:**
+
+- **Records are shallowly immutable, not deeply immutable.** A record holding a `List` or an array exposes the caller's mutable object through the accessor unless the compact constructor defensively copies it — the single most common record bug:
+```java
+// BROKEN: shallow immutability leaks the caller's live list
+public record Order(String id, List<Item> items) { }
+Order o = new Order("o1", mutableItems);
+mutableItems.add(sneakyItem);     // mutates o.items() too -- the "immutable" record just changed
+
+// FIXED: defensive copy in the compact constructor, unmodifiable view out
+public record Order(String id, List<Item> items) {
+    public Order {                              // compact constructor
+        items = List.copyOf(items);              // copies AND makes unmodifiable in one call
+    }
+}
+```
+- **Validation and normalization belong in the compact constructor**, the same place the defensive copy goes — it runs before field assignment on every construction path, including deserialization (below).
+```java
+public record Range(int lo, int hi) {
+    public Range {
+        if (lo > hi) throw new IllegalArgumentException("lo must be <= hi");
+    }
+}
+```
+- **A record cannot extend a class**, has no hidden state, and cannot declare additional non-static instance fields beyond its components. Any recipe that needs a superclass, or lazily-computed cached state alongside the immutable data, cannot be a record.
+- **A Builder is still the right tool for many components, optional components, or telescoping-constructor pain.** A twelve-component record has a twelve-argument canonical constructor — a worse call-site API than a fluent Builder, and no improvement over the telescoping constructors records were never meant to fix. The two compose rather than compete — a Builder whose `build()` returns a record:
+```java
+public record ServerConfig(String host, int port, int timeoutMs, boolean ssl) {
+    public static Builder builder(String host, int port) { return new Builder(host, port); }
+    public static final class Builder {
+        private final String host; private final int port;
+        private int timeoutMs = 5000; private boolean ssl = false;
+        private Builder(String host, int port) { this.host = host; this.port = port; }
+        public Builder timeoutMs(int t) { this.timeoutMs = t; return this; }
+        public Builder ssl(boolean s)   { this.ssl = s; return this; }
+        public ServerConfig build() { return new ServerConfig(host, port, timeoutMs, ssl); }
+    }
+}
+```
+- **Records deserialize through the canonical constructor**, unlike an ordinary class's `readObject`. Java's default record deserialization calls the canonical constructor with the stream's field values, so compact-constructor validation actually runs on every deserialized instance — closing off the classic bypass where a hand-written `Serializable` class must remember to duplicate its validation inside `readObject` or an attacker-crafted stream skips it entirely.
+
+### Sealed Interfaces + Pattern-Matching `switch` — Modern Alternative to Enum-Based Factories
+
+Where an enum-per-case factory or a Visitor pattern encodes "one of a closed set of types" with a `switch` on a type tag or a double-dispatch `accept()` method, a **sealed interface** (JEP 409, final in Java 17) plus a **pattern-matching `switch`** (JEP 441, final in Java 21) expresses the same closed hierarchy directly in the type system — and the compiler, not a runtime default branch, enforces exhaustiveness:
+
+```java
+public sealed interface Shape permits Circle, Rectangle, Triangle { }
+public record Circle(double radius) implements Shape { }
+public record Rectangle(double w, double h) implements Shape { }
+public record Triangle(double base, double height) implements Shape { }
+
+static double area(Shape shape) {
+    return switch (shape) {
+        case Circle c    -> Math.PI * c.radius() * c.radius();
+        case Rectangle r -> r.w() * r.h();
+        case Triangle t  -> 0.5 * t.base() * t.height();
+        // NO default clause needed -- permits closes the set, so the compiler
+        // proves every case is covered
+    };
+}
+```
+
+The payoff over the enum-factory or Visitor equivalent: add a fourth shape, `Trapezoid`, to the `permits` clause, and every `switch` over `Shape` in the codebase that lacks a case for it **fails to compile** — a compile error at every call site, instead of a silently-taken `default` branch (enum switch) or a forgotten `visitTrapezoid()` override (Visitor) that only surfaces at runtime, if it ever surfaces at all. `sealed` plus records plus pattern matching is the combination that makes this exhaustiveness free: the hierarchy is closed (`sealed`/`permits`), each variant is a plain immutable data carrier (`record`), and the compiler cross-checks the two against every `switch`.
+
 ### Enum Singleton (Best Implementation)
 
 ```java
@@ -351,6 +456,40 @@ The "2 objects" answer is the interview version. The number that matters in prod
 ```
 
 The byte array staying at 1 is the part worth carrying out of this section: `new String(String original)` assigns `this.value = original.value`, sharing the array, because `String` is immutable and there is nothing to protect against. So the loop above churns a million small header objects while the actual `"abc"` bytes exist exactly once. That makes it a garbage-rate problem rather than a footprint problem — invisible in a heap dump taken after a GC, visible immediately in allocation profiling. Note this sharing does *not* apply to `new String(charArray)` or `new String(bytes, UTF_8)`, which must copy defensively because the caller still holds a mutable array.
+
+### Object Header Size — The 2026 Answer
+
+"What is the size of a Java object header" has a moving answer, and reciting "12 bytes"
+without the rest is only half of it. On the Java 25 LTS baseline this section targets, the
+default header IS 12 bytes: an 8-byte mark word plus a 4-byte compressed class pointer.
+But `-XX:+UseCompactObjectHeaders` (JEP 519, product feature since Java 25) packs both into
+a single **8-byte** header by folding the class pointer into spare bits of the mark word,
+and JEP 534 makes that 8-byte header the *default* starting in **Java 27**, with the old
+12-byte layout disableable via `-XX:-UseCompactObjectHeaders` and slated for eventual
+deprecation. So the complete, correct 2026 answer is: "12 bytes by default on the current
+25 LTS, 8 bytes if `-XX:+UseCompactObjectHeaders` is set, and 8 bytes by default from
+Java 27 — which one applies depends on the JVM version and flags, not on the class."
+
+This directly touches the Integer cache material above. A cached `Integer` (`-128..127`)
+is one object shared by every reference in range, so the header size does not multiply —
+but an *uncached* boxed `Integer` shows the alignment trap that makes "4 bytes saved" the
+wrong intuition to reach for:
+
+```
+  12-byte header:  8 (mark) + 4 (class ptr) + 4 (int value) = 16 bytes, 0 padding
+   8-byte header:  8 (header)                + 4 (int value) = 12 bytes -> rounds up to 16
+
+  An Integer is 16 bytes EITHER WAY: the 4 saved header bytes are exactly what the
+  12-byte layout needed as padding to reach the next multiple of 8, so compact
+  headers buy nothing here even though the header itself really did shrink.
+```
+
+The honest close to this answer in an interview: state both numbers, name the two JEPs, and
+say how you would check rather than guess — **JOL** (`org.openjdk.jol`,
+`ClassLayout.parseClass(Foo.class).toPrintable()`) prints the real header size and field
+offsets for whatever JVM and flags are actually running. An interviewer who only wants "12"
+is testing recall; one who follows up with "does that always save memory" is testing
+whether you know alignment absorbs it as often as it doesn't.
 
 ### == vs .equals() Reference Table
 
@@ -574,6 +713,21 @@ In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`
 **Short:** A ternary mixing a primitive branch unboxes both operands, NPEing on a null Integer branch.
 
 Auto-unboxing throws whenever a `null` wrapper reaches a context that needs a primitive, because the compiler inserts an invisible `intValue()` call. The common shape is `Integer x = map.get(k); if (x > 0)` — `get` returns `null` for an absent key and the comparison dereferences it, so the stack trace points at a line containing no explicit method call. The conditional operator is the version that catches experienced developers: in `Integer v = flag ? maybeNull : 0`, the `0` is an `int`, so binary numeric promotion unboxes **both** branches before the result is re-boxed into `v` — the null branch is dereferenced even though the target type is `Integer` and even though the value would have been assignable as null. Writing `Integer.valueOf(0)` in the other branch keeps both operands reference-typed, no unboxing happens, and `v` is simply `null`. Fixes that remove the class rather than the instance: use primitives for anything you do arithmetic on, use `Map.getOrDefault(k, 0)` instead of `get` plus a null check, use `Objects.requireNonNullElse` when the wrapper type must survive, and keep both ternary branches at the same boxedness.
+
+**Q17: An interviewer asks the size of a Java object header — what is the correct 2026 answer, and why is "12 bytes" only half of it?**
+**Short:** 12 bytes by default on Java 25, 8 bytes with compact headers, and 8 bytes by default from Java 27.
+
+"12 bytes" is the size of today's default header — an 8-byte mark word plus a 4-byte compressed class pointer — on the Java 25 LTS baseline, and stopping there answers the question for exactly one JVM configuration. `-XX:+UseCompactObjectHeaders` (JEP 519, a supported product feature since Java 25) packs the mark word and class pointer into a single 8-byte header, and JEP 534 makes that 8-byte header the *default* starting in Java 27, with the 12-byte layout kept only as an opt-out (`-XX:-UseCompactObjectHeaders`) on a path to eventual deprecation. So the complete answer names both numbers and the two JEPs that connect them, rather than a single memorized constant — the true header size on any given deployment depends on the JVM version and the flags it runs with, and the only way to know for certain is to measure it with JOL (`ClassLayout.parseClass(Foo.class).toPrintable()`) rather than assume. The follow-up question worth anticipating is whether the 4-byte shrink always saves memory — it does not, because 8-byte object alignment can absorb it entirely (a class with one `int` field is 16 bytes under both header sizes) or turn it into a full 8-byte win (a class with no other 4-byte-aligned field to share the padding with) — so "it depends on the class's field layout" is the sharper answer than a flat percentage.
+
+**Q18: You turn a class into a `record` — is it now immutable?**
+**Short:** Only shallowly — a record's accessor exposes any mutable component, like a List, verbatim.
+
+A `record`'s fields are `final` and its canonical constructor and accessors are generated for you, but that only guarantees the record's own reference fields cannot be reassigned — it says nothing about whether an object one of those fields points to can be mutated by someone else who holds a reference to it. `record Order(String id, List<Item> items) {}` is the textbook case: `order.items()` returns the exact `List` instance passed to the constructor, so a caller who kept a reference to that list can still call `.add()` on it and change what `order.items()` returns next time, with no compiler warning and no exception. The fix is a compact constructor that defensively copies mutable components — `items = List.copyOf(items);` — which both copies and wraps the result as unmodifiable in one call; without that line, "the record is immutable" is only true for components that were already immutable types (`int`, `String`, another record), not for a `List`, array, or mutable reference type held inside it.
+
+**Q19: When would you still hand-write a Builder instead of using a record, in 2026?**
+**Short:** When a type has many optional components, since a record's canonical constructor takes every field.
+
+A record's canonical constructor takes every component as a required positional argument, so a record with a dozen components — most of them optional with sensible defaults — forces every call site to supply all twelve in the right order, which is exactly the telescoping-constructor problem the Builder pattern exists to solve; a record buys nothing there. Reach for a Builder when a type has many optional fields, when several parameters share a type and are easy to transpose positionally, or when construction needs multi-field cross-validation that reads better as a fluent chain than as one dense compact-constructor block. The two aren't rivals: a common pattern is a Builder whose `build()` method's last line is `new SomeRecord(...)` — mutable, fluent construction on the outside, an immutable, value-correct record as the actual product.
 
 ---
 

@@ -6,10 +6,10 @@
 
 LangGraph is a graph-based framework for building stateful, multi-step LLM applications. Where LangChain chains are DAGs (directed acyclic graphs) that execute once and terminate, LangGraph models workflows as cyclic state machines: nodes process state, edges determine what runs next, and the graph can loop until a termination condition.
 
-Released by LangChain, Inc. in January 2024, LangGraph became the recommended way to build production agents. It replaces `AgentExecutor` (LangChain's old agent runner) for any workflow requiring: loops, human-in-the-loop approvals, multi-agent coordination, or persistent state across sessions.
+Released by LangChain, Inc. in January 2024, LangGraph became the recommended way to build production agents. It replaces `AgentExecutor` (LangChain's old agent runner) for any workflow requiring: loops, human-in-the-loop approvals, multi-agent coordination, or persistent state across sessions. LangGraph reached 1.0 general availability on 2025-10-22 alongside LangChain 1.0; LangChain's `create_agent` — the current recommended way to build a standard tool-calling agent — is a batteries-included factory that itself runs on the LangGraph runtime, so `create_agent` and hand-built `StateGraph`s are two abstraction levels of the same engine, not competing frameworks.
 
-**Current version**: langgraph 0.1.x (2024)
-**Production adoption signal**: Used by LinkedIn, Elastic, Replit, and thousands of enterprise deployments via LangGraph Cloud. The de facto standard for production LLM agents.
+**Current version**: langgraph 1.x (1.2.11, released 2026-08-11)
+**Production adoption signal**: Used by LinkedIn, Elastic, Replit, Uber, Klarna, and thousands of enterprise deployments via LangSmith Deployment (the managed hosting product, renamed from LangGraph Platform/LangGraph Cloud in October 2025). The de facto standard for production LLM agents.
 
 ---
 
@@ -370,7 +370,7 @@ for event in app.stream(
     # Node 'agent' returned: {'messages': [AIMessage(content='LangGraph is...')]}
 
 # Stream token-by-token from LLM (not just state transitions)
-async for event in app.astream_events(input_state, version="v1"):
+async for event in app.astream_events(input_state, version="v2"):
     if event["event"] == "on_chat_model_stream":
         chunk = event["data"]["chunk"]
         print(chunk.content, end="", flush=True)
@@ -561,7 +561,7 @@ def timeout_sensitive_node(state: WorkflowState) -> dict:
     return {}
 ```
 
-`interrupt()` is LangGraph 0.1.x's preferred API over `interrupt_before`/`interrupt_after` at compile time — it allows dynamic, condition-based interrupts at any point in a node's execution, with full access to the node's current state at that moment.
+`interrupt()` is the preferred API over `interrupt_before`/`interrupt_after` at compile time — it allows dynamic, condition-based interrupts at any point in a node's execution, with full access to the node's current state at that moment. Resuming passes `Command(resume=value)` to `invoke`/`stream`; note that on resume LangGraph re-runs the interrupted node from its start rather than from the `interrupt()` call site, so code before the `interrupt()` call must be safe to execute twice.
 
 ---
 
@@ -581,17 +581,19 @@ def timeout_sensitive_node(state: WorkflowState) -> dict:
 
 ## 8. Tradeoffs
 
-| Dimension | LangGraph | LangChain AgentExecutor | Custom Agent Loop |
-|-----------|-----------|------------------------|-------------------|
+`AgentExecutor` is legacy — pre-1.0 chain classes including it now live in the separate `langchain-classic` package. The current comparison is against `create_agent` (LangChain 1.x), which is a batteries-included factory built on the LangGraph runtime, so most of its rows below inherit LangGraph's capabilities rather than lacking them; the real tradeoff is abstraction level, not features.
+
+| Dimension | LangGraph (`StateGraph`) | LangChain `create_agent` | Custom Agent Loop |
+|-----------|--------------------------|---------------------------|-------------------|
 | Complexity | Medium-High | Low | Low-High |
-| Debugging | Good (explicit state) | Poor (black box) | Good (your code) |
-| Streaming | Native | Callback-based | Manual |
-| Persistence | Built-in (checkpointers) | None | Build yourself |
-| Human-in-loop | Built-in | Not supported | Build yourself |
-| Multi-agent | First-class | Hacks | Build yourself |
-| Parallel execution | Send API | Not supported | asyncio |
+| Debugging | Good (explicit state) | Good (inherits LangGraph state, less boilerplate to inspect) | Good (your code) |
+| Streaming | Native | Native (same runtime) | Manual |
+| Persistence | Built-in (checkpointers) | Built-in (inherits LangGraph checkpointer) | Build yourself |
+| Human-in-loop | Built-in | Built-in (inherits LangGraph `interrupt()`) | Build yourself |
+| Multi-agent | First-class (subgraphs, supervisors) | Middleware/subagent patterns | Build yourself |
+| Parallel execution | Send API | Send API (same runtime) | asyncio |
 | Learning curve | High | Low | Variable |
-| Lock-in | Medium (LangChain ecosystem) | High | None |
+| Lock-in | Medium (LangChain ecosystem) | Medium (LangChain ecosystem) | None |
 
 **LangGraph vs [CrewAI](crewai.md):**
 
@@ -725,14 +727,16 @@ often.
 | `langgraph-checkpoint-sqlite` | Persistence | SQLite checkpointer, for development |
 | `langgraph-checkpoint-postgres` | Persistence | PostgreSQL checkpointer, for production |
 | `langchain-core` | Runnable primitives | Required dependency |
-| `LangGraph Cloud` | Managed deployment | Hosted execution, built-in checkpointing, observability |
+| `LangSmith Deployment` | Managed deployment | Hosted execution, built-in checkpointing, observability (renamed from LangGraph Platform/Cloud, Oct 2025) |
 | `LangSmith` | Observability | Automatic tracing of all graph executions |
 | `langchain-openai` | LLM provider | OpenAI function calling for tool-use agents |
 
 **Version matrix:**
 - langgraph 0.0.x (Jan 2024): initial release, basic StateGraph
-- langgraph 0.1.x (mid 2024): Send API (parallel), subgraphs, interrupt improvements
-- Requires: `langchain-core >= 0.2`, Python 3.9+
+- langgraph 0.1.x-0.6.x (2024-2025): Send API (parallel), subgraphs, dynamic `interrupt()`, durable execution
+- langgraph 1.0 (2025-10-22): general availability alongside LangChain 1.0; no breaking changes committed until 2.0
+- langgraph 1.2.11 (2026-08-11): current release
+- Requires: `langchain-core >= 0.2`, Python 3.10+
 
 ---
 
@@ -778,9 +782,9 @@ Three streaming modes: (1) `.stream(input, stream_mode="values")` — yields the
 **Short:** Call node functions directly as plain Python, test routing functions in isolation, and run end-to-end with `MemorySaver` and a mocked LLM.
 Three approaches: (1) Test nodes in isolation — nodes are plain Python functions taking state and returning dict; call them directly without the graph: `result = agent_node({"messages": [HumanMessage("test")], "step_count": 0})`; assert on the returned dict; (2) Test routing functions separately — routing functions are pure functions of state; (3) End-to-end test with `MemorySaver` checkpointer and mocked LLM: use `langchain_core.utils.mock_llm_calls` or `unittest.mock.patch` to control model responses. Avoid file/DB checkpointers in tests — use `MemorySaver` for isolation.
 
-**Q: What is TypedDict state and why is it required?**
-**Short:** It gives LangGraph the type annotations and `Annotated` reducer metadata needed to validate node updates; a plain dict breaks that.
-LangGraph requires state to be a `TypedDict` (or a dataclass/Pydantic model in newer versions) rather than a plain dict. `TypedDict` provides: (1) type annotations that LangGraph uses to validate node input/output; (2) IDE autocompletion for state fields; (3) explicit reducer annotations via `Annotated[type, reducer]`. Using a plain `dict` breaks LangGraph's type inference and reducer handling. Common state fields: `messages` (conversation history), domain-specific data (retrieved docs, tool results), control fields (step count, routing decisions, error info).
+**Q: Does LangGraph state have to be a TypedDict?**
+**Short:** No — LangGraph 1.x accepts a `TypedDict`, a `dataclass`, or a Pydantic `BaseModel` as the state schema; a plain dict does not work.
+LangGraph accepts three schema forms for `StateGraph`: `TypedDict` (lightweight, no runtime validation, the common in-graph choice), `@dataclass` (also zero runtime overhead, slightly more ergonomic attribute access), and a Pydantic `BaseModel` (adds runtime validation, so a node that returns malformed data fails immediately instead of propagating bad state — at some validation cost, which matters on hot paths). A common pattern is `TypedDict` internally and Pydantic at graph boundaries (input/output schemas) where validating untrusted data is worth the overhead. Whichever form you pick, reducer behavior via `Annotated[type, reducer]` works the same way; a plain `dict` breaks LangGraph's type inference and reducer handling. Common state fields: `messages` (conversation history), domain-specific data (retrieved docs, tool results), control fields (step count, routing decisions, error info).
 
 **Q: How does LangGraph differ from a plain state machine?**
 **Short:** Its state is an arbitrary evolving dict with native streaming, async, and checkpointing, not just discrete enum-based transitions.
@@ -810,9 +814,9 @@ def route_after_tools(state: AgentState) -> str:
     return "agent"  # retry via agent
 ```
 
-**Q: What is LangGraph Cloud and when should you use it?**
-**Short:** A managed hosting service with a built-in checkpointer, LangSmith integration, and a debugging studio, useful to skip infra setup.
-LangGraph Cloud is a managed deployment service for LangGraph applications. It provides: hosted graph execution with horizontal scaling, managed checkpointer (no need to set up PostgreSQL), built-in LangSmith integration, REST API for invoking graphs and resuming interrupted runs, and a visual studio for debugging graph execution. Use it when: you want to skip infrastructure setup for LangGraph deployment, you need the streaming + checkpoint API without building your own server. Self-host (FastAPI + PostgreSQL checkpointer) when: cost sensitivity, data residency requirements, or needing deep infrastructure customization.
+**Q: What is LangSmith Deployment and when should you use it?**
+**Short:** A managed hosting service with a built-in checkpointer, LangSmith tracing, and a debugging studio, useful to skip infra setup.
+LangSmith Deployment (renamed from LangGraph Platform/LangGraph Cloud in October 2025) is a managed deployment service for LangGraph applications. It provides: hosted graph execution with horizontal scaling, a managed checkpointer (no need to set up PostgreSQL), built-in LangSmith tracing, a REST API for invoking graphs and resuming interrupted runs, and a visual studio for debugging graph execution. Deployment options range from fully managed Cloud SaaS through Bring-Your-Own-Cloud to fully self-hosted. Use it when: you want to skip infrastructure setup for LangGraph deployment, or you need the streaming + checkpoint API without building your own server. Self-host (FastAPI + PostgreSQL checkpointer) when: cost sensitivity, data residency requirements, or needing deep infrastructure customization.
 
 **Q: How do you handle very long conversations that exceed the context window?**
 **Short:** Trim old messages, periodically summarize history into a running `SystemMessage`, or slide a window over the last K messages.
@@ -830,9 +834,9 @@ Subgraph state is isolated — each graph defines its own TypedDict. LangGraph m
 **Short:** A `(existing, update) -> merged` function that replaces the default replace/append merge semantics for a state field.
 A reducer is a function `(existing, update) -> merged` called when a node returns a partial state update. Define custom reducers when the default behaviors (replace for scalar fields, append for `add_messages`) do not fit your semantics. Examples: merge dicts (for accumulating metadata from multiple nodes), priority-sorted lists (for findings where importance matters more than order), set union (for tag accumulation). Attach reducers with `Annotated[type, reducer_function]` in your TypedDict. Important: reducers must handle `None` as `existing` for the first write (no prior state). Custom reducers enable nodes to return partial updates independently (e.g., multiple parallel nodes all writing to `findings`) without overwriting each other's results — LangGraph calls the reducer for each update in order.
 
-**Q: What is LangGraph Cloud and when should you use it?**
-**Short:** The same managed service, but at high volume its per-execution pricing makes self-hosted Postgres significantly cheaper.
-LangGraph Cloud is a managed deployment service for LangGraph applications. It provides: hosted graph execution with horizontal scaling, managed checkpointer (no need to set up PostgreSQL), built-in LangSmith integration, REST API for invoking graphs and resuming interrupted runs, and a visual studio for debugging graph execution. Use it when: you want to skip infrastructure setup for LangGraph deployment, you need the streaming + checkpoint API without building your own server. Self-host (FastAPI + PostgreSQL checkpointer) when: cost sensitivity, data residency requirements, or needing deep infrastructure customization. LangGraph Cloud pricing is per-node-execution; at high volume (>1M executions/day), self-hosted PostgreSQL + vLLM is significantly cheaper.
+**Q: How does LangSmith Deployment's pricing compare to self-hosting LangGraph at high volume?**
+**Short:** Its per-node-execution pricing makes self-hosted PostgreSQL significantly cheaper past roughly a million executions per day.
+LangSmith Deployment (the managed hosting product for LangGraph, renamed from LangGraph Platform/LangGraph Cloud) gives you hosted graph execution with horizontal scaling, a managed checkpointer, built-in LangSmith tracing, a REST API for invoking and resuming graphs, and a visual debugging studio — all billed per-node-execution. Use it when: you want to skip infrastructure setup for LangGraph deployment, or you need the streaming + checkpoint API without building your own server. Self-host (FastAPI + PostgreSQL checkpointer) when: cost sensitivity, data residency requirements, or deep infrastructure customization are the priority. At high volume (>1M executions/day), self-hosted PostgreSQL is significantly cheaper than the per-execution pricing.
 
 ---
 

@@ -14,10 +14,15 @@ Core abstractions:
 - `Step` — a unit of work; either chunk-oriented or tasklet
 - `ItemReader<T>` → `ItemProcessor<I,O>` → `ItemWriter<O>` — the chunk pipeline
 - `JobRepository` — stores `JobInstance`, `JobExecution`, `StepExecution` in a database
-- `JobLauncher` — starts a `Job` with a set of `JobParameters`
+- `JobOperator` — starts, restarts, stops, abandons and recovers a `Job` with a set of `JobParameters`
 - `@StepScope` / `@JobScope` — late-binding beans for step/job-specific configuration
 
-Spring Batch 5 (GA with Spring Boot 3.0) requires Java 17 and Spring Framework 6.
+Spring Batch 6 (GA 2025-11-19, shipped by Spring Boot 4.x) is built on Spring Framework 7 and keeps the Java 17+ baseline. Four Batch 6 changes reshape the API surface:
+
+- **`JobOperator` is the launch API.** It now extends `JobLauncher`, so you no longer define a separate `JobLauncher` bean. `JobLauncher` itself is `@Deprecated(since = "6.0", forRemoval = true)` and scheduled for removal in 6.2 or later — write against `JobOperator`.
+- **`JobRepository` extends `JobExplorer`.** Read-only metadata lookups (`getJobNames()`, `findRunningJobExecutions()`, `getLastJobExecution()`) live on `JobRepository`, and the separate `JobExplorer` bean is gone; `JobExplorer` and `JobExplorerFactoryBean` are deprecated.
+- **`ChunkOrientedStep`** (built with `ChunkOrientedStepBuilder<I, O>`) replaces the internal `ChunkOrientedTasklet` machinery. `TaskletStep` survives for genuinely non-chunk work; only its no-arg and name-only constructors are deprecated in favour of `TaskletStep(JobRepository)`.
+- **Everything in `spring-batch-infrastructure` moved package.** `org.springframework.batch.item.*` is now `org.springframework.batch.infrastructure.item.*`, so every reader and writer import changes.
 
 ---
 
@@ -102,7 +107,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    launch["JobLauncher.run(job, params)"] --> repo["JobRepository: find or create JobInstance"]
+    launch["JobOperator.start(job, params)"] --> repo["JobRepository: find or create JobInstance"]
     repo --> jobExec["JobExecution STARTED\n-> BATCH_JOB_EXECUTION table"]
     jobExec --> stepExec["Step-1: StepExecution STARTED\n-> BATCH_STEP_EXECUTION"]
     stepExec --> openStream["Open ItemStream\nrestore ExecutionContext from DB"]
@@ -164,11 +169,12 @@ flowchart TD
 
 ## 6. How It Works — Detailed Mechanics
 
-### 6.1 Job and Step Configuration (Spring Batch 5, Spring Boot 3+)
+### 6.1 Job and Step Configuration (Spring Batch 6, Spring Boot 4+)
 
 ```java
 @Configuration
-@EnableBatchProcessing   // Spring Batch 5: auto-config in Boot 3; @EnableBatchProcessing optional
+// No @EnableBatchProcessing: Boot 4 auto-configures JobRepository (which now also
+// serves the old JobExplorer reads), JobOperator, and the transaction manager.
 public class ImportJobConfig {
 
     @Bean
@@ -504,13 +510,14 @@ See §6.2 above — `jobParameters` is `null` at startup if the bean is not `@St
 ### Pitfall 2: Re-running a job with the same `JobParameters`
 ```java
 // BROKEN: second launch for same date is rejected (job already completed)
-jobLauncher.run(job, new JobParameters(Map.of("date", new JobParameter("2024-01-15"))));
-jobLauncher.run(job, new JobParameters(Map.of("date", new JobParameter("2024-01-15"))));
+JobParameters same = new JobParametersBuilder().addString("date", "2026-01-15").toJobParameters();
+jobOperator.start(job, same);
+jobOperator.start(job, same);
 // Second call throws JobInstanceAlreadyCompleteException
 
 // FIX: add a unique run parameter
-jobLauncher.run(job, new JobParametersBuilder()
-    .addString("date", "2024-01-15")
+jobOperator.start(job, new JobParametersBuilder()
+    .addString("date", "2026-01-15")
     .addLong("run.id", System.currentTimeMillis())
     .toJobParameters());
 ```
@@ -528,8 +535,23 @@ Without a unique sort key, page boundaries are non-deterministic — records can
 ### Pitfall 4: Large `ItemWriter` transactions rolling back the full chunk
 If `ItemWriter` calls a slow external API and one call fails, the entire chunk transaction rolls back — all N items are re-processed. Use `@Transactional(propagation = REQUIRES_NEW)` in the writer for external calls, or use `RetryTemplate` with back-off inside the writer.
 
-### Pitfall 5: `@EnableBatchProcessing` conflict in Spring Boot 3
-Spring Boot 3 auto-configures Spring Batch when `spring-boot-starter-batch` is on the classpath. Adding `@EnableBatchProcessing` overrides the auto-configuration and may cause duplicate beans or incorrect schema initialization. In Spring Boot 3+, remove `@EnableBatchProcessing` and use `application.properties` to configure batch behaviour.
+### Pitfall 5: `@EnableBatchProcessing` conflict in Spring Boot
+Spring Boot auto-configures Spring Batch when `spring-boot-starter-batch` is on the classpath. Adding `@EnableBatchProcessing` overrides the auto-configuration and may cause duplicate beans or incorrect schema initialization. Leave it off and configure batch behaviour through `application.properties`. Reach for it only when you genuinely need to hand-configure the infrastructure — and in Batch 6 pair it with the store-specific `@EnableJdbcJobRepository` or `@EnableMongoJobRepository` rather than the deprecated `modular = true` attribute.
+
+### Pitfall 6: Batch 5 imports that compile until you upgrade
+```java
+// BROKEN on Batch 6: every spring-batch-infrastructure package moved
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.database.JdbcPagingItemReader;
+
+// FIXED
+import org.springframework.batch.infrastructure.item.file.FlatFileItemReader;
+import org.springframework.batch.infrastructure.item.database.JdbcPagingItemReader;
+```
+The core module moved too: `org.springframework.batch.core.explore.*` is now `org.springframework.batch.core.repository.explore`, the JDBC DAOs sit under `org.springframework.batch.core.repository.dao.jdbc`, partition support flattened from `core.partition.support` into `core.partition`, and the listener, job, step and parameter classes left the root `org.springframework.batch.core` package for `core.listener`, `core.job`, `core.step` and `core.job.parameters`. None of this is a behaviour change and all of it is a compile error, so budget an import sweep — not a redesign — for the upgrade.
+
+### Pitfall 7: a `JobParameters` built like a `Map`
+`JobParameter` is a record in Batch 6 and carries its own name, so `JobParameters` holds a `Set<JobParameter>` rather than a `Map<String, JobParameter>`. Code that iterated the old map's entry set, or constructed `new JobParameters(Map.of(...))`, no longer compiles. Build parameters through `JobParametersBuilder` and the change is invisible.
 
 ---
 
@@ -537,12 +559,17 @@ Spring Boot 3 auto-configures Spring Batch when `spring-boot-starter-batch` is o
 
 | Tool / Feature | Version | Purpose |
 |---|---|---|
-| `spring-boot-starter-batch` | Spring Boot 3.x | Starter: includes spring-batch-core, spring-batch-infrastructure |
-| `spring-batch-core` | Spring Batch 5.x | Job/Step/chunk model, JobRepository, executors |
-| `spring-batch-infrastructure` | Spring Batch 5.x | ItemReader/Writer implementations, retry/skip |
-| `spring-batch-test` | Spring Batch 5.x | `JobLauncherTestUtils`, `StepScopeTestExecutionListener` |
-| `spring.batch.jdbc.initialize-schema=always` | Spring Boot 3.x | Auto-creates BATCH_* tables on startup (use `never` in prod) |
-| `@EnableBatchProcessing` | Spring Batch 4.x (avoid in Boot 3) | Enables batch infrastructure beans — auto-done by Boot 3 |
+| `spring-boot-starter-batch` | Spring Boot 4.x | Starter: includes spring-batch-core, spring-batch-infrastructure |
+| `spring-batch-core` | Spring Batch 6.x | Job/Step/chunk model, `JobRepository`, `JobOperator`, executors |
+| `spring-batch-infrastructure` | Spring Batch 6.x | ItemReader/Writer implementations under `org.springframework.batch.infrastructure.item.*` |
+| `spring-batch-test` | Spring Batch 6.x | `@SpringBatchTest`, `StepScopeTestExecutionListener` |
+| `spring-batch-integration` | Spring Batch 6.x | Remote chunking and remote partitioning over a broker |
+| `JobOperator` | Spring Batch 6.x | `start` / `restart` / `startNextInstance` / `stop` / `abandon` / `recover`; extends `JobLauncher` |
+| `CommandLineJobOperator` | Spring Batch 6.x | Modern replacement for `CommandLineJobRunner`; drives a job from a shell or cron |
+| `ChunkOrientedStepBuilder` | Spring Batch 6.x | Builds a `ChunkOrientedStep` — the chunk path, separate from `TaskletStep` |
+| `@EnableJdbcJobRepository` | Spring Batch 6.x | JDBC-backed job repository config alongside `@EnableBatchProcessing` |
+| `@EnableMongoJobRepository` | Spring Batch 6.x | MongoDB-backed job repository config |
+| `spring.batch.jdbc.initialize-schema=always` | Spring Boot 4.x | Auto-creates BATCH_* tables on startup (use `never` in prod) |
 | `FlatFileItemReader` | Core | Reads CSV/fixed-length files |
 | `JdbcPagingItemReader` | Core | Reads DB records with keyset pagination |
 | `JdbcBatchItemWriter` | Core | Writes via JDBC batch insert/update |
@@ -580,7 +607,7 @@ In chunk-oriented processing, items flow through three phases — `ItemReader`, 
 **Q5: What causes `JobInstanceAlreadyCompleteException` and how do you prevent it for repeatable jobs?**
 **Short:** JobInstanceAlreadyCompleteException fires when the same Job and parameters already completed, needing a time-varying parameter to rerun.
 
-`JobInstanceAlreadyCompleteException` is thrown when `JobLauncher.run()` is called with `Job + JobParameters` that match an already-COMPLETED `JobInstance`. Spring Batch uses this uniqueness to guarantee idempotency: re-running a completed job with the same parameters is rejected to prevent accidental double-processing. To run the same logical job repeatedly (nightly batch): add a time-varying parameter like `addLong("run.id", System.currentTimeMillis())` or `addString("runDate", today)`. For true idempotency (re-runnable for the same date), use `JobParametersIncrementer` to automatically add a sequence number to the parameters.
+`JobInstanceAlreadyCompleteException` is thrown when `JobOperator.start()` is called with `Job + JobParameters` that match an already-COMPLETED `JobInstance`. Spring Batch uses this uniqueness to guarantee idempotency: re-running a completed job with the same parameters is rejected to prevent accidental double-processing. To run the same logical job repeatedly (nightly batch): add a time-varying parameter like `addLong("run.id", System.currentTimeMillis())` or `addString("runDate", today)`. For true idempotency (re-runnable for the same date), use `JobParametersIncrementer` to automatically add a sequence number to the parameters.
 
 **Q6: How does partitioning improve throughput, and what is the difference between local and remote partitioning?**
 **Short:** Local partitioning runs sub-ranges on threads in one JVM; remote partitioning distributes them to separate worker JVMs via a broker.
@@ -658,12 +685,22 @@ Alternatively, use `spring.batch.job.enabled=true` (Spring Boot auto-launches jo
 
 `ItemStream` is an interface with three methods: `open(ExecutionContext)`, `update(ExecutionContext)`, `close()`. `ExecutionContext` is a key-value map persisted per `StepExecution`. On startup, `open()` is called with the saved context (may be empty for a new execution, or populated for a restart). After each chunk, `update()` is called — the reader/writer serialises its progress (e.g., "I've read 5,000 records") into the context, which is written to `BATCH_STEP_EXECUTION_CONTEXT`. On restart, `open()` receives the saved context and can fast-forward to the correct starting position. Most built-in readers (`FlatFileItemReader`, `JdbcPagingItemReader`) implement `ItemStream` automatically. Custom readers must implement it to enable restartability.
 
-**Q14: What is the default behavior of Spring Boot 3's batch auto-configuration, and what changed from Spring Batch 4?**
-**Short:** Spring Boot 3's Batch 5 auto-config removes @EnableBatchProcessing and the *BuilderFactory classes and disables job-at-startup.
+**Q14: What does a Spring Batch 5 to 6 migration actually cost you, and what breaks first?**
+**Short:** Batch 6 is mostly a compile-time migration: infrastructure packages moved, JobLauncher and JobExplorer folded into JobOperator and JobRepository.
 
-Spring Boot 3 + Spring Batch 5 auto-configuration changes: (1) `@EnableBatchProcessing` is no longer needed — Spring Boot auto-creates `JobRepository`, `JobLauncher`, `PlatformTransactionManager`; adding `@EnableBatchProcessing` DISABLES the auto-config (you take full manual control); (2) `spring.batch.jdbc.initialize-schema=always|embedded|never` replaces `spring.batch.initialize-schema`; (3) `JobBuilderFactory` and `StepBuilderFactory` are removed — use `JobBuilder(name, jobRepository)` and `StepBuilder(name, jobRepository)` directly; (4) `spring.batch.job.enabled=false` (default in Boot 3) — jobs no longer run automatically at startup unless enabled. The key migration action for Boot 2 → Boot 3: remove `@EnableBatchProcessing`, replace `*Factory` builders, update property keys.
+The first thing that breaks is imports, and it breaks everywhere: every API in `spring-batch-infrastructure` moved from `org.springframework.batch.*` to `org.springframework.batch.infrastructure.*`, so `FlatFileItemReader`, `JdbcPagingItemReader` and every other reader and writer needs a new import, and the core module reshuffled listeners, job, step and parameter classes out of the root `org.springframework.batch.core` package. The second wave is the launch API: `JobOperator` now extends `JobLauncher` and is the interface to write against, `JobRepository` now extends `JobExplorer` so the read-only lookups moved there, and both old types are deprecated for removal in 6.2 or later — you delete two bean definitions rather than rewrite logic. Then the details: `JobParameter` became a record that carries its own name so `JobParameters` holds a `Set` instead of a `Map`; retry is now Spring Framework 7's `RetryPolicy` rather than the Spring Retry library, and skip is entirely `SkipPolicy`-driven; `JobRepositoryFactoryBean` became `JdbcJobRepositoryFactoryBean`; the `BATCH_JOB_SEQ` sequence was renamed `BATCH_JOB_INSTANCE_SEQ`, which is a schema change your DBA needs to hear about; and `MongoItemReader`, `MongoItemWriter`, `Neo4jItemReader` and `Neo4jItemWriter` were removed outright. Micrometer's global static meter registry is gone too, so an `ObservationRegistry` must now be a bean. Budget an afternoon of import sweeping and one careful schema migration, not a redesign — the chunk model, restartability semantics and `JobRepository` metadata tables are unchanged.
 
-**Q15: How would you implement an idempotent batch job that can safely re-run for the same date without double-processing?**
+**Q15: Why does Spring Batch 6 need `JobOperator.recover()` when `restart()` already exists?**
+**Short:** restart() resumes an execution that ended cleanly in a FAILED state; recover() rescues one whose JVM died and left it marked STARTED forever.
+
+`restart(JobExecution)` handles the well-behaved failure: the step threw, the framework wrote a FAILED status and a checkpoint, and the next run resumes from that checkpoint. `recover(JobExecution)` handles the failure that leaves no such record — the pod was OOM-killed or the node vanished mid-chunk, so the metadata tables still say STARTED for an execution no JVM is running. Before Batch 6 you fixed that by hand, with a store-specific `UPDATE` against `BATCH_JOB_EXECUTION` that every team wrote slightly differently and some wrote wrongly. `recover()` marks the abandoned execution as failed consistently across every job repository implementation, so the job becomes restartable through the normal path. Pair it with Batch 6's graceful shutdown, which propagates the stop signal into running steps so a planned rolling deploy produces a clean FAILED-with-checkpoint rather than an orphan that needs recovering at all.
+
+**Q16: When does `ChunkOrientedStep` matter, and is `TaskletStep` obsolete?**
+**Short:** ChunkOrientedStep is the dedicated read-process-write step in Batch 6; TaskletStep is not obsolete and still owns single-shot work.
+
+`ChunkOrientedStep`, built through `ChunkOrientedStepBuilder<I, O>`, is Batch 6's first-class chunk-processing step, replacing the arrangement where a chunk step was a `TaskletStep` wrapping a `ChunkOrientedTasklet` around a `ChunkProvider` and a `ChunkProcessor`. Those internals — `ChunkOrientedTasklet`, `ChunkProvider`, `ChunkProcessor`, and the simple and fault-tolerant variants of each — are deprecated, and the practical benefit is that a chunk step is now one type instead of a five-type composition you had to understand to debug a skip or retry. `TaskletStep` is not obsolete: a step that truncates a staging table, calls one stored procedure, or moves a file is genuinely a single unit of work with no item stream, and `Tasklet` remains the right abstraction for it. Only its no-arg and name-only constructors are deprecated, in favour of `TaskletStep(JobRepository)`. The rule of thumb is unchanged from Batch 5 — if you can name an item, use a chunk step; if the work does not decompose into items, use a tasklet.
+
+**Q17: How would you implement an idempotent batch job that can safely re-run for the same date without double-processing?**
 **Short:** An idempotent batch job keys JobParameters on the business date and uses upsert writes so reruns never duplicate records.
 
 Idempotency in batch requires: (1) **unique `JobParameters`** keyed on the business date (`{runDate=2024-01-15}`) so Spring Batch treats each date as one `JobInstance`; (2) a completed `JobInstance` for that date is rejected on re-launch — no double-run is possible; (3) if the job fails partway and is restarted, the same `{runDate=2024-01-15}` parameters re-use the existing `JobInstance` and resume from the checkpoint — no reprocessing of already-committed chunks; (4) for the `ItemWriter`, use `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL) or `MERGE` (SQL Server/Oracle) to make individual writes idempotent against DB-level duplicates; (5) add `skipLimit` to skip malformed records that would otherwise cause repeated failures without progress. This combination ensures that regardless of how many times the job is restarted, each record is written exactly once.
@@ -677,29 +714,196 @@ Idempotency in batch requires: (1) **unique `JobParameters`** keyed on the busin
 3. **Sort key of `JdbcPagingItemReader` must include the primary key** — ensures deterministic pagination and correct restart behaviour.
 4. **Set `skipLimit` conservatively** — unlimited skipping masks data quality problems. Log every skipped item to an audit table for post-job review.
 5. **Use `ItemStream` in custom readers** — required for restartability; without `update()` the job re-reads from the beginning on restart.
-6. **Do not use `@EnableBatchProcessing` in Spring Boot 3** — the auto-configuration covers all infrastructure; adding it disables the auto-config.
+6. **Do not use `@EnableBatchProcessing` under Spring Boot** — the auto-configuration covers all infrastructure; adding it disables the auto-config. If you must configure by hand, add the store-specific `@EnableJdbcJobRepository` rather than the deprecated `modular = true`.
 7. **Separate job configuration from business logic** — `ItemProcessor` should not know about chunks, transactions, or Spring Batch specifics; it receives one item and returns one item (or null to skip).
 8. **Use `spring.batch.jdbc.initialize-schema=never` in production** — create the schema manually from the provided SQL scripts; auto-create is for development only.
-9. **Monitor via `JobExplorer`** — provides read-only access to `JobRepository`; use it to list running/failed jobs and feed your operations dashboard.
+9. **Monitor via `JobRepository`** — it now carries the read-only lookups that used to live on the deprecated `JobExplorer` (`getJobNames()`, `findRunningJobExecutions()`, `getLastJobExecution()`); use them to list running and failed jobs and feed your operations dashboard. Register an `ObservationRegistry` bean too — Batch 6 dropped Micrometer's global static meter registry, so metrics silently disappear without one.
 10. **For distributed batch (Kubernetes)**, use Spring Cloud Data Flow or a Kubernetes CronJob with distributed locking (Redis SETNX / Postgres advisory lock) to prevent multiple pods launching the same job simultaneously.
+11. **Write against `JobOperator`, and expose `recover()` to operations.** `JobLauncher` is deprecated for removal in 6.2 or later, and `JobOperator` adds the two verbs a night-shift engineer actually needs — `abandon()` for an execution that must never resume, `recover()` for one whose JVM died and left the metadata stuck on STARTED. `CommandLineJobOperator` puts the same verbs behind a shell command for cron and Kubernetes Jobs.
 
 ---
 
 ## 14. Case Study
 
-See the Spring case study: [Design Batch Pipeline](../case_studies/design_batch_pipeline.md)
+**Scenario: the Batch 5 to Batch 6 cutover that could not restart its own backlog**
 
-**Quick summary:** An order fulfillment service runs a nightly batch to reconcile 5 million unshipped orders, enrich them with warehouse inventory, and generate pick-lists. The Spring Batch implementation uses:
-- `JdbcPagingItemReader` (paginated by `orderId`) with `@StepScope`
-- `ItemProcessor` calling a warehouse API (with Resilience4j retry)
-- `JdbcBatchItemWriter` for bulk insert of pick-list records
-- Range partitioning across 8 threads (chunks of 500 per partition)
-- Skip policy: `skipLimit=500` for warehouse API timeouts; skipped orders go to a `CompensationItemWriter`
-- Full restartability: if the job fails at partition 5, partitions 1–4 are not re-processed
+See the full design in the Spring case study:
+[Design Batch Pipeline](../case_studies/design_batch_pipeline.md). This section covers the
+one thing that design does not: what happens when you carry a live Batch 5 job repository
+across the version boundary.
+
+**Context.** An order-fulfilment platform runs 14 nightly jobs against one shared job
+repository in PostgreSQL. The largest, `reconcile-orders`, reads 5 million unshipped
+orders through a `JdbcPagingItemReader`, enriches each from a warehouse API, and writes
+pick-lists in chunks of 500 across 8 range partitions. The estate is on Spring Boot 3.4 /
+Spring Batch 5.2. The upgrade to Boot 4.1 / Batch 6 was booked for a Saturday maintenance
+window, sized at four hours: sweep imports, run the schema migration, redeploy.
+
+It took eleven hours, and the overrun had nothing to do with the code.
+
+### What actually broke
+
+On the Thursday before the window, `reconcile-orders` failed at partition 5 of 8 —
+the warehouse API returned 503s past the `skipLimit`. Normal operations: the checkpoint is
+in `BATCH_STEP_EXECUTION_CONTEXT`, so a restart resumes partitions 5-8 and skips the 3.2
+million rows already written. The on-call engineer left it for Monday, because Monday is
+cheaper than a 2am restart.
+
+Monday was Batch 6. The restart failed:
+
+```
+org.springframework.batch.core.repository.JobRestartException:
+  JobInstance [id=88412] cannot be restarted
+```
+
+**Root cause.** Batch 6 changed the job-parameter model — `JobParameter` became a record
+carrying its own name, so `JobParameters` holds a `Set<JobParameter>` instead of a
+`Map<String, JobParameter>`. The serialised form in `BATCH_JOB_EXECUTION_PARAMS` changed
+with it. From the migration guide, verbatim:
+
+> Due to the change to job parameters in v6, the serialisation format of parameters is
+> different from the one in v5. Therefore, it is not possible to restart failed job
+> instances that were launched with v5 using v6.
+>
+> It is expected that failed v5 job instances are either restarted to success or abandoned
+> before the migration to v6 is done.
+
+The 3.2 million already-written rows were not lost, but nothing in Batch 6 could resume
+past them. The only remaining options were a hand-written SQL replay of the missing range
+or a full re-run — the team re-ran, which is where the seven extra hours went.
+
+### The pre-flight that would have prevented it
+
+Every job instance in the repository is in one of four states on cutover night, and each
+needs a decision **while Batch 5 is still running**.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    scan(["Scan BATCH_JOB_EXECUTION<br/>before the window"]) --> comp{"STATUS?"}
+    comp -->|COMPLETED| safe(["Migrates cleanly<br/>no action"])
+    comp -->|STARTED, no JVM alive| stuck(["JobOperator.recover()<br/>marks it FAILED"])
+    comp -->|FAILED| decide{"Is the remaining<br/>work still needed?"}
+    stuck --> decide
+    decide -->|yes| rerun(["restart() to COMPLETED<br/>on Batch 5"])
+    decide -->|no| aband(["abandon() on Batch 5<br/>never restartable again"])
+    rerun --> gate(["Zero non-COMPLETED,<br/>non-ABANDONED instances<br/>= cutover gate"])
+    aband --> gate
+    safe --> gate
+    gate --> migrate(["Run schema migration<br/>then deploy Batch 6"])
+
+    class scan,comp,decide io
+    class safe,gate train
+    class stuck,rerun mathOp
+    class aband lossN
+    class migrate base
+```
+
+The gate query is one statement, and it belongs in the runbook as a hard stop:
+
+```sql
+-- Must return 0 rows before the Batch 6 deployment starts.
+SELECT e.JOB_EXECUTION_ID, i.JOB_NAME, e.STATUS, e.START_TIME
+FROM   BATCH_JOB_EXECUTION e
+JOIN   BATCH_JOB_INSTANCE  i ON i.JOB_INSTANCE_ID = e.JOB_INSTANCE_ID
+WHERE  e.STATUS NOT IN ('COMPLETED', 'ABANDONED');
+```
+
+The Thursday failure would have shown up here as one row, four days early, when restarting
+it cost 40 minutes of unattended runtime instead of a maintenance window.
+
+### `recover()` vs `abandon()` — the distinction that decides the night
+
+Two of the 14 jobs were not FAILED but stuck in `STARTED`: a Kubernetes node had been
+drained mid-chunk and the pod died without ever writing a terminal status. Before Batch 6
+the fix was a store-specific `UPDATE BATCH_JOB_EXECUTION SET STATUS='FAILED' ...` that
+every team wrote slightly differently. Batch 6 gives it a name:
+
+```java
+// Stuck in STARTED because the JVM died: no terminal status was ever written.
+// recover() marks it FAILED and sets recovered=true in the execution context,
+// which makes it eligible for a normal restart.
+jobOperator.recover(jobExecution);
+jobOperator.restart(jobExecution);   // resumes from the last committed checkpoint
+
+// Different verb, different meaning: the remaining work is no longer wanted.
+// An abandoned execution can NEVER be restarted — this is one-way.
+jobOperator.abandon(staleExecution);
+```
+
+Choosing `abandon()` where you meant `recover()` destroys the restart path permanently, so
+the runbook names the owner of that decision rather than leaving it to whoever is on call.
+
+### The schema migration is real, not a no-op
+
+A Batch 5 repository is not silently readable by Batch 6. The sequence
+`BATCH_JOB_SEQ` was renamed `BATCH_JOB_INSTANCE_SEQ`, and Spring Batch ships per-vendor
+migration scripts (11 databases) under `spring-batch-core/.../core/migration/6.0/`. Run the
+one for your vendor as a versioned Flyway migration, not by hand:
+
+```sql
+-- V47__batch6_repository.sql  (PostgreSQL variant, from the shipped 6.0 script)
+ALTER SEQUENCE BATCH_JOB_SEQ RENAME TO BATCH_JOB_INSTANCE_SEQ;
+```
+
+### The code changes, in the order they bite
+
+```java
+// BROKEN on Batch 6 — every infrastructure package moved.
+import org.springframework.batch.item.database.JdbcPagingItemReader;
+import org.springframework.batch.item.database.builder.JdbcPagingItemReaderBuilder;
+
+@Bean
+JobLauncher jobLauncher(JobRepository repo) { ... }   // no longer needed at all
+
+@Bean
+JobExplorer jobExplorer(DataSource ds) { ... }        // no longer needed at all
+```
+
+```java
+// FIXED — infrastructure packages relocated, and two bean definitions simply deleted.
+import org.springframework.batch.infrastructure.item.database.JdbcPagingItemReader;
+import org.springframework.batch.infrastructure.item.database.builder.JdbcPagingItemReaderBuilder;
+
+// JobOperator extends JobLauncher and DefaultBatchConfiguration declares it for you;
+// JobRepository extends JobExplorer, so getJobNames() and findRunningJobExecutions()
+// are already on the repository bean you have.
+@Bean
+Job reconcileOrders(JobRepository repo, Step partitioned) {
+    return new JobBuilder("reconcile-orders", repo).start(partitioned).build();
+}
+```
+
+The import sweep is mechanical — run
+`org.openrewrite.java.spring.batch.SpringBatch5To6Migration` rather than editing 200 files,
+then read the diff. One thing OpenRewrite cannot do for you: Batch 6 dropped Micrometer's
+global static meter registry, so an `ObservationRegistry` must now be an actual bean or
+your batch metrics vanish without a single error in the log.
+
+### Outcome
+
+| Phase | Planned | Actual | Why |
+|---|---|---|---|
+| Import sweep (OpenRewrite + review) | 90 min | 70 min | Mechanical, as expected |
+| Schema migration | 20 min | 20 min | One `ALTER SEQUENCE`, versioned in Flyway |
+| Two `STARTED` orphans | not planned | 15 min | `recover()` then `restart()` |
+| The FAILED v5 instance | not planned | **7 h** | Unrestartable under v6; full 5M-row re-run |
+| Smoke run of all 14 jobs | 60 min | 60 min | Clean |
+
+The lesson is not about Spring Batch. It is that a job repository is **state**, and a state
+store with resumable checkpoints in it has a migration precondition exactly like a database
+schema does. The precondition here is one line long: *no job instance may be mid-flight
+across the version boundary*. It costs one SQL query to enforce and seven hours to skip.
 
 **Cross-links:**
 - [Spring Transactions](../spring_transactions/spring_transactions.md) — transaction propagation in chunk commits
 - [Spring Messaging](../spring_messaging/spring_messaging.md) — remote chunking via RabbitMQ
+- [Database Migrations](../database_migrations/database_migrations.md) — versioning the repository schema change above
 - [Spring Cloud Patterns](../spring_cloud_patterns/spring_cloud_patterns.md) — Resilience4j retry in ItemProcessor
 
 ---

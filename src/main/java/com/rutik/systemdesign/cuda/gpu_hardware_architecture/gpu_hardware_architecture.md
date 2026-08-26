@@ -106,7 +106,8 @@ capabilities a kernel author must know about:
 | Ampere | A100, RTX 30xx | 8.0 / 8.6 | 3rd-gen Tensor Cores + TF32 + BF16; async copy (`cp.async`) global→shared without a register round-trip; ~40 MB L2; MIG |
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
 | Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory across a cluster; 50 MB L2; 228 KB shared memory/SM |
-| Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; larger NVLink domains |
+| Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; NVLink 5 at 1.8 TB/s bidirectional per GPU, 72-GPU NVL72 domains |
+| Rubin | VR200, Vera Rubin NVL72 | not yet published | TSMC 3nm multi-chip module, 336B transistors; 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
 
 Constants worth memorizing (used throughout this section): **warp = 32 threads**; the
 register file is **64K 32-bit registers per SM (256 KB)** on every architecture from
@@ -130,8 +131,10 @@ timeline
     Ada Lovelace (8.9) : FP8 Tensor Cores, larger L2
     Hopper (9.0) : Tensor Memory Accelerator (TMA)
                 : thread-block clusters
-    Blackwell (10.0) : FP4 / FP6 Tensor Cores
+    Blackwell (10.0) : FP4 / FP6 Tensor Cores and Tensor Memory (tcgen05)
                 : 2nd-gen Transformer Engine
+    Rubin (H2 2026) : 288 GB HBM4 per GPU
+                : NVLink 6 at 3.6 TB/s per GPU
 ```
 
 A kernel targeting a later `sm_XX` inherits every earlier generation's capability —

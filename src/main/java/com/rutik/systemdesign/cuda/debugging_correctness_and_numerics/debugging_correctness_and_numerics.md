@@ -587,8 +587,10 @@ import torch
 # TF32 is the SILENT DEFAULT for FP32 matmul/conv on Ampere+ — a debugging trap
 # when a model "loses accuracy" moving from Volta/CPU to an A100/H100 with zero
 # code change. Opt out explicitly to compare against a true FP32 reference:
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.fp32_precision = "ieee"
+torch.backends.cudnn.conv.fp32_precision = "ieee"
+# or, one policy for every backend at once:
+# torch.backends.fp32_precision = "ieee"
 
 # use_deterministic_algorithms(True) makes PyTorch prefer deterministic kernel
 # variants and RAISES an error (rather than silently running nondeterministically)
@@ -854,14 +856,16 @@ change FMA contraction, reduction order or precision, so it cannot make GPU outp
 CPU reference, or match a different GPU generation, bit-for-bit.
 
 **Q: Why is TF32 described as a "silent" debugging trap on Ampere and later?**
-**Short:** TF32 is Ampere-onward's default Tensor Core path for FP32 matmuls, silently carrying only 10 mantissa bits internally, changing numerics with no code change or warning.
-Because it changes numerics with no code change and no warning. TF32 is the default compute
-mode for FP32 matrix multiplies and convolutions routed through Tensor Cores from Ampere
-onward: the tensors are still stored as full FP32, but the multiply-accumulate internally
-carries only TF32's 10 stored mantissa bits — 3.3 trustworthy decimal digits instead of
-FP32's 7.2. A model can therefore lose precision, and gain several times the throughput,
-purely from moving to newer hardware. Opt out with
-`torch.backends.cuda.matmul.allow_tf32 = False`.
+**Short:** TF32 silently carries only 10 mantissa bits inside FP32 Tensor Core math on Ampere+, changing numerics with no code change and no warning; opt out with `fp32_precision = "ieee"`.
+Because it changes numerics with no code change and no warning. From Ampere onward, FP32
+matrix multiplies and convolutions routed through Tensor Cores may run in TF32: the tensors
+are still stored as full FP32, but the multiply-accumulate internally carries only TF32's 10
+stored mantissa bits — 3.3 trustworthy decimal digits instead of FP32's 7.2. Whether it is
+on by default depends on the layer you call from — cuBLAS permits it and PyTorch's cuDNN
+convolution path uses it, while `torch.matmul` stays exact until you opt in — so a model can
+lose precision, and gain several times the throughput, purely from moving to newer hardware.
+Pin it explicitly with `torch.backends.cuda.matmul.fp32_precision = "ieee"` (or
+`torch.backends.fp32_precision = "ieee"` for every backend at once).
 
 **Q: How do you compile a kernel for `cuda-gdb` line-level debugging, and what does it cost?**
 **Short:** nvcc -G -g generates device-side debug info and disables most optimizations, producing a slower binary whose altered scheduling can mask a timing-sensitive race.

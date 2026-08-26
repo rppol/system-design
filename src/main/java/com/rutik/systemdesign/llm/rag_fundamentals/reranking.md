@@ -526,6 +526,47 @@ Fix: Fine-tune the reranker on domain-specific relevance judgments (query, relev
 Running cross-encoder on one document at a time (100 serial API calls) instead of batching all 100 candidates together.
 Fix: Batch all candidates in a single model forward pass with padding. This is 10-50× faster than serial inference.
 
+**7. Letting the tokenizer silently cut the answer out of a long document**
+```python
+# BROKEN: no awareness of WHERE in the document truncation lands
+def score_pair(query: str, document: str, model, tokenizer, max_length: int = 512) -> float:
+    features = tokenizer(
+        [[query, document]],
+        max_length=max_length,
+        truncation=True,     # default truncation_strategy="longest_first" trims
+        padding=True,        # whichever sequence is longer -- for a 900-token
+        return_tensors="pt", # document that means the LAST ~400+ tokens never
+    )                        # reach the model at all
+    with torch.no_grad():
+        return torch.sigmoid(model(**features).logits.squeeze()).item()
+
+# A 900-token troubleshooting article whose actual fix is in the final
+# paragraph (tokens ~850-900):
+query = "how do I resolve error E-2045 after the update"
+score = score_pair(query, long_support_article, model, tokenizer)
+# score comes back near 0 -- BGE-reranker-large's 512-token limit means
+# the fix text never reached the model, so a genuinely relevant document
+# is scored as if it were irrelevant and loses to a shorter, wrong one.
+```
+BGE-reranker-large's 512-token limit applies to the *combined* `[query][SEP][document]` sequence, and the default `truncation_strategy="longest_first"` trims from whichever side is longer — for a short query and a 900-token document, that is almost entirely the document's tail. A cross-encoder cannot rerank text it never saw: the recall ceiling here is not the retriever's, it is self-inflicted by truncation, and it produces the exact same silent failure as Pitfall 1 (a relevant document ranked as if irrelevant) for a different underlying reason.
+```python
+# FIXED: score sliding windows of the document and keep the max score,
+# so the answer span is caught by at least one window regardless of
+# where in the document it falls
+def score_document(query: str, document: str, model, tokenizer,
+                    window: int = 400, stride: int = 300, max_length: int = 512) -> float:
+    doc_tokens = tokenizer.encode(document, add_special_tokens=False)
+    spans = [doc_tokens[i:i + window] for i in range(0, len(doc_tokens), stride)]
+    spans = spans or [doc_tokens]
+    scores = [
+        score_pair(query, tokenizer.decode(span), model, tokenizer, max_length)
+        for span in spans
+    ]
+    return max(scores)
+```
+Sliding-window scoring is the fallback for a reranker whose limit you cannot change; the actual fix, per Pitfall 2, is chunking documents to fit the reranker's limit at index time so this code path is never needed. Either way the fix is the same principle: know the reranker's token budget and verify the answer span survives it, rather than trusting that "the model didn't error" means "the model saw everything."
+Fix: Chunk documents to fit the reranker's context limit at index time (preferred), or fall back to sliding-window scoring with max-pooling across windows when re-chunking is not possible; never assume silent truncation means the full document was considered.
+
 ---
 
 ## 11. Technologies & Tools

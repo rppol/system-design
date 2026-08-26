@@ -346,6 +346,76 @@ public class OrderPlacedIntegrationEvent {
 }
 ```
 
+### Documenting the Contract — AsyncAPI 3.1
+
+Compatibility rules only bind if the contract is written down somewhere a machine can check.
+OpenAPI describes a request/response API; **AsyncAPI** is its event-driven counterpart, and the
+current release is **3.1.0** (2026-01-31), a non-breaking minor over 3.0.0 whose one specification
+change is a **ROS 2 protocol binding**. The version to know is 3.0, because that is where the
+model changed: **channels, operations and messages became three separate things**. In 2.x a
+channel carried `publish`/`subscribe` verbs, which were chronically ambiguous — "publish" meant the
+opposite thing depending on whether you were the application or its client. In 3.x a channel is
+just an address, and an `operation` states, from the documented application's point of view,
+whether it `send`s or `receive`s over it.
+
+```yaml
+asyncapi: 3.1.0
+info:
+  title: Order Service
+  version: 1.4.0
+
+servers:
+  production:
+    host: kafka.internal:9092
+    protocol: kafka
+
+channels:                                     # a channel is an ADDRESS, no verb
+  orderPlaced:
+    address: orders.placed.v1
+    messages:
+      OrderPlaced:
+        $ref: '#/components/messages/OrderPlaced'
+    bindings:
+      kafka:
+        partitions: 24
+        replicas: 3
+
+operations:                                   # the verb lives HERE, from the app's viewpoint
+  publishOrderPlaced:
+    action: send                              # this application SENDS on that channel
+    channel:
+      $ref: '#/channels/orderPlaced'
+
+components:
+  messages:
+    OrderPlaced:
+      contentType: application/json
+      headers:
+        type: object
+        properties:
+          correlationId: { type: string, format: uuid }
+      payload:
+        $ref: '#/components/schemas/OrderPlacedPayload'
+  schemas:
+    OrderPlacedPayload:
+      type: object
+      required: [eventId, eventType, occurredAt, orderId, amount]
+      properties:
+        eventId:    { type: string, format: uuid }
+        eventType:  { type: string, const: OrderPlaced }
+        occurredAt: { type: string, format: date-time }
+        orderId:    { type: string }
+        amount:     { type: number }
+        currency:   { type: string, default: USD }   # added later, with a default -> BACKWARD-compatible
+```
+
+The reason to write this rather than a wiki page is that it is **checkable**: `spectral lint`
+enforces house rules over it, and the same additive-only discipline above becomes a CI gate
+instead of a code-review convention. The trap to avoid is generating the document from your
+producer's classes and calling it a contract — a generated spec describes what one implementation
+currently does, which is precisely the thing that drifts; the contract is the input to the
+producer, not its output.
+
 ### Event Storming Process
 
 ```
@@ -529,6 +599,9 @@ A producer team renamed the field `customerId` to `userId` in an integration eve
 **Schema Management**
 - **Confluent Schema Registry** — Avro, Protobuf, JSON Schema. Compatibility modes: BACKWARD (the default), BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE, NONE. The non-transitive modes check a new schema only against the latest registered version; the `_TRANSITIVE` variants check it against every previous version.
 - **AWS Glue Schema Registry** — managed schema registry for AWS ecosystem.
+- **AsyncAPI** — the specification for documenting event-driven APIs; current release **3.1.0** (2026-01-31). Since 3.0 a channel is an address and the `send`/`receive` verb lives on an `operation`, removing 2.x's `publish`/`subscribe` ambiguity. Bindings exist for Kafka, AMQP, MQTT, WebSocket, NATS and (new in 3.1.0) ROS 2.
+- **Spectral** — lints OpenAPI *and* AsyncAPI documents against a ruleset you own, so the additive-only compatibility rules above become a CI gate rather than a review convention.
+- **CloudEvents** — CNCF specification for a vendor-neutral event envelope (`id`, `source`, `specversion`, `type`, plus optional `subject`, `time`, `datacontenttype`), with defined bindings for HTTP, Kafka, AMQP and MQTT. Use it when events cross an organisational or vendor boundary and the envelope has to survive a broker change; a bespoke envelope is fine inside one system you own end to end.
 
 **Event Storming**
 - **Collaboration boards:** **Miro**, **MURAL** — remote boards for digital event storming.
@@ -623,6 +696,16 @@ A policy (lilac sticky) is an automation rule: "When [event] THEN [command]". It
 **Short:** CQRS routes commands to a write model that emits events, which projectors use to build read models that serve queries.
 
 CQRS separates the write model (command side) from the read model (query side) at the architectural level. Commands flow to the write model which validates business invariants, changes state, and emits domain events. Those events are consumed by projectors that build denormalized read models optimized for specific query patterns. Queries flow only to the read models and never touch the write model. This enables the write side to be strongly consistent and the read side to be eventually consistent, independently scalable, and freely denormalized.
+
+**Q: How do you document an event-driven API so consumers can build against it without reading your producer's code?**
+**Short:** Write an AsyncAPI document — the event-driven counterpart to OpenAPI — describing channels, operations and message schemas, and lint it in CI.
+
+Write an AsyncAPI document and treat it the way you treat an OpenAPI document: as the input to the producer, not a report generated from it. The current release is 3.1.0 (31 January 2026), a non-breaking minor over 3.0.0 whose only specification change is a ROS 2 protocol binding. The version worth understanding is 3.0, because that is where the model changed: channels, operations and messages became three separate objects. In 2.x a channel carried `publish`/`subscribe` verbs and they were chronically ambiguous, since "publish" meant the opposite thing depending on whether you were reading as the application or as its client; in 3.x a channel is only an address, and an `operation` declares `send` or `receive` from the documented application's point of view, which removes the ambiguity entirely. The payoff is that the document is machine-checkable — `spectral lint` runs over AsyncAPI as well as OpenAPI, so your additive-only compatibility discipline becomes a CI gate instead of a code-review habit. The trap is generating the spec from your producer's classes and calling it a contract: a generated document describes what one implementation happens to do today, which is exactly the thing that drifts.
+
+**Q: Your events cross into a partner's system and you may swap brokers next year. What should the envelope look like?**
+**Short:** Use the CNCF CloudEvents envelope, whose required attributes and per-protocol bindings survive a broker change and are understood outside your organisation.
+
+Use CloudEvents, the CNCF specification for a vendor-neutral event envelope, rather than the bespoke envelope you would design for internal use. It defines four required attributes — `id`, `source`, `specversion` and `type` — plus optional ones including `subject`, `time` and `datacontenttype`, and, crucially, defines **bindings** that say exactly how those attributes map onto HTTP headers, Kafka record headers, AMQP properties and MQTT, in both structured mode (envelope inside the body) and binary mode (attributes in headers, payload untouched). That binding layer is what makes it worth the ceremony: the same event survives a move from Kafka to an HTTP push or to a managed bus without every consumer rewriting its parsing. The `source` + `id` pair is also the natural idempotency key, which saves your partner from inventing one. Do not adopt it reflexively for events that never leave a system you own end to end — there the envelope is pure overhead and a domain-shaped envelope reads better. The rule is the boundary: the moment another organisation or another vendor's broker is on the far side, standardise the envelope.
 
 ---
 

@@ -149,6 +149,57 @@ The Gunicorn worker classes live in the standalone **`uvicorn-worker`** package
 | `uvicorn_worker.UvicornH11Worker` | HTTP/1.1 only (h11 parser) | Stricter HTTP compliance, slower |
 | Hypercorn worker | HTTP/1.1, HTTP/2, HTTP/3 | HTTP/2 push, QUIC experiments |
 
+### 4.4 The ASGI Runtime Matrix
+
+"Gunicorn plus Uvicorn workers" is one of five shapes, and it is the one an orchestrated
+deployment least often wants.
+
+| Runtime | Process model | Admission control | Pick it when |
+|---|---|---|---|
+| Uvicorn, single process | one process, one event loop | `--limit-concurrency` (immediate 503) | K8s / Cloud Run / App Runner — the orchestrator already replicates |
+| Uvicorn `--workers N` | Uvicorn's own supervisor forks N children over a shared socket | same, per worker | a bare VM where you want multiple cores without adding Gunicorn |
+| Gunicorn + `uvicorn_worker.UvicornWorker` | pre-fork supervisor, mature signal handling | none of its own — Gunicorn queues | a bare VM already standardized on Gunicorn's config, hooks, and `max_requests` recycling |
+| Granian | Rust (Hyper + Tokio) supervisor; ASGI, WSGI, and its own RSGI | per-worker backpressure limiter on the accept loop | one binary instead of three packages; HTTP/2 without Hypercorn |
+| Hypercorn | asyncio/trio, HTTP/1.1 + HTTP/2 + HTTP/3 | none of its own | you genuinely need HTTP/2 or QUIC at the app tier |
+
+**Uvicorn's own `--workers` makes Gunicorn optional on a bare VM.** Uvicorn ships a
+multiprocess supervisor: it binds the socket in the parent, forks N children, and restarts a
+child that dies. It does not have Gunicorn's full hook system, `preload_app`, or per-worker
+`max_requests` recycling — if you rely on those, keep Gunicorn. If you were only using
+Gunicorn to get N processes, you can delete it and one dependency with it.
+
+**Where multi-process load balancing actually happens.** No Python server distributes requests
+itself. Either the parent binds one socket and all children `accept()` on it (the pre-fork
+model — the kernel wakes one child per connection), or each worker binds its own socket with
+`SO_REUSEPORT` and the kernel hashes the connection's 4-tuple to a worker. The second is what
+lets you restart one worker without dropping the listener, and it is also why per-worker load
+can look uneven: the kernel hashes connections, not requests, so one long-lived keep-alive
+connection carrying 10,000 requests lands entirely on one worker.
+
+```mermaid
+flowchart LR
+    C([Clients]) --> K{{Kernel}}
+    K -->|"pre-fork: one shared socket"| P(Parent binds<br/>children accept)
+    P --> W1(Worker 1)
+    P --> W2(Worker 2)
+    K -->|"SO_REUSEPORT: one socket each"| H(Kernel hashes<br/>4-tuple)
+    H --> S1(Worker 1<br/>own listener)
+    H --> S2(Worker 2<br/>own listener)
+
+    classDef src fill:#61afef,stroke:#3b7dd8,color:#282c34
+    classDef ker fill:#c678dd,stroke:#a552c4,color:#282c34
+    classDef mid fill:#e5c07b,stroke:#c9a227,color:#282c34
+    classDef wrk fill:#98c379,stroke:#6a9c4d,color:#282c34
+    class C src
+    class K,H ker
+    class P mid
+    class W1,W2,S1,S2 wrk
+```
+
+*Pre-fork shares one listener, so a parent restart drops it; `SO_REUSEPORT` gives each worker
+its own, so workers can be replaced independently — at the cost of connection-level rather
+than request-level balancing.*
+
 ---
 
 ## 5. Architecture Diagrams
@@ -291,7 +342,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 engine: AsyncEngine | None = None
 session_factory: async_sessionmaker | None = None
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- startup ---
@@ -306,7 +356,6 @@ async def lifespan(app: FastAPI):
     yield
     # --- shutdown (runs when SIGTERM drains) ---
     await engine.dispose()  # closes all pool connections cleanly
-
 
 app = FastAPI(lifespan=lifespan)
 ```
@@ -436,12 +485,10 @@ from app import main  # import the MODULE, not the name: `from app.main import e
 
 router = APIRouter()
 
-
 @router.get("/healthz")
 async def liveness():
     """Kubernetes liveness probe: is the process alive and not deadlocked?"""
     return {"status": "ok"}
-
 
 @router.get("/ready")
 async def readiness():
@@ -625,6 +672,90 @@ actually become the maximum. Second, the gap between 56% and 70% is a single ste
 growth, not a design margin: 800 req/s across 10 pods holds the fleet where it is, and 1,000
 req/s across the same 10 pods is what actually trips the scale-out to 12.
 
+### 6.9 Admission control: the only backstop the server itself gives you
+
+Every layer above — HPA, load balancer, the queue in front — reacts on a delay measured in
+seconds. The ASGI server is the one place that can reject work in microseconds, and by
+default it rejects nothing.
+
+```bash
+uvicorn app.main:app \
+    --limit-concurrency 200 \      # >200 in-flight -> immediate 503, NOT queued
+    --limit-max-requests 20000 \   # recycle the process, caps slow leaks
+    --limit-max-requests-jitter 2000 \
+    --backlog 2048                 # OS accept queue, independent of the above
+```
+
+`--limit-concurrency` is checked when the request line is parsed: if in-flight connections or
+tasks are at the limit, uvicorn substitutes a `service_unavailable` app and returns 503 right
+there. That is the behaviour you want — an overloaded service that answers 503 in 1 ms sheds
+load and tells the caller something true, while one that queues for 30 seconds converts an
+overload into a timeout storm and hides the signal from every dashboard.
+
+`--backlog` (default 2048) is a different knob at a different layer: it is the OS accept
+queue passed to `listen()`. Connections sitting in the backlog have not been accepted yet, so
+`--limit-concurrency` cannot see them; a deep backlog is how latency accumulates invisibly.
+Set the concurrency limit from what the process can actually serve — roughly
+`target_p99_seconds x sustainable_rps` — and leave the backlog alone unless you have measured
+accept-queue overflow.
+
+Granian takes the other approach: its per-worker backpressure limiter halts the connection
+accept loop when too many requests are outstanding, so excess connections wait in the kernel
+backlog rather than being answered. Rejecting (uvicorn) surfaces overload to the client
+immediately; halting the accept loop (Granian) pushes it back to the TCP layer and the load
+balancer. Gunicorn's pre-fork model has neither and will queue until it OOMs.
+
+Whatever the runtime, a scarce downstream resource needs its own limit inside the app — an
+`anyio.CapacityLimiter` sized to real GPU slots or database connections, not to the ASGI
+server's connection count. See
+[`../websockets_sse_and_streaming/websockets_sse_and_streaming.md`](../websockets_sse_and_streaming/websockets_sse_and_streaming.md)
+Section 6.6.
+
+### 6.10 Free-threaded Python (3.14t): what actually runs
+
+Python 3.14 promotes the free-threaded build from experimental to a supported configuration,
+shipped as a separate interpreter (`python3.14t`) alongside the default GIL build. For an ASGI
+deployment the honest summary is narrower than the headline:
+
+| Workload | Effect of moving to `3.14t` |
+|---|---|
+| I/O-bound endpoints (the usual FastAPI service) | ~nothing. One event loop is still one thread; concurrency already came from `await`, not from threads |
+| `def` handlers doing real CPU work in the anyio thread pool | this is where it pays — those 40 threads stop serializing on the GIL |
+| Single-threaded throughput | slightly worse; the free-threaded build carries measurable per-operation overhead |
+
+**The blocker that decides it for most services is greenlet, which SQLAlchemy's asyncio
+extension requires.** greenlet enabled free-threaded support in 3.3.0 and expanded it in 3.4.0,
+so async SQLAlchemy does *run* on `3.14t` — but the project describes that support as having
+"only limited testing", and the known caveats are the kind you do not want under a production
+data layer: forking at the wrong moment can hang a child process, `GreenletExit` may stop being
+raised in some multi-threaded scenarios, memory may leak, and avoiding rare crashes can require
+disabling the thread-local bytecode cache (`PYTHON_TLBC=0` or `-X tlbc=0`). So the honest
+position is "runs, but not qualified for production yet", not "will not start". That single
+dependency, not any property of FastAPI, is what keeps most of this ecosystem on the GIL build.
+
+Two related facts worth carrying:
+
+- **SQLAlchemy 2.1 moves greenlet entirely into the `[asyncio]` extra**, so it is no longer
+  installed by default and `AsyncSession` needs `pip install "sqlalchemy[asyncio]"`. The stated
+  reason is packaging, not free-threading — 1.4 and 2.0 carried "a complex expression to
+  determine if the `greenlet` dependency... could be installed from pypi using a pre-built
+  wheel", which broke tools like poetry. Pin the extra now: it is already valid on 2.0, which is
+  still the current stable line while 2.1 is in beta, so the upgrade becomes a non-event.
+- **A C extension not built for free-threading re-enables the GIL at import.** CPython's own
+  guidance is blunt: extension modules "need to explicitly indicate that they support running
+  with the GIL disabled; otherwise importing the extension will raise a warning and enable the
+  GIL at runtime" — a module without `Py_mod_gil = Py_MOD_GIL_NOT_USED` turns it back on. You
+  then get the slower interpreter and none of the parallelism, and only a warning says so. Verify
+  against your real dependency set, never a bare interpreter:
+  `python3.14t -c "import sys, yourapp; print(sys._is_gil_enabled())"`, and run the import under
+  `-W error` in CI so the warning fails the build and names the offending module.
+
+Granian supports free-threaded builds from 2.0 but its own documentation calls that support
+experimental and discourages it in production. Treat `3.14t` as a measured experiment for a
+CPU-bound service with a verified-clean dependency tree, not as a deployment default. The
+interpreter-level detail lives in
+[`../../python/the_gil_and_free_threading/the_gil_and_free_threading.md`](../../python/the_gil_and_free_threading/the_gil_and_free_threading.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -768,7 +899,6 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 
 _engine: AsyncEngine | None = None
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _engine
@@ -780,7 +910,6 @@ async def lifespan(app: FastAPI):
     yield
     if _engine:
         await _engine.dispose()
-
 
 app = FastAPI(lifespan=lifespan)
 ```
@@ -871,19 +1000,53 @@ readinessProbe:
   failureThreshold: 2    # faster to remove from LB pool if DB is unreachable
 ```
 
+### Pitfall 5: Shipping the free-threaded interpreter without checking the GIL actually stayed off
+
+```bash
+# BROKEN: "we moved to 3.14t for the throughput"
+FROM python:3.14-slim
+RUN pip install fastapi uvicorn sqlalchemy asyncpg
+CMD ["python3.14t", "-m", "uvicorn", "app.main:app"]
+
+# Two failures, neither of which raises:
+# 1. SQLAlchemy's async engine needs greenlet, whose free-threaded support is
+#    explicitly "limited testing" -- it imports and runs, then leaks memory,
+#    hangs a forked child, or drops a GreenletExit, hours or days in.
+# 2. Any dependency whose C extension is not free-threading-ready re-enables
+#    the GIL at import time. The service runs on the SLOWER interpreter with
+#    none of the parallelism, and every dashboard looks normal.
+```
+
+```bash
+# FIX: prove it, per build, with the real dependency set imported
+RUN python3.14t -c "\
+import app.main, sys; \
+assert not sys._is_gil_enabled(), 'GIL re-enabled by an extension'"
+# ...and if the app uses async SQLAlchemy, stay on the default build for now.
+# greenlet runs on 3.14t but calls its own support "limited testing";
+# revisit when that hardens, and set PYTHON_TLBC=0 if you evaluate it early.
+```
+
+A bare `python3.14t -c "import sys; print(sys._is_gil_enabled())"` returns `False` and proves
+nothing — the GIL comes back when *your* dependencies are imported. Assert it in the image
+build, so a transitive upgrade that re-enables the GIL fails CI instead of quietly costing
+you the thing you migrated for.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Role | Key Config | Production Notes |
 |------|------|------------|-----------------|
-| Uvicorn | ASGI server | `--workers 1` in K8s, `--loop uvloop`, `--timeout-graceful-shutdown 30` | `uvicorn[standard]` adds uvloop + httptools |
+| Uvicorn | ASGI server and multiprocess supervisor | `--workers 1` in K8s, `--workers N` on a bare VM, `--loop uvloop`, `--limit-concurrency N`, `--timeout-graceful-shutdown 30` | `uvicorn[standard]` adds uvloop and httptools; its own `--workers` replaces Gunicorn unless you need hooks, `preload_app`, or `max_requests` |
 | Gunicorn | Process supervisor | `workers=2*cpu+1`, `worker_class="uvicorn_worker.UvicornWorker"` | Use on bare VMs; skip in K8s |
 | uvloop | High-perf event loop | `pip install uvloop`; auto-detected by uvicorn[standard] | Linux/macOS only, no Windows wheels; 2-4x per its README |
 | Docker | Container packaging | Multi-stage, non-root, `PYTHONUNBUFFERED=1` | `python:3.13-slim` base; slim + multi-stage keeps it small |
 | Kubernetes Deployment | Replica management | `maxSurge=1, maxUnavailable=0` | Rolling update strategy |
 | Kubernetes HPA | Autoscaling | CPU 60% target or custom RPS metric | Requires `metrics-server` or Prometheus adapter |
 | Argo Rollouts | Advanced deployments | Canary weight, analysis templates | Requires Argo CD integration |
+
+| Granian | Rust (Hyper + Tokio) ASGI/WSGI/RSGI server | `--workers`, `--backpressure`, HTTP/2 built in | One binary instead of server + worker + supervisor; free-threading support is experimental per its own docs |
 | Hypercorn | Alternative ASGI server | HTTP/2 + HTTP/3 support | Less mature than Uvicorn; use for H2 push |
 | uv | Fast dependency management | `uv sync --frozen` in Dockerfile | Astral's README claims 10-100x faster than `pip` |
 
@@ -971,6 +1134,63 @@ A 1-second timeout paired with a single-failure threshold treats any transient d
 
 Size it as `preStop` sleep + graceful HTTP drain timeout + a small safety margin, never by feel. For example, a 5-second `preStop` sleep plus a 30-second drain needs at least 40 seconds. If the value is set too low, Kubernetes sends SIGKILL the instant the grace period expires regardless of whether requests are still in flight, hard-killing the process mid-request and dropping any connection that had not yet completed — the exact outcome graceful shutdown was meant to prevent. Kubernetes' shutdown sequence is fixed: SIGTERM first, then a wait of exactly `terminationGracePeriodSeconds`, then SIGKILL if the process has not exited on its own. Always compute this value explicitly from your own `preStop` and drain settings rather than trusting Kubernetes' 30-second default, which may not match your application's actual drain time.
 
+**Q17: Do you still need Gunicorn to run FastAPI on multiple cores on a bare VM?**
+**Short:** No — Uvicorn ships its own multiprocess supervisor, so `--workers N` covers it unless you need Gunicorn's hooks, preload_app, or max_requests recycling.
+
+No. Uvicorn has a built-in supervisor: `uvicorn app.main:app --workers 4` binds the socket in
+the parent, forks four children, and restarts one that dies. If the only reason Gunicorn was
+in the stack was "we need more than one process", it can be deleted along with the
+`uvicorn-worker` package. Keep Gunicorn when you actually use what it adds — the full server
+hook system, `preload_app`, per-worker `max_requests` recycling, or an existing
+`gunicorn.conf.py` your operations tooling depends on. Inside Kubernetes the question is moot:
+run a single process per pod and let replicas be the unit of scale, because a multi-worker
+process hides per-worker load from the HPA and makes readiness probes lie.
+
+**Q18: How does a request get distributed across worker processes, and why is per-worker load uneven?**
+**Short:** The kernel distributes, not the server — either children accept on one shared socket or SO_REUSEPORT hashes the connection 4-tuple to a worker.
+
+No Python server balances requests itself. In the pre-fork model the parent binds one listening
+socket and every child calls `accept()` on it, so the kernel wakes one child per incoming
+connection. With `SO_REUSEPORT` each worker binds its own socket on the same port and the
+kernel hashes the connection's 4-tuple to pick a worker; that is what lets one worker be
+replaced without dropping the listener. Either way the unit of distribution is the
+**connection**, not the request — so a client holding one keep-alive connection that carries
+10,000 requests sends all 10,000 to a single worker. That is the usual explanation for a
+worker at 90% CPU beside three at 20%, and it is why per-worker metrics matter more than the
+process average.
+
+**Q19: What does `--limit-concurrency` do, and how is it different from `--backlog`?**
+**Short:** limit-concurrency returns an immediate 503 above N in-flight requests; backlog is the OS accept queue and holds connections the server has not seen yet.
+
+`--limit-concurrency N` is an application-level admission control: when in-flight connections
+or tasks reach N, uvicorn answers the next request with an immediate 503 rather than queueing
+it. `--backlog` (default 2048) is the OS-level accept queue passed to `listen()` — those
+connections have not been accepted yet, so the concurrency limit cannot see them, and a deep
+backlog is where latency hides. Size the concurrency limit from what the process can actually
+serve, roughly `target_p99_seconds x sustainable_rps`, and leave the backlog alone unless you
+have measured accept-queue overflow. This matters because it is the only backstop that reacts
+in microseconds: an HPA takes tens of seconds, and until it acts a service with no limit
+converts an overload into a timeout storm.
+
+**Q20: Should you deploy FastAPI on free-threaded Python 3.14t?**
+**Short:** Almost certainly not yet — greenlet calls its own free-threaded support "limited testing", so async SQLAlchemy runs there but is not production-qualified.
+
+Rarely, and only after measuring. The decisive blocker is dependency-level, not framework-level:
+SQLAlchemy's asyncio extension requires greenlet, and while greenlet enabled free-threaded
+support in 3.3.0 and expanded it in 3.4.0, the project itself describes that support as having
+"only limited testing" — with known caveats around forking hanging a child process, `GreenletExit`
+no longer being raised in some multi-threaded scenarios, possible memory leaks, and rare crashes
+that need `PYTHON_TLBC=0`. So async SQLAlchemy on `3.14t` starts and serves traffic; it is simply
+not something to put a production data layer on yet, and the distinction matters because the
+failure is a slow leak rather than a loud import error. Even without that, the upside is narrow: a typical FastAPI service is
+I/O-bound and already gets its concurrency from `await` on a single event-loop thread, so
+removing the GIL changes nothing; the gain is real only for `def` handlers doing CPU work in
+the anyio thread pool, and single-threaded throughput is slightly worse. The trap on top is
+silent: a C extension not built for free-threading re-enables the GIL at import with no error,
+so you get the slower interpreter and none of the parallelism. If you evaluate it, assert
+`sys._is_gil_enabled()` is `False` in the image build *after importing your real application*,
+not on a bare interpreter.
+
 ---
 
 ## 13. Best Practices
@@ -1000,8 +1220,17 @@ Size it as `preStop` sleep + graceful HTTP drain timeout + a small safety margin
 
 **Performance**
 - Use `uvicorn[standard]` in production to get uvloop and httptools automatically
+- Set `--limit-concurrency` on every public service. It is the only backstop that sheds load
+  in microseconds; an unlimited server turns an overload into a timeout storm and hides the
+  signal from the HPA
+- On a bare VM, reach for `uvicorn --workers N` before adding Gunicorn — one fewer dependency
+  and one fewer supervisor unless you actually use Gunicorn's hooks or `preload_app`
+- Treat free-threaded `3.14t` as an experiment, not a default: greenlet's free-threaded support
+  is self-described as "limited testing", so async SQLAlchemy runs but is not production-
+  qualified, and any non-ready C extension silently re-enables the GIL. Assert
+  `sys._is_gil_enabled()` is `False` after importing the real app
 - Never use `--reload` in production; use K8s rolling updates for code changes
-- Profile with `py-spy` or `austin` before over-provisioning workers; one blocking sync call in an async route negates all concurrency gains — see `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
+- Profile with `py-spy` or `austin` before over-provisioning workers; one blocking sync call in an async route negates all concurrency gains — see `../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md`
 
 **Observability cross-cutting**
 - Emit structured JSON logs with correlation IDs (`request_id`, `trace_id`) from every request; configure `accesslog` in Gunicorn to emit JSON — see `../observability_and_monitoring/observability_and_monitoring.md`
@@ -1072,7 +1301,6 @@ _session_factory = None
 _model: Pipeline | None = None
 _model_ready: bool = False
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _engine, _session_factory, _model, _model_ready
@@ -1099,7 +1327,6 @@ async def lifespan(app: FastAPI):
     if _engine:
         await _engine.dispose()
 
-
 app = FastAPI(lifespan=lifespan, title="ML Inference Service")
 ```
 
@@ -1113,12 +1340,10 @@ from app import main  # module import: `from app.main import _engine` would free
 
 router = APIRouter()
 
-
 @router.get("/healthz")
 async def liveness():
     # Minimal: just confirm the event loop is responsive
     return {"status": "ok"}
-
 
 @router.get("/ready")
 async def readiness():
@@ -1145,15 +1370,12 @@ from app import main  # module import so the lifespan-loaded model is visible
 
 router = APIRouter()
 
-
 class PredictRequest(BaseModel):
     features: list[float]
-
 
 class PredictResponse(BaseModel):
     prediction: float
     model_version: str
-
 
 # BROKEN: CPU-bound sklearn predict() called directly in async route
 # Blocks the event loop for ~5ms per request.
@@ -1164,7 +1386,6 @@ async def predict_broken(req: PredictRequest) -> PredictResponse:
     arr = np.array(req.features).reshape(1, -1)
     result = main._model.predict(arr)  # BROKEN: CPU-bound call blocks event loop
     return PredictResponse(prediction=float(result[0]), model_version="1.0")
-
 
 # FIX: offload CPU-bound work to a thread pool via asyncio.to_thread()
 # The event loop is free to serve other requests while sklearn runs in a thread.
@@ -1221,5 +1442,5 @@ spec:
 *Cross-references:*
 - `../configuration_and_settings_management/configuration_and_settings_management.md` — `BaseSettings`, ConfigMap/Secret injection
 - `../observability_and_monitoring/observability_and_monitoring.md` — structured logging, Prometheus metrics, OpenTelemetry
-- `../../async_patterns_and_pitfalls/async_patterns_and_pitfalls.md` — blocking-in-async detection, `asyncio.to_thread()`
+- `../../python/async_patterns_and_pitfalls/async_patterns_and_pitfalls.md` — blocking-in-async detection, `asyncio.to_thread()`
 - `../middleware_and_lifecycle/middleware_and_lifecycle.md` — `lifespan`, middleware ordering, BackgroundTasks

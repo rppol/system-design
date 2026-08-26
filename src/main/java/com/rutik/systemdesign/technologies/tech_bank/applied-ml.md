@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: applied-ml -->
 
-The 241 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 240 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Applied ML** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -38,12 +38,6 @@ It fits the case where you can describe what abnormal looks like -- a shift, a s
 You hand it one row per decision -- model score, true label, protected attributes -- and it computes group rates (FPR, FNR, FDR, FOR, precision, recall) and then disparities as each group's rate divided by a reference group's, flagging any that falls outside a tolerance such as the four-fifths rule.
 
 The output is an audit report, not a mitigation: it tells you which parity you fail and by how much, in a form a compliance reader can keep. Its fairness tree exists because you cannot satisfy every definition at once -- punitive interventions care about false positives, assistive ones about false negatives. To then change the model, fairlearn or aif360 carry the algorithms.
-
-### AI
-**Short:** Umbrella index entry, not a product; here it stands for EHR-integrated AI clinical documentation.
-**Kind:** concept
-**Lang:** *
-**Roles:** applied-ml/nlp-and-text @3
 
 ### aif360
 **Short:** IBM AI Fairness 360: the widest catalog of pre-, in- and post-processing bias-mitigation algorithms and metrics.

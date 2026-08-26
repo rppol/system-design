@@ -1,13 +1,15 @@
-# Study Plans — Blind 75 & NeetCode 150
+# Study Plans — the curated problem lists, mapped to patterns
 
 ## Purpose & How to Use This Guide
 
 The 25 pattern files in this section each have their own §7 Problem Bank —
 but those banks are organized for *depth within a pattern*, not for
 *sequencing across patterns*. This guide does the opposite: it takes the two
-most widely used curated interview lists — **Blind 75** and
-**NeetCode 150** — and maps every problem onto the pattern file that teaches
-the technique it requires, then proposes a phase-by-phase study order.
+lists this repo builds its tables on — **Blind 75** and **NeetCode 150** —
+and maps every problem onto the pattern file that teaches the technique it
+requires, then proposes a phase-by-phase study order. §1 places those two
+inside the wider set of lists you will be pointed at, and says which one to
+be working and when.
 
 **How to use this file:**
 1. If you have limited time (2-4 weeks), work through the **B75**-tagged
@@ -54,22 +56,35 @@ then re-attempt one earlier problem from memory as spaced repetition.*
 
 ---
 
-## 1. Blind 75 vs. NeetCode 150
+## 1. Which list, and when
 
-**Blind 75** (compiled in 2020) is the original, tightly-curated 75-problem
-list — it remains an excellent baseline for "I have 3-4 weeks before a
-loop." **NeetCode 150** (2022) is a superset: it keeps almost all of Blind 75
-and adds ~75 more problems, organized into 18 categories on neetcode.io,
-with substantially deeper coverage of graphs (advanced graphs: Dijkstra,
-Bellman-Ford, MST), 2-D DP (edit distance, interleaving string, regex
-matching), and backtracking (subsets, permutations, N-Queens — categories
-Blind 75 barely touches).
+There is no single canonical problem list. There are four or five that get
+recommended, they overlap heavily, and the useful question is not "which is
+best" but "which one am I working *right now*, and what does finishing it
+buy me." They form a progression:
 
-**Recommendation:** if you're inside 4 weeks of an interview, do **B75**
-first, in the phase order below — it's the highest-density subset. If you
-have more runway, continue into the **NC150** rows for the same patterns
-before moving to the next phase; this reinforces the pattern you just
-learned with harder variants instead of context-switching.
+| List | Size | What it is for | Move on when |
+|---|---|---|---|
+| **Blind 75** | 75 | The irreducible core. Compiled in 2020; still the highest problems-per-pattern density anyone has published. The right list when the loop is 3-4 weeks out and you need coverage, not depth. | You can name the pattern for every one of the 75 without solving it |
+| **NeetCode 150** | 150 | The standard breadth tier — nearly all of Blind 75 plus ~75 more across the same 18 categories, with real depth added in advanced graphs (Dijkstra, Bellman-Ford, MST), 2-D DP (edit distance, interleaving string, regex matching), and backtracking (subsets, permutations, N-Queens), which Blind 75 barely touches. **This is the default.** | You can read an unseen Medium and pick the approach inside two minutes |
+| **LeetCode Top Interview 150** | 150 | LeetCode's own official study plan, and the alternative breadth tier. Same job as NC150, different curation; every problem has a LeetCode-quality editorial behind it, and completing it awards the Top Interview 150 badge. Work it *instead of* NC150, not after — the overlap is large. | Same bar as NC150 |
+| **NeetCode 250** | 250 | NC150 plus 100 more. Note what it actually is: neetcode.io calls it **the most beginner-friendly list, intended for people completely new to algorithms** — the extra 100 are mostly the gentler rungs (60 Easy / 155 Medium / 35 Hard) that make the climb gradual. It is a *wider on-ramp*, not a harder tier. Start here if NC150's Mediums are landing as walls rather than puzzles. | You are through the Mediums without the editorial |
+| **Company-tagged lists** | varies | The last mile, and only the last mile. Filter LeetCode's company tags to the target company and the last 6 months once you already have the patterns; the tags are behind LeetCode Premium. Worth 1-2 weeks, never worth starting with. | The interview happens |
+
+**The target is 100-150 problems you genuinely understand, not 400 you have
+seen.** Current guidance has converged hard on this: a candidate who worked
+NC150 with real review outperforms one who ground 500 without it, because
+the thing being tested is pattern recognition and the marginal 300th problem
+adds almost no new pattern. The measurable bar is not a count — it is that
+you can read an unseen Medium and name the right approach within about two
+minutes. The 8.5-week, 7-phase plan in §3 is built to exactly that size.
+
+**Recommendation:** inside 4 weeks, do **B75** only, in the phase order
+below — it is the highest-density subset. With more runway, continue into
+the **NC150** rows for the same pattern before moving to the next phase;
+that reinforces the pattern you just learned with a harder variant instead
+of context-switching. Add company tags in the final fortnight, and only
+then.
 
 ---
 

@@ -1,5 +1,25 @@
 # NewSQL and Distributed SQL
 
+> **Version anchor — August 2026.** The licensing and product landscape in this category
+> moves faster than the algorithms do, so anchor on both.
+>
+> **CockroachDB** retired its Core offering with 24.3 (November 2024) and now ships under
+> a single source-available **CockroachDB Software License** in three flavours:
+> **Enterprise** (paid), **Enterprise Free** (no cost for organisations under $10M annual
+> revenue), and a 30-day **Enterprise Trial**. Telemetry is **mandatory** on the Free and
+> Trial licences — a cluster that stops reporting for 7 days is throttled to 5 concurrent
+> SQL transactions — and can only be disabled on a paid Enterprise licence. CockroachDB
+> Cloud plans are **Basic / Standard / Advanced**; "Serverless" and "Dedicated" are gone.
+>
+> **AWS ships two different answers** and they are not the same product. **Aurora
+> PostgreSQL Limitless Database** (GA 31 October 2024) layers transparent sharding over
+> Aurora Serverless v2 shard groups behind one endpoint — still Aurora, still one engine
+> per shard. **Aurora DSQL** (GA 27 May 2025) is a ground-up serverless distributed SQL
+> engine: PostgreSQL-compatible, active-active across Regions, strongly consistent reads
+> and writes at every Regional endpoint, no primary.
+>
+> Behaviour that depends on a version is tagged inline.
+
 ## 1. Concept Overview
 
 NewSQL and Distributed SQL systems provide horizontally scalable databases that preserve the full ACID guarantees and SQL interface of traditional relational databases. They emerged to solve the conflict between two unsatisfactory choices: PostgreSQL/MySQL (strong consistency, limited scale) and NoSQL systems (horizontal scale, weakened consistency and expressiveness). The defining characteristic is distributed ACID transactions — linearizable reads and serializable writes across multiple nodes without the developer burden of application-level sharding.
@@ -448,7 +468,7 @@ cluster has.
 | System         | Language | License      | Managed Option          | Key Differentiator           |
 |----------------|----------|--------------|-------------------------|------------------------------|
 | Google Spanner | Proprietary | Proprietary | Cloud Spanner (GCP)     | TrueTime external consistency |
-| CockroachDB    | Go       | BSL/CCL      | CockroachDB Serverless  | PostgreSQL wire protocol      |
+| CockroachDB    | Go       | CockroachDB Software License (source-available) | CockroachDB Cloud — Basic / Standard / Advanced | PostgreSQL wire protocol      |
 | TiDB           | Go/Rust  | Apache 2.0   | TiDB Cloud              | HTAP (TiKV + TiFlash)        |
 | YugabyteDB     | C++      | Apache 2.0   | Yugabyte Managed        | PostgreSQL + Cassandra APIs   |
 | Amazon Aurora  | C++      | Proprietary  | AWS Aurora              | Shared log, fast failover     |
@@ -515,9 +535,9 @@ Write intents are uncommitted values written directly to the MVCC keyspace by in
 YugabyteDB exposes two SQL APIs over the same DocDB storage engine: YSQL (PostgreSQL-compatible, port 5433) and YCQL (Cassandra Query Language-compatible, port 9042). DocDB uses RocksDB as the storage layer, with Raft for replication. YSQL targets OLTP use cases requiring joins and transactions; YCQL targets time-series and wide-column access patterns. This lets teams consolidate PostgreSQL and Cassandra workloads on one system. The tradeoff is that neither API is 100% feature-complete with its reference implementation.
 
 **Q: How does Aurora's shared log differ from true distributed SQL?**
-**Short:** Aurora's single-writer shared-log design lets many replicas read without full sync, but writes never scale horizontally like true distributed SQL.
+**Short:** Aurora's shared log gives one writer plus up to 15 fast-failover readers; horizontal write scale requires Aurora Limitless or Aurora DSQL instead.
 
-Aurora uses a single-writer, shared-log architecture. All writes go through one primary instance (no write scale-out). The primary writes to a distributed log store (6 copies across 3 AZs), and up to 15 read replicas can replay this log for reads. Failover is fast (<30s) because replicas share the log — there is no full replica sync needed. This is not true distributed SQL because writes do not scale horizontally. Aurora Limitless (announced 2023) adds sharding on top of Aurora to support distributed writes, moving toward distributed SQL.
+Aurora uses a single-writer, shared-log architecture. All writes go through one primary instance (no write scale-out). The primary writes to a distributed log store (6 copies across 3 AZs), and up to 15 read replicas can replay this log for reads. Failover is fast (<30s) because replicas share the log — there is no full replica sync needed. This is not true distributed SQL because writes do not scale horizontally. AWS covers that gap with two separate products: **Aurora PostgreSQL Limitless Database** (GA 31 October 2024) layers transparent sharding over Aurora Serverless v2 shard groups behind a single endpoint, so writes distribute while the engine stays Aurora; and **Aurora DSQL** (GA 27 May 2025) is a ground-up serverless distributed SQL engine — PostgreSQL-compatible, active-active across Regions, with strongly consistent reads and writes at every Regional endpoint and no primary at all. Limitless is the "keep Aurora, add shards" answer; DSQL is the "Spanner-shaped, optimistic concurrency, no single writer" answer.
 
 **Q: What retry strategy should applications use with distributed SQL systems?**
 **Short:** Distributed SQL retries must use exponential backoff with jitter and always restart the whole transaction, not just the failing statement.

@@ -102,6 +102,7 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | [Rate Limiting](rate_limiting/rate_limiting.md) | Token bucket, sliding window, distributed | Intermediate |
 | [CDN](cdn/cdn.md) | Edge caching, push vs pull, TTL, geographic routing | Intermediate |
 | [Database Sharding](database_sharding/database_sharding.md) | Shard key, range vs hash sharding, resharding | Advanced |
+| [Geospatial Indexing](geospatial_indexing/geospatial_indexing.md) | Geohash, S2, H3, quadtrees; proximity and k-nearest search | Advanced |
 | [Consensus Algorithms](consensus_algorithms/consensus_algorithms.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
 | [Event Sourcing & CQRS](event_sourcing_cqrs/event_sourcing_cqrs.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
 | [Distributed Transactions](distributed_transactions/distributed_transactions.md) | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys | Advanced |
@@ -235,6 +236,23 @@ case_studies
   design_metrics_monitoring.md         principal
   design_digital_wallet.md             -
   design_proximity_service.md          -
+  design_youtube_upload_pipeline.md  senior
+  design_distributed_job_scheduler.md  senior
+  design_flash_sale_ticketing.md  senior
+capacity_estimation
+  capacity_estimation.md  senior, principal
+realtime_updates
+  realtime_updates.md  senior
+geospatial_indexing
+  geospatial_indexing.md  -
+coordination_and_contention
+  coordination_and_contention.md  senior, principal
+cell_based_architecture
+  cell_based_architecture.md  principal
+multi_region_and_data_residency
+  multi_region_and_data_residency.md  principal
+stream_processing
+  stream_processing.md  senior
 -->
 ## Learning Paths
 
@@ -245,26 +263,30 @@ This section is exhaustive by design — 18 modules spanning the full architectu
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 23 case studies. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (14 modules)
+### Senior Path (18 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 1 | [scalability](scalability/scalability.md) | module page only |
-| 2 | [load_balancing](load_balancing/load_balancing.md) | module page only |
-| 3 | [caching](caching/caching.md) | module page only |
-| 4 | [database_design](database_design/database_design.md) | module page only |
-| 5 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
-| 6 | [api_design](api_design/api_design.md) | module page only |
-| 7 | [message_queues](message_queues/message_queues.md) | module page only |
-| 8 | [rate_limiting](rate_limiting/rate_limiting.md) | module page only |
-| 9 | [cdn](cdn/cdn.md) | module page only |
-| 10 | [consistent_hashing](consistent_hashing/consistent_hashing.md) | module page only |
-| 11 | [database_sharding](database_sharding/database_sharding.md) | module page only |
-| 12 | [microservices](microservices/microservices.md) | module page only |
-| 13 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 16 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 2 | [capacity_estimation](capacity_estimation/capacity_estimation.md) | module page only |
+| 3 | [load_balancing](load_balancing/load_balancing.md) | module page only |
+| 4 | [caching](caching/caching.md) | module page only |
+| 5 | [database_design](database_design/database_design.md) | module page only |
+| 6 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
+| 7 | [api_design](api_design/api_design.md) | module page only |
+| 8 | [realtime_updates](realtime_updates/realtime_updates.md) | module page only |
+| 9 | [message_queues](message_queues/message_queues.md) | module page only |
+| 10 | [rate_limiting](rate_limiting/rate_limiting.md) | module page only |
+| 11 | [cdn](cdn/cdn.md) | module page only |
+| 12 | [consistent_hashing](consistent_hashing/consistent_hashing.md) | module page only |
+| 13 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 15 | [microservices](microservices/microservices.md) | module page only |
+| 16 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 17 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
+| 20 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 25 | [stream_processing](stream_processing/stream_processing.md) | module page only |
 
-**Not in this path** (4 of 18, Full Path only): `observability`, `security_and_auth`, `consensus_algorithms`, `event_sourcing_cqrs`
+**Not in this path** (7 of 25, Full Path only): `geospatial_indexing`, `observability`, `security_and_auth`, `cell_based_architecture`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns senior time.
@@ -279,23 +301,27 @@ A ruthless cut to what a **senior system design interview** actually probes — 
 | Cross-Service Consistency & Failure Handling | 2PC/Saga/TCC/outbox for consistency across service boundaries, plus circuit breakers/bulkheads/retries for the "what if this call fails" probe every interviewer asks |
 
 <!-- study-path-table principal -->
-### Principal Path (11 modules)
+### Principal Path (15 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 1 | [scalability](scalability/scalability.md) | module page only |
-| 5 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
-| 6 | [api_design](api_design/api_design.md) | module page only |
-| 11 | [database_sharding](database_sharding/database_sharding.md) | module page only |
-| 12 | [microservices](microservices/microservices.md) | module page only |
-| 13 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 14 | [observability](observability/observability.md) | module page only |
-| 15 | [security_and_auth](security_and_auth/security_and_auth.md) | module page only |
-| 16 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
-| 17 | [consensus_algorithms](consensus_algorithms/consensus_algorithms.md) | module page only |
-| 18 | [event_sourcing_cqrs](event_sourcing_cqrs/event_sourcing_cqrs.md) | module page only |
+| 2 | [capacity_estimation](capacity_estimation/capacity_estimation.md) | module page only |
+| 6 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
+| 7 | [api_design](api_design/api_design.md) | module page only |
+| 13 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 15 | [microservices](microservices/microservices.md) | module page only |
+| 16 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 17 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
+| 18 | [observability](observability/observability.md) | module page only |
+| 19 | [security_and_auth](security_and_auth/security_and_auth.md) | module page only |
+| 20 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 21 | [cell_based_architecture](cell_based_architecture/cell_based_architecture.md) | module page only |
+| 22 | [consensus_algorithms](consensus_algorithms/consensus_algorithms.md) | module page only |
+| 23 | [multi_region_and_data_residency](multi_region_and_data_residency/multi_region_and_data_residency.md) | module page only |
+| 24 | [event_sourcing_cqrs](event_sourcing_cqrs/event_sourcing_cqrs.md) | module page only |
 
-**Not in this path** (7 of 18, Full Path only): `load_balancing`, `caching`, `database_design`, `message_queues`, `rate_limiting`, `cdn`, `consistent_hashing`
+**Not in this path** (10 of 25, Full Path only): `load_balancing`, `caching`, `database_design`, `realtime_updates`, `message_queues`, `rate_limiting`, `cdn`, `consistent_hashing`, `geospatial_indexing`, `stream_processing`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the tradeoff frame itself: choosing a consistency and partitioning model, sizing the blast radius of each dependency, and defending the design you rejected. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.

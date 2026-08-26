@@ -26,7 +26,7 @@ Key capabilities covered in this module:
 
 Cross-references:
 - For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`
-- For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/rest_api_design.md`
+- For REST API design principles behind these endpoints, see `../../backend/rest_api_design/rest_api_design.md`
 
 ---
 
@@ -727,9 +727,38 @@ mechanism in this module.
 mix of REST endpoints, WebSocket channels and SSE streams from a single ASGI app — the
 "one transport abstraction for three protocols" property from §2.
 
+**MCP servers.** The Model Context Protocol — how an LLM client discovers and calls tools —
+defines exactly two standard transports: **stdio** for a subprocess, and **Streamable HTTP**
+for anything on a network. Streamable HTTP is an ASGI app's natural shape, which is why FastAPI
+and Starlette sit under most remote MCP servers. The spec requires a **single endpoint path
+serving both POST and GET** (`https://example.com/mcp`): the client POSTs a JSON-RPC message
+with `Accept: application/json, text/event-stream`, and the server answers *either* with one
+JSON object or by opening an SSE stream on that same response — a `GET` to the same path opens
+a server-to-client stream. A JSON-RPC notification or response gets `202 Accepted` with no body.
+
+Three details make it a good exercise in this module's machinery. Session state lives in an
+`Mcp-Session-Id` response header the client must echo; a server that has expired a session
+returns **404**, which the client treats as "re-initialize", not as "endpoint missing". Version
+negotiation rides an `MCP-Protocol-Version` header on every subsequent request, and an
+unsupported value **must** be a `400`. And stream resumption is plain SSE: the server attaches
+an `id` to each event and the client reconnects with `Last-Event-ID`, so ids are a per-stream
+cursor — the same mechanism covered in
+[`../websockets_sse_and_streaming/websockets_sse_and_streaming.md`](../websockets_sse_and_streaming/websockets_sse_and_streaming.md).
+
+The security requirements are not optional and are easy to miss on an ASGI app: the server
+**must** validate the `Origin` header on every connection, because without it a web page can
+reach a locally running MCP server by DNS rebinding; a local server should bind `127.0.0.1`
+rather than `0.0.0.0`; and every connection should be authenticated.
+
+Note that Streamable HTTP **replaced** the older HTTP+SSE transport (two endpoints, a long-lived
+`GET` stream plus a separate POST endpoint) from protocol version `2024-11-05`. New servers
+implement the single-endpoint transport; the two-endpoint form exists only for backwards
+compatibility with old clients.
+
 **The general pattern.** FastAPI's typical production niche is the I/O-bound service that must
-also publish a machine-readable contract: model-inference gateways, internal platform APIs, and
-BFF layers where an OpenAPI schema drives client SDK generation and contract tests.
+also publish a machine-readable contract: model-inference gateways, MCP servers, internal
+platform APIs, and BFF layers where an OpenAPI schema drives client SDK generation and contract
+tests.
 
 ---
 
@@ -768,8 +797,11 @@ BFF layers where an OpenAPI schema drives client SDK generation and contract tes
 - You need WebSocket or Server-Sent Events alongside REST on the same server.
 - Auto-generated OpenAPI is required (client SDK generation, contract testing).
 - The team knows Python 3.10+ typing well; they will benefit from inline validation.
-- You want Pydantic v2's Rust-backed validation performance (5–50x faster than v1, per
-  Pydantic's own published comparison).
+- Request bodies are validation-heavy enough for Pydantic v2's Rust `pydantic-core` engine to
+  pay: the speedup is model-shaped, measured ~2.7x on a flat 3-field model and ~13x on one
+  carrying a 20-key dict plus a 20-element list (CPython 3.13.11, pydantic 1.10.26 vs 2.13.4).
+  A single small DTO validates in microseconds either way — this only shows up at p99 when a
+  request validates hundreds of objects.
 - Service needs graceful startup/shutdown for resource pools (DB, ML models, Kafka consumers).
 
 ### Do NOT use FastAPI + ASGI when:
@@ -789,66 +821,15 @@ BFF layers where an OpenAPI schema drives client SDK generation and contract tes
 
 ## 10. Common Pitfalls
 
-### Pitfall 1 — BROKEN: Using deprecated `on_startup` / `on_shutdown` event handlers
-
-`@app.on_event("startup")` and `@app.on_event("shutdown")` are deprecated in favour of the
-`lifespan` context manager, available since FastAPI 0.93 and carrying an explicit
-`@deprecated` marker on `FastAPI.on_event` today. The old handlers have no way to share state
-with request handlers.
-
-```python
-# BROKEN — deprecated API, no way to share pool with route handlers
-from fastapi import FastAPI
-import asyncpg
-
-app = FastAPI()
-pool = None  # module-level global — threading / import issues
-
-@app.on_event("startup")           # deprecated; emits DeprecationWarning
-async def startup():
-    global pool
-    pool = await asyncpg.create_pool(dsn="postgresql://...")
-
-@app.on_event("shutdown")
-async def shutdown():
-    await pool.close()
-
-@app.get("/users")
-async def list_users():
-    return await pool.fetch("SELECT id FROM users")  # pool may be None in tests
-```
-
-```python
-# FIX — lifespan context manager (FastAPI 0.93+)
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
-import asyncpg
-from fastapi import FastAPI, Request
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[dict]:
-    pool = await asyncpg.create_pool(dsn="postgresql://...")
-    yield {"db": pool}
-    await pool.close()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/users")
-async def list_users(request: Request) -> list[dict]:
-    rows = await request.state.db.fetch("SELECT id, username FROM users")
-    return [dict(r) for r in rows]
-```
-
-The `lifespan` approach: no global state, the pool is explicitly scoped to the process
-lifetime, and tests can override the lifespan with `app.router.lifespan_context`.
+> **`lifespan` vs the deprecated `on_startup`/`on_shutdown` events** is the other classic
+> pitfall here. It belongs to the module that owns the lifecycle, and the full BROKEN/FIX
+> treatment — including why a startup exception gets swallowed — lives in
+> [middleware_and_lifecycle](../middleware_and_lifecycle/middleware_and_lifecycle.md) §10.
+> Section 6 above introduces `lifespan`; that module is where it is worked through.
 
 ---
 
-### Pitfall 2 — BROKEN: Synchronous blocking call in an `async def` route
+### Pitfall 1 — BROKEN: Synchronous blocking call in an `async def` route
 
 A `def` route handler is run in a thread pool by FastAPI. But an `async def` handler runs
 directly on the event loop. Calling a blocking function inside `async def` freezes the
@@ -929,7 +910,7 @@ If you truly must use a synchronous library, wrap it in `asyncio.get_event_loop(
 
 ---
 
-### Pitfall 3 — BROKEN: Returning a Pydantic model without `response_model` — extra fields leak
+### Pitfall 2 — BROKEN: Returning a Pydantic model without `response_model` — extra fields leak
 
 ```python
 # BROKEN — internal fields exposed to clients
@@ -990,7 +971,7 @@ async def get_user(user_id: int) -> UserInternal:
 
 ---
 
-### Pitfall 4 — Using `--reload` in production
+### Pitfall 3 — Using `--reload` in production
 
 `uvicorn main:app --reload` starts a watchdog thread that polls the filesystem. This increases
 CPU usage, delays startup on large codebases, and is not safe in containerised deployments
@@ -998,7 +979,7 @@ where the source directory is read-only. Always omit `--reload` in production im
 
 ---
 
-### Pitfall 5 — Mutating global state during request handling
+### Pitfall 4 — Mutating global state during request handling
 
 ASGI servers run in a single process with a single event loop. A class-level or module-level
 list mutated in a route handler is shared across all concurrent requests. Use a proper cache
@@ -1194,6 +1175,20 @@ pods/containers) via the orchestrator. Increase `--workers` (Uvicorn supervises 
 processes itself) when the bottleneck is CPU — Python parsing, Pydantic validation of very large payloads, or
 synchronous business logic — since each extra worker can utilise an additional CPU core
 independently of the GIL.
+
+**Q17: Why is an ASGI framework like FastAPI the natural fit for a remote MCP server?**
+**Short:** MCP's Streamable HTTP transport needs one path serving POST and GET that can answer either a JSON body or an SSE stream — which is exactly what an ASGI app does.
+MCP defines two standard transports: stdio for a subprocess, and Streamable HTTP for anything
+remote. Streamable HTTP requires a **single endpoint path handling both POST and GET**, where
+the same POST may be answered with either `application/json` or `text/event-stream` depending
+on the request — and a GET on that path opens a server-to-client SSE stream. Switching a single
+route between a unary response and a long-lived stream, on one connection abstraction, is
+precisely what ASGI gives you and what WSGI cannot do at all. The rest maps onto ordinary
+FastAPI machinery: `Mcp-Session-Id` and `MCP-Protocol-Version` are header dependencies,
+resumption is SSE `id` plus `Last-Event-ID`, and a `404` on an expired session is a protocol
+signal meaning "re-initialize" rather than an error. The requirement most often missed is
+security: the spec says a server **must** validate the `Origin` header, because otherwise a
+malicious web page can reach a developer's locally running MCP server through DNS rebinding.
 
 ---
 
@@ -1507,4 +1502,4 @@ approach: tests can inject a stub resource pool without monkey-patching global s
 
 *Cross-references:*
 - *For dependency injection on top of ASGI, see `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`*
-- *For REST API design principles behind these endpoints, see `../../../backend/rest_api_design/rest_api_design.md`*
+- *For REST API design principles behind these endpoints, see `../../backend/rest_api_design/rest_api_design.md`*

@@ -815,6 +815,8 @@ Applying arc-standard/arc-eager to a non-projective language (Czech ~23% non-pro
 | MaltParser / MSTParser | Classic transition / graph baselines | Historical reference implementations |
 | evalb / conll18 scorer | Bracketing F1 / UAS-LAS scoring | Official evaluation scripts; use these, not homemade metrics |
 
+The spaCy UAS/LAS figures quoted in Section 14's case study (`en_core_web_sm`, `en_core_web_trf`) were checked against the **`en_core_web_sm-3.8.0`/`en_core_web_trf-3.8.0`** release metadata published at [spacy.io/models/en](https://spacy.io/models/en) and the `explosion/spacy-models` GitHub releases (current as of August 2026): `en_core_web_sm-3.8.0` scores DEP_UAS 91.77 / DEP_LAS 89.92 on spaCy's own held-out evaluation, and `en_core_web_trf-3.8.0` scores DEP_UAS 95.19 / DEP_LAS 93.84. The case study's numbers sit within a few tenths of a point of these official figures, which is expected — its "internal 2K-sentence gold set" is a different, company-specific eval set, not spaCy's own benchmark, so a small gap either direction is normal rather than an error. Throughput (sentences/second) is not something spaCy publishes; those numbers are the case study's own measured figures and are version- and hardware-specific.
+
 ---
 
 ## 12. Interview Questions with Answers
@@ -946,6 +948,8 @@ Enforce it with a spanning-tree decoder rather than independent per-token head s
 | spaCy `en_core_web_sm` (transition) | 92.1 | 90.0 | ~8,000 sent/s |
 | spaCy `en_core_web_trf` (transformer) | 95.4 | 93.9 | ~120 sent/s (CPU) |
 | Stanza biaffine (graph) | 95.9 | 94.3 | ~200 sent/s |
+
+The spaCy UAS/LAS columns above are this company's own internal-eval-set numbers, not spaCy's published benchmark — see Section 11 for the current `spacy.io/models/en` figures they were checked against and how close the two sets sit.
 
 Decision: `en_core_web_sm` for the bulk stream (throughput-bound at 2M articles/day), with the transformer parser reserved for a high-value "priority" queue where accuracy justified the 60× cost.
 

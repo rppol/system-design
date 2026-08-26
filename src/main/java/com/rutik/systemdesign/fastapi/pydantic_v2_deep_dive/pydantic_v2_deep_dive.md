@@ -1,6 +1,6 @@
 # Pydantic v2 — Deep Dive
 
-> See `../../the_type_system_and_typing/the_type_system_and_typing.md` for `TypeVar`, `Protocol`, and `Annotated` types used by Pydantic.
+> See `../../python/the_type_system_and_typing/the_type_system_and_typing.md` for `TypeVar`, `Protocol`, and `Annotated` types used by Pydantic.
 > See `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` for how Pydantic models are used as request bodies in FastAPI routes.
 
 ---
@@ -1338,5 +1338,5 @@ json_str = order.model_dump_json(exclude_none=True)
 ---
 
 *Cross-references:*
-- `../../the_type_system_and_typing/the_type_system_and_typing.md` — `TypeVar`, `Protocol`, `Annotated`, `Self` used throughout this module.
+- `../../python/the_type_system_and_typing/the_type_system_and_typing.md` — `TypeVar`, `Protocol`, `Annotated`, `Self` used throughout this module.
 - `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` — how Pydantic models are declared as request body parameters and how FastAPI calls `model_validate` automatically.

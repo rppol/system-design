@@ -421,6 +421,110 @@ volatile int x = 0, y = 0;
 // This is the SURPRISING result — proves why volatile is needed.
 ```
 
+### Standalone Fences: `VarHandle` and the Legacy `Unsafe` API
+
+Everything above places barriers *implicitly*, as a side effect of a `volatile` access or a
+lock. Sometimes you want the barrier without the access — you have already published the
+data with plain writes and need one ordering point, and paying for a `volatile` write on
+every field would be wasteful. That is what a **standalone fence** is for.
+
+The standard API is five static methods on `java.lang.invoke.VarHandle`:
+
+| Method | Barrier | Guarantees |
+|--------|---------|-----------|
+| `VarHandle.acquireFence()` | LoadLoad + LoadStore | No load or store after the fence is reordered before a load preceding it |
+| `VarHandle.releaseFence()` | StoreStore + LoadStore | No load or store before the fence is reordered after a store following it |
+| `VarHandle.fullFence()` | StoreLoad (the expensive one) | Total ordering — nothing crosses in either direction |
+| `VarHandle.loadLoadFence()` | LoadLoad | Loads before the fence complete before loads after it |
+| `VarHandle.storeStoreFence()` | StoreStore | Stores before the fence are visible before stores after it |
+
+The pairing is the whole point and the thing to remember: a **release** fence on the writer
+pairs with an **acquire** fence on the reader. Neither alone establishes anything.
+
+```java
+// Publish a fully-built object through a PLAIN field, using explicit fences.
+private Config config;   // deliberately not volatile
+
+void publish(Config c) {
+    c.initialize();                    // plain writes to c's fields
+    VarHandle.releaseFence();          // everything above becomes visible before...
+    config = c;                        // ...this plain store
+}
+
+Config consume() {
+    Config c = config;                 // plain read
+    if (c == null) return null;
+    VarHandle.acquireFence();          // ...and the reads below see the initialized fields
+    return c;
+}
+```
+
+This is genuinely lower-level than the rest of this module and the honest guidance is to
+**not reach for it**. A `volatile` field or a `final` field gives you the same ordering with
+the compiler checking your work, and the JIT already elides barriers it can prove
+unnecessary. Standalone fences are for the case where you have measured a real cost — a
+tight loop where the `volatile` read cannot be hoisted — and are willing to own the
+correctness argument yourself.
+
+**The legacy form you will meet in real code.** Before Java 9 the only way to get these was
+`sun.misc.Unsafe`, and a large amount of surviving library code — lock-free queues, ring
+buffers, older versions of Netty and Disruptor-style structures — still uses it:
+
+```java
+// Legacy: sun.misc.Unsafe, deprecated for removal since Java 22
+theUnsafe.loadFence();     // -> VarHandle.acquireFence()
+theUnsafe.storeFence();    // -> VarHandle.releaseFence()
+theUnsafe.fullFence();     // -> VarHandle.fullFence()
+```
+
+All three carry `@Deprecated(since = "22", forRemoval = true)` and name their `VarHandle`
+replacement in the javadoc. They are memory-access methods under JEP 471 (Java 23), so on
+Java 24 they warn on first use, and **on Java 26 they throw** — the
+`--sun-misc-unsafe-memory-access` default moved to `deny`. If you own the code, the
+migration is a one-to-one rename with no semantic change. If a dependency owns it, that
+dependency has a hard deadline, and the way to find out before your users do is to run your
+test suite with `--sun-misc-unsafe-memory-access=deny`.
+
+### Spin-Waiting: `Thread.onSpinWait()`
+
+A busy-wait loop is the natural landing point for everything above — it is the one place a
+correct `volatile` read is not enough, because correctness and efficiency come apart.
+
+```java
+// Correct but wasteful: burns a core and fights the memory system
+while (!flag) { }                       // flag is volatile
+
+// Correct and CPU-friendly (Java 9+, JEP 285)
+while (!flag) { Thread.onSpinWait(); }
+```
+
+`Thread.onSpinWait()` is a **hint**, not a barrier — it changes nothing about the JMM and
+adds no ordering. What it does is tell the CPU that this loop is a spin-wait, which the JIT
+turns into the platform's pause instruction: `PAUSE` on x86-64, `YIELD` (and `ISB` in some
+forms) on AArch64. Three things follow:
+
+- **The memory-order violation penalty disappears.** On x86 a tight read loop fills the
+  pipeline with speculative loads of the watched location. When another core finally writes
+  it, the processor must flush that whole speculative window — tens of cycles — before it
+  can exit the loop. `PAUSE` tells it not to speculate that far ahead, so the exit is
+  faster. The counter-intuitive result is that *adding* an instruction makes the loop
+  react sooner.
+- **An SMT sibling gets the core's resources.** On a hyper-threaded core, a spinning thread
+  otherwise starves its sibling of issue slots.
+- **Power and thermals drop**, which on a shared or cloud host means less thermal throttling
+  of everything else on the socket.
+
+Where it belongs, precisely: a short, bounded wait where you *expect* the flag to flip
+within a few hundred nanoseconds — the fast path of a lock, a lock-free queue's producer
+waiting for a slot, a latch you know is about to open. It does **not** replace
+`LockSupport.park()`. The rule of thumb is the same one that governs any spin: if the
+expected wait exceeds a context switch (roughly 1–10 µs), park instead of spinning, and
+never spin unbounded on a runtime whose thread count can exceed the core count — including
+virtual threads, where a spinning virtual thread occupies its carrier and cannot be
+preempted. `ThreadPoolExecutor`, `ArrayBlockingQueue`, and `AbstractQueuedSynchronizer`
+already make this call for you, which is the strongest argument for using them rather than
+hand-rolling a spin.
+
 ---
 
 ## 7. Real-World Examples
@@ -609,15 +713,30 @@ The JMM guarantees a read can never observe a value that no thread ever wrote �
 
 x86 uses a strong memory model (Total Store Order) that preserves most store/load ordering, so many JMM-violating data races still happen to produce the expected result on that hardware. ARM and POWER use weaker memory models that aggressively reorder independent loads and stores unless an explicit memory barrier forbids it, so the same unsynchronized code can expose stale reads or reordered writes that x86 was silently hiding. This is why concurrency bugs are notorious for passing code review, passing tests on a developer's x86 laptop, and then failing intermittently on ARM-based cloud instances or Android phones. Practical guidance: never rely on "it works on my machine" for concurrent code — write to the JMM specification (`volatile`/`synchronized`/atomics) rather than to one architecture's observed behavior, and use `jcstress` or test on ARM hardware to catch model-dependent bugs before production.
 
+**Q19: What does `Thread.onSpinWait()` actually do, and why does adding an instruction make a spin loop react faster?**
+**Short:** It emits the CPU's pause instruction, which stops speculation in the loop so exiting it does not pay a pipeline-flush penalty.
+
+`Thread.onSpinWait()` (Java 9, JEP 285) is a **hint to the CPU**, not a memory barrier — it adds no happens-before edge and changes nothing about the JMM's guarantees, so it never replaces the `volatile` on the flag you are spinning on. What it does is let the JIT emit the platform's spin-wait instruction: `PAUSE` on x86-64, `YIELD` on AArch64. The apparent paradox resolves once you look at what the processor is doing in a bare `while (!flag) {}` loop: it speculatively issues many loads of the watched location, and when another core finally writes it, the memory-order violation forces a flush of that entire speculative window — tens of cycles — before the loop can exit. `PAUSE` tells the core not to speculate that far ahead, so the *exit* is cheaper even though each iteration does slightly more. Two other wins come with it: on a hyper-threaded core the spinning thread stops starving its SMT sibling of issue slots, and power draw drops, which on a shared host means less thermal throttling of everything around it. Use it for short bounded waits where you expect the flag within a few hundred nanoseconds — a lock's fast path, a lock-free queue waiting for a slot. Past roughly a context switch (1–10 µs) you should `LockSupport.park()` instead, and never spin unbounded where threads can outnumber cores — including on virtual threads, where a spinning virtual thread occupies its carrier and cannot be preempted.
+
+**Q20: What are `VarHandle.acquireFence()` and `releaseFence()` for, when `volatile` already inserts barriers?**
+**Short:** They give an ordering point without an access, letting you publish plain writes once instead of paying volatile on every field.
+
+They give you the barrier without the access. A `volatile` field couples ordering to a specific read or write, so publishing a 20-field object safely means either 20 volatile writes or one volatile write to a reference. Standalone fences let you write all 20 fields plainly, then place **one** `VarHandle.releaseFence()` before the publishing store, with a matching `VarHandle.acquireFence()` after the reader's load. The pairing is the whole mechanism: a release fence on the writer orders everything before it against stores that follow, an acquire fence on the reader orders everything after it against loads that precede, and **neither one alone establishes anything**. The full set is `acquireFence` (LoadLoad + LoadStore), `releaseFence` (StoreStore + LoadStore), `fullFence` (adds the expensive StoreLoad), plus the narrower `loadLoadFence` and `storeStoreFence`. The practical guidance is to not reach for them: a `volatile` or `final` field gives the same ordering with the compiler checking your work, and the JIT already elides barriers it can prove redundant. Fences are for a measured hot path where you are willing to own the correctness argument yourself — and they are correspondingly easy to get subtly wrong, because a missing fence produces a bug that only appears on weakly-ordered hardware.
+
+**Q21: You inherit a lock-free queue that calls `Unsafe.storeFence()`. What breaks, and when?**
+**Short:** It throws on Java 26 — the Unsafe memory-access methods now deny by default; swap in the one-to-one VarHandle equivalents.
+
+It stops running. `sun.misc.Unsafe.loadFence()`, `storeFence()`, and `fullFence()` are all marked `@Deprecated(since = "22", forRemoval = true)`, and they are memory-access methods under JEP 471 (Java 23), which set the removal path for that whole surface. Java 24 (JEP 498) prints one warning per JVM on first use; **Java 26 throws**, because the `--sun-misc-unsafe-memory-access` default moved from `warn` to `deny`; and removal comes in a release after 26. Note what did *not* change — this is the claim people get wrong: the `Unsafe` class itself is still reachable via the `jdk.unsupported` module, so this is not "Unsafe is gone", it is specifically the memory-access surface becoming fatal. If you own the code the fix is a mechanical rename with identical semantics: `loadFence()` → `VarHandle.acquireFence()`, `storeFence()` → `VarHandle.releaseFence()`, `fullFence()` → `VarHandle.fullFence()`, exactly as each method's own javadoc says. If a *dependency* owns it — lock-free queues, ring buffers, and older Netty and Disruptor-style structures are the common carriers — then that dependency has a hard deadline and you want to find out before your users do: run the test suite with `--sun-misc-unsafe-memory-access=deny` in CI today, which turns a future outage into a build failure.
+
 ---
 
 ## 13. Best Practices
 
 1. **Write DRF (Data-Race-Free) programs** — it's the only way to get the JMM's sequential consistency guarantee.
 2. **Never read a shared mutable variable without a happens-before edge** — even "just a read" of a non-volatile long is a potential torn read.
-3. **Prefer immutable objects (all-final fields)** for shared state — zero synchronization overhead, strongest safety guarantee.
+3. **Prefer immutable objects (all-final fields)** for shared state — zero synchronization overhead, strongest safety guarantee [Effective Java Item 17: "Minimize mutability"].
 4. **Use `volatile` only for simple flag/reference visibility** — not for compound operations like `i++`.
-5. **Use `synchronized` (or `ReentrantLock`) for compound operations** on shared mutable state.
+5. **Use `synchronized` (or `ReentrantLock`) for compound operations** on shared mutable state [Effective Java Item 78: "Synchronize access to shared mutable data"].
 6. **Never publish `this` inside a constructor** — freeze action hasn't occurred yet.
 7. **Use `AtomicReference` for single-reference safe publication** in lock-free code.
 8. **Be explicit about ordering modes in lock-free code** — document which hb edges you're relying on.
@@ -681,7 +800,7 @@ class ConfigCache {
 }
 ```
 
-### Double-Checked Locking: Broken Without `volatile`, Then Fixed (Item 83)
+### Double-Checked Locking: Broken Without `volatile`, Then Fixed [Effective Java Item 83: "Use lazy initialization judiciously"]
 
 The same hazard underlies the classic DCL singleton.
 

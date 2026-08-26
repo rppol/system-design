@@ -17,6 +17,8 @@
 10. [Spring's Alternative](#springs-alternative)
 11. [Interview Questions](#interview-questions)
 
+**Full runnable implementation:** [`ThreadSafeSingleton.java`](ThreadSafeSingleton.java) — 449 lines, one file, `main()` at the bottom. It demonstrates all five idioms side by side — eager, `synchronized` accessor, double-checked with `volatile`, holder class, and enum — with a `main()` that races threads at each so the difference is observable, not just argued.
+
 ---
 
 ## Intuition
@@ -522,3 +524,66 @@ A write to a volatile variable happens-before all subsequent reads of that varia
 **Short:** An Enum singleton natively satisfies lazy initialization, serialization safety, and reflection safety all at once.
 
 Use an Enum singleton. It satisfies all three requirements natively. Alternatively, use the Holder idiom with `readResolve()` for serialization safety (but reflection safety requires additional checks in the constructor: `throw new IllegalStateException("Already instantiated")`).
+
+---
+
+**Q: Why is the Synchronized Method singleton correct but a poor production choice?**
+**Short:** It pays lock-acquisition cost, roughly 100-300ns, on every call even though only the first call needs synchronization.
+
+Every call to `getInstance()` acquires the method-level lock, including the millions of calls after the instance already exists and no synchronization is needed at all. Each acquisition costs roughly 100-300 nanoseconds, which adds up under high call volume even though the actual work being protected — the null check and the one-time construction — happens exactly once. It is correct, but Double-Checked Locking, the Holder idiom, or Enum all achieve the same safety with far less overhead on the hot path.
+
+---
+
+**Q: Why is class loading in Eager Initialization considered thread-safe without any explicit lock?**
+**Short:** Per JLS 12.4.2, class loading and static field initialization are inherently synchronized by the JVM.
+
+The JVM initializes a class's static fields when the class is first loaded, and JLS 12.4.2 guarantees that class initialization itself is thread-safe — the JVM uses a per-class initialization lock so only one thread can run a class's static initializers, and every other thread requesting that class blocks until initialization completes. This means `private static final EagerSingleton INSTANCE = new EagerSingleton();` is created exactly once, before any thread can observe a partially-constructed instance, with zero explicit synchronization code required. It's the same underlying JVM guarantee that makes the Holder idiom work for lazy initialization.
+
+---
+
+**Q: What does readResolve() do for a Serializable singleton, and why doesn't Enum need it?**
+**Short:** readResolve() returns the existing instance instead of a deserialized copy; Enum deserialization never creates a new instance.
+
+A regular `Serializable` singleton, deserialized via `ObjectInputStream.readObject()`, produces a brand-new object by default — a second instance distinct from the one returned by `getInstance()`. Implementing `protected Object readResolve() { return getInstance(); }` intercepts that process and substitutes the existing singleton, discarding the newly deserialized copy. Enum constants never need this fix because Java's serialization mechanism for enums uses `Enum.valueOf(enumClass, name)` on deserialization instead of calling a constructor, which always resolves back to the one existing constant by name.
+
+---
+
+**Q: When should you NOT use Enum Singleton?**
+**Short:** When you need resource-intensive lazy initialization, or the class must extend another class.
+
+Enum is unsuitable when the singleton needs true lazy initialization with resource-intensive setup, since a plain enum constant is initialized as soon as the enum class is loaded rather than on first use (nested enums can simulate laziness, but at added complexity). It's also unsuitable when the class needs to extend another class, because Java enums implicitly extend `java.lang.Enum` and cannot extend anything else. A third case is when the singleton needs to implement several interfaces and the enum syntax would obscure that intent — the Holder idiom is the more readable choice there.
+
+---
+
+**Q: Why is `synchronized("SINGLETON_LOCK")` on a string literal a dangerous mistake?**
+**Short:** String literals are interned JVM-wide, so any other class synchronizing on the same literal shares the same lock.
+
+String literals in Java are interned — the JVM guarantees that identical literal text refers to the exact same `String` object across the entire application, in any class. So `synchronized("SINGLETON_LOCK")` in one class acquires the identical lock object as any other class in the codebase that happens to synchronize on the same literal string, creating an unintended coupling between completely unrelated pieces of code. This can silently serialize operations that have nothing to do with each other, or in the worst case, contribute to a deadlock between two classes that never intended to share any lock at all. Always synchronize on a private, dedicated object instead of a string literal.
+
+---
+
+**Q: Why does subclassing a Singleton defeat the entire pattern?**
+**Short:** The subclass constructor calls super(), which can construct another instance of the parent, breaking the one-instance guarantee.
+
+Subclassing a singleton class means the subclass's constructor implicitly or explicitly calls `super()`, which runs the parent's constructor and produces another instance of the singleton's state — directly contradicting the "exactly one instance" guarantee the pattern exists to provide. Even if the subclass itself is only ever instantiated once, the pattern has already been broken in spirit: there are now two distinct construction paths into what was supposed to be a single, globally-controlled object. This is why singleton classes should be declared `final`, preventing subclassing entirely rather than relying on convention to avoid it.
+
+---
+
+**Q: How do you correctly test that a singleton is truly thread-safe under real contention?**
+**Short:** Release all threads simultaneously with a CountDownLatch and compare System.identityHashCode() values.
+
+Spin up many threads (100 is a reasonable count), each waiting on a shared `CountDownLatch` before calling `getInstance()`, then release the latch once to make every thread attempt the call at essentially the same instant — this maximizes contention rather than letting threads trickle in one at a time. Collect `System.identityHashCode()` of the returned instance from each thread into a thread-safe `Set`, since `identityHashCode()` distinguishes actual object identity even if `equals()`/`hashCode()` are overridden. A truly thread-safe singleton produces a set of size exactly one; run the test multiple times, since race conditions are not always reproducible on a single run.
+
+---
+
+**Q: How does Spring's "singleton" scope differ from the classic Singleton pattern?**
+**Short:** Spring's singleton scope means one instance per ApplicationContext, while the classic pattern means one instance per JVM class loader.
+
+Spring's default `@Scope("singleton")` guarantees exactly one bean instance per `ApplicationContext`, not per JVM — a test using `@SpringBootTest` gets its own fresh context and therefore its own fresh "singleton" instance, and an application that creates multiple contexts (unusual, but possible) gets multiple instances of the same "singleton" bean. The classic Singleton pattern, by contrast, guarantees one instance per JVM class loader regardless of any framework context. In ordinary Spring applications this distinction rarely matters, but it explains why a Spring "singleton" bean is not the same guarantee as a classic `getInstance()` singleton.
+
+---
+
+**Q: At system scale, why doesn't a classic Singleton guarantee global uniqueness across a fleet of service replicas?**
+**Short:** A Singleton only guarantees one instance per JVM process, so 20 replicas produce 20 separate singletons.
+
+A Singleton's guarantee is scoped to a single JVM process — with 20 horizontally-scaled service replicas, each running its own JVM, you have 20 independent singleton instances, not one shared instance across the fleet. State that genuinely must be globally unique — a distributed lock, a global counter, a single source of truth for configuration — requires a distributed coordination layer like Redis or etcd, because no in-process pattern can enforce uniqueness across process boundaries. This is the scaling caveat every connection-pool-manager or rate-limiter-registry Singleton example in this module implicitly assumes: correct within one JVM, and only within one JVM.

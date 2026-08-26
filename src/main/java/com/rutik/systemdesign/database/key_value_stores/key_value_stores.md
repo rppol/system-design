@@ -808,28 +808,50 @@ ZRANGE leaderboard:global (rank-10) (rank+10) REV WITHSCORES
 # Returns 21 players with scores centered on the player
 
 # Memory:
-# 50M players × ~50 bytes (skiplist + hashtable dual encoding) = ~2.5GB
-# Fits comfortably in Redis Cluster shard with 8GB RAM
+# 50M players × ~100 bytes (skiplist + hashtable dual encoding, short member ids) = ~5GB
+# Fits in a Redis Cluster shard with 8GB RAM, but with only ~3GB of headroom
 ```
 
 **The idea behind it.** The sizing line reads: "a sorted set costs roughly a fixed number of bytes
 per member, so capacity planning is one multiplication, not a simulation." The per-member constant
-(~50 bytes) is what you have to defend in an interview — it is the *dual* encoding, skiplist plus
-hashtable, that makes it 50 rather than the ~16 bytes the raw score and pointer would suggest.
+is what you have to defend in an interview, and the number people guess is always far too low: the
+raw score plus a pointer is 16 bytes, but a `skiplist`-encoded ZSet stores every member **twice**,
+once in the skiplist for ordering and once in a hashtable for O(1) score lookup. Derive it rather
+than quoting it — the constant moves with the member-string length, which is the only input you
+control:
+
+```
+  zskiplistNode base   ele ptr 8 + score 8 + backward ptr 8            =  24 B
+  level array          16 B per level, expected 1/(1-0.25) = 1.33      =  21 B
+                       -> node allocation rounds to the 48 B jemalloc bin
+  sds member string    hdr 3 + len + NUL, one allocation shared with
+                       the dict -> 16 B bin for a 9-char id like
+                       "player:42"; 40 B bin for a 36-char UUID
+  dictEntry            key ptr 8 + val union 8 (the score, inline) +
+                       next ptr 8                                      =  24 B
+  bucket array         amortized at load factor <= 1                   = ~11 B
+
+  total (short id)     48 + 16 + 24 + 11                               = ~99 B  -> call it 100
+  total (UUID member)  48 + 40 + 24 + 11                               = ~123 B
+```
+
+**Use ~100 bytes/member for short ids and ~125 for UUID members. This is the canonical figure for
+the section** — [`in_memory_databases`](../in_memory_databases/in_memory_databases.md) derives its
+leaderboard sizing from the same constant rather than restating a different one.
 
 | Symbol | What it is |
 |--------|------------|
 | 50M | Members (players) in the sorted set |
-| ~50 bytes | Per-member cost: skiplist node + forward pointers + hashtable entry + member string |
+| ~100 bytes | Per-member cost for a short member id: skiplist node 48 + member sds 16 + dict entry 24 + bucket 11 |
 | 8GB | RAM on the shard that must hold the whole sorted set — a ZSet is never split across slots |
 | 200/s, 500K/s | Write rate (`ZADD`) and read rate the same single key must absorb |
 
 **Walk one example.** Memory, then whether the shard's read budget actually holds:
 
 ```
-  memory       50,000,000 members x 50 bytes = 2,500,000,000 bytes
-                                             = 2.5 GB      (2.33 GiB)
-  headroom     2.5 GB of 8 GB  ->  31 percent used, 5.5 GB spare for
+  memory       50,000,000 members x 100 bytes = 5,000,000,000 bytes
+                                              = 5.0 GB      (4.66 GiB)
+  headroom     5.0 GB of 8 GB  ->  62 percent used, 3.0 GB spare for
                COW during BGSAVE, fragmentation, and the daily/weekly ZSets
 
   reads        500,000/s against ONE key -> one node, exactly the Pitfall 2 shape
@@ -838,10 +860,13 @@ hashtable, that makes it 50 rather than the ~16 bytes the raw score and pointer 
                only the per-player ZREVRANK queries stay uncached
 ```
 
-Note the tension the case study resolves quietly: the memory math is comfortable, but the 500K/s
-figure lands entirely on a single key, so the design depends on the 5-second app-side cache far more
-than on the shard count. Doubling to 100M players costs 2.5GB more and one extra skiplist hop —
-doubling read traffic without the cache would need the key-sharding fix instead.
+Note the tension the case study resolves quietly: the memory math still fits, but only just — at 62
+percent used, a BGSAVE fork that dirties half the keyspace and 20 percent jemalloc fragmentation
+between them eat most of the 3GB left. And the 500K/s figure lands entirely on a single key, so the
+design depends on the 5-second app-side cache far more than on the shard count. Doubling to 100M
+players costs 5GB more, which does *not* fit — that is the point at which the global leaderboard
+stops being one key and becomes a sharded top-N (per-shard ZSets merged app-side), and doubling
+read traffic without the cache would need the same key-sharding fix.
 
 **Regional leaderboards** (daily, weekly, monthly with TTL):
 ```bash

@@ -158,6 +158,67 @@ Approaches:
   3. Born-again networks: Train a student of identical architecture; it often outperforms the teacher
 ```
 
+#### Reasoning-Trace Distillation
+
+The dominant distillation pattern since 2025, and the reason almost every small reasoning model
+exists. It is a special case of data-level distillation, but the thing being transferred is not an
+answer — it is a *behaviour*: long deliberation, self-checking, backtracking, and knowing when to
+keep going.
+
+```
+  1. Sample long CoT traces from a reasoning teacher (the full <think> block,
+     not just the final answer)
+  2. Reject by VERIFIED final answer — keep only traces that landed correct
+  3. SFT the student on (prompt -> full trace + answer) with plain
+     token-level cross-entropy
+  4. Stop. No RL stage on the student.
+```
+
+**The canonical recipe is DeepSeek-R1's distill family**, and its details are the ones worth
+knowing because every later recipe is a variation on them:
+
+| Choice | What R1 did |
+|--------|-------------|
+| Data volume | ~800K samples: ~600K rejection-sampled correct CoT (math, logic, code, science) plus ~200K non-reasoning instruction and factual samples |
+| Objective | Token-level cross-entropy on the full trace. No KL term, no temperature, no teacher logits |
+| Epochs | 2 |
+| RL on the student | **None** — the distills are pure SFT |
+| Students | 1.5B / 7B / 14B / 32B on Qwen2.5 bases; 8B / 70B on Llama bases |
+
+**Why the ~200K non-reasoning samples are not filler.** Train only on rejection-sampled math and
+code and the student learns that every prompt deserves a thousand thinking tokens, including "what
+is the capital of France". The general-instruction mixture is what keeps the model usable outside
+the reasoning distribution; it is a regulariser, not padding.
+
+**What makes this different from logit distillation (§4.1) — and it is the point.** There are no
+teacher logits anywhere in the pipeline, so:
+
+- **An API-only teacher works.** Logit distillation needs the teacher's full output distribution,
+  which no hosted frontier model exposes. Trace distillation needs only sampled text.
+- **Tokenizers need not match.** This is why one DeepSeek teacher could produce both Qwen-based and
+  Llama-based students in the same release — cross-family distillation that Pitfall 2 below rules
+  out for merging is routine here.
+- **There is no temperature knob**, so Pitfall 6 does not apply. The tuning surface moves to the
+  rejection filter and the reasoning/non-reasoning mixture ratio instead.
+
+**What it does NOT transfer.** It moves the reasoning *behaviour* down, not the capability
+*ceiling*. The distills punch well above their size class on math and code, but "a 7B beats a 70B"
+is a benchmark-specific claim and not a general capability statement — see
+[Reasoning Models](../reasoning_models/reasoning_models.md) for the scoped figures and the
+scaffolds they were measured under.
+
+**Two failure modes specific to this recipe:**
+
+- **Length inflation.** The student copies the teacher's deliberation length rather than its
+  difficulty-sensitivity, so easy prompts get long traces and the token bill rises with no accuracy
+  to show for it. Measure mean output tokens per query alongside accuracy, or the distill can look
+  like a win on the eval and a loss on the invoice.
+- **Right answer, wrong route.** Rejection sampling filters on the *final answer* only, so a trace
+  that reached the correct result through an invalid step survives and is trained on as if it were
+  exemplary. Filtering additionally with a process reward model — see the PRM training discussion
+  in [Reasoning Models](../reasoning_models/reasoning_models.md) — catches these, at the cost of
+  needing a PRM you have to train first.
+
 ### 4.2 Model Merging
 
 Every method below operates on **task vectors** — the delta a fine-tune adds to the
@@ -944,11 +1005,19 @@ N:M sparsity is a semi-structured sparsity pattern where exactly N out of every 
 
 **Q: How would you design a distillation pipeline for a production LLM deployment?**
 **Short:** A production distillation pipeline collects teacher outputs on real traffic, trains the student with combined KL and cross-entropy loss, and deploys within about 5% of teacher quality.
-Start by selecting the strongest available teacher model for your task — GPT-4 class or the best open-weight model. Collect 10K-100K examples from your production distribution (or generate them synthetically). For data-level distillation (simpler): run teacher inference on all examples, store (prompt, teacher_response) pairs, fine-tune the student with standard SFT. For logit-level distillation (higher quality): run teacher inference collecting full logit vectors, train student with combined KL divergence (T=4, alpha=0.3) and cross-entropy loss. Evaluate on a held-out test set representing production traffic, measuring both quality (accuracy, ROUGE, win-rate vs teacher) and operational metrics (latency, throughput, cost). If quality is within 5% of teacher on the target task, deploy the student. If not, increase training data size, try feature distillation (match intermediate layers), or accept a larger student architecture. Always measure the cost-quality tradeoff: a student at 90% teacher quality but 10x lower cost is usually the right production choice.
+Start by selecting the strongest available teacher model for your task — a frontier tier such as Claude Opus 5 or gpt-5.6-sol, or the best open-weight model you can serve. Collect 10K-100K examples from your production distribution (or generate them synthetically). For data-level distillation (simpler): run teacher inference on all examples, store (prompt, teacher_response) pairs, fine-tune the student with standard SFT. For logit-level distillation (higher quality): run teacher inference collecting full logit vectors, train student with combined KL divergence (T=4, alpha=0.3) and cross-entropy loss. Evaluate on a held-out test set representing production traffic, measuring both quality (accuracy, ROUGE, win-rate vs teacher) and operational metrics (latency, throughput, cost). If quality is within 5% of teacher on the target task, deploy the student. If not, increase training data size, try feature distillation (match intermediate layers), or accept a larger student architecture. Always measure the cost-quality tradeoff: a student at 90% teacher quality but 10x lower cost is usually the right production choice.
 
 **Q: What is task arithmetic and how is it used to compose or remove model capabilities?**
 **Short:** Task arithmetic adds or subtracts a capability's weight-space delta from a shared base model, composing or removing skills without any retraining.
 Task arithmetic represents fine-tuning as vector addition in weight space. The task vector for a capability is the difference between the fine-tuned model and its base: tau_code = code_model - base_model. You can compose capabilities by adding task vectors: combined = base + alpha*tau_code + beta*tau_math, where alpha and beta control the strength of each capability. You can remove capabilities by subtraction: detoxified = model - gamma*tau_toxic, where tau_toxic was computed from a model fine-tuned on toxic content. The key requirement is that all models share the same base. Task arithmetic enables modular capability composition without retraining: you can dynamically adjust the strength of each capability by tuning the scaling coefficients. Limitation: task vectors are only approximately orthogonal — when two tasks modify the same parameters (e.g., both affect the model's verbosity), interference occurs and quality degrades.
+
+**Q: How does reasoning-trace distillation differ from classic logit distillation?**
+**Short:** Reasoning-trace distillation fine-tunes on sampled chain-of-thought text with plain cross-entropy, so it needs no teacher logits, no shared tokenizer, and no temperature.
+Reasoning-trace distillation samples the teacher's full chain of thought, filters those traces by verified final answer, and fine-tunes the student on (prompt, full trace + answer) with ordinary token-level cross-entropy. Three consequences follow from there being no teacher logits in the pipeline. An API-only teacher works, because you need sampled text rather than an output distribution no hosted frontier model exposes. Tokenizers need not match, which is why DeepSeek-R1 produced both Qwen2.5-based and Llama-based students from one teacher — the cross-family distillation that tokenizer mismatch rules out for model merging is routine here. And there is no temperature or alpha to tune; the tuning surface moves to the rejection filter and the mixture ratio instead. R1's recipe is the reference: roughly 800K samples (about 600K rejection-sampled correct CoT across math, logic, code and science plus about 200K non-reasoning instruction and factual samples), 2 epochs, token-level cross-entropy, and no RL stage on the students. What it transfers is the reasoning behaviour — long deliberation, self-checking, backtracking — not the teacher's capability ceiling, so treat any "small model beats large model" result as benchmark-specific.
+
+**Q: What are the two failure modes specific to distilling a reasoning model, and how do you catch them?**
+**Short:** Length inflation makes the student deliberate on easy prompts and raises token cost with no accuracy gain, and answer-only rejection sampling trains on traces that were right by a wrong route.
+The first is length inflation: the student copies the teacher's deliberation length rather than its difficulty-sensitivity, so trivial prompts get thousand-token traces and the bill rises with nothing to show on the eval. Catch it by tracking mean output tokens per query alongside accuracy — a distill can look like a clear win on quality and a clear loss on cost, and reporting only the former is how that ships. The usual mitigation is mixing in general instruction data (R1 used about 200K non-reasoning samples against 600K reasoning ones) so the model still has a short-answer mode, and enforcing a thinking budget at inference. The second is right answer, wrong route: rejection sampling filters on the final answer only, so a trace that reached the correct result through an invalid intermediate step survives and gets trained on as exemplary, teaching the student the bad step. Catch it by filtering additionally with a process reward model that scores intermediate steps, using a weakest-link aggregator rather than a mean so one invalid step condemns the trace — the cost being that you now need a PRM, which is its own training problem.
 
 ---
 

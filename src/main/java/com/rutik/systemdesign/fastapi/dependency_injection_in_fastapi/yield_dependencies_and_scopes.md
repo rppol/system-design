@@ -22,7 +22,7 @@ Key capabilities covered in this sub-file:
 
 Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
 
-Cross-reference: [Dependency Injection in FastAPI](../README.md)
+Cross-reference: [Dependency Injection in FastAPI](dependency_injection_in_fastapi.md)
 
 ---
 

@@ -1,8 +1,22 @@
 # Time-Series Databases
 
+> **Version anchor (2026-08-25).** **Prometheus 3.x** is current — 3.0 shipped
+> November 2024 (first major release since 2.0 in 2017, rebuilt UI, native OTLP
+> ingestion, UTF-8 metric/label names) and **native histograms went stable in
+> 3.8**. **Remote-Write 2.0** (shipped with 3.0) is the wire protocol this page
+> assumes unless a snippet is explicitly labeled 1.0. **InfluxDB 3** — Core and
+> Enterprise — reached GA in **April 2025**: a ground-up Rust rewrite on Apache
+> Arrow / DataFusion / Parquet / Arrow Flight that replaces the TSM-indexed
+> 1.x/2.x engine entirely; where a fact is specific to the old engine it is
+> tagged `[InfluxDB 1.x/2.x]`. The open-source **`TimescaleDB`** extension keeps
+> its name exactly as written throughout this page — only the company and
+> managed platform changed, to **Tiger Data** and **Tiger Cloud** (rebranded 17
+> June 2025). **ClickHouse 26.x** is current. Behaviour that depends on a
+> specific version is tagged inline, e.g. `[3.8]`, `[InfluxDB 3]`.
+
 ## 1. Concept Overview
 
-Time-series databases (TSDBs) are optimized for data with a natural time dimension: metrics, events, sensor readings, financial ticks, and application logs. They exploit the append-only, time-ordered nature of this data for dramatic compression and query performance. Key databases: TimescaleDB (PostgreSQL-based), InfluxDB (purpose-built TSDB), ClickHouse (columnar OLAP with time-series strengths), and Prometheus (pull-based metrics).
+Time-series databases (TSDBs) are optimized for data with a natural time dimension: metrics, events, sensor readings, financial ticks, and application logs. They exploit the append-only, time-ordered nature of this data for dramatic compression and query performance. Key engines: `TimescaleDB` (PostgreSQL extension, developed by Tiger Data), InfluxDB 3 (Rust/Arrow-based purpose-built TSDB), ClickHouse (columnar OLAP with time-series strengths), Prometheus 3.x (pull-based metrics), QuestDB (high-throughput SQL TSDB built for financial tick data), and VictoriaMetrics (Prometheus-compatible long-term storage).
 
 ---
 
@@ -160,38 +174,83 @@ SELECT add_retention_policy('sensor_readings', INTERVAL '90 days');
 -- Drops entire 7-day chunks older than 90 days — instant (DROP TABLE, not DELETE)
 ```
 
+**Tiger Data, Tiger Cloud, and Hypercore.** The extension above is still called
+`TimescaleDB` and every SQL snippet on this page runs unchanged — nothing about
+the open-source product's name or API changed. What changed (17 June 2025) is
+the company behind it: **Timescale rebranded to Tiger Data**, and its managed
+service is now **Tiger Cloud** rather than "Timescale Cloud". Tiger Cloud's
+storage engine, **Hypercore**, is a hybrid row-columnar engine: a freshly
+inserted row lands in row-oriented form (fast single-row inserts and updates,
+the same job the uncompressed active chunk does above), then converts to the
+columnar form in place as it ages past the compression policy — one engine
+covering both regimes instead of a row store plus a separately-maintained
+columnar copy. Tiger Cloud layers hot/cold data tiering and horizontally
+scalable read replicas on top of that engine. None of this changes how you
+write to a self-hosted `TimescaleDB` extension; it is what you get by paying
+for the managed platform.
+
 ### InfluxDB
 
-Purpose-built TSDB with its own query language (InfluxQL/Flux) and storage format.
+InfluxDB comes in two architecturally different generations. **InfluxDB
+1.x/2.x** is a purpose-built TSDB with its own storage engine (TSM) and query
+languages (InfluxQL, Flux). **InfluxDB 3** — Core and Enterprise, GA April
+2025 — is a from-scratch Rust rewrite on the Apache Arrow ecosystem, and the
+rewrite exists specifically to remove the cardinality ceiling the TSM design
+imposed. Both share the same write-side data model and line protocol.
 
 ```
-InfluxDB data model:
+InfluxDB data model (unchanged across generations):
   Measurement: like a table (e.g., "cpu", "temperature")
   Tag: indexed string dimension (host, region, sensor_id)
   Field: the actual measurement values (value, cpu_percent, temperature_celsius)
   Timestamp: nanosecond precision
 
-Line protocol (write format):
+Line protocol (write format, same on 1.x/2.x and 3.x):
   cpu,host=server01,region=us-east cpu_percent=95.5,idle=4.5 1711234567890000000
   └─ measurement ──┘└── tags ──────┘└────── fields ─────────┘└── timestamp (ns) ┘
-
-TSM (Time-Structured Merge Tree) storage:
-  Similar to LSM-tree but optimized for time-series:
-  - Data organized by measurement + tag set + time range (TSM files)
-  - Built-in compression per field type
-  - Automatic compaction within time blocks
-
-InfluxDB 3.0 (2023): switched to Apache Arrow + Parquet on object storage
 ```
 
+**`[InfluxDB 1.x/2.x]` TSM (Time-Structured Merge Tree) storage**: an
+LSM-tree variant that keeps an **in-memory index of every unique
+(measurement, tag-set) combination** so it can seek straight to a series's
+data files. That index is exactly what makes tag cardinality a hard ceiling —
+see Pitfall 1 below — because every distinct tag combination is a permanent
+resident entry, not a value the engine can page to disk mid-query.
+
 ```flux
-// Flux query language (InfluxDB 2.0+):
+// Flux query language (InfluxDB 2.x):
 from(bucket: "sensors")
   |> range(start: -1h)
   |> filter(fn: (r) => r._measurement == "temperature" and r.device_id == "dev-42")
   |> aggregateWindow(every: 5m, fn: mean)
   |> yield(name: "5min_avg")
 ```
+
+**`[InfluxDB 3]` Rust + Arrow/DataFusion/Parquet/Flight.** InfluxDB 3 Core
+(open source, recent-data engine) and Enterprise (adds HA, security, and
+scale) replace TSM entirely:
+
+```
+InfluxDB 3 storage stack:
+  In-memory:  Apache Arrow columnar record batches (recent, unpersisted writes)
+  Query:      Apache DataFusion — a Rust SQL query engine that operates
+              directly on Arrow batches and Parquet files
+  On disk:    Apache Parquet — the persisted, columnar file format
+  Wire:       Arrow Flight — a columnar RPC protocol for query results,
+              avoiding the row-by-row serialize/deserialize cost of JSON/line
+              protocol on the read path
+  Streaming:  a built-in Processing Engine transforms/enriches/alerts on
+              data as it arrives, before it is queried
+```
+
+Because SQL now runs through DataFusion, InfluxDB 3 speaks SQL directly (Flux
+still works for 2.x compatibility, but SQL is the primary language). The
+Parquet files are addressed by (measurement, time range) rather than by a
+resident per-series index entry, so **there is no in-memory structure whose
+size is a product of tag cardinality** — the specific mechanism behind
+InfluxDB's "dies on high-cardinality tags" reputation is gone by
+construction, not tuned around. InfluxDB 3 markets this as "unlimited
+cardinality." See the Q&A section for the full before/after mechanism.
 
 ### ClickHouse
 
@@ -238,7 +297,8 @@ GROUP BY device_id, hour;
 
 ### Prometheus
 
-Pull-based metrics system with its own time-series database.
+Pull-based metrics system with its own time-series database. Prometheus
+3.x is current (3.0 shipped November 2024).
 
 ```yaml
 # Prometheus configuration: scrape targets
@@ -295,6 +355,110 @@ flowchart LR
 ```
 
 All three backends solve the same gap — Prometheus's own storage is deliberately short-term, so the real choice is scale and multi-tenancy, not whether to add one of them at all.
+
+**`[3.0]` Remote-Write 2.0.** The arrows above used to carry Remote-Write 1.0;
+Prometheus 3.0 ships **Remote-Write 2.0** as the default, with automatic
+protocol negotiation falling back to 1.0 if the receiving backend is old.
+2.0 adds native support for **metadata, exemplars, created timestamps, and
+native histograms** in the wire format, and it uses **string interning** —
+repeated label names/values are sent once and referenced by index instead of
+repeated per-sample — to cut both payload size and the CPU cost of
+compressing/decompressing it. Figures reported at KubeCon NA 2024: roughly
+**60% smaller messages, 90% less memory, and 70% less CPU** on the write
+path versus 1.0, for the same sample volume. This is a straight infrastructure
+win for the fan-out above: the same 15-day local retention, cheaper to ship
+to Thanos/Cortex/VictoriaMetrics.
+
+**`[3.8]` Native histograms and the cardinality math.** A **classic**
+Prometheus histogram materializes one time series *per bucket, per label
+combination* — you pick the `le` bucket boundaries up front, and each one is
+a first-class series with its own `_bucket{le="..."}` labels. A **native
+histogram** stores the entire distribution — exponential bucket schema,
+counts, sum — as a **single series per label combination**, with the bucket
+layout carried inside that one series instead of exploded across many.
+Opt-in via `scrape_native_histograms: true`; it went from experimental in 3.0
+to a **stable feature in 3.8**.
+
+```
+Classic histogram: 12 `le` buckets, 500 distinct label combinations
+  series = buckets x label_combinations
+         = 12 x 500                     =  6,000 series
+  (plus a _sum and _count series per combination — omitted here for the
+   bucket-vs-bucket comparison)
+
+Native histogram: same distribution, same 500 label combinations
+  series = 1 x label_combinations
+         = 1 x 500                      =    500 series
+
+  reduction: 6,000 / 500                =     12x fewer series just from
+                                              collapsing the bucket axis
+```
+
+This is the same multiplicative-cardinality shape as the InfluxDB tag pitfall
+below — a classic histogram turns "how many buckets did I pick" into a
+*multiplier* on every label combination you already have, and native
+histograms remove that multiplier by making the bucket axis internal to one
+series instead of external across many. The quantile math also gets more
+accurate as a side effect: `histogram_quantile()` over a classic histogram is
+only as precise as the buckets you guessed in advance, while a native
+histogram's exponential schema resolves quantiles without that guess.
+
+**VictoriaMetrics as a remote-write target.** VictoriaMetrics is
+Prometheus-**compatible** rather than Prometheus-derived: it accepts
+`remote_write`, serves PromQL (plus its own superset, MetricsQL, for
+functions PromQL lacks), and is a drop-in Grafana data source. Its pitch
+against the stack above is resource footprint — it reports materially lower
+memory and disk usage than Prometheus for the same series count and
+retention, largely from a more compact on-disk format and less per-series
+index overhead. It ships as a single binary (`single-node`, simplest
+operationally) or as a sharded `cluster` variant (`vminsert` / `vmstorage` /
+`vmselect`) for horizontal scale and multi-tenancy. **Choose VictoriaMetrics
+over Prometheus + Thanos/Mimir when** the deciding factor is operational
+simplicity and cost at scale — one binary (or one small set of cluster
+components) replacing Prometheus-plus-a-separate-long-term-store is less to
+run than Prometheus fanning out to a second distributed system, for
+teams that don't need Thanos/Mimir's specific multi-cluster federation
+model.
+
+### QuestDB
+
+QuestDB is a column-oriented SQL database purpose-built for high-throughput
+ingest — the pitch is financial tick data and IoT streams where write rate,
+not query complexity, is the bottleneck. It stores columns partitioned by
+time on disk (daily/monthly/yearly partitions, chosen like ClickHouse's
+`PARTITION BY`) and accepts writes over the **InfluxDB line protocol** as one
+of its ingest paths, alongside PostgreSQL wire protocol and its own REST
+endpoint — so a Telegraf-based pipeline pointed at InfluxDB can often be
+repointed at QuestDB with no format change.
+
+Its query language is ordinary SQL extended with time-series-specific
+verbs:
+
+```sql
+-- SAMPLE BY: time-bucketed aggregation, ClickHouse's toStartOfHour()
+-- equivalent expressed as a clause rather than a function call
+SELECT ts, symbol, avg(price)
+FROM trades
+WHERE ts > dateadd('h', -1, now())
+SAMPLE BY 5m;
+
+-- LATEST ON: the most recent row per key, without a window function
+SELECT * FROM trades LATEST ON ts PARTITION BY symbol;
+
+-- ASOF JOIN: join each row to the most recent prior row in another table
+-- at or before the same timestamp — the canonical "what was the quote
+-- when this trade printed" financial query
+SELECT trades.ts, trades.symbol, trades.price, quotes.bid, quotes.ask
+FROM trades
+ASOF JOIN quotes ON (symbol);
+```
+
+`ASOF JOIN` is the one that matters most: matching a trade to the most
+recent quote *before* it in ordinary SQL means a correlated subquery with
+`ORDER BY ts DESC LIMIT 1`, evaluated per row — expensive and awkward.
+`ASOF JOIN` expresses "most recent prior row" as a first-class join type
+the engine can execute with a single ordered merge pass instead of a
+per-row subquery.
 
 ---
 
@@ -540,7 +704,7 @@ Tracing one row through the multi-clause TTL statement makes the ordering concre
 | Query performance | Excellent | Good | Excellent | Good |
 | Compression | Excellent (90%+) | Good | Excellent (90-99%) | Good |
 | Retention management | Excellent (chunk drop) | Good (bucket retention) | Excellent (TTL/partitions) | Limited (15-day default) |
-| Horizontal scale | Limited (Timescale Cloud) | InfluxDB 3.0 | Excellent (distributed) | Via Thanos/Cortex |
+| Horizontal scale | Limited (Tiger Cloud) | InfluxDB 3 Enterprise (HA) | Excellent (distributed) | Via Thanos/Cortex/VictoriaMetrics |
 | Operational complexity | Low (PostgreSQL) | Medium | High | Low |
 
 ---
@@ -556,7 +720,11 @@ Tracing one row through the multi-clause TTL statement makes the ordering concre
 
 **TimescaleDB**: best for teams that know PostgreSQL, need full SQL, and want ACID compliance.
 
-**InfluxDB**: best for metrics and monitoring use cases, especially with Telegraf collector ecosystem.
+**InfluxDB**: best for metrics and monitoring use cases, especially with the Telegraf collector ecosystem. Reach for **InfluxDB 3** (Core/Enterprise) specifically when tag cardinality is high or unpredictable — the Arrow/Parquet rewrite is the direct fix for the memory-index ceiling that made 1.x/2.x brittle under that workload (see Pitfall 1).
+
+**QuestDB**: best for financial tick data and other extreme-ingest SQL workloads where `ASOF JOIN` (join to the most recent prior row) is a core query pattern.
+
+**VictoriaMetrics**: best as a lower-footprint, single-binary swap-in for a Prometheus + Thanos/Mimir long-term-storage stack when full PromQL compatibility is enough and the extra federation features of Thanos/Mimir aren't needed.
 
 **ClickHouse**: best for analytics at scale (billions of rows), complex SQL aggregations, HTAP workloads, and when compression ratio is critical.
 
@@ -604,8 +772,8 @@ Every branch past the first gate still has to satisfy the same "use a TSDB" crit
 
 ## 10. Common Pitfalls
 
-**Pitfall 1: High cardinality tags in InfluxDB causing memory explosion**
-InfluxDB maintains an in-memory index of all unique tag combinations (series cardinality). If `user_id` (millions of unique values) is used as a tag, the series cardinality explodes: 1M users × 10 metrics = 10M series in memory. Symptoms: OOM crashes, slow query performance. Fix: use user_id as a field (not a tag — not indexed), not as a tag. Only index low-cardinality dimensions (region, host, service).
+**Pitfall 1: `[InfluxDB 1.x/2.x]` High cardinality tags causing memory explosion**
+InfluxDB 1.x/2.x's TSM engine maintains an in-memory index of all unique tag combinations (series cardinality). If `user_id` (millions of unique values) is used as a tag, the series cardinality explodes: 1M users × 10 metrics = 10M series in memory. Symptoms: OOM crashes, slow query performance. Fix: use user_id as a field (not a tag — not indexed), not as a tag. Only index low-cardinality dimensions (region, host, service). **This pitfall is specific to the TSM-indexed 1.x/2.x line.** InfluxDB 3 (Core/Enterprise, GA April 2025) replaced TSM with Parquet files addressed by measurement and time range on the Arrow/DataFusion stack, so there is no resident per-series index whose size multiplies with tag cardinality — InfluxDB 3 markets this as "unlimited cardinality." Migrating to InfluxDB 3 removes the need for the field-vs-tag workaround below; it does not make the underlying multiplicative-cardinality math below wrong, it removes the data structure that math was describing the cost of.
 
 **Read it like this.** Series cardinality is a **product, not a sum**: every distinct combination of
 tag values is its own indexed series, so `cardinality = |tag1| x |tag2| x ... x |tagN|`. Adding a tag
@@ -652,7 +820,7 @@ rule guarding a *product*: three tags each just inside 10,000 still multiply out
 A ClickHouse table with `ORDER BY ts` (time only). Query pattern: `WHERE device_id = 42 AND ts > now() - 1h`. ClickHouse reads all granules for the time range — all devices. Fix: `ORDER BY (device_id, ts)` — device_id as leading key allows skipping granules for other devices. Primary key selectivity: highest-cardinality, most-filtered field should be first in ORDER BY.
 
 **Pitfall 3: Prometheus storage filling up without long-term solution**
-Prometheus default retention is 15 days. Teams forget to configure Thanos/Cortex/VictoriaMetrics for long-term storage. When the 15-day window fills: old data is dropped silently. Capacity alert: configure `--storage.tsdb.retention.size=50GB` to limit by size, not just time. For compliance or SLA reporting requiring 90 days of metrics: set up Thanos sidecar or VictoriaMetrics remote write immediately.
+Prometheus default retention is 15 days. Teams forget to configure Thanos/Cortex/VictoriaMetrics for long-term storage. When the 15-day window fills: old data is dropped silently. Capacity alert: configure `--storage.tsdb.retention.size=50GB` to limit by size, not just time. For compliance or SLA reporting requiring 90 days of metrics: set up Thanos sidecar or VictoriaMetrics remote write immediately. `[3.0]` Point the `remote_write` config at Remote-Write 2.0 rather than 1.0 when the receiving backend supports it (protocol negotiation falls back to 1.0 automatically otherwise) — the payload-size and CPU savings compound with retention length, since a longer-lived long-term store is shipped proportionally more data.
 
 **Pitfall 4: Missing chunk_time_interval tuning in TimescaleDB**
 Default chunk_time_interval=7 days may be wrong. For high-write workloads (1B rows/day), 7-day chunks become too large to compress efficiently — the in-memory chunk (active chunk) consumes too much RAM. Fix: smaller chunk interval (1 day or even 4 hours for very high throughput). For low-write workloads (1M rows/day), 7-day chunks are fine. Rule: active chunk should fit in ~25% of available RAM.
@@ -666,14 +834,16 @@ Default chunk_time_interval=7 days may be wrong. For high-write workloads (1B ro
 
 | Tool | Purpose |
 |------|---------|
-| TimescaleDB | PostgreSQL extension for time-series (hypertables, compression, continuous aggs) |
+| `TimescaleDB` | PostgreSQL extension for time-series (hypertables, compression, continuous aggs) — open-source name unchanged |
+| Tiger Cloud | Managed `TimescaleDB` platform from Tiger Data (formerly Timescale Cloud); adds Hypercore hybrid row-columnar storage |
 | pg_partman | Automated partition management for PostgreSQL |
-| InfluxDB | Purpose-built TSDB (Flux query language) |
+| InfluxDB 3 Core / Enterprise | Purpose-built TSDB, GA April 2025 — Rust on Arrow/DataFusion/Parquet/Flight, unlimited cardinality; Enterprise adds HA/security/scale |
 | Telegraf | Agent for collecting metrics (InfluxDB ecosystem) |
 | ClickHouse | Columnar OLAP with time-series strengths |
-| Prometheus | Pull-based metrics (PromQL, Alertmanager) |
+| Prometheus 3.x | Pull-based metrics (PromQL, Alertmanager); Remote-Write 2.0 + native histograms (stable `[3.8]`) |
 | Thanos | Long-term storage and multi-cluster Prometheus |
-| VictoriaMetrics | High-performance Prometheus-compatible TSDB |
+| VictoriaMetrics | Prometheus-compatible (PromQL + MetricsQL) long-term store; lower memory/disk footprint than Prometheus at the same series count |
+| QuestDB | Column-oriented SQL TSDB for extreme ingest; `ASOF JOIN`/`SAMPLE BY`/`LATEST ON`, InfluxDB line-protocol ingest |
 | Grafana | Metrics visualization (supports all of the above) |
 | Apache Druid | Real-time OLAP for event streams |
 | OpenTSDB | Distributed TSDB built on HBase |
@@ -695,12 +865,12 @@ Gorilla (Facebook 2015) compresses floating-point time-series values using XOR b
 **Q: When would you choose TimescaleDB over InfluxDB?**
 **Short:** Choose TimescaleDB for SQL and relational joins; choose InfluxDB for a pure metrics workload with the Telegraf ecosystem.
 
-Choose TimescaleDB when: (1) Team knows SQL and PostgreSQL — no new query language to learn. (2) Need full ACID compliance and joins with relational data (user table + sensor table). (3) Data model has complex relationships (not purely metrics). (4) Want to use PostgreSQL ecosystem tools (pg_stat_statements, pgBouncer, Patroni, existing ORM). (5) Compression and retention needs are met by TimescaleDB (they usually are for < 1M writes/second per node). Choose InfluxDB when: (1) Pure metrics/monitoring use case with no relational joins. (2) Need the Telegraf ecosystem (agents, pre-built collectors for 200+ data sources). (3) Simple time-series model fits naturally (measurement + tags + fields). (4) Team prefers Flux language for its functional style. TimescaleDB's advantage: it's PostgreSQL underneath — you get mature RDBMS features, whereas InfluxDB is a specialized tool.
+Choose TimescaleDB when: (1) Team knows SQL and PostgreSQL — no new query language to learn. (2) Need full ACID compliance and joins with relational data (user table + sensor table). (3) Data model has complex relationships (not purely metrics). (4) Want to use PostgreSQL ecosystem tools (pg_stat_statements, pgBouncer, Patroni, existing ORM). (5) Compression and retention needs are met by TimescaleDB (they usually are for < 1M writes/second per node). Choose InfluxDB when: (1) Pure metrics/monitoring use case with no relational joins. (2) Need the Telegraf ecosystem (agents, pre-built collectors for 200+ data sources). (3) Simple time-series model fits naturally (measurement + tags + fields). (4) Team prefers Flux or SQL (InfluxDB 3) for querying. TimescaleDB's advantage: it's PostgreSQL underneath — you get mature RDBMS features, whereas InfluxDB is a specialized tool. Note the naming split: the open-source extension is still called `TimescaleDB`; the company and managed platform behind it are now Tiger Data and Tiger Cloud (rebranded June 2025). And if the specific worry is InfluxDB's historical tag-cardinality ceiling, that concern applies to the 1.x/2.x line — InfluxDB 3 (GA April 2025) removed it with an Arrow/Parquet rewrite, so it is no longer a reason to prefer TimescaleDB by default.
 
 **Q: How does Prometheus TSDB store and compress time-series data?**
 **Short:** Prometheus stores 2-hour blocks using delta-of-delta timestamp compression and XOR-encoded float samples.
 
-Prometheus TSDB stores data in 2-hour blocks (chunks). Each chunk contains: (1) Index: maps labels (metric name, tag key-value pairs) to series IDs. (2) Samples: compressed time-series data using delta-of-delta compression for timestamps (timestamps change by a constant scrape_interval — delta-of-delta is usually 0 or 1 bit) and XOR encoding for float values. Compression: delta-of-delta for 15-second intervals achieves ~1.7 bytes per sample (vs 16 bytes raw). Chunks compacted periodically into larger blocks for efficiency. Retention: 15-day default → blocks older than 15 days deleted. Long-term: use remote_write to send samples to Thanos, VictoriaMetrics, or Cortex for S3-backed storage.
+Prometheus TSDB stores data in 2-hour blocks (chunks). Each chunk contains: (1) Index: maps labels (metric name, tag key-value pairs) to series IDs. (2) Samples: compressed time-series data using delta-of-delta compression for timestamps (timestamps change by a constant scrape_interval — delta-of-delta is usually 0 or 1 bit) and XOR encoding for float values. Compression: delta-of-delta for 15-second intervals achieves ~1.7 bytes per sample (vs 16 bytes raw). Chunks compacted periodically into larger blocks for efficiency. Retention: 15-day default → blocks older than 15 days deleted. Long-term: use `remote_write` to send samples to Thanos, VictoriaMetrics, or Cortex for S3-backed storage. As of Prometheus 3.0, `remote_write` defaults to **Remote-Write 2.0**, which adds metadata/exemplars/native-histogram support and string-interned labels to the wire format — reported at roughly 60% smaller payloads and 70% less CPU than 1.0 for the same sample volume, negotiated automatically down to 1.0 if the receiving backend doesn't support 2.0. This is the transport for the same 2-hour-block data described above; it changes what gets shipped off-box, not how the local TSDB stores it.
 
 **Q: What is a hypertable in TimescaleDB and how does partitioning work?**
 **Short:** A hypertable transparently partitions a table into time-based chunks, enabling pruning, compression, and instant drops.
@@ -738,14 +908,14 @@ TTL ts + INTERVAL 7 DAY TO VOLUME 'warm',
 Moves are triggered by background merge threads. Data automatically migrates from NVMe → HDD → S3 based on age. Query still works across all tiers (ClickHouse fetches from S3 when needed). This dramatically reduces storage costs: NVMe at $2/GB, S3 at $0.023/GB-month — 87x cost difference for cold data.
 
 **Q: What is the difference between InfluxDB tags and fields and why does cardinality matter?**
-**Short:** High-cardinality values belong in unindexed fields, not tags, since every tag combination creates its own in-memory series.
+**Short:** In InfluxDB 1.x/2.x's TSM index, high-cardinality values belong in fields, not tags; InfluxDB 3 removes that limit.
 
-Tags: indexed dimensions, used for filtering (WHERE clause). Stored in an in-memory index (series index). Field: actual measurement values, not indexed, stored in TSM files alongside timestamps. Cardinality issue: InfluxDB creates one series per unique combination of measurement + all tag values. With user_id as a tag: 1M users × 10 metrics = 10M series in the in-memory index. At ~1-2KB per series: 10-20GB RAM just for the series index. Symptoms: startup takes hours (rebuilding index), queries slow, OOM crashes. Rule: tags should have low cardinality (< 10,000 unique values). High-cardinality dimensions (user_id, trace_id, IP address) should be fields. Filtering on a field requires scanning all matching series — acceptable if the field is not a common filter.
+Tags: indexed dimensions, used for filtering (WHERE clause). Fields: actual measurement values, not indexed, stored alongside timestamps. The cardinality issue described below is specific to **InfluxDB 1.x/2.x**: its TSM engine creates one series per unique combination of measurement + all tag values, held in an in-memory series index. With user_id as a tag: 1M users × 10 metrics = 10M series in that index. At ~1-2KB per series: 10-20GB RAM just for the series index. Symptoms: startup takes hours (rebuilding index), queries slow, OOM crashes. Rule for 1.x/2.x: tags should have low cardinality (< 10,000 unique values); high-cardinality dimensions (user_id, trace_id, IP address) should be fields, at the cost of no longer being able to filter on them as an indexed lookup. **InfluxDB 3** (Core/Enterprise, GA April 2025) changes the underlying storage: data is Parquet files on an Arrow/DataFusion engine addressed by measurement and time range, not a resident per-series index, so there is no structure whose size is a product of tag cardinality — InfluxDB 3 advertises this as unlimited cardinality. The tag/field distinction in the write-side line protocol is unchanged across both generations; what changed is only what the *storage engine* does with a tag.
 
 **Q: How does Prometheus handle high-cardinality labels and what breaks?**
 **Short:** Unbounded label values create one series per combination in Prometheus, exhausting memory and causing OOM.
 
-Prometheus stores each unique label combination (metric{label1=val1, label2=val2}) as a separate series in memory. 1M unique label combinations = 1M series × ~4KB per series = 4GB RAM minimum for the series index (more for samples). Common sources of cardinality explosion: using user_id, session_id, or trace_id as labels. Impact: Prometheus OOM, scrape timeouts, slow queries. Detection: `prometheus_tsdb_symbol_table_size_bytes` and `prometheus_tsdb_head_series` metrics. Prevention: never use unbounded labels. Use histograms (pre-aggregated buckets) instead of recording individual request latencies. Recording rules: pre-aggregate high-cardinality metrics at Prometheus level before storing.
+Prometheus stores each unique label combination (metric{label1=val1, label2=val2}) as a separate series in memory. 1M unique label combinations = 1M series × ~4KB per series = 4GB RAM minimum for the series index (more for samples). Common sources of cardinality explosion: using user_id, session_id, or trace_id as labels. Impact: Prometheus OOM, scrape timeouts, slow queries. Detection: `prometheus_tsdb_symbol_table_size_bytes` and `prometheus_tsdb_head_series` metrics. Prevention: never use unbounded labels. Use histograms (pre-aggregated buckets) instead of recording individual request latencies. Recording rules: pre-aggregate high-cardinality metrics at Prometheus level before storing. `[3.8]` One specific source of this explosion has a direct fix now: a **classic** histogram multiplies its own bucket count into every label combination (12 buckets × 500 combinations = 6,000 series), while a **native histogram** stores the whole distribution as one series per combination (500 series). That collapses the bucket axis of the cardinality product; it does nothing for an unbounded label like user_id or trace_id sitting on the other axis, which is still the fix described above — move it out of the label set entirely.
 
 **Q: When would you use Apache Druid over ClickHouse for time-series analytics?**
 **Short:** Choose Druid for sub-second queries on freshly streamed Kafka data; choose ClickHouse for exact SQL on raw data.
@@ -776,6 +946,31 @@ TimescaleDB compresses each chunk by reorganizing its rows into column-oriented 
 **Short:** Partition ClickHouse tables coarsely enough to stay manageable while still matching your retention drop batches.
 
 `PARTITION BY toYYYYMM(ts)` gives monthly partitions, a reasonable default for most time-series tables since it keeps partition count manageable while still allowing whole-month drops for retention. Choosing an overly fine granularity, such as partitioning by day or even by hour on a moderate-volume table, multiplies the number of partition directories and their associated metadata, and ClickHouse's merge process has to manage far more small parts, increasing background merge overhead and slowing queries that must open many partition files just to touch a small time range. This mirrors the shard-count tradeoff in Elasticsearch: too few partitions makes retention and pruning coarse-grained, while too many partitions adds coordination and file-handle overhead that outweighs any pruning benefit. Choose granularity based on drop frequency and data volume per period: partition by month if you drop data in monthly batches and each month holds a healthy multi-gigabyte volume, or by day only if the daily volume alone already justifies its own partition. Monitor partition count with `system.parts` and consolidate granularity if the count grows into the thousands.
+
+**Q: What is a native histogram in Prometheus and how does it change the cardinality math versus a classic histogram?**
+**Short:** A native histogram stores one series per label set instead of multiplying bucket count into every combination.
+
+A classic Prometheus histogram materializes one time series per `le` bucket boundary *per label combination* — if you pick 12 buckets and have 500 distinct label combinations, that is `12 x 500 = 6,000` series (plus separate `_sum`/`_count` series on top). A native histogram stores the entire distribution — an exponential bucket schema, counts, and sum — inside a single series per label combination, so the same workload becomes `1 x 500 = 500` series: a 12x reduction from collapsing the bucket axis alone, before counting any other label. Enable it per scrape target with `scrape_native_histograms: true`; the feature was experimental starting in Prometheus 3.0 and became stable in **3.8**. The quantile math also improves as a side effect: `histogram_quantile()` over a classic histogram is only as accurate as the bucket boundaries you guessed at instrumentation time, while the native histogram's exponential schema resolves quantiles without pre-committing to a boundary set. The tradeoff is that native histograms require both the client library and the Prometheus server to support the format — mixed fleets need `scrape_classic_histograms` fallback during migration.
+
+**Q: What does Remote-Write 2.0 add over Remote-Write 1.0 in Prometheus, and why does it matter at scale?**
+**Short:** Remote-Write 2.0 adds metadata, exemplars, and native histograms, plus string interning that shrinks payloads sharply.
+
+Remote-Write 2.0, the default wire format since Prometheus 3.0, extends what a `remote_write` sample carries — metadata (type, help text, unit), exemplars, created timestamps, and native histograms all travel natively, instead of being dropped or bolted on as they were in 1.0. The bigger operational win is **string interning**: repeated label names and values across a batch of samples are sent once and referenced by index rather than repeated in every sample, cutting both the bytes on the wire and the CPU cost of compressing and decompressing them. Figures reported at KubeCon NA 2024 put this at roughly 60% smaller messages, 90% less memory, and 70% less CPU versus 1.0 for equivalent sample volume. Protocol negotiation is automatic: a 2.0-capable sender falls back to 1.0 against an older receiving backend (Thanos, Cortex, VictoriaMetrics, or any remote-write-compatible store), so upgrading Prometheus itself does not require upgrading every downstream target in lockstep. The practical effect for capacity planning: the same fleet of Prometheus servers can fan out to a long-term store at a fraction of the network and CPU cost they needed under 1.0.
+
+**Q: Why does InfluxDB 3's rewrite on Arrow, DataFusion, and Parquet remove the cardinality ceiling that InfluxDB 1.x/2.x had?**
+**Short:** InfluxDB 3 addresses data by Parquet file and time range instead of a resident per-series index, so cardinality stops costing RAM.
+
+InfluxDB 1.x/2.x's TSM engine has to know, in memory, which files hold which series before it can serve a query — that requires a permanent in-memory index entry for every unique (measurement, tag-set) combination, which is exactly why series cardinality (`|tag1| x |tag2| x ... x |tagN|`) translates almost directly into RAM and why a million-user tag can OOM a node (see Pitfall 1). InfluxDB 3 Core and Enterprise, GA April 2025, replace that engine entirely: writes land as **Apache Arrow** columnar record batches in memory, get queried through **Apache DataFusion** (a Rust SQL engine that operates on Arrow and Parquet directly), and persist to **Apache Parquet** files addressed by measurement and time range rather than by a resident tag-combination lookup. There is no data structure in this design whose size is a product of tag cardinality — a query with a high-cardinality filter scans and filters Parquet row groups instead of dereferencing an index entry that had to exist in RAM before the query even started. That is the mechanical reason InfluxDB 3 can advertise unlimited cardinality: it isn't a tuned-up version of the old ceiling, it is a storage engine that never built the structure the ceiling came from. **Arrow Flight** carries query results over the wire in the same columnar layout, avoiding a row-by-row serialization step on the read path.
+
+**Q: When do you choose a purpose-built TSDB (ClickHouse, InfluxDB 3, QuestDB) over TimescaleDB on PostgreSQL?**
+**Short:** Choose a purpose-built TSDB when scale or ingest rate outgrows what a PostgreSQL extension can carry.
+
+`TimescaleDB` wins when the workload needs real SQL joins against relational data, ACID transactions, and the PostgreSQL operational ecosystem (pgBouncer, Patroni, existing ORMs) — it is a PostgreSQL extension first, so you get a mature RDBMS underneath and pay PostgreSQL's per-node write ceiling in return (roughly single-digit millions of rows/second before you need Tiger Cloud's distributed reads or manual sharding). Move to a purpose-built engine when any one of these stops being true: (1) **Scale past single-node PostgreSQL** — ClickHouse's distributed MergeTree or InfluxDB 3 Enterprise's HA scale horizontally by design rather than as an add-on. (2) **No relational joins needed** — if the data model really is just measurement + tags/dimensions + values, the SQL-join guarantee `TimescaleDB` provides is unused overhead. (3) **Extreme ingest with a narrow query shape** — QuestDB's column-oriented engine and `ASOF JOIN` target exactly the tick-data case where PostgreSQL's row-oriented MVCC write path becomes the bottleneck. (4) **Unpredictable or very high tag cardinality** — this used to be an InfluxDB weakness relative to `TimescaleDB`'s relational indexes, but InfluxDB 3's Arrow/Parquet engine removed that specific gap. In short: `TimescaleDB` is the right default when you're not sure yet, because it costs you the least to be wrong about; reach for a purpose-built engine once the workload has told you which axis (join complexity, node count, or ingest rate) it actually needs to scale on.
+
+**Q: What problem does QuestDB's `ASOF JOIN` solve, and why is it awkward to express in standard SQL?**
+**Short:** ASOF JOIN matches each row to the most recent prior row in another table, the canonical tick-to-quote query.
+
+`ASOF JOIN` matches each row on the left to the most recent row on the right whose timestamp is at or before it — the textbook case is "what was the bid/ask quote in effect when this trade printed." In standard SQL, that same question requires a correlated subquery per row (`SELECT ... FROM quotes WHERE quotes.symbol = trades.symbol AND quotes.ts <= trades.ts ORDER BY quotes.ts DESC LIMIT 1`), which forces the engine to re-evaluate an ordered scan for every single left-hand row rather than executing one coordinated pass over both time-ordered inputs. `ASOF JOIN` gives the planner enough information to do that in a single ordered merge — walk both tables once, each already sorted by time, and advance the right-hand pointer only forward — turning an O(n log n)-per-row correlated subquery pattern into a linear merge over both series. The same query shape shows up outside finance too: matching a sensor reading to the most recent calibration event, or a request to the most recent config version active at request time; anywhere "most recent prior fact" is the join condition, `ASOF JOIN` is the direct expression of it instead of a workaround.
 
 ---
 

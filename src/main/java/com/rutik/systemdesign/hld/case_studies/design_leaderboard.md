@@ -718,7 +718,7 @@ Given a fixed total write QPS and player count, the number of shards `N` is itse
 
 | Component | Representative Technologies | Notes |
 |---|---|---|
-| Sharded sorted-set store | Redis Cluster (ZSET per shard), Aerospike sorted maps | §4.1, §4.2 — primary ranking structure |
+| Sharded sorted-set store | Valkey Cluster or Redis Cluster (ZSET per shard), Aerospike sorted maps | §4.1, §4.2 — primary ranking structure. Valkey is the default pick for a new deployment; see "Which engine" below |
 | Top-N cache | Redis (separate key from the live ZSETs) or an application-level cache (Caffeine, Memcached) | §3, §5 — refreshed every 1-2s by the merger |
 | Durable score store | Wide-column store (Cassandra/DynamoDB-style) or relational (Postgres) partitioned by `(leaderboardId, season)` | §4.5 — cross-ref [`../../database/key_value_stores/key_value_stores.md`](../../database/key_value_stores/key_value_stores.md) |
 | Write-behind queue | In-process queue (per-shard) or a lightweight Kafka topic for durability of the queue itself | §4.5 |
@@ -730,10 +730,40 @@ Given a fixed total write QPS and player count, the number of shards `N` is itse
 
 | Component | Build | Buy / Open-Source | This Design's Choice |
 |---|---|---|---|
-| Sorted-set ranking engine | Custom skip-list implementation (§4.1's `SkipListLeaderboard` as a reference) | Redis ZSET (battle-tested, exact complexity guarantees documented) | Buy — Redis ZSET's `ZADD`/`ZRANK`/`ZRANGE` are precisely the operations needed, with years of production hardening; custom skip-list code is a reasonable *interview* artifact but not a production choice |
-| Sharding / shard placement | Custom consistent-hash ring | Redis Cluster's built-in hash-slot sharding (16,384 slots, similar in spirit to virtual nodes) | Either — Redis Cluster's hash slots solve the same problem as §4.2's `hash(playerId)` sharding with less custom code, at the cost of less control over shard-to-node assignment granularity |
+| Sorted-set ranking engine | Custom skip-list implementation (§4.1's `SkipListLeaderboard` as a reference) | A Valkey or Redis ZSET (battle-tested, exact complexity guarantees documented) | Buy — the ZSET's `ZADD`/`ZRANK`/`ZRANGE` are precisely the operations needed, with years of production hardening; custom skip-list code is a reasonable *interview* artifact but not a production choice. Pick **Valkey** as the engine — see "Which engine" below |
+| Sharding / shard placement | Custom consistent-hash ring | Cluster mode's built-in hash-slot sharding (16,384 slots, similar in spirit to virtual nodes) — identical in Valkey and Redis | Either — hash slots solve the same problem as §4.2's `hash(playerId)` sharding with less custom code, at the cost of less control over shard-to-node assignment granularity |
 | Global top-K merge | Custom k-way merge worker (§4.2's `GlobalTopKMerger`) | No off-the-shelf equivalent — this is inherently bespoke to the sharding decision | Build — this is the one genuinely bespoke component; everything else in this design is assembling existing primitives |
 | Durable store | Custom append-only log + compaction | Managed wide-column store (DynamoDB, Cassandra-as-a-service) | Buy — §4.5's write-behind and replay logic is bespoke, but the underlying storage engine should not be |
+
+### Which Engine: Valkey or Redis?
+
+"Buy the sorted set" leaves one decision open that an interviewer will push on, because it is a
+2026 question rather than a 2020 one: **which sorted-set engine.** Redis moved off BSD in
+March 2024, and Redis 8.0 (May 2025) ships under **AGPLv3** — copyleft, with obligations that
+matter to anyone who offers the engine as a service or embeds it in a product they
+redistribute. **Valkey** is the fork that came out of that change: BSD-3, stewarded by the
+Linux Foundation, built by long-standing Redis contributors, and command- and
+wire-compatible. Every primitive this design rests on — `ZADD`, `ZRANK`, `ZRANGE ... REV`,
+16,384 hash slots, `EXPIRE`-based season keys (§4.4) — behaves identically, so §4's complexity
+arguments and §10's capacity numbers are unchanged either way.
+
+What changes is procurement and cost:
+
+| | Valkey | Redis (8.x) |
+|---|---|---|
+| Licence | BSD-3 (Linux Foundation) | AGPLv3 |
+| Managed availability | ElastiCache and MemoryDB (Valkey 9.1), Google Memorystore, and other clouds | ElastiCache "Redis OSS" engine, Redis Cloud |
+| Managed price | AWS prices it ~20% below Redis OSS on node-based clusters, ~33% below on serverless | Baseline |
+| Reason to prefer it here | Nothing in this design uses a Redis-only feature | Only if you need RedisJSON/RedisTimeSeries or Redis Enterprise Active-Active CRDT geo-replication |
+
+For this leaderboard the answer is **Valkey**: the design uses only core sorted-set and
+cluster primitives, so the licence and the managed-service price are the only differentiating
+factors and both point the same way. The one place Redis Enterprise would still win is §4.8's
+multi-region single-global-ranking problem — its Active-Active CRDT replication is a genuine
+capability the fork has no equivalent for. §4.8 deliberately does **not** use it (a CRDT
+counter cannot give a single authoritative rank ordering), so it does not change the verdict
+here; say so explicitly if asked, because "Redis Enterprise has Active-Active" is the strongest
+counter-argument available and the reason it does not apply is the interesting part.
 
 ### Client Delivery: Polling vs. Push for Rank Updates
 

@@ -47,7 +47,11 @@ and [vLLM](../../llm/vllm_deep_dive/vllm_deep_dive.md) assume a CUDA GPU, OpenVI
 target is the CPU already in the box — the huge installed base of Xeons and client
 laptops that never had their inference tuned. It is the toolkit you reach for to
 squeeze existing Intel capacity before buying accelerators, to run models at the edge
-where there is no GPU, or to put an LLM on an AI PC's NPU.
+where there is no GPU, or to put an LLM on an AI PC's NPU. That contrast is real but it
+is the *easy* one: the runtimes OpenVINO is genuinely weighed against are the other
+CPU/edge runtimes — llama.cpp, standalone ONNX Runtime, ExecuTorch, Core ML/MLX and
+Qualcomm QNN — and §8 settles that comparison, including the `[2026.1]` change that
+turned llama.cpp from a rival into a host.
 
 **What it is NOT.** OpenVINO is not a training framework (NNCF's quantization-aware
 training runs *inside* PyTorch/TensorFlow; OpenVINO consumes the result). It is not
@@ -55,6 +59,30 @@ oneAPI — it *uses* oneAPI's **oneDNN** (kernels) and **oneTBB** (threading) li
 but it is a distinct product. And it has **no CUDA device** — it does not run on
 NVIDIA GPUs. (Conversely, NVIDIA Triton ships an **OpenVINO backend** so it can serve
 CPU models inside a GPU fleet — the two products compose rather than compete.)
+
+### Vendor trajectory — the thing to say out loud before betting a platform on this
+
+Adopting OpenVINO is partly a bet on Intel, and that bet has two halves with very
+different outlooks. Say both when someone asks.
+
+**The accelerator half has retreated.** Intel **cancelled Falcon Shores** as a
+merchant product, keeping it only as an internal test chip for its successor
+**Jaguar Shores**, and the standalone **Gaudi** line is being wound down rather than
+extended. So the honest read is that Intel has no competitive merchant AI *training*
+accelerator in market, and "OpenVINO plus Intel accelerators" is not a credible
+alternative to a CUDA fleet today. Anyone pitching OpenVINO on that basis is selling
+a roadmap.
+
+**The CPU/client half is the actual product, and it is not going anywhere.** OpenVINO's
+real installed base is Xeon server CPUs and Core Ultra client silicon with an NPU —
+hardware bought for other reasons, present in enormous quantity, and shipping on a
+predictable cadence regardless of what happens to Jaguar Shores. That is a durable
+position, and it is the one this module teaches.
+
+The practical consequence for a design review: OpenVINO is a sound bet for
+**inference on hardware you already own**, and a poor one as a wager on Intel
+overtaking NVIDIA in accelerators. Those are different decisions and only the first
+one is on the table.
 
 **API-era disambiguation.** Everything in this module is **API 2.0** — the `ov::`
 C++ namespace and the top-level `openvino` Python package, introduced in `[2022.1]`.
@@ -854,6 +882,45 @@ bottleneck, and eliminating it is the difference between real-time and dropped f
 | **Triton + OpenVINO backend** | many backends | **NVIDIA + Intel** | via TRT-LLM/vLLM backends | server, mixed fleet |
 | **ONNX Runtime + OpenVINO EP** | ONNX only | Intel (per-op fallback) | n/a | in-process, existing ORT app |
 
+### The real competitive set — CPU and edge runtimes, not GPU serving stacks
+
+The table above compares four ways to *deploy OpenVINO*, and the paragraphs elsewhere
+on this page compare OpenVINO against Triton and vLLM. That is the easy argument, and
+it is not the one you will actually be asked. Nobody weighing OpenVINO is also weighing
+an H100 fleet; they are weighing **the other runtimes that also target a CPU or an edge
+device**. Those are:
+
+| Runtime | Model format | Where it wins outright | Where OpenVINO wins |
+|---|---|---|---|
+| **llama.cpp** | GGUF | any hardware at all — CUDA, ROCm, Metal, bare CPU, a Raspberry Pi; a single static binary with no dependency tree; new model architectures land here first | non-LLM workloads (CV, ASR, classical vision) which llama.cpp does not address at all; Intel NPU; a shared runtime for a mixed model estate |
+| **ONNX Runtime** (standalone) | ONNX | breadth of *hardware reach* per artifact — mobile NPUs, DirectML/Windows ML, and the browser via WASM/WebGPU; a mature `onnxruntime-genai` path for LLMs | peak throughput on Intel silicon, because the OpenVINO EP is literally OpenVINO doing the work; INT4 weight compression via NNCF |
+| **ExecuTorch** | PyTorch ExecuTorch | staying inside the PyTorch toolchain end to end — no export to a foreign IR, no conversion step to keep in CI | a converted-once artifact that runs unchanged across CPU, iGPU and NPU; a much older and more complete CV operator set |
+| **Core ML / MLX** | Core ML / MLX | Apple silicon, where OpenVINO has no story whatsoever | everything that is not Apple silicon |
+| **Qualcomm QNN / AI Hub** | QNN / ONNX | Snapdragon NPUs on Windows-on-ARM and Android | x86 and Intel NPUs |
+
+**The two honest conclusions.**
+
+First, **the "OpenVINO or llama.cpp" question is largely dissolved, and this is the
+most important 2026 fact on this page.** OpenVINO ships as a native llama.cpp backend
+(`GGML_BACKEND_OPENVINO`, built with `-DGGML_OPENVINO=ON`, device selected at runtime
+with `GGML_OPENVINO_DEVICE`), landed with `[2026.1]` and documented in the upstream
+`ggml-org/llama.cpp` repository. It translates GGML compute graphs into OpenVINO graphs
+so a **stock GGUF file** runs on Intel CPU, iGPU and NPU without conversion to IR and
+without leaving llama.cpp's tooling. So for an on-prem CPU LLM deployment on Intel, the
+answer is usually *llama.cpp with the OpenVINO backend* — you keep GGUF, the ecosystem
+and the day-one support for new architectures, and you gain the Intel device coverage.
+Reach for `openvino-genai` and IR instead when you need NNCF's INT4 weight compression
+specifically, or when the LLM sits in a mixed estate alongside CV models you already
+serve through OVMS.
+
+Second, **the ONNX Runtime comparison is not symmetric and the page should stop
+implying it is.** ORT with the OpenVINO EP *is* OpenVINO underneath, so "which is
+faster on a Xeon" is close to meaningless. The real choice is about the **artifact and
+the integration surface**: keep ORT when one ONNX file must also run on a mobile NPU,
+in DirectML on Windows, or in a browser, and take OpenVINO directly when the target is
+only ever Intel and you want the conversion, quantization and serving toolchain rather
+than an execution provider bolted into someone else's runtime.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -880,6 +947,21 @@ bottleneck, and eliminating it is the difference between real-time and dropped f
 - The model **churns daily in PyTorch** and conversion friction would dominate — a
   `torch.compile(backend="openvino")` path may fit, but full IR conversion each day is
   overhead.
+- Your target is **Apple silicon** (use Core ML or MLX) or a **Snapdragon NPU** (use
+  Qualcomm QNN / AI Hub) — OpenVINO has no device for either.
+- You want **one artifact that also runs on a mobile NPU, in Windows ML/DirectML, or in
+  a browser** — that is ONNX Runtime's reach, and you can still get Intel performance
+  underneath it via the OpenVINO Execution Provider.
+- You need **day-one support for a brand-new LLM architecture** — those land in
+  llama.cpp first; conversion paths and `optimum-intel` follow.
+
+**And the case that is no longer either/or.** "OpenVINO *or* llama.cpp for an on-prem
+CPU LLM" is the most common real question here, and since `[2026.1]` the answer is
+usually **both**: llama.cpp built with `-DGGML_OPENVINO=ON` runs stock GGUF files on
+Intel CPU, iGPU and NPU through OpenVINO, so you keep GGUF and the llama.cpp ecosystem
+and still get the Intel device coverage (§8). Go to `openvino-genai` and IR when you
+specifically need NNCF INT4 weight compression, or when the LLM has to sit in the same
+OVMS deployment as CV models.
 
 ---
 
@@ -952,6 +1034,22 @@ bottleneck, and eliminating it is the difference between real-time and dropped f
   deployment on Intel hardware with per-op fallback to the default EP.
 - **`torch.compile(backend="openvino")`** `[2023.1+]` — run a PyTorch model through
   OpenVINO without an explicit export step, for models that churn in PyTorch.
+- **llama.cpp** `[2026.1+]` — OpenVINO ships as a native llama.cpp backend, built with
+  `-DGGML_OPENVINO=ON` and targeted at runtime with `GGML_OPENVINO_DEVICE`, so a stock
+  GGUF file runs on Intel CPU, iGPU and NPU with no IR conversion (§8).
+
+### 11.4a The runtimes you will be compared against
+
+Named here because §8's competitive analysis is the part of this page most often
+skipped, and none of these is a GPU serving stack:
+
+- **llama.cpp** — the portable GGUF runtime; now a *host* for OpenVINO rather than only
+  a rival.
+- **ONNX Runtime** — as a standalone runtime, not just the EP above: mobile NPUs,
+  DirectML / Windows ML, and WASM/WebGPU in the browser.
+- **ExecuTorch** — the PyTorch-native edge path, no foreign IR.
+- **Core ML**, **MLX** — Apple silicon, where OpenVINO has no device.
+- **Qualcomm QNN** — Snapdragon NPUs on Windows-on-ARM and Android.
 
 ### 11.5 Hardware Feature Matrix
 
@@ -1241,6 +1339,56 @@ the weights that's on by default and safe for almost any model. NNCF INT8 is a *
 calibration-dependent** quantization that needs representative data and can shift accuracy
 but delivers the 2–4× VNNI/AMX speedup. FP16 is a free size win; INT8 is a deliberate
 speed optimization with an accuracy budget to manage.
+
+**Q: OpenVINO or llama.cpp for an on-prem CPU LLM deployment?**
+**Short:** Usually both — since `[2026.1]` OpenVINO is a native llama.cpp backend, so stock GGUF runs on Intel CPU, iGPU and NPU without IR conversion.
+Since `[2026.1]` this is mostly no longer a choice. OpenVINO ships as a native llama.cpp
+backend — build with `-DGGML_OPENVINO=ON`, select the device at runtime with
+`GGML_OPENVINO_DEVICE` — which translates GGML compute graphs into OpenVINO graphs so a
+**stock GGUF file** runs on Intel CPU, iGPU and NPU with no conversion to IR and without
+leaving llama.cpp's tooling. That is normally the right default for an on-prem Intel
+deployment: you keep GGUF, the ecosystem, and day-one support for new architectures,
+which is where llama.cpp genuinely leads, and you gain Intel device coverage. Go to
+`openvino-genai` and IR instead for two specific reasons — you need NNCF's INT4 weight
+compression, or the LLM has to sit in the same OVMS deployment as CV models you already
+serve. The stale version of this answer treats them as rivals; check which release the
+person is on before giving it.
+
+**Q: You already run ONNX Runtime on Xeons. Is switching to OpenVINO worth it?**
+**Short:** Probably not for speed, because the OpenVINO Execution Provider is OpenVINO doing the work; switch for the toolchain, not the throughput.
+Probably not for the reason you are being asked. ORT with the **OpenVINO Execution
+Provider** *is* OpenVINO underneath, so "which is faster on a Xeon" is close to a
+meaningless question — you already have the kernels. The real axis is the **artifact and
+the integration surface**. Keep ORT when one ONNX file must also reach a mobile NPU,
+DirectML / Windows ML, or a browser through WASM/WebGPU, because that hardware reach is
+ORT's actual advantage and OpenVINO has no equivalent. Move to OpenVINO directly when
+the target is only ever Intel and you want the whole toolchain — `ovc` offline IR for
+fast dependency-free loading, NNCF for INT8/INT4, OVMS for serving, and the NPU — rather
+than an execution provider bolted into someone else's runtime.
+
+**Q: Intel cancelled Falcon Shores and is winding down Gaudi. Should that change whether you adopt OpenVINO?**
+**Short:** No, because OpenVINO's installed base is Xeon and Core Ultra CPUs, not merchant accelerators — but do not pitch it as a CUDA alternative.
+It should change what you *claim*, not whether you adopt. Those two facts kill one
+argument: Intel has no competitive merchant AI training accelerator in market, so
+"OpenVINO plus Intel accelerators as an alternative to a CUDA fleet" is selling a
+roadmap, not a product. But that was never OpenVINO's real base. Its installed base is
+**Xeon server CPUs and Core Ultra client silicon with an NPU** — hardware bought for
+other reasons, present in enormous quantity, and shipping on a predictable cadence
+regardless of what happens to Jaguar Shores. So it stays a sound bet for inference on
+hardware you already own and a poor one as a wager on Intel overtaking NVIDIA. Separate
+those two decisions explicitly in a design review, because only the first one is
+actually on the table.
+
+**Q: Your target device is an Apple M-series laptop or a Snapdragon NPU. What does OpenVINO give you?**
+**Short:** Nothing — OpenVINO has no device for Apple silicon or Qualcomm NPUs; use Core ML/MLX and Qualcomm QNN respectively.
+Nothing at all, and this is the cleanest disqualifier on the page. OpenVINO's devices
+are Intel CPUs (plus ARM64 CPU), Intel integrated and Arc/Flex/Max GPUs, and the Intel
+NPU; there is no Apple or Qualcomm plugin and no path to one. For Apple silicon use
+**Core ML** or **MLX**; for Snapdragon NPUs on Windows-on-ARM or Android use
+**Qualcomm QNN** or AI Hub. If the requirement is genuinely one artifact across all
+three vendors' NPUs, neither OpenVINO nor those vendor stacks is the answer — that is
+ONNX Runtime's job, and you accept the throughput cost of the generic path in exchange
+for the reach.
 
 ---
 

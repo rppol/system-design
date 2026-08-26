@@ -28,7 +28,7 @@ Historically, this is also where the "GPU vs CPU" and "AI accelerator vs general
 - **Only specific input precisions are accepted**: FP16, BF16, TF32, FP8 (E4M3 and E5M2 variants), and INT8/INT4 depending on generation. Plain FP32 and FP64 are never native Tensor Core *inputs* — FP64 is supported only via a dedicated FP64 Tensor Core path on Ampere+ at roughly 2× ordinary FP64 CUDA-core throughput, still far below the FP16/BF16 rate.
 - **Accumulation always happens in a wider format than the inputs.** FP16/BF16/TF32 inputs accumulate in FP32; FP8 inputs typically accumulate in FP16 or FP32 depending on the library. This is not optional — it is what keeps summing hundreds of K-dimension products from losing all precision.
 - **Precision decides *whether* Tensor Cores engage; alignment decides *how fast* they run.** cuBLAS from 11.0 onward uses Tensor Cores wherever it can for a supported dtype, with no hard dimension or alignment requirement outside FP8 — the old "M/N/K must be multiples of 8 or you fall back to CUDA cores" rule is gone. What remains is a performance cliff, not a functional one: peak throughput needs the operands and their leading dimensions aligned to 16 bytes, which for 2-byte FP16/BF16 is a multiple of 8 elements. Miss it and cuBLAS picks a kernel that cannot issue wide vector loads and has to handle a ragged tile, so you keep the Tensor Cores and lose much of their benefit — with no error, only a number in the profile.
-- **TF32 is the format Ampere and later use for FP32 Tensor Core matmuls**, and whether it is on by default depends on the layer you are calling from: cuBLAS/cuDNN permit it, PyTorch ships with `torch.backends.cudnn.allow_tf32 = True` for convolutions but `torch.backends.cuda.matmul.allow_tf32 = False` for matmuls, so an FP32 `torch.matmul` is exact FP32 until you opt in. TF32 occupies a 32-bit register (so existing FP32 code needs zero source changes) but only the top 19 bits — 1 sign, 8 exponent, 10 mantissa — participate in the Tensor Core multiply, giving FP32's dynamic range at roughly FP16's mantissa precision.
+- **TF32 is the format Ampere and later use for FP32 Tensor Core matmuls**, and whether it is on by default depends on the layer you are calling from: cuBLAS/cuDNN permit it, PyTorch ships with `torch.backends.cudnn.conv.fp32_precision = "tf32"` for convolutions but `torch.backends.cuda.matmul.fp32_precision = "ieee"` for matmuls, so an FP32 `torch.matmul` is exact FP32 until you opt in. TF32 occupies a 32-bit register (so existing FP32 code needs zero source changes) but only the top 19 bits — 1 sign, 8 exponent, 10 mantissa — participate in the Tensor Core multiply, giving FP32's dynamic range at roughly FP16's mantissa precision.
 - **FP16 has a narrow dynamic range (5 exponent bits) and needs loss scaling.** Small gradient values common in deep learning routinely underflow FP16's smallest representable magnitudes; multiplying the loss by a scale factor before backward (and dividing gradients by the same factor before the optimizer step) shifts those values into FP16's representable range without changing the math.
 - **BF16 needs no loss scaling.** It trades FP16's extra mantissa bits for FP32's full 8-bit exponent range, so it can represent the same *magnitudes* as FP32 (just with less precision) — the underflow problem loss scaling solves for FP16 simply does not occur in BF16.
 - **The library stack has three altitudes**: raw `mma.sync` PTX (compiler/library-internal), the `nvcuda::wmma` fragment API (what a kernel author writes by hand), and CUTLASS/cuBLAS/cuDNN (production libraries that generate the tiling, pipelining, and epilogue code around `mma.sync` so you rarely hand-write WMMA in a real system).
@@ -60,6 +60,32 @@ timeline
 ```
 
 Every generation strictly adds a precision path on top of the last — nothing in this timeline is ever removed, which is why the "3rd gen" and "4th gen" labels in the table above map directly to which fragment element types a given `-arch` target actually supports (§6.3).
+
+The *instruction* you reach those precisions through, however, did not stay still. The `nvcuda::wmma` fragment API that §5 and §6.1-6.3 teach is the right rung to learn on and the wrong rung to ship a peak Hopper or Blackwell kernel from — §4.1b is the rest of that ladder.
+
+### 4.1b The three-generation MMA lineage: `wmma`, `wgmma`, `tcgen05`
+
+`nvcuda::wmma` is one member of a three-generation family, and the axis that changes across it is **who issues the instruction and where the accumulator physically lives**:
+
+| | `nvcuda::wmma` | `wgmma.mma_async` | `tcgen05.mma` |
+|---|---|---|---|
+| Architecture | Volta onward | Hopper, needs `sm_90a` | Blackwell, `sm_100`, CUDA 12.8+ |
+| Issued by | one **warp**, 32 threads | one **warpgroup**, 128 threads (4 warps) | one **thread**, on behalf of the whole CTA |
+| Synchronous? | yes | no — asynchronous | no — asynchronous |
+| A operand from | registers | shared memory or registers | Tensor Memory or shared memory |
+| Accumulator lives in | register file | register file | **Tensor Memory (TMEM)** |
+| Largest shape | 16x16x16 fragment | up to 64x256 | up to 256x256 |
+| FP8 support | **none, on any architecture** | yes | yes, plus block-scaled FP4/FP6 |
+
+Three things are worth extracting from that table.
+
+**The issuing scope collapsed as the shapes grew.** Volta needed all 32 lanes of a warp to jointly hold a 16x16 fragment. Hopper widened the tile to the point that one warp could not hold it, so `wgmma` recruits four warps into a warpgroup. Blackwell's tiles are wider still — and NVIDIA's answer was to stop distributing the operands across threads at all: a single leader thread issues `tcgen05.mma` for the entire CTA, and the data never lives in anyone's registers. `cta_group::2` goes one step further and pairs two SMs in a thread-block cluster on a single MMA, which is why the shape reaches 256x256. NVIDIA documents `tcgen05` instructions as 2-4x faster than Hopper's `wgmma`.
+
+**Tensor Memory is a new memory space with a hard constraint.** TMEM is on-chip, addressable, and distinct from both the register file and shared memory — and **only the Tensor Cores can operate on it directly, and Tensor Cores only do matrix multiplication.** Anything that is not a matmul — a softmax, an activation, a rescale — must first move its operands TMEM to registers, work there, and move results back. That single constraint is the architectural reason FlashAttention-4 splits softmax into its own warpgroup that ping-pongs with the MMA warpgroup instead of doing both in one loop; see [`build_a_flash_attention_kernel.md`](../case_studies/build_a_flash_attention_kernel.md) for the worked kernel.
+
+**FP4 only works block-scaled.** `tcgen05` block-scaled MMA consumes NVFP4, MXFP4, MXFP6 and MXFP8, and every 16 or 32 elements along the K dimension carry an associated scale factor. This is not an optimization, it is what makes 4-bit arithmetic representable at all: 4 bits gives roughly 16 distinct values and effectively no dynamic range, so a single per-tensor scale — which must cover the largest outlier in the whole matrix — crushes every ordinary value to the same one or two codes. A scale factor per 16 or 32 contiguous K-elements tracks the local magnitude instead, restoring usable range at a metadata cost of a few percent. Which quantization scheme to pick for a given model, and what accuracy it costs, belongs to [`llm/optimization_and_quantization`](../../llm/optimization_and_quantization/optimization_and_quantization.md); this module owns only the instruction and layout side — what a scale block is, where it lives, and which MMA consumes it.
+
+The honest guidance to close on: you will select these through CUTLASS/CuTe DSL, Triton, or cuBLAS rather than hand-writing them, but you must be able to *read* them, because every peak Hopper and Blackwell kernel is built from them and every profile you look at will name them.
 
 ### 4.2 The three levels of the Tensor Core software stack
 
@@ -504,17 +530,22 @@ loss.backward()   # no scaler -- bf16's 8 exponent bits match fp32's range,
 PyTorch's two TF32 switches do not default the same way, which is the detail that surprises people: convolutions get TF32 for free, matmuls do not.
 
 ```python
-print(torch.backends.cuda.matmul.allow_tf32)   # False -- fp32 matmul is exact fp32
-print(torch.backends.cudnn.allow_tf32)         # True  -- fp32 convolutions use TF32
+print(torch.backends.cuda.matmul.fp32_precision)   # "ieee" -- fp32 matmul is exact fp32
+print(torch.backends.cudnn.conv.fp32_precision)    # "tf32" -- fp32 convolutions use TF32
 
 # Opt matmuls in (for speed), or opt convolutions out (for FP32-exact tests):
 torch.backends.cuda.matmul.fp32_precision = "tf32"    # or "ieee" for true FP32
 torch.backends.cudnn.conv.fp32_precision = "ieee"     # or "tf32"
+
+# One policy for every backend at once:
+torch.backends.fp32_precision = "ieee"
 ```
 
-The `fp32_precision` form above is the current per-backend, per-operator API; the older
-boolean `allow_tf32` flags still work and set the same state. There is also a process-wide
-shorthand, `torch.set_float32_matmul_precision("high")`, which turns TF32 on for matmuls.
+`fp32_precision` is the per-backend, per-operator knob and takes `"ieee"` or `"tf32"`;
+`torch.backends.cudnn.rnn.fp32_precision` covers the RNN path the same way. There is also a
+process-wide shorthand, `torch.set_float32_matmul_precision("high")`, which turns TF32 on
+for matmuls. Set precision through exactly one of these surfaces — PyTorch does not support
+mixing settings across them.
 
 At the raw CUDA level, cuBLAS is the opposite of PyTorch's matmul default: `CUBLAS_DEFAULT_MATH` already permits TF32 for FP32 GEMMs on Ampere and later, and you opt *out* with a pedantic compute type (`CUBLAS_COMPUTE_32F_PEDANTIC`) to force true FP32. So the same FP32 matmul is exact through `torch.matmul` and TF32 through a direct `cublasGemmEx` — a real source of "the same model gives different numbers in C++ and Python."
 
@@ -672,6 +703,56 @@ flowchart LR
 ```
 
 Both gates are silent — nothing raises a warning on either branch — but they are not the same failure. A wrong dtype leaves the Tensor Cores entirely (left red box); a wrong alignment keeps them and throws away most of their throughput (middle red box). Either way, "did it compile and run" is never sufficient evidence that the full-speed path (green) was taken.
+
+### 6.11 Where the accumulator lives, and how you actually select a modern MMA
+
+The single most useful picture of the lineage in §4.1b is not the instruction syntax — it is where the accumulator physically sits, because that is what decides who can touch it:
+
+```
+  wmma (Volta+)          wgmma (Hopper)             tcgen05 (Blackwell)
+  --------------         --------------             -------------------
+   +-----------+          +-----------+              +-----------+
+   | REGISTERS |          | REGISTERS |              |   TMEM    |  <- new space
+   |  acc + A  |          |    acc    |              | acc and A |
+   +-----------+          +-----------+              +-----------+
+        ^                      ^                           ^
+        |                      |                           |
+     32 threads            128 threads                 1 thread issues
+     (1 warp)              (1 warpgroup)               for the whole CTA
+        |                      |                           |
+   any thread can        any thread can              ONLY the Tensor Cores
+   read/modify acc       read/modify acc             can touch TMEM directly
+   in place              in place                    -> a softmax must first
+                                                        copy TMEM -> registers
+```
+
+*As the tile grew, the accumulator moved out of the threads that compute it. That is the
+whole story: on Blackwell a non-matmul step is no longer a few instructions on data you
+already hold, it is an explicit round trip out of Tensor Memory and back.*
+
+You do not hand-write these. `wgmma` and `tcgen05` are PTX-level instructions whose
+per-thread operand layouts are architecture-specific, so the practical interface is a
+library that names the combination for you. In CUTLASS the choice is encoded in the
+dispatch policy's name:
+
+```cpp
+// CUTLASS 4.x Blackwell dispatch policies -- read the name left to right:
+//   KernelTmaWarpSpecialized 1Sm Nvf4 Sm100
+//          |            |     |    |     |
+//          |            |     |    |     +-- target architecture (sm_100)
+//          |            |     |    +-------- NVFP4 block-scaled operands
+//          |            |     +------------- cta_group::1 (one SM per MMA)
+//          |            +------------------- producer/consumer warp specialization
+//          +-------------------------------- TMA bulk copies feed the mainloop
+using Policy1Sm = cutlass::gemm::KernelTmaWarpSpecialized1SmNvf4Sm100;
+using Policy2Sm = cutlass::gemm::KernelTmaWarpSpecialized2SmMxf4Sm100;  // paired SMs
+```
+
+Every element a 2026 kernel author composes is in that one identifier — TMA feeding the
+copies, warp specialization decoupling producer from consumer, `cta_group` choosing one
+or two SMs, and a block-scaled narrow format. Selecting the policy is the work; the MMA
+instruction itself is generated for you. Triton reaches the same instructions from Python,
+and CuTe DSL is the layer FlashAttention-4 is written in.
 
 ---
 
@@ -873,6 +954,18 @@ Additional pitfalls:
 - **Benchmarking with a shape too small to saturate the GPU**: a 128×128×128 GEMM barely fills a single SM's worth of Tensor Core tiles regardless of precision, so a "no speedup from FP16" benchmark result on a toy shape says nothing about the production shape — always benchmark at the actual production batch/sequence/hidden dimensions.
 - **Channels-last vs. contiguous layout mismatches on convolutions**: cuDNN's fastest Tensor Core convolution kernels typically require `NHWC` (`torch.channels_last`) memory format; a model that never calls `.to(memory_format=torch.channels_last)` can silently sit on a slower `NCHW` Tensor Core path or no Tensor Core path at all.
 
+- **Building a warpgroup or `tcgen05` kernel against the plain architecture target instead of the `a`-suffixed one.** `wgmma` and `tcgen05` are *architecture-accelerated* instructions: they exist only under `sm_90a` and `sm_100a`, not under `sm_90` and `sm_100`. Drop the suffix and the build usually still succeeds — CUTLASS and Triton fall back to a slower non-warpgroup kernel — so the only symptom is throughput, and only against a number you may not have.
+
+```bash
+# BROKEN -- compiles clean, silently loses the warpgroup MMA path
+nvcc -arch=sm_90 flash_gemm.cu -o flash_gemm
+
+# FIX -- the 'a' suffix is what enables wgmma on Hopper, tcgen05 on Blackwell
+nvcc -arch=sm_90a flash_gemm.cu -o flash_gemm
+```
+
+  The second half of the trap is about forward compatibility, and it is easy to state backwards. The `-arch=sm_90a` *shorthand* is generous: nvcc expands it to `--gpu-code=sm_90a,compute_90,compute_90a`, so it embeds a plain `compute_90` PTX entry that a future driver can still JIT. What strips that safety net is the **explicit** `-gencode arch=compute_90a,code=sm_90a` form (and CMake's `90a-real`, and a `TORCH_CUDA_ARCH_LIST` entry with no `+PTX`) — that emits SASS only, and the binary then hard-fails with `cudaErrorNoKernelImageForDevice` on any GPU it was not built for. Note also that `compute_90a` PTX is itself architecture-specific and does not JIT forward; it is the plain `compute_90` entry doing that work. Keep one non-accelerated PTX entry in every `-gencode` list, and confirm with `cuobjdump --list-elf` that the binary really contains what you expect for every GPU you deploy to — see [`cuda_toolkit_and_compilation`](../cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md) for the full fatbin story.
+
 ---
 
 ## 11. Technologies & Tools
@@ -881,6 +974,9 @@ Additional pitfalls:
 |------|---------|-------|
 | `nvcuda::wmma` | CUDA C++ header exposing warp-level MMA fragments | Hand-written fused kernels; portable across Volta+ (feature set varies by SM) |
 | `mma.sync` (PTX) | The literal ISA-level Tensor Core instruction | Compiler/library-internal; almost never hand-written directly |
+| `wgmma.mma_async` (PTX) | Hopper's asynchronous warpgroup MMA | 128 threads issue one instruction; requires `-arch=sm_90a`. Selected through CUTLASS/Triton, not hand-written |
+| `tcgen05` + Tensor Memory (PTX) | Blackwell's 5th-gen MMA family and its dedicated accumulator memory space | One thread issues per CTA; `cta_group::1`/`::2`; block-scaled NVFP4/MXFP4/MXFP6/MXFP8. Requires `-arch=sm_100a` |
+| CuTe DSL | Python DSL over CUTLASS's CuTe layout algebra | The layer FlashAttention-4 is written in; expresses tiling, TMA copies and `tcgen05` MMAs without dropping to PTX |
 | CUTLASS | Templated C++ GEMM/convolution library | Custom epilogue fusion at near-cuBLAS performance; what cuBLAS is built on internally |
 | cuBLAS / cuBLASLt | Dense linear algebra library | The default path for `torch.matmul`/`nn.Linear`; automatic Tensor Core routing |
 | cuDNN | Deep-learning primitives (conv, pooling, normalization) | Automatic Tensor Core routing for convolutions under the same dimension/precision rules |
@@ -903,7 +999,7 @@ The most common cause is a dimension or leading dimension that is not 16-byte al
 
 **Q: Why did my FP32 unit test start failing after I upgraded to an Ampere GPU?**
 **Short:** TF32 truncates FP32 to about FP16 precision and is on by default for convolutions and cuBLAS GEMMs on Ampere+, though `torch.matmul` leaves it off unless enabled explicitly.
-TF32 truncates FP32's 23 mantissa bits down to 10 before the Tensor Core multiply, producing results that differ from true FP32 at roughly FP16 precision — and on Ampere and later it is enabled by default for *convolutions* in PyTorch (`torch.backends.cudnn.allow_tf32` is `True`) and for FP32 GEMMs issued straight through cuBLAS. It is *not* on by default for `torch.matmul`, where `torch.backends.cuda.matmul.allow_tf32` is `False`, so a failing matmul test usually means something in the stack turned it on explicitly (`torch.set_float32_matmul_precision("high")` is the common culprit). Either relax the test's tolerance to account for TF32 or pin the precision explicitly — `torch.backends.cudnn.conv.fp32_precision = "ieee"` on the PyTorch side, a pedantic compute type such as `CUBLAS_COMPUTE_32F_PEDANTIC` on the cuBLAS side.
+TF32 truncates FP32's 23 mantissa bits down to 10 before the Tensor Core multiply, producing results that differ from true FP32 at roughly FP16 precision — and on Ampere and later it is enabled by default for *convolutions* in PyTorch (`torch.backends.cudnn.conv.fp32_precision` is `"tf32"`) and for FP32 GEMMs issued straight through cuBLAS. It is *not* on by default for `torch.matmul`, where `torch.backends.cuda.matmul.fp32_precision` is `"ieee"`, so a failing matmul test usually means something in the stack turned it on explicitly (`torch.set_float32_matmul_precision("high")` is the common culprit). Either relax the test's tolerance to account for TF32 or pin the precision explicitly — `torch.backends.cudnn.conv.fp32_precision = "ieee"` on the PyTorch side, a pedantic compute type such as `CUBLAS_COMPUTE_32F_PEDANTIC` on the cuBLAS side.
 
 **Q: My FP16 training run is producing NaN losses after a few hundred steps — why?**
 **Short:** FP16's narrow 5-bit exponent range lets small gradients underflow to zero, eventually producing NaN/Inf; fix with `GradScaler` loss scaling or switch to BF16, which needs none.
@@ -984,6 +1080,22 @@ They are independent, multiplicative levers rather than alternatives — 2:4 spa
 **Q: Does arithmetic intensity (the roofline model) matter for deciding whether Tensor Cores help a given kernel?**
 **Short:** Yes — Tensor Cores raise the compute ceiling, but a memory-bandwidth-bound kernel below the ridge point, like single-token decode, gains little from a ceiling it never reaches.
 Yes — Tensor Cores raise the compute *ceiling*, but a kernel that is memory-bandwidth-bound (low arithmetic intensity, as in single-token autoregressive decode) is already below the ridge point and gains little to nothing from a higher compute ceiling it never reaches. Tensor Cores pay off precisely for compute-bound kernels (high arithmetic intensity, as in prefill or large-batch training matmuls) — see the CUDA section's roofline cross-cutting file for the general framework this module's precision-engagement rules plug into.
+
+**Q: What changed between `wmma`, `wgmma` and `tcgen05` in terms of who issues the instruction?**
+**Short:** The issuing scope widened then collapsed: one warp for `wmma`, a 128-thread warpgroup for Hopper's `wgmma`, and a single thread issuing for the whole CTA on Blackwell's `tcgen05`.
+The issuing scope widened and then collapsed entirely. `nvcuda::wmma` is warp-scoped — all 32 lanes jointly hold a 16x16 fragment in their registers. Hopper's tiles outgrew one warp, so `wgmma.mma_async` recruits a whole warpgroup of 128 threads (4 warps) into one asynchronous instruction. Blackwell went further and stopped distributing operands across threads at all: a single leader thread issues `tcgen05.mma` on behalf of the entire CTA, and `cta_group::2` pairs two SMs in a cluster on one MMA, which is how the shape reaches 256x256. The practical consequence is that a Blackwell kernel's structure is no longer "every thread does its share of the math" — it is one thread issuing while other warps stage data and post-process, which is why warp specialization and modern MMA always show up together.
+
+**Q: Why did Blackwell introduce Tensor Memory, and what does it cost a kernel author?**
+**Short:** Tensor Memory holds operands and accumulators off the register file, but only Tensor Cores can touch it directly, so every non-matmul step becomes an explicit copy to registers and back.
+Because the accumulator outgrew the register file. `tcgen05` shapes reach 256x256, and holding an accumulator that size across a CTA's registers would destroy occupancy, so Blackwell added Tensor Memory (TMEM) — an addressable on-chip space distinct from both registers and shared memory. The cost is a hard constraint: only the Tensor Cores can operate on TMEM directly, and Tensor Cores only do matrix multiplication. So a softmax, an activation, or a rescale is no longer a few instructions on data you already hold in registers — it is an explicit TMEM-to-register copy, the work, and a copy back. That is precisely why FlashAttention-4 gives softmax its own warpgroup that ping-pongs with the MMA warpgroup rather than interleaving both in a single loop. Budget for that round trip when you estimate a fused kernel's cost on Blackwell.
+
+**Q: What is a block scale factor, and why is FP4 unusable without one?**
+**Short:** A scale factor shared by every 16 or 32 contiguous K-elements; without it FP4's ~16 codes and one per-tensor scale collapse all ordinary values onto the same one or two levels.
+It is a small exponent shared by a contiguous run of elements along the K dimension — 16 or 32 of them for the NVFP4/MXFP4/MXFP6/MXFP8 formats that Blackwell's block-scaled `tcgen05` MMA consumes. It matters because 4 bits gives roughly 16 distinct codes and essentially no dynamic range on its own. With a single per-tensor scale, that scale has to cover the largest outlier anywhere in the matrix, so every ordinary-magnitude value gets crushed onto the same one or two codes and the matmul returns noise. A scale per 16 or 32 elements tracks local magnitude instead, restoring usable range for a few percent of metadata. This is the layout side of the story; which quantization scheme to choose for a given model and what accuracy it costs belongs to the LLM section's quantization material.
+
+**Q: What are `sm_90a` and `sm_100a`, and what breaks if you build for the plain target?**
+**Short:** They are architecture-accelerated targets that enable `wgmma` and `tcgen05`; build for the plain target instead and the code still compiles but silently drops to a slower kernel.
+They are *architecture-accelerated* compilation targets, and the `a` suffix is what makes Hopper's `wgmma` and Blackwell's `tcgen05` instructions available at all. Build the same source with `-arch=sm_90` instead of `sm_90a` and it usually still compiles — CUTLASS and Triton quietly select a non-warpgroup fallback kernel — so the only symptom is throughput far below peak, with no error anywhere. Do not, however, assume the accelerated target strips your forward-compatibility fallback: the `-arch=sm_90a` shorthand expands to `--gpu-code=sm_90a,compute_90,compute_90a`, so it still embeds a plain `compute_90` PTX entry a future driver can JIT. What removes that is the explicit `-gencode arch=compute_90a,code=sm_90a` form, which emits SASS only and then hard-fails with `cudaErrorNoKernelImageForDevice` on any GPU it was not built for. Keep one non-accelerated PTX entry in the `-gencode` list and verify the result with `cuobjdump --list-elf`.
 
 ---
 

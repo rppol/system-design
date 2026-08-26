@@ -226,6 +226,70 @@ flowchart LR
 
 ---
 
+## Interview Questions and Answers
+
+**Q: What is the real test for whether two pieces of code are a DRY violation?**
+**Short:** Ask whether a single business-rule change would require editing more than one place.
+The test is not "do these two blocks look similar" but "if this piece of knowledge changes, how many places do I need to update." Two blocks that look identical today but encode different business rules — like tax calculation for employees versus contractors — are not a violation, because they can diverge independently. Two blocks that look different but encode the same rule, like the same email-validation regex spelled out three different ways, ARE a violation. When answering "how many files change for this one rule," more than one is the actual signal.
+
+**Q: Why is it wrong to merge two identical-looking functions just because they currently share code?**
+**Short:** Identical code that represents different domain concepts will diverge and force painful untangling later.
+`calculateEmployeeTax()` and `calculateContractorTax()` may compute the same formula today, but they represent different domain concepts that are only coincidentally equal. Merging them into `calculateTax()` creates a false coupling: when the rules diverge, as tax rules do, someone must add a `type` flag or a conditional branch to the shared function. Sandi Metz's line captures it directly — duplication is far cheaper than the wrong abstraction, so leave them separate until a real shared rule, not a coincidental resemblance, justifies merging.
+
+**Q: What does the Rule of Three actually prescribe, and why wait for a third occurrence instead of abstracting on the second?**
+**Short:** Write it once, tolerate duplication on the second occurrence, and extract only on the third.
+On the first occurrence you just write the code. On the second, you note the duplication but deliberately leave it, because two data points aren't enough to know the real shape of the abstraction. On the third occurrence you finally have enough signal to see what actually varies and what doesn't, so you extract with confidence. Abstracting after only two instances is exactly the premature-abstraction trap the rule exists to prevent.
+
+**Q: What are the concrete signs that you've built the wrong abstraction while chasing DRY?**
+**Short:** Boolean flags, null parameters, and "only used for X" comments on a shared function.
+A shared function that needs a `type` or boolean flag to branch between callers is really two functions pretending to be one. Callers passing `null` for parameters they don't need is another tell — the abstraction is bigger than any single caller actually requires. A comment reading "only used for X, not Y" is the clearest signal of all: it admits the function is not actually general, just prematurely generalized. Any of these three is a cue to split the abstraction back apart rather than keep patching it.
+
+**Q: What is WET and how does it relate to DRY?**
+**Short:** WET ("Write Everything Twice") is the anti-pattern of copying logic instead of centralizing it.
+WET code copies the same logic across multiple classes or services, so a bug fix applied to one copy leaves the others silently wrong. DRY is the opposite discipline: centralize the logic once so a fix or a rate change benefits every caller automatically. WET is cheap to write in the moment but expensive to maintain, while DRY costs upfront abstraction discipline in exchange for guaranteed consistency. The tradeoff is not free either way — DRY still needs a genuinely correct abstraction, not just any centralization.
+
+**Q: In the ValidationUtils example, what exactly changed to fix the DRY violation, and what does each caller now depend on?**
+**Short:** Three duplicated regex checks were replaced by one static `ValidationUtils.isValidEmail()` method.
+`UserService`, `RegistrationService`, and `NotificationService` each hard-coded their own copy of the same email-validation rule (`contains("@") && endsWith(".com")`). The fix extracted that rule into a single static method on `ValidationUtils`, and every caller now invokes that one method instead of its own copy. When the email rule needs to support `.org` or `.net` domains, there is exactly one method to change, and every caller picks up the new behavior automatically.
+
+**Q: What do you give up when you extract a DRY abstraction — what is the cost side of the tradeoff?**
+**Short:** Abstractions add indirection that a reader must navigate to see what code actually does.
+Every extraction adds a layer between the caller and the behavior: a reader must jump to `ValidationUtils` to understand what "valid email" means instead of seeing it inline. If the abstraction is wrong, it also creates coupling between unrelated callers who now share a class that doesn't fit either of them cleanly. DRY's benefits — one fix point, guaranteed consistency — are real, but they are only worth the indirection cost when the abstraction genuinely represents one piece of knowledge.
+
+**Q: How is database normalization (3NF) an application of DRY?**
+**Short:** Third Normal Form stores every fact exactly once, eliminating update anomalies from duplicated data.
+3NF eliminates transitive dependencies so that each fact — a customer's address, a product's price — is stored in exactly one row rather than repeated across many. This is literally the DRY principle applied to data instead of code: if the fact changes, exactly one row is updated, and every reader sees a consistent value. Denormalization deliberately reintroduces duplication for read performance, which is the same "duplication is sometimes the right choice" tradeoff DRY makes at the code level.
+
+**Q: How does an API gateway apply DRY at the infrastructure level across microservices?**
+**Short:** Centralizing rate limiting, auth, and logging in the gateway avoids reimplementing them per service.
+Without a gateway, every microservice would need its own rate-limiting, authentication, and request-logging logic — the same knowledge duplicated across every service boundary. Centralizing these concerns in the gateway means a new service inherits them automatically just by sitting behind it, with no per-service implementation required. This is DRY operating at the infrastructure layer rather than the code layer: one authoritative place for a cross-cutting policy.
+
+**Q: Why is a schema registry (Confluent Schema Registry, AWS Glue Schema Registry) considered a DRY pattern?**
+**Short:** A schema registry is the single authoritative source for event schemas instead of each service hard-coding its own copy.
+Without a registry, producers and consumers each hard-code their understanding of an event's shape, and those copies silently drift apart as the event evolves. The registry becomes the one authoritative representation of the schema that every producer and consumer references directly. This prevents the exact failure mode DRY targets in code — divergent copies of the same knowledge — but at the scale of an entire event-driven system.
+
+**Q: How does the Template Method pattern reduce duplication compared to writing each algorithm variant from scratch?**
+**Short:** Template Method centralizes the algorithm's skeleton once while letting only the varying steps differ per subclass.
+Without it, each variant of an algorithm — say, three data-export formats — would duplicate the entire control flow (open, validate, process, close) and vary only in one or two steps. Template Method puts that shared skeleton in a base class exactly once, and subclasses override only the steps that actually differ. This is DRY applied to algorithm structure specifically: the sequencing logic has one authoritative home even though the details vary.
+
+**Q: How does the Strategy pattern eliminate duplication that a chain of if/else branches would otherwise create?**
+**Short:** Strategy replaces duplicated conditional branches with one interchangeable object per variant.
+A naive design might repeat the same `if (paymentType == CREDIT_CARD) {...} else if (paymentType == PAYPAL) {...}` conditional in every place a payment is processed. Strategy pulls each variant into its own class implementing a shared interface, so the conditional logic exists in exactly one place — wherever the strategy is selected — instead of being copy-pasted at every call site. This is DRY applied to conditional logic rather than to straight-line code.
+
+**Q: What real-world Spring class is cited as a DRY example, and what boilerplate does it eliminate?**
+**Short:** `JdbcTemplate` centralizes the connection-open/close boilerplate every DAO would otherwise repeat.
+Without it, every DAO class would duplicate the same connection-acquisition, exception-translation, and resource-cleanup logic around each query. `JdbcTemplate` extracts that repetitive plumbing into one place, so a DAO only supplies the SQL and the row-mapping logic while the template handles the rest. This is the same DRY payoff as the `ValidationUtils` example: one authoritative implementation instead of N near-identical copies.
+
+**Q: Give an example of a genuine DRY violation versus a coincidental duplication that should stay separate.**
+**Short:** Three copies of the same email-regex are a violation; two similarly-shaped tax functions for different roles are not.
+The email-validation example is a genuine violation because all three services encode literally the same business rule — "what counts as a valid email" — and a rule change should touch one place. `calculateEmployeeTax()` and `calculateContractorTax()` look alike today but represent independently-evolving rules for different roles, so merging them creates false coupling rather than removing real duplication. The distinguishing question is always whether the two pieces of code would need to change together for the same reason.
+
+**Q: Why does root CLAUDE.md's content guidance pair DRY with "show broken code, then the fix" as its own teaching pattern?**
+**Short:** Seeing the WET version and its DRY fix side by side makes the abstraction's payoff concrete rather than abstract.
+Showing three duplicated `validateEmail` implementations first makes the cost of duplication visible — three places to remember, three chances to miss one when the rule changes. Following it with the `ValidationUtils` extraction shows exactly what changed and why every caller now depends on one authoritative method. The pairing turns "avoid duplication" from an abstract slogan into a concrete before/after a reader can verify against the code.
+
+---
+
 ## Quick Summary
 
 | Aspect | Summary |

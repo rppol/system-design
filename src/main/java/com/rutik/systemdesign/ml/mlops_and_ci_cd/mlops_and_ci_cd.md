@@ -86,6 +86,70 @@ Key insight: the model is not the deliverable. The deliverable is the pipeline t
 - **Label drift** — distribution of predicted classes shifts significantly from training distribution
 - **Event-triggered** — upstream schema change or new data partition available
 
+### Data Contracts
+
+A data contract is a versioned, enforced agreement between a data **producer** (the team or
+system that emits a table, topic, or event stream) and the ML **consumer** that reads it: the
+schema (column names, types, nullability), the semantics of each field, a freshness SLO, an
+allowed null-rate bound, and an explicit process for a breaking change. The defining property is
+where it is enforced — in the **producer's own CI**, before a breaking change ships — not
+downstream, after the ML team has already ingested broken data.
+
+This is the structural fix for the single most common production ML outage: an upstream team
+renames or re-types a column and the feature pipeline silently produces garbage instead of
+failing loudly. War Story 2 in Section 10 is exactly this — `user_age_bucket` renamed to
+`age_bucket` produced an all-NaN feature for three days because nothing on the producer's side
+knew an ML consumer depended on that exact column name. A data contract makes that dependency
+explicit and machine-checked, so the rename fails the producer's own pull request instead of
+failing silently in a downstream model.
+
+A data contract is a different enforcement point from a data-quality suite like Great
+Expectations, even though both check schema and distributions. **Great Expectations validates
+YOUR OWN pipeline's output** — it runs downstream, after ingestion, and catches quality problems
+in data you already control. **A contract binds THEIR pipeline** — it runs upstream, in the
+producer's CI, and blocks a breaking change from merging in the first place. Great Expectations
+tells you data is already bad; a contract stops it from becoming bad. Mature setups run both: the
+contract as the upstream gate against known-shape breakage, Great Expectations as the downstream
+safety net for what no contract anticipated — a value that is in-range but semantically wrong, or
+a distribution that drifts slowly rather than breaking outright.
+
+### Model Registry Governance
+
+Governance is the process wrapped around registry mechanics: who may move a model between
+stages, what evidence that move requires, and what gets recorded so the decision is
+reconstructable later. [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md) covers the
+mechanics this builds on — aliases, tags, `LoggedModel` lineage, and the limits of the built-in
+basic-auth plugin; this section is the workflow layered on top of them, and applies the same way
+whether the underlying registry is MLflow, SageMaker Model Registry, or Agent Platform Model
+Registry.
+
+A governed promotion path needs four things, regardless of which registry implements it:
+
+- **Staged promotion gates with named approvers.** Each stage transition (dev -> staging ->
+  production) requires a specific role's sign-off, recorded as a tag or an external approval
+  record — not one engineer merging a PR. A credit-risk model's production promotion needs the
+  model-risk team's sign-off in addition to the CI performance gate; the CI gate alone is
+  necessary but not sufficient for a regulated model.
+- **An immutable audit trail of every promotion decision.** Who approved it, when, and against
+  which evaluation run, captured outside the registry's own access control — an approval system,
+  a ticket, or a signed commit to a promotions log — because a registry's built-in auth (MLflow's
+  basic-auth plugin is the example [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md)
+  documents) commonly has no audit log of its own.
+- **A model card attached as registry metadata.** Intended use, known limitations, training data
+  summary, and evaluation results attached to the specific registered version — not floating in a
+  wiki page that drifts out of sync with the model it describes.
+- **Lineage from a registry version back to the exact training data and code commit** that
+  produced it — the dataset digest and git SHA this section's Best Practices already require
+  logging at training time, now readable FROM the registry entry a deployment decision points at.
+
+The requirement this serves: a regulated model's deployment decision must be reconstructable
+months later — a credit-scoring model that denied a loan, an ad-targeting model a regulator
+asks about, a healthcare triage model under audit. "We retrained often and it seemed fine" is not
+an answer a regulator or an incident postmortem accepts; "version 47, approved by the model-risk
+team on this date against this evaluation run, trained on this dataset digest and this commit" is.
+Governance is not bureaucracy layered onto MLOps — it is what turns a hard-to-answer discovery
+request into a five-minute registry lookup.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -466,6 +530,90 @@ def ml_pipeline(
     )
 ```
 
+### Data Contract Definition and CI Enforcement
+
+A data contract lives as a versioned file next to the **producer's** pipeline code, so a breaking
+schema change and the contract violation that catches it land in the same pull request.
+
+```yaml
+# contracts/user_events_v3.yaml — owned by the Events Platform team,
+# consumed by the fraud-detection and personalization feature pipelines
+contract_version: 3
+dataset: events.user_events
+owner_team: events-platform
+consumers: [ml-fraud-team, ml-personalization-team]
+schema:
+  - name: user_id
+    type: string
+    nullable: false
+  - name: age_bucket        # renamed from user_age_bucket in v3 — see breaking_changes
+    type: string
+    nullable: false
+    allowed_values: ["18-24", "25-34", "35-44", "45-54", "55+"]
+  - name: event_ts
+    type: timestamp
+    nullable: false
+freshness_slo_minutes: 15
+max_null_rate:
+  age_bucket: 0.01
+breaking_changes:
+  - version: 3
+    change: "user_age_bucket renamed to age_bucket"
+    migration: "dual-write both columns for 30 days; consumers migrate by 2026-09-15"
+```
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pandas as pd
+import yaml
+
+
+@dataclass
+class ContractViolation:
+    column: str
+    reason: str
+
+
+def validate_against_contract(df: pd.DataFrame, contract_path: str) -> list[ContractViolation]:
+    """Runs in the PRODUCER's own CI, against the producer's own pipeline output —
+    not downstream in the ML team's feature pipeline. A violation blocks the
+    producer's merge, which is what makes this a contract rather than a
+    data-quality check run after the fact."""
+    with open(contract_path) as f:
+        contract = yaml.safe_load(f)
+
+    violations: list[ContractViolation] = []
+    expected_cols = {c["name"]: c for c in contract["schema"]}
+
+    for name, spec in expected_cols.items():
+        if name not in df.columns:
+            violations.append(
+                ContractViolation(name, "column missing — breaks every registered consumer")
+            )
+            continue
+        null_rate = df[name].isna().mean()
+        max_allowed = contract.get("max_null_rate", {}).get(name, 0.0)
+        if null_rate > max_allowed:
+            violations.append(
+                ContractViolation(name, f"null rate {null_rate:.3f} exceeds contract max {max_allowed}")
+            )
+        allowed = spec.get("allowed_values")
+        if allowed and not df[name].dropna().isin(allowed).all():
+            violations.append(ContractViolation(name, "value outside contract's allowed_values"))
+
+    return violations
+```
+
+Run this validator in the **Events Platform team's own CI**, on their own pipeline's output —
+so `user_age_bucket` -> `age_bucket` going missing fails the rename's pull request before merge,
+instead of shipping a silent all-NaN column to every registered consumer the way War Story 2 in
+Section 10 played out. Great Expectations, by contrast, would run downstream in the ML team's own
+pipeline and could only detect the resulting NaN spike after ingestion — useful as a second line
+of defense, not a substitute for the upstream gate.
+
 ### GitHub Actions CI Workflow for ML
 
 ```yaml
@@ -667,6 +815,9 @@ Three checks fire before any user population is fully committed, and the first o
 | Scheduled retraining | Simple, predictable | May retrain unnecessarily; may miss sudden drift between schedules |
 | Drift-triggered retraining | React faster to data shifts | Requires robust drift detection; risk of false-positive retraining storms |
 | Shadow mode testing | Zero risk before canary | Doubles inference cost; adds latency to the shadow path |
+| Data contracts (producer-side, e.g. dbt model contracts) | Blocks a breaking schema change before it ships, no downstream detection lag | Requires the producer team to adopt and maintain it; cross-team buy-in is the hard part, not the tooling |
+| Downstream data-quality validation (Great Expectations) | No cross-team coordination needed to adopt | Only detects a breaking change after ingestion — cannot stop it from shipping |
+| Registry governance (staged approvals + audit trail) | Reconstructable deployment decisions; defensible under regulatory audit | Adds latency to every promotion; requires a role structure (who approves what) the team must maintain |
 
 ---
 
@@ -705,6 +856,11 @@ An upstream data team renamed a column in a Hive table from `user_age_bucket` to
 
 Fix: Great Expectations suite runs in CI on every data pipeline change. Schema contract specifies required columns, types, null rate <= 1%, and value range. Any upstream schema change that breaks the contract fails the CI pipeline before the feature pipeline is deployed.
 
+The more durable fix moves the check one hop further upstream: a formal data contract (see
+Section 4) enforced in the *Events Platform team's own CI*, not just the ML team's downstream
+Great Expectations suite, would have failed the renaming pull request itself — catching the break
+before any pipeline run, rather than after 3 days of degraded production predictions.
+
 ### War Story 3: Rollback Not Tested — 2-Hour Outage During Incident
 
 A production model failed a canary: AUC regressed 4%. The runbook said "execute `scripts/rollback.py`". When the on-call engineer ran it during the incident, the script failed because it read the previous model version from an environment variable (`PREV_MODEL_VERSION`) that had been overwritten during the canary promotion step. The rollback script had never been tested end-to-end in the staging environment. The team spent 2 hours manually reconstructing the previous serving config from logs.
@@ -730,6 +886,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - **MLflow Model Registry** — open source; the lifecycle mechanism is mutable **aliases** (`@champion`, `@challenger`) plus key-value tags, so one model version can carry several labels at once and promotion is an atomic alias move. Also provides model signatures and a REST API
 - Agent Platform Model Registry (formerly Vertex AI Model Registry) — GCP-managed; integrates with Agent Platform Endpoints
 - **SageMaker Model Registry** — AWS-managed; Model Groups + Model Package versions with an approval status; integrates with SageMaker Endpoints
+- None of the above ship a regulator-grade audit trail out of the box — the staged-approval workflow, model cards, and lineage a regulated model needs is a process built on top of registry mechanics, covered in Section 4's Model Registry Governance
 
 **Pipeline Orchestration:**
 - **Kubeflow Pipelines (KFP v2, SDK 2.x)** — Kubernetes-native; KFP SDK for Python DAG definition; portable
@@ -745,6 +902,11 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - **Great Expectations (GX Core 1.x)** — schema + distribution expectations; Python-API only (no CLI); integrates into Airflow and CI
 - **Deepchecks** — ML-specific checks including train-test drift, model performance degradation
 - **Evidently AI** — drift reports, data quality reports; integrates with MLflow
+
+**Data Contracts** (enforced on the producer's own pipeline — see Section 4):
+- **dbt model contracts** — YAML-defined column names, types, and constraints on a dbt model; enforced at build time, so a breaking change fails the producer's own `dbt build` before it ships (`docs.getdbt.com/docs/mesh/govern/model-contracts`, read 2026-08-25)
+- **Confluent Schema Registry** (Avro / Protobuf / JSON Schema) — the same enforcement point for streaming producers: a schema-evolution compatibility check runs before a new event schema is allowed to register
+- Great Expectations, listed above, is the complementary downstream check — it validates data already ingested, not the producer's pipeline before it ships
 
 **CI/CD:**
 - **GitHub Actions** — YAML-based workflows; free tier for public repos; GitHub-native
@@ -765,7 +927,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 
 **Feature Stores:**
 - **Feast** — open source; offline (Parquet/BigQuery) + online (Redis/DynamoDB) stores
-- **Tecton** — SaaS feature platform; strong consistency guarantees
+- **Tecton (Databricks)** — real-time feature platform; strong consistency guarantees
 - Agent Platform Feature Store (formerly Vertex AI Feature Store) — GCP-managed; feature data is registered from a BigQuery source and exposed through Bigtable online serving via feature view instances
 
 ---
@@ -844,6 +1006,14 @@ Level 0 is manual notebooks, Level 1 automates the training pipeline, and Level 
 **Short:** Put automated data-validation gates before training so corrupted data fails the pipeline instead of reaching the model.
 Put automated data-validation gates before training so bad data fails the pipeline instead of flowing into the model. Great Expectations (or equivalent) enforces a schema contract — required columns, dtypes, null-rate and range bounds, row-count volume checks — and distribution checks flag values outside historical norms; for adversarial risk, add anomaly detection on new partitions and require human approval for large shifts. The gate must block the run, not merely warn.
 
+**Q: What does a data contract enforce that a downstream Great Expectations suite cannot?**
+**Short:** A contract blocks a breaking change in the producer's own CI before it ships; a downstream suite can only detect the damage after ingestion.
+A data contract is enforced in the **producer's own CI**, against the producer's own pipeline, before a schema-breaking change is allowed to merge. Great Expectations runs downstream, in the consumer's pipeline, after the data has already landed — it can flag that a column is suddenly all-NaN, but only after ingestion, and only if someone is watching that specific check. The contract prevents the class of bug outright (a rename or re-type never reaches production); the downstream suite is a safety net for what the contract did not anticipate — an in-range but semantically wrong value, or a distribution that drifts slowly. War Story 2 in Section 10 is the canonical failure a contract, not a downstream suite, would have caught before it shipped.
+
+**Q: What must a model registry record for a regulated model's deployment decision to be reconstructable a year later?**
+**Short:** The approving role and date, the evaluation run it was judged against, and the exact dataset digest and code commit that produced the version.
+Four things, tied to the specific registered version rather than floating in a wiki: who approved the promotion and when, recorded in an audit trail outside the registry's own often-weak access control; which evaluation run the approval was granted against; the exact dataset digest and git commit that produced that model version, so training can be reproduced or re-audited; and a model card capturing intended use and known limitations at the time of the decision. Without all four, "the model that made this decision" is unanswerable months later — you can point at a version number, but not defend why it was live or what it was validated against, which is the question a regulator or an incident postmortem actually asks.
+
 ---
 
 ## 13. Best Practices
@@ -888,7 +1058,7 @@ flowchart TD
     ciIntegration["3. Integration test<br/>shadow traffic, 15 min"]
     ciPromote["4. MLflow alias move<br/>@challenger to @champion"]
     k8sDeploy@{ icon: "logos:kubernetes", form: "square", label: "5. Deploy to K8s<br/>rolling update, 10% canary", pos: "b", h: 44 }
-    modelServing["Model Serving<br/>FastAPI + TorchServe, 400 RPS<br/>Istio weighted split 10/90"]
+    modelServing["Model Serving<br/>FastAPI + BentoML, 400 RPS<br/>Istio weighted split 10/90"]
     prometheus@{ icon: "logos:prometheus", form: "square", label: "Prometheus metrics<br/>rate - errors - p99", pos: "b", h: 44 }
     rollbackMon["Automated Rollback Monitor<br/>canary error_rate vs baseline<br/>rollback if ratio over 2.0 in 30min"]
 

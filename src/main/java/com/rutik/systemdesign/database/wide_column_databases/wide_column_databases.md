@@ -1,5 +1,15 @@
 # Wide-Column Databases
 
+> **Version anchor (2026-08-25).** **Apache Cassandra 5.0** (GA September 2024) is the current
+> stable generation and this page's baseline. **Cassandra 6.0** exists only as **6.0-alpha1**
+> as of 2026 — not GA, not production-ready — and its headline feature, **Accord**, is called
+> out as alpha everywhere it appears below. **ScyllaDB** is a separate C++, shard-per-core
+> reimplementation of the Cassandra wire protocol, covered in its own subsection — a different
+> codebase, not a Cassandra version. **Apache HBase** and its managed descendant **Google Cloud
+> Bigtable** are the other Bigtable-lineage branch in this category, also covered in their own
+> subsection — this module is named for the wide-column *category*, not only for Cassandra.
+> Behavior gated to a specific release is tagged inline, e.g. `[5.0]`, `[6.0-alpha]`.
+
 ## 1. Concept Overview
 
 Wide-column databases (also called column-family stores) store data in rows with dynamic columns, where different rows can have different columns. Apache Cassandra is the dominant open-source wide-column database, offering leaderless distributed architecture, tunable consistency, and linear scalability. Unlike relational tables, Cassandra's data model is designed around query patterns, not entity relationships.
@@ -291,6 +301,25 @@ TWCS (Time Window Compaction Strategy):
   Good: excellent for time-series data with TTL (entire SSTable expires together)
   Bad:  not suitable for non-time-series data
   Use:  time-series, IoT, event logs with TTL
+
+UCS (Unified Compaction Strategy) [5.0]:
+  A single tunable, density-based strategy that can be configured to behave like leveled
+  or like tiered compaction, and adjusts automatically as the cluster grows -- instead of
+  hand-picking STCS/LCS/TWCS per table
+  Good: much higher achievable node density without per-table strategy tuning
+  Bad:  newer than STCS/LCS/TWCS, opt-in (not the default for existing tables), one more
+        set of scaling parameters to reason about
+  Use:  general clusters where you would otherwise be guessing between STCS and LCS;
+        still pick TWCS explicitly for a pure time-series TTL table (a feed, IoT
+        readings) -- whole-SSTable expiry on TTL is a property UCS does not target
+```
+
+```cql
+-- UCS opt-in per table, 5.0+:
+ALTER TABLE sensor_readings WITH compaction = {
+    'class': 'UnifiedCompactionStrategy'
+    -- optional per-level scaling parameters tune the leveled/tiered blend
+};
 ```
 
 ```
@@ -360,6 +389,157 @@ IF balance = 500;
 -- Performance: ~5-10x slower than regular writes
 ```
 
+### Accord: Transactions Beyond LWT [6.0-alpha]
+
+LWT above costs 4 round trips because it runs Paxos per operation, and it is scoped to a
+single partition. Apache Cassandra 6.0 — **alpha only as of 2026, published as
+6.0-alpha1, not GA, not production-ready** — introduces **Accord**, a leaderless
+consensus protocol that aims to provide general-purpose ACID transactions natively,
+alongside Transactional Cluster Metadata and transactional repair.
+
+| | LWT (Paxos, stable today) | Accord (6.0-alpha, design goal) |
+|---|---|---|
+| Round trips, normal case | 4 (prepare, promise, propose, commit) | 1 wide-area round trip |
+| Scope | single partition | general-purpose, multi-partition |
+| Behavior under replica failure | degrades once a majority is unavailable | designed to stay stable under any tolerated minority of replica failures |
+| Status | shipping, backs `IF ... `/CAS today | alpha; the numbers above are design goals awaiting GA validation |
+
+Treat every Accord figure above as a target, not a measured result — there is no GA
+release to benchmark yet. Build on LWT for anything shipping today; track Accord for
+when 6.0 reaches GA if the workload needs transactions that cross partitions.
+
+### Secondary Indexes: Legacy 2i vs SAI [5.0]
+
+**Legacy secondary index (`2i`)** is built per node: each node indexes only the rows it
+stores, not one cluster-wide structure. A query that filters on the indexed column
+without the partition key in `WHERE` still fans out to every node — coordinator
+scatter-gather — and each node probes its own local index. Storage cost also grows
+roughly linearly with the number of indexed columns, because 2i keeps an entirely
+separate hidden table per index.
+
+**SAI (Storage-Attached Index)**, introduced in 5.0, replaces the on-disk half of that
+story without changing the fan-out: index data is attached to the normal
+memtable/SSTable lifecycle and mirrors the structure and locality of the table it
+indexes, so it flushes, compacts, and streams together with the base data instead of
+living in a separate hidden table.
+
+```cql
+CREATE INDEX status_idx ON orders (status) USING 'sai';
+CREATE INDEX amount_idx ON orders (amount) USING 'sai';   -- numeric range: >, <, BETWEEN
+CREATE INDEX notes_idx  ON orders (notes)  USING 'sai'
+  WITH OPTIONS = {'case_sensitive': 'false'};              -- text prefix/suffix
+```
+
+| | Legacy 2i | SAI (5.0) |
+|---|---|---|
+| Fan-out on a query without the partition key | cluster-wide scatter-gather | cluster-wide scatter-gather (unchanged) |
+| Storage overhead, N indexed columns | grows ~linearly in N (separate hidden table per index) | grows only marginally in N (shares the base table's storage lifecycle) |
+| Query types | equality only | equality, numeric range, text prefix/suffix, boolean, composite (AND) |
+| Streaming / bootstrap / repair | slow — each hidden index table streams separately | fast — mirrors base table locality |
+| Recommended for new tables | superseded by SAI | yes, for low/medium-cardinality filters |
+
+**The rule that survives both.** Neither 2i nor SAI removes the scatter-gather cost of a
+query with no partition key — SAI makes each node's per-index cost cheaper and the
+storage overhead of indexing several columns roughly free, it does not make the query
+cluster-local. For a high-cardinality, high-frequency access path (look up an order by
+`order_id`, a user by `email`), the answer is still the one this module opens with: a
+denormalized query table keyed by that column, following "one access pattern, one
+table." Reach for SAI for genuinely secondary filters layered on top of an
+already partition-key-scoped query, or for ad-hoc/analytical filters where
+scatter-gather is acceptable because the query is rare.
+
+### Vector Search with the VECTOR Type [5.0]
+
+Cassandra 5.0 adds a `VECTOR` CQL type and an approximate-nearest-neighbor (ANN) index
+built on **HNSW**, implemented as an SAI index type rather than a separate subsystem —
+a vector index shares SAI's storage-attached lifecycle (flush/compact/stream with the
+base table) the same way a numeric-range SAI index does.
+
+```cql
+CREATE TABLE product_embeddings (
+    product_id  UUID PRIMARY KEY,
+    name        TEXT,
+    embedding   VECTOR<FLOAT, 1536>
+);
+
+CREATE CUSTOM INDEX embedding_ann_idx ON product_embeddings (embedding)
+  USING 'sai' WITH OPTIONS = {'similarity_function': 'COSINE'};
+
+SELECT product_id, name FROM product_embeddings
+ORDER BY embedding ANN OF [0.12, -0.04, 0.31]
+LIMIT 10;
+```
+
+What it is good for: a single-store answer when embeddings and the row that owns them
+already live in Cassandra, and the workload is "top-K similar rows within a
+partition-scoped or full-table search," avoiding a second system just for the vector
+index. What it is not: a drop-in replacement for a purpose-built vector database on
+recall-sensitive, high-QPS, or filter-heavy ANN workloads — this is the newest SAI
+index type in the newest Cassandra generation, with a shorter production track record
+than HNSW implementations in engines built vector-first. See
+[Vector Databases](../vector_databases/vector_databases.md) for the HNSW/IVF/PQ
+mechanics and the pgvector/dedicated-store tradeoff this decision actually turns on.
+
+### HBase and the Bigtable Lineage
+
+Cassandra descends from two papers: Amazon's Dynamo gives it the ring, gossip, and
+tunable quorum; Google's Bigtable (2006) gives it the column-family data model.
+**Apache HBase** is the other major open-source Bigtable descendant, built directly on
+the Bigtable design rather than on Dynamo — which is why its tradeoffs run in the
+opposite direction from Cassandra's on almost every axis below.
+
+**HBase architecture.** HBase runs on top of **HDFS** rather than owning its own
+storage. An **HMaster** assigns **regions** — contiguous row-key ranges — to
+**RegionServers**, and a RegionServer splits a region automatically once it grows past
+a size threshold. Per region: a **MemStore** (the in-memory write buffer, HBase's
+memtable equivalent) flushes to immutable **HFiles** (HBase's SSTable equivalent) on
+HDFS, backed by a **WAL** for durability; **ZooKeeper** coordinates the cluster —
+region assignment, HMaster failover, RegionServer liveness.
+
+| | Cassandra | HBase |
+|---|---|---|
+| Storage layer | owns its own disk storage | runs on top of HDFS |
+| Partitioning | hash of the partition key (murmur3 -> token ring), masterless | range of the row key, assigned by a master (HMaster) |
+| Coordination | gossip, no master | ZooKeeper + HMaster |
+| Consistency | tunable (`W + R > RF`), eventual by default | strong by construction — exactly one RegionServer owns a region at a time |
+| Row-key hotspotting | avoided by hashing (murmur3 spreads keys across the ring) | a real risk — monotonically increasing row keys (timestamps, auto-increment IDs) all land in the newest region until it splits; fixed by salting/hashing the row-key prefix |
+| Failover unit | any node can coordinate; no election | region reassignment on RegionServer failure; HMaster failover on master failure |
+| Managed descendant | DataStax Astra DB | Google Cloud Bigtable (HBase-API-compatible managed service) |
+
+**When each is the right answer.** HBase's one-RegionServer-per-region design gives
+strong, read-your-writes consistency for free — exactly what Cassandra's tunable-quorum
+model does not give you without paying for QUORUM+QUORUM. Pick HBase (or managed
+Bigtable) when the workload wants that consistency by default and already lives in a
+Hadoop/HDFS ecosystem. Pick Cassandra when you want masterless multi-region writes, no
+single region-owner to fail over, and are willing to design row keys around hashing
+instead of natural ranges. Google Cloud Bigtable is the managed way to get HBase's
+model — and its HBase-API compatibility — without operating HDFS or ZooKeeper yourself.
+
+### ScyllaDB: Shard-Per-Core Reimplementation
+
+ScyllaDB reimplements the Cassandra wire protocol and CQL in C++ on the **Seastar**
+framework instead of running on the JVM. Two changes drive most of the difference:
+
+- **Shard-per-core**: one shard is pinned to each physical core, owns its own memory
+  and its own slice of the node's data, and never shares state with another shard on
+  the same machine — eliminating cross-core locking and letting a single node's
+  throughput scale with core count in a way Cassandra's JVM threads do not.
+- **No JVM, no GC**: C++ with RAII-based memory management means no stop-the-world
+  garbage-collection pause — exactly the failure mode that shows up as p99
+  tail-latency spikes on a large JVM heap under load.
+
+Practical consequence: far higher achievable throughput per node and fewer nodes for
+the same workload, at the cost of a different operational model (Seastar's
+async/reactor-per-core model instead of the JVM tooling most Cassandra operators
+already know) and a feature set that lags newer Cassandra releases — SAI, vector
+search, and UCS above are Cassandra-5.0-specific; verify ScyllaDB's own roadmap before
+assuming feature parity.
+
+**Real-world example.** Discord migrated its message-history storage from Cassandra to
+ScyllaDB after Cassandra's JVM garbage collection produced tail-latency spikes at their
+node count and message volume; the move cut both p99 latency and the node count needed
+to serve the same traffic — the canonical case for choosing ScyllaDB over Cassandra.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -416,6 +596,31 @@ Within the partition, rows are stored sorted by clustering key (`ts DESC`), so t
 ---
 
 ## 6. How It Works — Detailed Mechanics
+
+### Trie Memtables & BTI SSTables [5.0]
+
+Cassandra 5.0 adds an alternative memtable implementation and on-disk SSTable format,
+opt-in per table:
+
+- **Trie memtable** stores keys in a trie (prefix tree) instead of the legacy
+  skip-list. Shared prefixes are stored once, so the same key set needs fewer objects
+  and less heap, and lookups walk the trie's cache-friendly node layout instead of
+  chasing skip-list pointers scattered across the heap.
+- **BTI (Big Trie-Index) SSTable format** replaces the legacy skip-list-based on-disk
+  index with a trie-based one — same idea as the memtable change, applied to the
+  immutable SSTable's index rather than the mutable in-memory structure.
+
+```cql
+CREATE TABLE sensor_readings (device_id UUID, ts TIMESTAMP, temperature DOUBLE,
+    PRIMARY KEY (device_id, ts))
+  WITH memtable = {'class': 'TrieMemtable'};
+```
+
+Concrete effect: less heap pressure per memtable, which matters most on ingest-heavy
+tables that flush large memtables often — the same failure mode Pitfall 1 below (large
+partitions leading to OOM during compaction) sits next to. Trie memtables and BTI are
+opt-in in 5.0, not the default for existing tables — verify the setting survived an
+upgrade rather than assuming it.
 
 ### Tombstone Accumulation Problem
 
@@ -532,7 +737,7 @@ bucket width that puts your busiest key under both limits, then remember the cos
 | Consistency | Tunable (eventual to strong) | Strong (ACID) | Tunable |
 | Schema flexibility | Moderate | Rigid | High |
 | Query flexibility | Limited (partition key required) | Very High (SQL) | High (aggregation) |
-| Secondary indexes | Limited (local, materialized view) | Rich (B+tree, GIN, etc.) | Rich |
+| Secondary indexes | Limited (local, per-node fan-out; SAI [5.0] narrows but does not close the gap) | Rich (B+tree, GIN, etc.) | Rich |
 | Transactions | Single partition or LWT | Full ACID | Multi-document ACID (also across shards) |
 
 ---
@@ -633,7 +838,9 @@ A team sets RF=1 ("we don't need replication, we'll use RAID"). Node failure →
 | `Medusa` | Backup/restore tool for Cassandra |
 | `Reaper` | Cassandra repair management |
 | `Cassandra Exporter` | Prometheus metrics exporter |
-| ScyllaDB | C++ Cassandra-compatible alternative (shard-per-core, no JVM) |
+| ScyllaDB | C++ Cassandra-compatible alternative (shard-per-core, no JVM); see dedicated subsection in §4 |
+| Apache HBase | Bigtable-lineage wide-column store on HDFS; HMaster + RegionServers, ZooKeeper-coordinated |
+| Google Cloud Bigtable | Managed, HBase-API-compatible descendant of the original Bigtable paper |
 
 ---
 
@@ -652,7 +859,7 @@ Every DELETE in Cassandra writes a tombstone marker instead of physically removi
 **Q: Explain how Cassandra achieves linearizability with lightweight transactions.**
 **Short:** Cassandra achieves linearizability only for single-partition ops via Paxos-based lightweight transactions, at four round trips.
 
-Cassandra's default consistency model is eventual (tunable to strong via QUORUM, but not linearizable). Lightweight Transactions (LWT) use the Paxos consensus protocol to achieve linearizability for single-partition operations. LWT workflow: (1) Prepare: coordinator sends prepare to all replicas for the partition, each responds with the highest promised Paxos round it knows. (2) Promise: if coordinator gets majority acknowledgment, proceeds. (3) Propose: coordinator sends the conditional operation (CAS: IF balance = 500 THEN balance = 600). (4) Commit: replicas commit if the condition is still true. Cost: 4 round trips (vs 1 for regular writes) → 4x latency, ~10x less throughput. Use only for: unique constraints (INSERT IF NOT EXISTS for unique emails), distributed counters requiring exact accuracy, reservation systems.
+Cassandra's default consistency model is eventual (tunable to strong via QUORUM, but not linearizable). Lightweight Transactions (LWT) use the Paxos consensus protocol to achieve linearizability for single-partition operations. LWT workflow: (1) Prepare: coordinator sends prepare to all replicas for the partition, each responds with the highest promised Paxos round it knows. (2) Promise: if coordinator gets majority acknowledgment, proceeds. (3) Propose: coordinator sends the conditional operation (CAS: IF balance = 500 THEN balance = 600). (4) Commit: replicas commit if the condition is still true. Cost: 4 round trips (vs 1 for regular writes) → 4x latency, ~10x less throughput. Use only for: unique constraints (INSERT IF NOT EXISTS for unique emails), distributed counters requiring exact accuracy, reservation systems. Looking ahead: Cassandra 6.0 — alpha only as of 2026, not GA — introduces Accord, a leaderless consensus protocol targeting one wide-area round trip for general-purpose, multi-partition ACID transactions instead of Paxos's four; treat that as a design goal, not something to build on until 6.0 reaches GA.
 
 **Q: How does Cassandra's consistent hashing with vnodes differ from simple consistent hashing?**
 **Short:** Vnodes give each physical node many small token ranges, spreading rebalancing load across the whole cluster.
@@ -662,7 +869,7 @@ Simple consistent hashing: each node owns one contiguous token range. Node addit
 **Q: What is the difference between STCS, LCS, and TWCS compaction strategies?**
 **Short:** STCS favors low write amplification, LCS favors low space amplification and reads, TWCS drops SSTables by time window.
 
-STCS (Size-Tiered): merges SSTables of similar sizes. Low write amplification — SSTables are merged infrequently and only with similar-sized peers. Space amplification: up to 2x (multiple overlapping SSTables with different versions of same row). Best for: write-heavy workloads where reads are infrequent. LCS (Leveled): organizes SSTables in size levels (similar to RocksDB LCS). Each level is a sorted, non-overlapping set. Low space amplification (1.1x). Higher write amplification (10-30x). Consistent read performance (fewer SSTables to check). Best for: read-heavy workloads, mixed OLTP. TWCS (Time Window): designed for time-series with TTL. Groups SSTables by time window (e.g., 1 hour). Compacts within windows but not across windows. When a time window's TTL expires, the entire SSTable is dropped — no tombstone scanning. Best for: IoT, time-series, any data with uniform TTL.
+STCS (Size-Tiered): merges SSTables of similar sizes. Low write amplification — SSTables are merged infrequently and only with similar-sized peers. Space amplification: up to 2x (multiple overlapping SSTables with different versions of same row). Best for: write-heavy workloads where reads are infrequent. LCS (Leveled): organizes SSTables in size levels (similar to RocksDB LCS). Each level is a sorted, non-overlapping set. Low space amplification (1.1x). Higher write amplification (10-30x). Consistent read performance (fewer SSTables to check). Best for: read-heavy workloads, mixed OLTP. TWCS (Time Window): designed for time-series with TTL. Groups SSTables by time window (e.g., 1 hour). Compacts within windows but not across windows. When a time window's TTL expires, the entire SSTable is dropped — no tombstone scanning. Best for: IoT, time-series, any data with uniform TTL. Cassandra 5.0 adds a fourth option, UCS (Unified Compaction Strategy): one tunable, density-based strategy that can be configured to behave like leveled or tiered and adjusts automatically as the cluster grows, so most tables no longer need STCS/LCS/TWCS hand-picked — TWCS remains the explicit right choice for a pure time-series TTL table where whole-SSTable expiry is the entire point.
 
 **Q: What is the replication factor and how does it interact with consistency levels?**
 **Short:** Strong consistency holds when write plus read consistency levels exceed the replication factor (W + R > RF).
@@ -705,9 +912,9 @@ Large partitions (> 100MB) cause problems: hot nodes during compaction, OOM duri
 Node failure detection: heartbeat via gossip stops → other nodes mark it DOWN within ~10 seconds. Data availability: RF=3, CL=QUORUM: 2 of 3 replicas remain → operations continue. Reads and writes are served by the remaining 2 replicas. Hinted handoff: coordinator stores "hints" for writes intended for the failed node (up to max_hint_window_in_ms = 3 hours default). On node recovery: coordinator replays stored hints to the recovered node. After hints expire (or for longer outages): run `nodetool repair` to resync the recovered node from neighboring replicas. Full repair: compares data across all replicas, fixes inconsistencies using Merkle trees (anti-entropy mechanism). Schedule weekly `nodetool repair -full` on each node.
 
 **Q: How do Cassandra secondary indexes work, and why are they discouraged for high-cardinality columns?**
-**Short:** Cassandra secondary indexes are per-node and fan out cluster-wide, making them unsuitable for high-cardinality lookups.
+**Short:** Cassandra secondary indexes (legacy 2i and 5.0's SAI) are per-node and fan out cluster-wide, unsuitable for high-cardinality lookups.
 
-A Cassandra secondary index is built locally on each node, indexing only the rows that node stores, not as one global structure like a PostgreSQL B+tree. A query filtering only by the secondary-indexed column, with no partition key in the `WHERE` clause, still fans out to every node in the cluster and probes each node's local index, turning what looks like an indexed lookup into a scatter-gather across the ring. This works acceptably for low-cardinality columns, such as a `status` field with a handful of distinct values where each node's local index stays small, but on high-cardinality columns like user email or unique IDs, every node's local index still gets checked for what is effectively a single-row lookup, wasting cluster-wide effort on every query. The recommended fix for high-cardinality lookup patterns is a separate query table keyed by that column as the partition key, following Cassandra's "one access pattern, one table" rule, rather than relying on a secondary index at all. Reserve secondary indexes for genuinely low-cardinality filters layered on top of an already partition-key-scoped query.
+A Cassandra secondary index is built locally on each node, indexing only the rows that node stores, not as one global structure like a PostgreSQL B+tree. A query filtering only by the secondary-indexed column, with no partition key in the `WHERE` clause, still fans out to every node in the cluster and probes each node's local index, turning what looks like an indexed lookup into a scatter-gather across the ring. This works acceptably for low-cardinality columns, such as a `status` field with a handful of distinct values where each node's local index stays small, but on high-cardinality columns like user email or unique IDs, every node's local index still gets checked for what is effectively a single-row lookup, wasting cluster-wide effort on every query. As of Cassandra 5.0, **SAI (Storage-Attached Index)** — `CREATE INDEX ... USING 'sai'` — is the recommended index type for new tables: it attaches index data to the normal memtable/SSTable lifecycle, so storage overhead grows only marginally as you index more columns and it supports range, prefix/suffix, and composite queries the legacy `2i` cannot. SAI does not change the fan-out behavior above — a query without the partition key still contacts every node — so the recommended fix for high-cardinality lookup patterns is unchanged: a separate query table keyed by that column as the partition key, following Cassandra's "one access pattern, one table" rule, rather than relying on either index type. Reserve secondary indexes (2i or SAI) for genuinely low-cardinality filters layered on top of an already partition-key-scoped query.
 
 **Q: Why is a large IN clause with many partition keys an anti-pattern in Cassandra, and how do token-aware drivers help?**
 **Short:** A large IN clause forces one coordinator into cluster-wide scatter-gather; token-aware drivers route sub-batches directly.
@@ -718,6 +925,36 @@ A Cassandra IN clause listing thousands of partition keys forces the coordinator
 **Short:** Counter columns only support atomic increment and decrement, merging per-replica shards to avoid read-modify-write races.
 
 A counter column is a special Cassandra data type that only supports atomic increment and decrement, not being set to an arbitrary value like a normal column. Internally, Cassandra tracks each counter as a set of per-replica shard values merged together on read, which lets increments from different coordinators land without the read-modify-write race condition a normal column would suffer under concurrent updates. This makes counters genuinely useful for high-throughput tallies, such as page views or like counts, where many clients increment the same value concurrently and only the aggregate total matters, not the order of individual increments. The tradeoff is that counter columns cannot coexist with regular columns in the same table, cannot be part of a primary key, and cannot be reliably reset to an exact value without care, since "set to zero" is actually implemented as tracking and subtracting the current total. Use counters only for simple additive tallies, and model anything needing exact values or complex updates as a normal column with application-level coordination instead.
+
+**Q: When does SAI still not replace a denormalized query table in Cassandra 5.0?**
+**Short:** SAI narrows secondary-index cost per column but never removes cluster-wide scatter-gather, so hot lookups still need a query table.
+
+SAI (Storage-Attached Index) fixes the storage-overhead half of Cassandra's old secondary-index problem: index data mirrors the base table's memtable/SSTable lifecycle instead of living in a separate hidden table per index, so indexing several columns no longer multiplies disk usage the way legacy `2i` did. What SAI does not fix is the query-time half — a query without the partition key in `WHERE` still contacts every node in the cluster and probes each node's SAI index, because SAI is still a per-node structure, not one global index. For a high-cardinality, high-frequency access path (looking up a user by email, an order by ID), that scatter-gather cost dominates regardless of how cheap each node's local probe is. The rule stays the one this module opens with: for that kind of access pattern, build a denormalized query table keyed by the lookup column as its partition key. Reach for SAI instead when the filter is genuinely secondary — layered on top of a query that already includes the partition key, or run rarely enough that scatter-gather is acceptable.
+
+**Q: What problem does Unified Compaction Strategy (UCS) solve that STCS/LCS/TWCS don't?**
+**Short:** UCS is one tunable, density-based strategy that behaves like leveled or tiered as the cluster grows, avoiding per-table strategy picking.
+
+STCS, LCS, and TWCS each optimize for a different resource — STCS for low write amplification, LCS for low space amplification and consistent reads, TWCS for TTL-driven time-series — which means an operator has to pick the right one per table and re-evaluate as that table's workload shifts. UCS (Unified Compaction Strategy), added in Cassandra 5.0, replaces that per-table choice with one strategy whose behavior is controlled by density-based scaling parameters: configured one way it behaves like leveled compaction, configured another way it behaves like tiered, and it adjusts automatically as the cluster grows rather than requiring a manual strategy change. The practical operational win is much higher achievable node density without hand-tuning STCS/LCS/TWCS table by table. UCS does not replace TWCS's core trick — dropping an entire expired SSTable with zero tombstone scanning — so a pure time-series TTL table (a feed, IoT sensor readings) should still pick TWCS explicitly rather than defaulting to UCS.
+
+**Q: How does Accord differ from Paxos-based LWT, and is it available today?**
+**Short:** Accord targets one wide-area round trip for general ACID transactions, but ships only as Cassandra 6.0-alpha, not GA.
+
+Cassandra's Lightweight Transactions run Paxos per operation: prepare, promise, propose, commit — four round trips, and scoped to a single partition. Accord, introduced in Cassandra 6.0, is a leaderless consensus protocol designed to provide general-purpose, multi-partition ACID transactions in roughly one wide-area round trip under normal conditions, with performance designed to stay stable under any tolerated minority of replica failures rather than degrading the way majority-based protocols can. As of 2026, Cassandra 6.0 is published only as 6.0-alpha1 — not GA, not production-ready — so every number above is a design goal awaiting validation at GA, not a benchmarked result. Build on Paxos-based LWT for anything shipping today; Accord is the thing to evaluate once 6.0 reaches general availability and only if the workload genuinely needs transactions that cross partitions.
+
+**Q: When would you choose HBase over Cassandra for a wide-column workload?**
+**Short:** Choose HBase when you want strong per-region consistency by default and already run on HDFS/ZooKeeper.
+
+HBase and Cassandra both descend from Google's Bigtable paper, but HBase inherited Bigtable's architecture directly while Cassandra grafted Bigtable's data model onto Amazon Dynamo's ring. That shows up as opposite tradeoffs: HBase partitions by row-key range, assigns each range (region) to exactly one RegionServer via a master (HMaster), and gets strong, read-your-writes consistency for free because only one server ever owns a given region at a time — no quorum math required. Cassandra partitions by hashing the key across a masterless ring and only gets that same strength by paying for `QUORUM` reads and writes on every operation, defaulting instead to tunable eventual consistency. The cost on HBase's side is architectural: it runs on HDFS rather than owning its storage, needs ZooKeeper plus an HMaster for coordination, and a monotonically increasing row key (timestamps, auto-increment IDs) hotspots the newest region until it splits, a problem Cassandra's murmur3 hashing avoids by construction. Choose HBase, or its managed descendant Google Cloud Bigtable, when the workload wants strong consistency by default and already lives in a Hadoop/HDFS ecosystem; choose Cassandra for masterless multi-region writes and when you can design row keys around hashing instead of natural ranges.
+
+**Q: What does ScyllaDB's shard-per-core architecture buy you over Cassandra, and what's the cost?**
+**Short:** Shard-per-core plus no JVM GC gives ScyllaDB higher throughput per node, at the cost of a different ops model and lagging features.
+
+ScyllaDB reimplements the Cassandra wire protocol and CQL in C++ on the Seastar framework instead of the JVM. Two architectural changes drive the difference: shard-per-core pins one shard to each physical core with its own memory and its own slice of the node's data, eliminating the cross-core locking a JVM thread pool pays for, so a single node's throughput scales with core count more directly; and the absence of a JVM means no stop-the-world garbage-collection pause, which is precisely the failure mode that produces p99 tail-latency spikes on a large heap under load. The practical payoff is far higher achievable throughput per node and fewer nodes for the same workload — Discord migrated its message-history storage from Cassandra to ScyllaDB for exactly this reason, moving off Cassandra because JVM garbage collection was producing tail-latency spikes at their node count and message volume. The cost is a different operational model — Seastar's async/reactor-per-core design instead of the JVM tooling most Cassandra operators already know — and a feature set that lags newer Cassandra releases; SAI, vector search, and UCS are Cassandra-5.0-specific, so feature parity with ScyllaDB should be verified rather than assumed.
+
+**Q: How does Cassandra 5.0's VECTOR type and ANN search fit into SAI, and when should you use it?**
+**Short:** VECTOR search is an HNSW-based SAI index type good for single-store top-K similarity, not a dedicated vector database replacement.
+
+Cassandra 5.0 adds a `VECTOR<FLOAT, N>` CQL type and an approximate-nearest-neighbor index built on HNSW, implemented as an SAI index type rather than a bolted-on subsystem — `CREATE CUSTOM INDEX ... USING 'sai' WITH OPTIONS = {'similarity_function': 'COSINE'}`, then `SELECT ... ORDER BY embedding ANN OF [...] LIMIT k`. Because it is an SAI index, it shares SAI's storage-attached lifecycle: it flushes, compacts, and streams together with the base table instead of living in a separate index store. This makes it a good fit when embeddings and the row that owns them already live in Cassandra and the workload is "top-K similar rows within an existing partition-scoped or full-table search" — one fewer system to run and keep in sync. It is not a drop-in replacement for a purpose-built vector database on recall-sensitive, high-QPS, or filter-heavy ANN workloads: it is the newest SAI index type in the newest Cassandra generation, with a shorter production track record than HNSW implementations in engines built vector-first from the start. See [Vector Databases](../vector_databases/vector_databases.md) for the HNSW/IVF/PQ mechanics and the pgvector-versus-dedicated-store tradeoff this decision actually turns on.
 
 ---
 

@@ -10,7 +10,7 @@ Python offers three distinct models for concurrent and parallel execution:
 - **Multiprocessing** (`multiprocessing` module): spawns separate OS processes, each with its own GIL and memory space. True parallelism for CPU-bound work. Communication requires pickling data across process boundaries.
 - **`concurrent.futures`**: high-level executor abstraction over both models. `ThreadPoolExecutor` wraps threads; `ProcessPoolExecutor` wraps processes. Preferred for most application code.
 
-Python 3.8 added `multiprocessing.shared_memory` for zero-copy shared buffers across processes. Python 3.12 introduced experimental free-threaded mode (no GIL) via `--disable-gil` build flag.
+Python 3.8 added `multiprocessing.shared_memory` for zero-copy shared buffers across processes. Python 3.13 shipped free-threaded mode (no GIL) experimentally as a separate build (`python3.13t`, configured with `--disable-gil`); Python 3.14 made it officially supported (PEP 779) as `python3.14t`, with the single-thread overhead down to roughly 1% on macOS aarch64 to 8% on x86-64 Linux. Python 3.14 also added `concurrent.interpreters` and `concurrent.futures.InterpreterPoolExecutor` (PEP 734) — a third parallelism model, alongside threads and processes, that gives each interpreter its own GIL without the pickling cost of a full process.
 
 See `../the_gil_and_free_threading/the_gil_and_free_threading.md` for why multiprocessing outperforms threading for CPU-bound work.
 See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio alternative to threading for I/O-bound concurrency.
@@ -39,7 +39,7 @@ See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio altern
 
 **Daemon threads**: A daemon thread is killed automatically when all non-daemon threads (including `main`) exit. Non-daemon threads keep the process alive until they finish. Default is `daemon=False`.
 
-**Process creation cost**: On Linux, `fork()` is cheap (copy-on-write). On macOS (Python 3.8+) and Windows, the default start method is `spawn` — it imports the entire module from scratch, adding ~0.1–0.3s startup overhead per process.
+**Process creation cost**: `fork()` is cheap (copy-on-write) — it duplicates the parent's memory pages without re-running module imports. On macOS (Python 3.8+) and Windows, the default start method is `spawn` — it imports the entire module from scratch, adding ~0.1–0.3s startup overhead per process. As of Python 3.14, Unix platforms other than macOS switched their default from `fork` to `forkserver` (macOS and Windows are unchanged — they already defaulted to `spawn`). `forkserver` starts one clean, single-threaded server process at pool creation and forks each worker from it, which sidesteps the classic `fork`-in-a-threaded-process deadlock: a plain `fork()` copies whatever state a lock was in at the instant of the fork, but not the other threads that might have held it, so a child can inherit a lock permanently held by a thread that no longer exists in it. Request `fork` explicitly when you still need it, via `multiprocessing.get_context("fork")`.
 
 ---
 
@@ -51,6 +51,7 @@ See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio altern
 | `ThreadPoolExecutor` | `concurrent.futures` | During I/O / C extensions | Yes (risky) | I/O-bound pool |
 | `multiprocessing.Pool` | `multiprocessing` | N/A (separate GIL) | No (pickle) | CPU-bound batch |
 | `ProcessPoolExecutor` | `concurrent.futures` | N/A (separate GIL) | No (pickle) | CPU-bound pool |
+| `InterpreterPoolExecutor` | `concurrent.futures` [3.14] | N/A (per-interpreter GIL) | No (explicit queues) | CPU-bound, no pickle-a-process cost |
 | `SharedMemory` | `multiprocessing.shared_memory` | N/A | Yes (raw bytes) | Large data CPU-bound |
 | `subprocess` | `subprocess` | Yes | No (pipes/files) | External programs |
 
@@ -58,6 +59,8 @@ See `../asyncio_and_event_loop/asyncio_and_event_loop.md` for the asyncio altern
 - I/O-bound: `max_workers = min(32, os.cpu_count() + 4)` (Python default for `ThreadPoolExecutor`)
 - CPU-bound: `max_workers = os.cpu_count()` — one process per physical core
 - Database connection pools: match `max_workers` to your DB connection pool size (typically 10–20)
+
+**`InterpreterPoolExecutor` [3.14]**: runs each task in its own sub-interpreter (PEP 684, one GIL per interpreter), submitted the same way as `ThreadPoolExecutor`/`ProcessPoolExecutor` via `concurrent.futures`. Its pitch is parallelism without paying to pickle and fork an entire process image — no new OS process, no re-imported module tree. The cost is strict isolation: sub-interpreters do not share a Python heap, so passing data in and out goes through explicit queues (`concurrent.interpreters.create_queue()`) rather than shared memory, and most C extensions that assume a single global interpreter state are not yet interpreter-safe.
 
 ---
 
@@ -657,16 +660,16 @@ def run_ffmpeg(input_path: str, output_path: str) -> tuple[int, str, str]:
 
 ## 8. Tradeoffs
 
-| Dimension | `threading` | `multiprocessing` | `asyncio` |
-|---|---|---|---|
-| CPU-bound speedup | None (GIL) | Linear with cores | None |
-| I/O-bound speedup | Yes | Yes (overkill) | Yes (best) |
-| Memory overhead | ~8 MB per thread | ~30 MB per process | ~few KB per coroutine |
-| Shared state | Easy but risky | Hard (pickle / SharedMemory) | Easy (single thread) |
-| Startup cost | ~1 ms | ~100–300 ms (spawn) | Negligible |
-| Debugging | Hard (race conditions) | Hard (IPC) | Medium (traceable) |
-| GIL interaction | Blocked for bytecode | Independent GIL | Single GIL, coop yield |
-| Best use case | I/O-bound + legacy sync | CPU-bound batch | I/O-bound async |
+| Dimension | `threading` | `multiprocessing` | `asyncio` | `InterpreterPoolExecutor` [3.14] |
+|---|---|---|---|---|
+| CPU-bound speedup | None (GIL) | Linear with cores | None | Linear with interpreters |
+| I/O-bound speedup | Yes | Yes (overkill) | Yes (best) | Yes (overkill) |
+| Memory overhead | ~8 MB per thread | ~30 MB per process | ~few KB per coroutine | Less than a process, more than a thread |
+| Shared state | Easy but risky | Hard (pickle / SharedMemory) | Easy (single thread) | Hard (explicit queues, no shared heap) |
+| Startup cost | ~1 ms | ~100–300 ms (spawn) | Negligible | Interpreter creation, no fork/re-exec |
+| Debugging | Hard (race conditions) | Hard (IPC) | Medium (traceable) | Hard (isolation, no shared state) |
+| GIL interaction | Blocked for bytecode | Independent GIL | Single GIL, coop yield | One GIL per interpreter |
+| Best use case | I/O-bound + legacy sync | CPU-bound batch | I/O-bound async | CPU-bound without a process's pickle cost |
 
 **Put simply.** "Each concurrency model charges a fixed rent per unit of concurrency, and the three
 rents differ by three orders of magnitude." The memory row above is not a tiebreaker — at high
@@ -903,6 +906,7 @@ def thread_b() -> None:
 | `ThreadPoolExecutor` | Thread pool | Yes | I/O-bound pools | No CPU parallelism |
 | `multiprocessing.Pool` | Process pool | No | CPU-bound batch | Pickle overhead |
 | `ProcessPoolExecutor` | Process pool | No | CPU-bound with futures | Pickle overhead |
+| `InterpreterPoolExecutor` | Sub-interpreter pool | Per interpreter | CPU-bound, no process spawn | No shared heap, thin C-extension support |
 | `multiprocessing.shared_memory` | IPC | No | Large NumPy arrays | Manual lifecycle |
 | `multiprocessing.Value/Array` | IPC | No | Simple typed counters | Fixed size |
 | `queue.Queue` | In-process | Yes | Thread-safe communication | Single process only |
@@ -971,9 +975,21 @@ The exception is caught in the worker, pickled, and sent back to the main proces
 **Short:** Choose subprocess for running external non-Python binaries, and multiprocessing for parallelizing Python functions themselves.
 Choose `subprocess` when: (1) running external binaries that are not Python (ffmpeg, git, curl, pandoc), (2) the tool has its own memory management and you just need its output, (3) you need shell piping or redirection, (4) you want to run system commands for orchestration. Choose `multiprocessing` when: (1) running Python functions in parallel, (2) you need to pass Python objects (not just strings) efficiently, (3) you need shared memory or `Value`/`Array`. `subprocess` has lower overhead for invoking external tools and avoids the Python object serialization problem entirely.
 
-**Q15: How does the `multiprocessing` start method affect behavior on macOS and Windows?**
-**Short:** macOS switched its default multiprocessing start method from fork to the safer but slower spawn in Python 3.8.
-Python 3.8+ changed the default start method on macOS from `fork` to `spawn`. `fork` duplicates the parent process memory (cheap, copy-on-write) but can cause deadlocks in forked processes that inherited lock state from the parent — particularly with Objective-C frameworks on macOS. `spawn` starts a fresh Python interpreter and re-imports the main module (adds ~0.1–0.3s per worker but is safe). Windows only supports `spawn`. Use `if __name__ == "__main__":` guard on Windows/macOS to prevent recursive spawning. `forkserver` is a third option: one fork server holds a clean state and forks from it.
+**Q16: Python 3.14 changed the default `multiprocessing` start method on Linux from `fork` to `forkserver`. What can this break, and how do you fix it?**
+**Short:** forkserver forks from a clean server process instead of the caller, so code relying on inherited caller-process state at fork time breaks.
+Code that assumed `fork` semantics — reading module-level globals or open file descriptors that were set up in the *calling* process just before `Pool()` was created — can silently see stale or missing state under `forkserver`, because workers are forked from a separate, early-started server process rather than from the process that called `Pool()`. Symptoms: a worker missing a database connection or config value the main process set right before spawning workers, or a worker that can no longer see a file descriptor the parent opened afterward. The fix is not to fight the new default: pass required state explicitly as function arguments (which get pickled and delivered to every start method) rather than relying on inherited process globals. If you have already audited the code as single-threaded and fork-safe and need the old behavior, request it explicitly with `multiprocessing.get_context("fork")`.
+
+**Q17: How do you choose between `ThreadPoolExecutor`, `ProcessPoolExecutor`, `InterpreterPoolExecutor`, and a free-threaded build?**
+**Short:** Pick by bottleneck and isolation needs: I/O favors threads, CPU-bound favors processes or interpreters, true shared-memory CPU parallelism favors free-threading.
+Start from the bottleneck: if the workload is I/O-bound, `ThreadPoolExecutor` is simplest and cheapest — the GIL releases during the blocking call, so threads overlap fine. If it is CPU-bound and tasks are naturally independent with small arguments, `ProcessPoolExecutor` gives true parallelism at the cost of pickling arguments and results and a ~100–300ms-per-worker spawn. If the CPU-bound tasks are numerous and short enough that a process's spawn and pickle cost dominates, `InterpreterPoolExecutor` [3.14] gets a separate GIL per task without forking a new OS process — but data still cannot be shared directly, only passed through explicit queues, and many C extensions are not yet interpreter-safe. If you need CPU-bound tasks to share a single mutable heap directly — no pickling, no queues — a free-threaded build (`python3.14t`) is the only option, but it requires auditing every C-extension dependency for free-threaded support and adding your own locks around every piece of shared mutable state, since the GIL was your only synchronization before.
+
+**Q18: Why does calling `fork()` in a process that already has threads risk a deadlock?**
+**Short:** fork() copies only the calling thread into the child, so a lock another thread held at fork time can never be released there.
+`fork()` duplicates the parent's entire address space, including the current state of every lock, but it starts the child with exactly one thread — the one that called `fork()`. If a different thread in the parent happened to be holding a lock (or was in the middle of acquiring one) at the moment of the fork, that lock's "held" state is copied into the child, but the thread that would eventually release it does not exist there. Any code in the child that later tries to acquire that same lock blocks forever. This is why forking after some library has already spun up background threads (a logging thread, a connection-pool thread, an internal thread inside `requests` or a database driver) is a classic source of intermittent, hard-to-reproduce hangs. `forkserver` and `spawn` avoid the problem entirely by never forking a process with extra threads in it — `forkserver`'s server process is deliberately kept single-threaded, and `spawn` starts a brand-new interpreter with no inherited threads at all.
+
+**Q15: How does the `multiprocessing` start method differ across platforms, and what changed in Python 3.14?**
+**Short:** Python 3.14 defaults non-macOS Unix to forkserver; macOS and Windows were already on spawn and are unchanged.
+Python 3.8+ set macOS's default start method to `spawn`; Windows has only ever supported `spawn`. `spawn` starts a fresh Python interpreter and re-imports the main module (adds ~0.1–0.3s per worker) but is always safe. As of Python 3.14, Unix platforms other than macOS also moved off `fork` — their new default is `forkserver`, which keeps one clean, single-threaded server process alive and forks each worker from it, avoiding both `spawn`'s full re-import cost and `fork`'s deadlock risk. Plain `fork()` duplicates the parent's memory (cheap, copy-on-write) but is unsafe once the parent has other threads: a child inherits whatever state a lock was in at fork time without inheriting the thread that owned it, so a lock held by a thread that does not exist in the child can never be released. Use `if __name__ == "__main__":` guard on Windows/macOS to prevent recursive spawning. Request `fork` explicitly with `multiprocessing.get_context("fork")` when its speed is needed and the parent process is known to be single-threaded at fork time.
 
 ---
 

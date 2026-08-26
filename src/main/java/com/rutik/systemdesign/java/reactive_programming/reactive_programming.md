@@ -22,7 +22,8 @@ Key components:
 - **Backpressure** — `request(n)` demand signalling; `onBackpressureBuffer/Drop/Latest/Error`.
 - **Reactor `Context`** — immutable key/value map propagated *upstream* (the reactive replacement for `ThreadLocal`).
 
-Reactor Core 3.6+ (the version under Spring Boot 3.x) targets Java 8+; RxJava 3.x is
+Reactor Core 3.8.x (the 2025.0.x release train, the version under Spring Boot 4.x /
+Spring Framework 7) targets Java 8+; RxJava 3.x is
 the alternative implementation with a slightly different operator vocabulary.
 
 ---
@@ -510,9 +511,9 @@ Always bound the buffer and pick an overflow strategy.
 
 | Tool / Library | Version | Purpose |
 |---|---|---|
-| Reactor Core | 3.6+ (Boot 3.x) | `Flux`/`Mono`, operators, schedulers |
-| Reactor Test (`StepVerifier`) | 3.6+ | Deterministic testing of reactive streams |
-| `reactor-tools` / `Hooks.onOperatorDebug()` | 3.6+ | Assembly-time stack trace capture |
+| Reactor Core | 3.8.x (2025.0.x train, Boot 4.x) | `Flux`/`Mono`, operators, schedulers |
+| Reactor Test (`StepVerifier`) | 3.8.x | Deterministic testing of reactive streams |
+| `reactor-tools` / `Hooks.onOperatorDebug()` | 3.8.x | Assembly-time stack trace capture |
 | BlockHound | 1.0+ | Java agent that detects blocking calls on non-blocking threads |
 | RxJava 3 | 3.1+ | Alternative reactive library (Android, RSocket) |
 | Reactive Streams TCK | 1.0.4 | Conformance test kit for custom `Publisher`s |

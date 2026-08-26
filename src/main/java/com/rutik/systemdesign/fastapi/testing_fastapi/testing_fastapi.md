@@ -56,7 +56,8 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2. SQLAlc
 - Use when: the test itself is async, when testing streaming responses, or when fixtures are async generators
 - Requires `pytest-asyncio` (or `anyio`) and `asyncio_mode = "auto"` in `pytest.ini` / `pyproject.toml`
 - Does not execute `BackgroundTasks` synchronously — tasks run on the event loop; use `asyncio.sleep(0)` or explicit `await` to flush them
-- Lifespan is triggered by `async with AsyncClient(app=app, base_url="http://test") as ac:`
+- Constructed as `AsyncClient(transport=ASGITransport(app=app), base_url="http://test")` — `ASGITransport` is the only way in; there is no `app=` shortcut on the client
+- **Does NOT run `lifespan`.** `ASGITransport` speaks only the `http` scope, so startup/shutdown never fire and anything the app stashes in `lifespan` is missing. Wrap the app in `LifespanManager` from `asgi-lifespan` when a test needs it (see Section 6.4)
 
 ### 4.3 Transaction Rollback Strategy
 
@@ -273,6 +274,7 @@ def client(db_session):
 ```python
 # tests/conftest.py  (continued)
 import httpx
+from httpx import ASGITransport
 
 @pytest_asyncio.fixture
 async def async_client(db_session):
@@ -282,7 +284,7 @@ async def async_client(db_session):
     app.dependency_overrides[get_db] = override_get_db
 
     async with httpx.AsyncClient(
-        app=app,
+        transport=ASGITransport(app=app),
         base_url="http://test",
         headers={"Content-Type": "application/json"},
     ) as ac:
@@ -290,6 +292,146 @@ async def async_client(db_session):
 
     app.dependency_overrides.clear()
 ```
+
+`ASGITransport` is mandatory: `AsyncClient` has no `app=` parameter, so passing one raises
+`TypeError: AsyncClient.__init__() got an unexpected keyword argument 'app'`. It also takes
+`raise_app_exceptions=False` (inspect a 500 body instead of re-raising the app's exception),
+`root_path` (mount the app under a sub-path), and `client=("1.2.3.4", 123)` (fake the peer
+address, which is how you test an IP-keyed rate limiter without a network).
+
+### 6.4.1 Running `lifespan` under AsyncClient
+
+`ASGITransport` implements the `http` scope and nothing else — it never sends
+`lifespan.startup`, so a fixture built only from the block above starts the app with every
+`lifespan`-populated resource still unset. `TestClient` used as a context manager does run
+lifespan; `AsyncClient` does not. When an async test needs it, drive the protocol explicitly
+with `LifespanManager`:
+
+```python
+# tests/conftest.py  (continued)
+from asgi_lifespan import LifespanManager
+
+@pytest_asyncio.fixture
+async def lifespan_client():
+    # LifespanManager sends lifespan.startup on enter and waits for
+    # lifespan.startup.complete; on exit it sends lifespan.shutdown and waits.
+    async with LifespanManager(app) as manager:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=manager.app),
+            base_url="http://test",
+        ) as ac:
+            yield ac
+```
+
+Note `manager.app`, not `app` — the manager returns a wrapped application, and passing the
+bare `app` silently skips the very startup you added the manager for. Keep this fixture
+separate from `async_client`: most tests do not need a real connection pool, and paying
+startup and shutdown per test is the usual reason an async suite is slow.
+
+### 6.4.2 Catching blocking calls with BlockBuster
+
+The most expensive FastAPI bug is a blocking call inside an `async def` — `requests.get`,
+`time.sleep`, a sync driver, `open().read()` on a large file. It never fails a test: the
+result is correct, so every assertion passes, and the only symptom is that p99 collapses
+under concurrency in production. `blockbuster` closes that gap by patching the blocking
+primitives to raise when they are called from the event loop. It is a third-party test-time
+dependency, not part of FastAPI — a proposal to run FastAPI's own suite under it was declined
+as unnecessary for the framework itself, but the same run surfaced real blocking calls in
+Starlette, which is the argument for pointing it at your application code.
+
+```python
+# tests/conftest.py  (continued)
+from collections.abc import Iterator
+
+from blockbuster import BlockBuster, blockbuster_ctx
+
+
+@pytest.fixture(autouse=True)
+def blockbuster() -> Iterator[BlockBuster]:
+    # autouse: every test in the suite runs under detection, so a blocking
+    # call introduced anywhere fails the test that covers it.
+    with blockbuster_ctx() as bb:
+        yield bb
+```
+
+```python
+# tests/test_no_blocking.py
+import time
+
+import pytest
+from blockbuster import BlockingError
+
+
+async def test_report_route_does_not_block(async_client):
+    # Before: this passed. The route called a sync PDF renderer and stalled
+    # the loop for 400 ms per request -- correct output, dead throughput.
+    resp = await async_client.get("/reports/42")
+    assert resp.status_code == 200
+
+
+async def test_blocking_is_actually_detected():
+    # A guard on the guard: proves the fixture is active, so a broken
+    # blockbuster install cannot silently turn the whole suite green.
+    with pytest.raises(BlockingError, match="sleep"):
+        time.sleep(1)
+```
+
+Two operational notes. `autouse=True` is the point — opt-in detection only covers the tests
+someone remembered to mark. And expect real failures on the first run from libraries you do
+not control; `bb.functions["os.read"].can_block_in("site-packages/somelib", "load")` lets you
+allow-list a specific call site rather than disabling detection wholesale.
+
+### 6.4.3 Testing a streaming endpoint
+
+Asserting on `response.text` of a stream tests nothing about streaming: it buffers the whole
+body first, so an endpoint that yields everything in one chunk at the end passes identically
+to one that streams correctly. Test the **chunk boundaries**.
+
+```python
+# tests/test_streaming.py
+import json
+
+import httpx
+from httpx import ASGITransport
+
+from app.main import app
+
+
+async def test_sse_events_arrive_separately():
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        async with ac.stream("GET", "/sse/ticks") as resp:
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            # Set by FastAPI's EventSourceResponse -- without it nginx buffers
+            # the stream and the client sees nothing until the response ends.
+            assert resp.headers["x-accel-buffering"] == "no"
+
+            events = []
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    events.append(line.removeprefix("data:").strip())
+                if len(events) == 3:
+                    break        # exiting the block cancels the generator
+
+    assert len(events) == 3
+    assert events[0] != events[1]
+
+
+async def test_jsonl_stream_is_one_object_per_line():
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        async with ac.stream("GET", "/logs/stream") as resp:
+            assert resp.headers["content-type"].startswith("application/jsonl")
+            rows = [json.loads(l) async for l in resp.aiter_lines() if l]
+    assert all("ts" in r for r in rows)
+```
+
+Use `client.stream(...)` rather than `client.get(...)` — `get()` reads the body to completion
+and hands you the whole thing. Breaking out of the `aiter_lines()` loop exercises the
+client-disconnect path too, which is the code most likely to leak: the generator's `finally`
+should release whatever it acquired, and a test that always drains the stream to the end will
+never catch a leak there.
 
 ### 6.5 Auth override
 
@@ -603,7 +745,7 @@ stateDiagram-v2
     Crash --> [*]
 ```
 
-The lifespan context manager was introduced as the recommended pattern in Starlette 0.20+ / FastAPI 0.93+. Before that, startup/shutdown events were separate signals; `TestClient` did not guarantee they fired unless used as a context manager.
+The lifespan context manager arrived in FastAPI 0.93 (2023-03-07), superseding the separate `startup`/`shutdown` events. Before that, startup/shutdown events were separate signals; `TestClient` did not guarantee they fired unless used as a context manager.
 
 ### BROKEN / FIX 2: Leaking dependency overrides between tests
 
@@ -707,6 +849,8 @@ async def db_session(engine): ...      # fresh session, rolled back per test
 | `sqlalchemy[asyncio]` + `aiosqlite` | Async ORM + in-memory SQLite driver | Fast CI without a PostgreSQL process |
 | `faker` | Realistic test data | Useful in factory fixtures |
 | `freezegun` | Freeze `datetime.now()` | For testing time-sensitive routes |
+| `blockbuster` | Detects blocking calls inside the event loop | `pip install blockbuster`; use an `autouse` fixture wrapping `blockbuster_ctx()` |
+| `asgi-lifespan` | Runs `lifespan` startup/shutdown under `AsyncClient` | `ASGITransport` never fires lifespan events on its own |
 
 ---
 
@@ -805,6 +949,34 @@ An uncleared override stays on the shared `FastAPI` app object after the test th
 **Short:** freezegun freezes the clock so a JWT's expiry boundary can be tested deterministically without sleeping.
 
 Wrap the token-creation and the request-under-test in separate `freeze_time` contexts so the clock the application reads is deterministic rather than depending on real wall-clock timing. Create the token while frozen at a known issue time, then re-enter `with freeze_time(issue_time + timedelta(minutes=31)):` around the request call for a token whose `exp` claim was set to a 30-minute lifetime, forcing the expiry check to evaluate against a time strictly past the boundary. This avoids the flakiness of `time.sleep(1860)` and makes the boundary condition (`now == exp` vs `now > exp`) exactly reproducible on every CI run.
+
+**Q17: Your test suite is green but p99 collapses under load. What test would have caught it?**
+**Short:** A BlockBuster autouse fixture, which raises when a blocking call is made from inside the event loop.
+
+A blocking call inside an `async def` — `requests.get`, `time.sleep`, a sync DB driver, a large
+`open().read()` — returns the correct result, so every assertion passes and no test fails. The
+damage only appears under concurrency, because that one coroutine holds the event loop and
+every other request waits. Ordinary tests cannot see it: they exercise one request at a time,
+where a stalled loop is indistinguishable from a fast one. `blockbuster` patches the blocking
+primitives to raise `BlockingError` when called from the loop; wire it as an `autouse` fixture
+around `blockbuster_ctx()` so the whole suite runs under detection rather than only the tests
+someone remembered to mark. Add one test that asserts `pytest.raises(BlockingError)` on a
+deliberate `time.sleep`, so a broken install cannot silently turn the suite green. Expect real
+failures from third-party libraries on the first run, and allow-list specific call sites rather
+than disabling detection.
+
+**Q18: How do you test that an endpoint actually streams, rather than just returning the right body?**
+**Short:** Use client.stream() and assert on chunk boundaries and headers — reading response.text buffers the body and proves nothing.
+
+`await client.get(...)` reads the response to completion, so an endpoint that builds the whole
+payload and emits it in one chunk at the end passes exactly like one that streams properly.
+Drive it with `async with client.stream("GET", url) as resp` and iterate `resp.aiter_lines()`
+or `aiter_bytes()`, asserting that you receive discrete events before the response ends. Check
+the headers too — for SSE, `content-type: text/event-stream` and `x-accel-buffering: no`, since
+a missing `X-Accel-Buffering` is what makes a correct stream arrive all at once behind nginx.
+Break out of the loop partway rather than always draining it: that exercises the client-disconnect
+path, where the generator's `finally` must release whatever it acquired, and a test that always
+reads to the end will never catch a leak there.
 
 ---
 
@@ -914,7 +1086,9 @@ async def async_client(db_session, fake_user):
     app.dependency_overrides[get_db] = lambda: (yield db_session)
     app.dependency_overrides[get_current_user] = lambda: fake_user
 
-    async with httpx.AsyncClient(app=app, base_url="http://test") as ac:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()

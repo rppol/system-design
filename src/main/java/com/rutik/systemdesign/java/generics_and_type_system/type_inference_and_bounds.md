@@ -347,7 +347,7 @@ public static void swap(List<?> list, int i, int j) {
 }
 ```
 
-A deliberate raw type with a comment explaining the alternative. Copy the *comment* discipline, not the raw type.
+A deliberate raw type with a comment explaining the alternative — [Effective Java Item 26: "Don't use raw types"] is exactly the rule this comment is apologizing for breaking. Copy the *comment* discipline, not the raw type.
 
 Finally, a capture cannot be written down. `CAP#1` is not a denotable type — you cannot declare a variable of it, put it in a field, or return it. It exists for the duration of one expression, which is exactly why it cannot leak.
 
@@ -589,7 +589,7 @@ A metrics exporter built `Map<String, Long>` from `Collectors.toMap(Event::key, 
 | `TypeVariable.getBounds()` | Reads the whole bound list at runtime, including bounds erased out of the descriptor |
 | japicmp / Revapi | Fail the build on a descriptor change — the only automated defence against a bound reorder |
 | Error Prone | Static checks in this family, including type-parameter and unchecked-conversion bug patterns |
-| IDE "expand inferred type" | IntelliJ and Eclipse both display the solver's answer inline; the fastest way to see an `Object` you did not intend |
+| IntelliJ IDEA / Eclipse | The "expand inferred type" action displays the solver's answer inline; the fastest way to see an `Object` you did not intend |
 
 ---
 
@@ -623,7 +623,7 @@ The diamond needs a target type to infer from; `var` removes the declared type t
 **Q: Why does `list.set(0, list.get(1))` on a `List<?>` fail to compile even though it is obviously safe?**
 **Short:** Capture conversion applies per expression, so the two reads of the same variable produce two unrelated fresh type variables.
 
-Capture conversion (JLS 5.1.10) is applied to the type of an *expression*, not to a variable's declaration, so each read of `list` mints a fresh type variable. `javac` says so verbatim: `required: int,CAP#1 / found: int,CAP#2 / where CAP#1,CAP#2 are fresh type-variables ... from capture of ?`. The compiler cannot prove `CAP#1` and `CAP#2` denote the same type, so the write is rejected. The fix is to pass the list once to a generic helper `<T> void swap(List<T>, int, int)` — that captures the wildcard a single time, at the argument, and T is that one variable for the whole body.
+Capture conversion (JLS 5.1.10) is applied to the type of an *expression*, not to a variable's declaration, so each read of `list` mints a fresh type variable. `javac` says so verbatim: `required: int,CAP#1 / found: int,CAP#2 / where CAP#1,CAP#2 are fresh type-variables ... from capture of ?`. The compiler cannot prove `CAP#1` and `CAP#2` denote the same type, so the write is rejected. The fix is to pass the list once to a generic helper `<T> void swap(List<T>, int, int)` — that captures the wildcard a single time, at the argument, and T is that one variable for the whole body. Reaching for a generic method to solve what a raw or wildcard-only signature cannot is [Effective Java Item 30: "Favor generic methods"].
 
 **Q: Where does capture conversion happen automatically, without a helper method?**
 **Short:** On any expression of wildcard type — reads, arguments to generic methods, and `? super` parameter positions all capture unaided.
@@ -663,7 +663,7 @@ A bridge exists so a call through the erased supertype signature reaches the rea
 **Q: What is an f-bounded type parameter, and why prefer `Comparable<? super T>` over `Comparable<T>`?**
 **Short:** An f-bound refers to the parameter inside its own bound; the `? super` form also accepts a subclass whose ordering is inherited.
 
-`<T extends Comparable<T>>` is the f-bound, and it guarantees `t.compareTo(T)` rather than `compareTo(Object)`. Its weakness is inheritance: if `Animal implements Comparable<Animal>` and `Dog extends Animal`, then `Dog` is a `Comparable<Animal>`, not a `Comparable<Dog>`, so the strict form rejects `Dog` for no benefit. `<T extends Comparable<? super T>>` accepts both, which is why every JDK signature in this family — `Collections.max`, `Collections.sort`, `Comparator.naturalOrder` — uses the `? super` form. The other common f-bound is the self type in a builder hierarchy, `<B extends Builder<B>>`, whose one cost is an unchecked `(B) this` inside a `protected final self()`.
+`<T extends Comparable<T>>` is the f-bound, and it guarantees `t.compareTo(T)` rather than `compareTo(Object)`. Its weakness is inheritance: if `Animal implements Comparable<Animal>` and `Dog extends Animal`, then `Dog` is a `Comparable<Animal>`, not a `Comparable<Dog>`, so the strict form rejects `Dog` for no benefit. `<T extends Comparable<? super T>>` accepts both, which is why every JDK signature in this family — `Collections.max`, `Collections.sort`, `Comparator.naturalOrder` — uses the `? super` form, the exact guidance of [Effective Java Item 31: "Use bounded wildcards to increase API flexibility"] (PECS: producer-`extends`, consumer-`super`). The other common f-bound is the self type in a builder hierarchy, `<B extends Builder<B>>`, whose one cost is an unchecked `(B) this` inside a `protected final self()`.
 
 **Q: Can a type parameter have two class bounds? What are the rules on the bound list?**
 **Short:** No. At most one bound may be a class, it must come first, and no interface may repeat with different type arguments.
@@ -701,7 +701,7 @@ Applicability inference (JLS 18.5.1) runs during overload resolution and deliber
 5. **Fix an inference failure by adding a type, not by removing a check.** Explicit lambda parameter first, typed local second, named intermediate third, type witness last, cast never.
 6. **Read the `where` block, not the caret,** on any nested-collector or capture error. The caret marks the enclosing expression; the `where` block names the variable that actually conflicts.
 7. **Treat `location: variable p of type Object` as a diagnosis, not a symptom** — it always means the enclosing call received no target type.
-8. **Confine the unchecked `(B) this` of an f-bounded builder to one `protected final self()`** with a comment stating the invariant, exactly as the parent module's rule for `@SuppressWarnings` requires.
+8. **Confine the unchecked `(B) this` of an f-bounded builder to one `protected final self()`** with a comment stating the invariant, exactly as the parent module's rule for `@SuppressWarnings` requires — the narrowest-possible-scope-plus-comment discipline of [Effective Java Item 27: "Eliminate unchecked warnings"].
 9. **Extract a capture helper only when a body needs the same capture twice.** Reads, `? super` parameters, and generic-method arguments already capture correctly.
 10. **When you must use a redundant `Object &` bound, comment why.** It reads as noise to everyone who has not met the leftmost-bound rule.
 

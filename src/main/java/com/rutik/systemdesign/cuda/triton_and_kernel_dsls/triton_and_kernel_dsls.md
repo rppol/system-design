@@ -193,6 +193,7 @@ hand as index math, `__shared__` arrays, and `__syncthreads()` barriers.
 | Vendor libraries | cuBLAS, cuDNN | Whole operator (call, no code) | Library author, opaque to caller |
 | CUTLASS (C++ templates) | Custom GEMM/attention epilogues | Warp/thread-block tile, C++ template params | You, at C++ compile time, via templates |
 | **Triton** | `@triton.jit` kernels | **Block/tile** (`BLOCK_M × BLOCK_N`) | **Compiler** (layout, shared mem, pipelining) |
+| **CUDA Tile (cuTile)** | `@ct.kernel` kernels | **Tile**, named by a shape tuple (`shape=(1024,)`) — no offset math in source | **Compiler** (thread mapping, TMA staging, Tensor-Core dispatch) — see §4.4 |
 | CUDA C++ | Hand-written `__global__` kernel | **Individual thread** | **You**, explicitly (`threadIdx`, `__shared__`) |
 | PTX / SASS | Inline asm, `mma.sync` | Individual instruction/warp | You, at the instruction level |
 
@@ -237,6 +238,123 @@ with the same shape reuses the cached choice with zero search overhead; a new
 shape (e.g. a different sequence length) triggers a fresh search. This is the
 direct analogue of manually sweeping block sizes against the occupancy
 calculator in CUDA C++ — Triton just automates the sweep and the benchmark.
+
+### 4.4 cuTile and CUDA Tile IR — a fourth layer, not a new discipline
+
+CUDA 13.1 added a second compiler target beside PTX: **CUDA Tile IR**, and a Python
+source language that compiles to it, **cuTile** (`ct.kernel`, `ct.load`, `ct.launch`;
+`pip install cuda-tile`). Where PTX is NVIDIA's virtual ISA for the thread-level SIMT
+model every other module in this section builds on, Tile IR is a virtual ISA for a
+tile-level model — NVIDIA's own framing is that "CUDA Tile IR for tile programming is
+analogous to PTX for SIMT programming." The open-source reference implementation
+(`NVIDIA/cuda-tile`) is built as an MLIR dialect. cuTile itself targets a broad range
+of NVIDIA hardware — compute capability 8.x through 12.x, per NVIDIA's own install
+prerequisites — a wider stated floor than Triton's Ampere-only (CC 8.0) cutoff in §3
+implies, though NVIDIA's docs do not publish a per-generation performance-parity
+guarantee to go with it (see "Honest limits" below).
+
+**What changes when the unit of computation is a tile instead of a thread.** Every
+kernel in §6 eventually names a thread: `threadIdx.x` in CUDA C++, or a
+`tl.program_id`/`tl.arange` offset vector in Triton that the compiler still lowers to
+per-thread ownership. A cuTile kernel never computes an offset at all —
+`ct.load(a, index=(pid,), shape=(tile_size,))` names a tile by its block index and a
+shape tuple, and the compiler decides the thread mapping, the shared-memory staging,
+and the asynchronous copy pipeline underneath it: the same three things Triton's
+compiler already owns (§3), one layer further removed from the source. A `ct.load`
+over tensor data can lower to a Tensor Memory Accelerator (TMA) copy on hardware that
+has one, and a tile-shaped matrix multiply dispatches to Tensor Cores — the source
+never names TMA or a Tensor Core instruction directly, the same story
+`tl.make_tensor_descriptor` + `tl.dot` already tell one layer down in Triton (§6.3).
+
+Vector add, three ways — the full CUDA C++ and Triton kernels are walked line-by-line
+in §6.1; this shows only the part that names (or doesn't name) a tile:
+
+```cuda
+// CUDA C++ -- the thread computes its own index and guards itself
+int idx = blockIdx.x * blockDim.x + threadIdx.x;
+if (idx < n) out[idx] = x[idx] + y[idx];
+```
+
+```python
+# Triton -- the program computes a block of offsets and masks its own edges
+pid = tl.program_id(0)
+offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+mask = offsets < n_elements
+x = tl.load(x_ptr + offsets, mask=mask)
+```
+
+```python
+# cuTile -- the program names a tile by block index and shape; no offset math in source
+@ct.kernel
+def vector_add(a, b, c, tile_size: ct.Constant[int]):
+    pid = ct.bid(0)
+    a_tile = ct.load(a, index=(pid,), shape=(tile_size,))
+    b_tile = ct.load(b, index=(pid,), shape=(tile_size,))
+    ct.store(c, index=(pid,), tile=a_tile + b_tile)
+```
+
+Each version sits one rung higher than the last: CUDA C++ computes and guards a
+scalar index; Triton computes and masks a vector of offsets; cuTile passes a block
+index and a shape tuple and never writes offset arithmetic at all.
+
+**Where it sits against Triton.** The overlap is not incidental — cuTile and Triton
+occupy the same altitude in the table above: both Python, both compiling tile-level
+source through to PTX/SASS, both aimed at the "faster to write than CUDA C++, more
+control than a vendor library" gap. Triton is the older, cross-vendor, ecosystem-
+anchored answer: it is what TorchInductor emits (§7), it has AMD/HIP and Intel
+backends developed in the same repository, and it already has years of production
+kernels behind it (vLLM, SGLang, Unsloth — §7). cuTile is NVIDIA-native and much
+younger — public beta, shipped in CUDA 13.1 — with a first-party path onto newly
+shipped NVIDIA hardware features, since NVIDIA's own compiler team ships cuTile
+support for new architectures on NVIDIA's own schedule rather than through the
+separate, cross-vendor Triton project. The overlap has been publicly debated:
+Nicholas Wilt, a founding member of the original CUDA team, said it was "hard not to
+suspect that cuTile was developed directly to counter Triton" — a characterization
+NVIDIA has not directly addressed in public and that much of the developer community
+pushed back on, arguing that treating the tile as the programming model itself
+(rather than as an optimization technique layered under a thread model) is a real
+step past Triton, not a clone of it. What is not yet settled is performance: one 2026
+academic benchmark ("Evaluating CUDA Tile for AI Workloads on Hopper and Blackwell
+GPUs") measured cuTile GEMM at 63-69% of cuBLAS against Triton's 70-91% on two
+Blackwell GPUs (it did not report a Hopper cuTile GEMM number), while cuTile's fused-
+attention kernel reached 2.51× FlashAttention-2 throughput on a B200 but only 53% of
+it on a Blackwell workstation GPU (RTX PRO 6000) — the same study attributes that
+swing to the compiler's optimization effort concentrating on `sm_100` (B200) ahead of
+`sm_120` so far. Read any single number here as a snapshot of an actively developing
+compiler, not a settled verdict.
+
+**Where Tile IR sits beside PTX.**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    CUTILE(["cuTile<br/>Python"]) --> TILEIR["CUDA Tile IR<br/>tile-level,<br/>MLIR dialect"]
+    TRITONSRC(["Triton"]) --> PTXNODE["PTX<br/>thread-level<br/>SIMT"]
+    CPPSRC(["CUDA C++"]) --> PTXNODE
+    TILEIR --> SASSNODE(["SASS"])
+    PTXNODE --> SASSNODE
+
+    class CUTILE,TRITONSRC,CPPSRC,SASSNODE io
+    class TILEIR,PTXNODE frozen
+```
+
+Tile IR and PTX are sibling compiler targets, not a replacement of one by the other —
+NVIDIA describes Tile IR as "analogous to PTX for SIMT programming," and both still
+end at the same SASS. What differs is the machine each target models: PTX models one
+thread among many in lockstep (the model every non-Tile module in this section is
+built on); Tile IR models a tile-block computing over a fragment of a tensor. A
+source language picks the target that matches how it wants the programmer to think,
+not the hardware it runs on — both compile down to the same GPU.
+
+**Honest limits.** NVIDIA's own Tile IR documentation concedes the portability claim
+has a cost: it states plainly that "portability has a cost" and that the design goal
+is to keep that cost low, not eliminate it. cuTile's stated hardware floor is broad
+(compute capability 8.x-12.x), but the benchmark gap described above shows that
+source-level portability is not yet the same thing as performance-portability — no
+source found in this research publishes a concrete cross-generation slowdown figure,
+so none is stated here.
 
 ---
 
@@ -818,6 +936,16 @@ reporting 70 ms for an operation that steady-states at 0.708 ms — off by a fac
   implementations of fused transformer building blocks (attention, SwiGLU,
   layer norm) as drop-in `nn.Module` replacements, aimed squarely at "cuDNN
   doesn't have this fusion" gaps.
+- **FlashAttention-4 (CuTe DSL)** — the current state-of-the-art fused-
+  attention kernel is written entirely in CuTe DSL, CUTLASS's Python kernel
+  language, not in Triton and not by hand in CUDA C++/PTX. CuTe DSL expresses
+  tiling, TMA copies, and Blackwell's `tcgen05` MMAs directly from Python
+  without dropping to C++ templates, and its author reports it cuts compile
+  times roughly 20-30× versus the CUTLASS C++-template route FlashAttention-3
+  used. See [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
+  for the `wmma`/`wgmma`/`tcgen05` instruction lineage CuTe DSL is expressing,
+  and [`../case_studies/build_a_flash_attention_kernel.md`](../case_studies/build_a_flash_attention_kernel.md)
+  for the worked kernel.
 
 ---
 
@@ -1058,7 +1186,9 @@ multi-day CUDA C++ investment.
 | **CUTLASS** | C++ templates | Peak dense/batched GEMM & conv, custom epilogues | See [cuda_math_and_dnn_libraries](../cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md); same codebase NVIDIA builds cuBLAS from |
 | **Mojo** | New language, Python-superset syntax | Unified high-level + low-level GPU/CPU programming | MLIR-based; younger ecosystem, fewer production deployments to date |
 | **JAX / Pallas** | Python DSL, block-level (Triton-like) | Fused kernels inside JAX programs, TPU + GPU targets | Closest philosophical peer to Triton; JAX-native instead of PyTorch-native |
-| **ThunderKittens / CuTe (CUTLASS 3.x and 4.x)** | C++ template libraries (CuTe also has a Python DSL in CUTLASS 4.x) | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
+| **ThunderKittens** | C++ template library | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
+| **CuTe DSL** | Python DSL over CUTLASS's CuTe layout algebra | Tiling, TMA copies, and `tcgen05` MMAs expressed from Python without dropping to PTX or C++ templates | Ships inside CUTLASS (current release 4.7.0); public beta, graduating end of summer 2026. The language FlashAttention-4 is written in end to end — see §7 and [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
+| **CUDA Tile (cuTile)** | Python DSL, tile-level, compiles to CUDA Tile IR | Compiler-owned thread mapping, TMA staging and Tensor-Core dispatch from a single tile-shaped kernel | NVIDIA-native peer to Triton, shipped in CUDA 13.1; public beta. See §4.4 |
 | **`compute-sanitizer` / `cuda-gdb`** | N/A (CUDA C++ toolchain) | Race/memcheck, step debugging | Applies to Triton's *generated* SASS only indirectly — Triton's own error surface is less mature |
 | **Nsight Compute** | N/A (profiler) | Occupancy, memory-throughput, Tensor-Core utilization for ANY of the above | See [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the profiler doesn't care which DSL produced the SASS |
 
@@ -1125,6 +1255,18 @@ A: Yes — the pipeline is Python AST → Triton IR → Triton GPU IR (layout as
 **Q: How does Mojo's positioning differ from Triton's?**
 **Short:** Mojo aims to unify high-level tensor code and low-level thread/SIMD control in one language, while Triton commits to a single block-level SPMD abstraction.
 A: Mojo aims to unify high-level tensor code and low-level thread/SIMD control in one language, whereas Triton commits to a single abstraction level (block-level SPMD). Mojo is a younger ecosystem with fewer production deployments as of this writing; Triton already underlies `torch.compile` and multiple production inference engines.
+
+**Q: What does a tile-level compiler target like CUDA Tile IR buy you that a thread-level target like PTX doesn't?**
+**Short:** It lets the compiler own thread mapping, shared-memory staging and the copy pipeline entirely, since the source never names a thread or an offset to begin with.
+A: It removes the offset/thread-index vocabulary from the source language altogether, not just the manual work of computing it. A Triton kernel still writes `tl.program_id`/`tl.arange` and the compiler maps that vector of offsets onto threads; a cuTile kernel calls `ct.load(a, index=(pid,), shape=(tile_size,))` and never constructs an offset at all — the compiler decides thread mapping, shared-memory staging, and the asynchronous copy pipeline (down to dispatching a TMA copy or a Tensor Core instruction) purely from the tile's index and shape. The practical effect is the same trade Triton already makes against CUDA C++, pushed one notch further: less code and less to re-derive per GPU generation, in exchange for even less low-level control than Triton gives up. See §4.4.
+
+**Q: You're picking a kernel DSL for a new project. When would you still reach for CUDA C++ over Triton or cuTile?**
+**Short:** When you need instruction-level control neither tile DSL exposes, or your fleet includes GPUs older than each DSL's hardware floor.
+A: Reach for CUDA C++ when the kernel needs instruction-level control no tile DSL currently exposes — a specific `mma`/`tcgen05` variant, a hand-placed warp-specialized producer/consumer pipeline, or inline PTX — or when it's the single hottest production kernel where the last several points of throughput are worth the engineering cost (§9). It's also the only option below each DSL's hardware floor: Triton requires compute capability 8.0+ (§3) and cuTile's own install prerequisites list 8.x as its floor too, so a fleet carrying pre-Ampere GPUs needs CUDA C++ regardless of which tile DSL you'd otherwise prefer. A published 2026 benchmark also found cuTile's fused-attention kernel reaching only 53% of FlashAttention-2 on one Blackwell GPU (RTX PRO 6000) against Triton's 86% — a live reminder to profile a specific DSL/GPU pairing rather than assume either tile DSL is uniformly close to peak yet.
+
+**Q: What is CuTe DSL, and why does it matter that FlashAttention-4 is written in it?**
+**Short:** A Python DSL over CUTLASS's CuTe layout algebra expressing tiling, TMA copies and `tcgen05` MMAs without PTX; FA4 uses it for its ~20-30x faster compiles than C++ templates.
+A: CuTe DSL is a Python DSL layered over CUTLASS's CuTe layout algebra — it expresses tiling, TMA copies, and Blackwell's `tcgen05` MMA instructions directly from Python, without dropping to hand-written PTX or CUTLASS's C++ template metaprogramming. It matters because it is not a research toy: FlashAttention-4, the current state-of-the-art fused-attention kernel, is written in it end to end rather than in Triton or CUDA C++, and its author reports roughly 20-30× faster compile times than the C++-template route FlashAttention-3 used. For anyone evaluating "Triton vs. something lower-level" for a peak-throughput Blackwell kernel, CuTe DSL is now a live third option alongside cuTile and hand-written CUDA C++/CUTLASS — see §7 and [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) for the instruction lineage it targets.
 
 ---
 

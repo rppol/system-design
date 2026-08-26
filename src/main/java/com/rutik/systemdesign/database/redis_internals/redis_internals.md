@@ -75,7 +75,7 @@ and the two projects have genuinely **diverged**:
 | Atomic slot migration | No — `MIGRATE`-based, key by key | Yes `[Valkey 9.0]` |
 | Database-level ACLs | No | Yes `[Valkey 9.1]` |
 | Hash-field TTL | Yes `[7.4]` (`HEXPIRE`) | Yes `[Valkey 9.0]` |
-| Newest types | Array `[8.8]`, compact hashes `[8.10]` | Not present |
+| Newest types | Vector set `[8.0]`, array `[8.8]`, compact hashes `[8.10]` | Not present |
 | I/O threading | Reimplemented `[8.0]` | Lock-free queues `[Valkey 9.1]` |
 
 This is a live engineering choice, not a footnote. If you need the query engine or JSON, you need
@@ -467,6 +467,19 @@ they inherit those structures' costs.
 
 ### 4.10 The new types
 
+- **Vector set** `[8.0]` — the first genuinely new Redis data type in years, written by antirez and
+  shipped with Redis 8.0. Structurally it is a sorted set whose "score" is a whole embedding: each
+  member maps to a vector, and the type maintains an **HNSW graph** over them. `VADD key VALUES <n>
+  <v1> ... <vn> <member>` inserts (also accepting a little-endian FP32 blob), `VSIM key ELE <member>`
+  or `VSIM key VALUES ...` returns the nearest neighbours, and `VDIM` / `VCARD` / `VREM` / `VEMB` /
+  `VISMEMBER` round out the CRUD surface. Two details matter in production. First, **quantization is
+  on by default** — `VEMB` returns approximations, not the floats you inserted (`[1.0, 1.0]` reads
+  back as `0.9999999403953552`), which is the memory/recall trade the type makes for you. Second,
+  **filtered ANN is native**: `VSETATTR` attaches a JSON blob per member and `VSIM ... FILTER '.size
+  == "large" && .price > 20.00'` applies the predicate *during* the graph walk, so it does not
+  degenerate into post-filtering a fixed top-K the way a naive `pgvector` filter does (see
+  [`vector_databases`](../vector_databases/vector_databases.md)). Vector sets are the reason
+  Redis is a credible small-to-mid-scale vector store without the Query Engine.
 - **Array** `[8.8]` — a first-class ordered collection with positional access, added alongside
   `INCREX` (increment-and-set-expiry in one atomic command, removing the classic
   `INCR`-then-`EXPIRE` race that every rate limiter has to work around in Lua) and `XNACK`
@@ -478,7 +491,7 @@ they inherit those structures' costs.
   not make the transition reversible. Shipped alongside `HIMPORT` (bulk-load a hash without a
   round trip per field) and `BACKUP` (a server-side backup command).
 
-Both are Redis-only; there is no Valkey equivalent as of 9.1.
+All three are Redis-only; there is no Valkey equivalent as of 9.1.
 
 ---
 
@@ -1777,7 +1790,8 @@ every 100 ms surrendered to reclamation, for eleven minutes. p99 tripled on a sc
 ### 11.1 The servers
 
 - **Redis** — the server itself, 8.10.0 current, tri-licensed RSALv2/SSPLv1/AGPLv3, with the query
-  engine, JSON, time-series and probabilistic types folded into core since `[8.0]`.
+  engine, JSON, time-series and probabilistic types folded into core since `[8.0]`, plus the native
+  HNSW-backed **vector set** type (`VADD`/`VSIM`) added in the same release.
 - **Valkey** — the BSD-3-Clause Linux Foundation fork from 7.2.4, 9.1.1 current, wire-compatible and
   the default engine on AWS ElastiCache and MemoryDB, with multi-DB cluster mode and atomic slot
   migration that Redis has no equivalent of.

@@ -311,6 +311,68 @@ flowchart LR
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What is the Golden Hammer anti-pattern, and where does the name come from?**
+**Short:** Over-applying a familiar tool to every problem, from "if all you have is a hammer, everything looks like a nail."
+Golden Hammer occurs when a developer or team over-applies a familiar technology, tool, or technique to every problem regardless of whether it's the right fit. It is also known as the Law of the Instrument or Familiar Technology Bias. The critical distinction from most anti-patterns is that it's not about bad code — the hammer itself may be excellent technology; the problem is applying it indiscriminately because it's well-understood, comfortable, or politically convenient rather than because it fits the problem.
+
+**Q: How do you distinguish healthy technology standardization from unhealthy Golden Hammer uniformity?**
+**Short:** Standardization reduces operational burden for genuinely similar problems; a hammer ignores problem fit entirely.
+Healthy standardization means a team consistently uses PostgreSQL for its various relational, transactional workloads because those workloads genuinely share the same shape — this reduces operational burden, deepens expertise, and is a deliberate, fit-based choice. Golden Hammer is applying that same PostgreSQL expertise to a graph traversal problem or time-series ingestion where the data model and access patterns are fundamentally different. The test is whether the justification is "we evaluated this against the requirement and it fits" versus "we already know how to use it."
+
+**Q: Why does the SQL recursive-CTE shortest-path example in this file fail at scale?**
+**Short:** The recursive CTE performs a full recursive table scan whose candidate paths grow exponentially with depth.
+The recursive term expands every row into up to `b` children per level, so the CTE materializes up to `b^d` candidate rows for average friend count `b` and depth cap `d`. At a depth cap of 6 and an average of 100 friends per user, that's `100^6 = 10^12` candidate paths — a number that makes the query catastrophic well before reaching realistic social-graph scale. The right tool, an in-memory BFS on an adjacency list, is `O(V + E)` — linear in graph size rather than exponential in path depth, which is why it scales where the SQL approach cannot.
+
+**Q: When is a SQL recursive CTE actually an acceptable choice for this same shortest-path problem?**
+**Short:** At small scale — roughly 100 users — where the exponential blowup never materializes in practice.
+The file's own scale-threshold flowchart makes this explicit: at approximately 100 users, an SQL recursive CTE is fine because the candidate-path explosion never reaches a size that matters in practice. Once the graph fits in memory but exceeds toy scale, in-memory BFS with periodic Postgres snapshots is the right tool; beyond roughly 100M edges, a native graph database like Neo4j becomes appropriate. The lesson is that "wrong tool" is scale-dependent — the same technology can be the pragmatic choice below a threshold and the Golden Hammer above it.
+
+**Q: What five factors typically cause a team to fall into Golden Hammer?**
+**Short:** Expertise bias, organizational momentum, premature adoption excitement, insufficient problem analysis, and risk aversion.
+Expertise bias means developers reach for tools they know well because learning something new has upfront cost. Organizational momentum means a team standardized on one technology resists introducing new tools due to training and operational overhead. "Architecture astronauts" adopt exciting new technology prematurely ("let's use Kafka for everything, we'll need it eventually"). Lack of problem analysis means jumping to a solution before understanding the problem's actual characteristics. And risk aversion — "no one ever got fired for using Oracle" — makes the familiar tool feel politically safer even when it's technically the wrong fit.
+
+**Q: How does "problem-first thinking" work as an antidote to Golden Hammer, concretely?**
+**Short:** State the requirement in tool-neutral terms before selecting a technology, then evaluate options against it.
+Instead of starting with "we'll use PostgreSQL," write down the problem's actual characteristics first — for example, "store and query 10M sensor readings per second with point-in-time lookups" — before any technology is named. This tool-neutral framing forces an explicit comparison of candidate technologies against the stated requirement, rather than defaulting silently to whatever the team already knows. The Golden Hammer file frames this as a repeatable loop: define the problem, express it as tech-neutral abstractions, define a fitness function (latency, throughput, data-model fit), and only reach for the familiar tool if it actually satisfies that fitness function.
+
+**Q: What is a "fitness function" in the context of avoiding Golden Hammer, and why does it matter?**
+**Short:** A measurable criterion — latency, throughput, data-model fit — that a candidate technology must satisfy before adoption.
+A fitness function converts "is this the right tool?" from a subjective, familiarity-driven judgment into an objective, measurable check: does the candidate technology meet the stated latency, throughput, and data-model requirements? If the team's familiar tool passes the fitness function, using it is healthy standardization, not a hammer — the check has genuinely validated fit. If it fails, that failure is the trigger to prototype an alternative rather than forcing the familiar tool through anyway, which is exactly the branch point in the file's prevention-strategy flowchart.
+
+**Q: Give an example of Golden Hammer applied to a design pattern rather than a database or infrastructure choice.**
+**Short:** Wrapping a simple Point object in a Factory pattern when zero polymorphism is ever needed.
+The file's second example shows a team that just learned the Factory pattern applying it to constructing a simple `Point(x, y)` value object — building a `PointFactory` interface, a `CartesianPointFactory` implementation, and a `PointFactoryProvider` singleton wrapper, none of which is needed because there is no variation in how a `Point` is constructed. The fix is simply `new Point(3.0, 4.0)`. This shows Golden Hammer isn't limited to choosing the wrong database — it applies equally to over-applying design patterns learned recently, without asking whether the polymorphism the pattern provides is actually needed.
+
+**Q: Why is "we already use X" an insufficient justification in an architecture review, according to this anti-pattern?**
+**Short:** Familiarity is not fit — the review should require the tool be justified against the problem's characteristics.
+"We already use X" describes organizational convenience, not technical suitability — it says nothing about whether X's data model, consistency guarantees, or performance profile actually match the problem at hand. The prevention strategy explicitly calls for challenging this justification in architecture reviews by requiring that a proposed tool's fit be argued from the problem's read/write ratio, data model, scale, and query patterns, not from what the team happens to already operate. A tool can pass this bar and still be "the one we already use" — the point is that familiarity alone must not be the deciding argument.
+
+**Q: What real-world mismatch does using Redis as a system of record for financial transactions illustrate?**
+**Short:** Redis is an excellent cache/broker but its persistence and consistency model is wrong for ACID-requiring data.
+A team comfortable with Redis using it as the source of truth for financial transactions is applying a tool built for caching and messaging to a problem that requires strict ACID guarantees — durability, atomicity, and strong consistency — which Redis's design does not prioritize the same way a relational database with proper transaction support does. This is Golden Hammer at the infrastructure level: Redis is genuinely excellent at what it's designed for, and the failure is entirely about applying it to a problem whose correctness requirements it was never built to satisfy.
+
+**Q: How does Golden Hammer manifest as "Kafka for everything" at the HLD level, and what's the simpler alternative?**
+**Short:** Using Kafka for a once-an-hour batch job when a cron job with a database flag would be simpler and easier to operate.
+A team deeply familiar with Kafka may reach for it even for a background job that only needs to run once per hour, absorbing the operational overhead of running and monitoring a distributed streaming platform for a workload that a simple cron job checking a database flag could handle with a fraction of the complexity. The mismatch is the same shape as the SQL-for-graphs example: excellent technology, wrong fit — the fix isn't "stop using Kafka," it's recognizing that scheduled batch processing doesn't need a streaming platform's guarantees.
+
+**Q: What goes wrong when a two-person team adopts microservices for an internal CRUD tool?**
+**Short:** Effort shifts from building features to service discovery, inter-service auth, and distributed tracing overhead.
+Microservices architecture is designed to let large teams work independently on separately deployable services — value that depends on having enough people and enough scale to need that independence. A two-person team adopting it anyway spends most of its effort standing up service discovery, inter-service authentication, and distributed tracing instead of building the actual features the tool exists for. The right tool at that team size and scope is usually a well-structured monolith, which delivers the same functionality with a fraction of the operational surface area.
+
+**Q: Why can a two-day spike be a more persuasive argument against Golden Hammer than a design document?**
+**Short:** A working prototype with the right tool concretely demonstrates fit or speed, which abstract arguments rarely settle.
+Prototyping the alternative approach — actually building a small working version with the candidate right-fit tool — produces concrete evidence (this query runs in 50ms instead of 5 seconds; this code is 30 lines instead of 300) that is far more persuasive in a team debate than an argument about theoretical fit. The file frames this as the last resort in the prevention loop: only spend prototyping effort once the fitness-function check on the familiar tool has actually failed, since prototyping is real cost and shouldn't be spent to settle disagreements that a clear requirement could resolve on paper.
+
+**Q: What question should you ask in an interview when asked "how do you choose between SQL and NoSQL"?**
+**Short:** What are the access patterns and scalability needs — not what does the team already use.
+The Golden Hammer framing reorients the SQL-vs-NoSQL question away from "which one do we already know" and toward the access patterns (read/write ratio, query shape, need for joins or ad-hoc queries) and scalability needs (data volume, consistency requirements, horizontal scaling needs) the actual workload has. Answering with awareness of this anti-pattern signals that technology choices are evaluated by problem characteristics, which is the trait interviewers are specifically probing for when they ask this kind of open-ended tooling question.
+
+**Q: Describe a Golden Hammer scenario involving relational data forced into a NoSQL store, and its consequence.**
+**Short:** Using MongoDB/DynamoDB for complex relational data reimplements joins in application code and causes consistency headaches.
+Choosing MongoDB or DynamoDB for data with complex relationships and ad-hoc query requirements because "NoSQL scales better" often means the application ends up reimplementing joins in its own code, since the datastore doesn't natively support the relational queries the data actually needs. The result is consistency headaches from denormalized data going out of sync, plus access patterns that a well-indexed relational database would have answered with a single query — the scaling benefit that motivated the choice frequently isn't even needed at the data volumes involved.
+
 ## Interview Relevance
 
 **Common interview questions:**

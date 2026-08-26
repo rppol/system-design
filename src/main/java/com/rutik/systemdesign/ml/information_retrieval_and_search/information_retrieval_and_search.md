@@ -339,6 +339,18 @@ Notice the last row: IDF is why search engines never needed a hand-maintained st
 
 Multiply that column by raw `f` and you have TF-IDF; multiply it by the saturated, length-taxed frequency factor instead and you have BM25. The cosine similarity in the code above adds one more difference — it divides by the vector's L2 norm, which is a single fixed length normalization with no `b` to tune, so you cannot dial the length penalty per corpus the way BM25 lets you.
 
+**Why both smoothing terms are load-bearing, not just one.** The `+0.5` and the `+1.0` inside the IDF log guard two different failure modes at the extreme `n = N` (a term in every document), and dropping either one breaks the score differently:
+
+```
+  N = 10,000
+
+  no smoothing at all      : log((N - N) / N)                 = log(0)       = -infinity
+  +0.5, without the +1     : log((10000-10000+0.5)/10000.5)    = log(0.00005) = -9.9035
+  both, as written         : log(0.00005 + 1)                                =  0.00005
+```
+
+With no smoothing the score for any document containing a fully-ubiquitous term collapses to `-infinity`, destroying the whole ranking on one query term. With the `+0.5` but no `+1`, IDF goes *negative* — BM25 would actively penalize a document for containing "the" more, which is nonsense. Only both together floor the contribution at essentially zero. This is also why raising `k1` past its default matters less than it looks: at `k1 = 1.2` the saturating factor plateaus near its ceiling `k1+1 = 2.2` remarkably fast — a term repeated 1, 10, 50, and 1000 times in the same document scores a saturated-TF factor of `1.00`, `1.96`, `2.15`, and `2.20` respectively, so the 1000th mention buys about `0.05` more than the 10th bought `0.19` for. Stuffing a term a thousand times into a document earns under 5% more score than repeating it fifty times — the mechanism BM25 exists to defeat.
+
 ### 6.3 Dense Retrieval: Bi-Encoder Cosine Search
 
 ```python
@@ -362,6 +374,69 @@ def bi_encoder_topk(
     top_idx = np.argsort(-sims)[:k]
     return [(doc_ids[i], float(sims[i])) for i in top_idx]
 ```
+
+**Brute-force cosine is what an ANN index approximates, and why it stops working at scale.** At `D = 256` dimensions, scoring one query against 10M vectors is `10,000,000 x 256 x 2 = 5.12 billion` multiply-add operations -- seconds per query, not milliseconds. FAISS's `IndexIVFFlat` avoids scanning everything by clustering the corpus once, offline, and only scanning the clusters nearest the query at search time:
+
+```python
+import faiss
+import numpy as np
+
+def build_ivf_index(embeddings: np.ndarray, n_lists: int, nprobe: int) -> faiss.Index:
+    """IVF (Inverted File) index: cluster once at train() time, then only
+    scan `nprobe` of the `n_lists` clusters at query time.
+    """
+    dim = embeddings.shape[1]
+    quantizer = faiss.IndexFlatIP(dim)          # finds the nearest centroids
+    index = faiss.IndexIVFFlat(quantizer, dim, n_lists, faiss.METRIC_INNER_PRODUCT)
+    index.train(embeddings.astype(np.float32))  # k-means: carve the corpus into n_lists cells
+    index.add(embeddings.astype(np.float32))    # assign each vector to its nearest cell
+    index.nprobe = nprobe                        # runtime knob: cells scanned per query
+    return index
+```
+
+**What the two knobs cost.** `n_lists` is fixed at build time by `train()`; `nprobe` is a runtime knob changeable per query with no rebuild. The total work per query is two terms pulling in opposite directions as `n_lists` grows:
+
+```
+  distance computations per query
+      = n_lists                    (find the nearest centroids -- paid on every query)
+      + N x (nprobe / n_lists)     (scan the items inside the nprobe cells that won)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Corpus size -- number of vectors in the index |
+| `n_lists` | How many Voronoi cells k-means carved the corpus into. Build-time choice |
+| `nprobe` | How many of those cells to actually scan at query time. Runtime knob |
+| `nprobe / n_lists` | The fraction of the corpus touched per query |
+| `N / total` | Speedup over brute force -- the number that buys the latency budget |
+
+**Walk one example.** A 10M-vector, 256-dim corpus, `nprobe = 32` held fixed, three different build-time `n_lists`:
+
+```
+                       centroid     items          total distance
+  n_lists   nprobe     compares     scanned        computations     speedup vs brute
+  ------------------------------------------------------------------------------------
+  brute        -              0    10,000,000        10,000,000            1.0x
+    256       32            256     1,250,000         1,250,256            8.0x
+   1024       32          1,024       312,500           313,524           31.9x
+   4096       32          4,096        78,125            82,221          121.6x
+```
+
+`n_lists = 4096` does `82,221` distance computations instead of 10 million -- the ~100x win. Past that point `n_lists` cannot simply be raised forever: the first term (`n_lists` centroid compares) is paid on *every* query and grows linearly, so at `n_lists = 100,000` with `nprobe = 32` the centroid scan itself becomes the bottleneck, costing more than the 4096 row despite scanning fewer items per cell. The common rule of thumb (used in the Section 14 case study) is `n_lists` between `sqrt(N)` and `4*sqrt(N)` -- `sqrt(10,000,000) ~ 3,162`.
+
+**The other knob: fixing `n_lists` and sweeping `nprobe`.** With the corpus clustered into `n_lists = 1000` cells (roughly `sqrt(1,000,000)` for a 1M-vector index, ~1,000 vectors/cell):
+
+```
+  N = 1,000,000    n_lists = 1000    ~1,000 vectors per cluster
+
+   nprobe   vectors scanned   share of corpus   speedup vs flat
+      1           1,000            0.100%          1000.0x
+     10          10,000            1.000%           100.0x
+     50          50,000            5.000%            20.0x
+    100         100,000           10.000%            10.0x
+```
+
+Going from `nprobe = 1` to `10` costs 10x the work but recovers most of the missing recall, because a query's true nearest neighbor is very often inside one of its ten nearest clusters; going from `50` to `100` doubles the work again for a much smaller recall gain. **Recall is lost, and not recoverable by rescoring, because of how `add()` assigns vectors.** Each vector is assigned to exactly one cluster at index-build time. A query sitting near a cell boundary has genuine neighbors on the far side of that boundary, and if the neighboring cell is not among the `nprobe` opened, those documents are simply unreachable for that query -- raising `nprobe` opens more boundary cells, which is precisely why recall climbs with it. This is also the mechanism behind index staleness: `train()` fixes the cell boundaries, so documents added long after training land in cells drawn for a corpus that no longer exists, and queries aimed at the new material probe the wrong cells (Pitfall 3 covers the production consequence).
 
 ### 6.4 Hybrid Fusion: Reciprocal Rank Fusion
 
@@ -388,6 +463,28 @@ fused = reciprocal_rank_fusion([bm25_ranking, dense_ranking], k=60)
 # Doc 1 wins: rank 1 in BM25 and rank 2 in dense beats doc 2's rank-1-in-dense
 # but rank-4-in-BM25 -- RRF rewards consistently-good over spiky-in-one-list.
 ```
+
+| Symbol | What it is |
+|--------|------------|
+| `rank(d, system)` | The 1-based position document `d` got in that system's list. Rank 1 is best |
+| `k` | Damping constant, `60` by convention. Added to every rank before inverting |
+| `1 / (k + rank)` | One system's vote for `d`. Always positive, always shrinking as rank worsens |
+| `score(d)` | The fused score, used only for sorting -- its absolute value means nothing |
+
+**Why `k = 60` and not `0`.** The constant flattens the curve near the top of the list so rank 1 does not steamroll rank 2:
+
+```
+    k       score(rank 1)   score(rank 2)   how much better rank 1 is
+    0          1.0000          0.5000            2.00x   (100% better)
+    1          0.5000          0.3333            1.50x
+   10          0.0909          0.0833            1.09x
+   60          0.0164          0.0161            1.02x   (1.6% better)
+
+  With k = 60, rank 1 is still 17.4x rank 1000 -- so the ordering signal
+  survives while the top-of-list tyranny does not.
+```
+
+With `k = 0` a document that either system ranked first would nearly always win the fusion, reducing the hybrid to "whichever retriever was more confident" and discarding the second opinion the second retriever paid for. Cormack et al. (2009) found `60` worked well across diverse IR collections empirically, not from theory, and it is worth re-tuning when one retriever is known to be much stronger than the other.
 
 ### 6.5 Ranking Metrics: Precision@k, MRR, MAP, NDCG
 
@@ -559,6 +656,30 @@ ranker.fit(
     eval_at=[10],                          # optimize/report NDCG@10
 )
 ```
+
+**Decoding the LambdaRank gradient.** `lambda_rank_loss` above approximates one formula: `lambda_ij = |delta_NDCG(i, j)| x sigmoid(score_j - score_i)`, for a pair of documents `i` (more relevant) and `j` (less relevant) returned for the same query. Read the two factors separately: `delta_NDCG` says how much the metric would move if the pair were swapped into the correct order, and the sigmoid says how confidently the model already has them backwards. Multiply them and pairs that would move NDCG a lot AND are currently badly mis-ranked get the largest gradient; a pair sitting at rank 900 and 901 barely changes NDCG no matter how wrong the order is, so it gets almost no gradient at all -- this is the whole difference from plain RankNet, whose pairwise cross-entropy loss spends equal gradient on every mis-ordered pair regardless of where in the list it sits.
+
+**Walk one example.** A query returns four documents `[A, B, C, D]` scored by the current model as `A=0.9, C=0.7, B=0.5, D=0.3`, with true relevance `A=high, B=high, C=low, D=low` -- so `B` and `C` are swapped relative to the ideal order. Relevance is `1` for high and `0` for low, and the rank discount is `1 / log2(rank + 1)`:
+
+```
+  discounts       rank 1 = 1.0000   rank 2 = 0.6309   rank 3 = 0.5000   rank 4 = 0.4307
+
+  model order      A(rel 1)   C(rel 0)   B(rel 1)   D(rel 0)
+  DCG            = 1x1.0000 + 0x0.6309 + 1x0.5000 + 0x0.4307 = 1.5000
+
+  ideal order      A(rel 1)   B(rel 1)   C(rel 0)   D(rel 0)
+  IDCG           = 1x1.0000 + 1x0.6309 + 0x0.5000 + 0x0.4307 = 1.6309
+
+  NDCG now       = 1.5000 / 1.6309 = 0.9197
+  NDCG if swapped                  = 1.0000
+  delta_NDCG                       = 0.0803
+
+  sigmoid(score_C - score_B) = sigmoid(0.7 - 0.5) = sigmoid(0.2) = 0.5498
+
+  lambda_BC = 0.0803 x 0.5498 = 0.0441
+```
+
+`0.0803` says this swap is worth about 8 points of NDCG -- real, but not catastrophic. `0.5498` says the model only mildly prefers `C` to `B`, close to a coin flip, so it is nearly fixing itself already. Multiplying them yields a modest correction. Now imagine the same pair sitting at ranks 1 and 2 instead, with scores `0.9` vs `0.1`: `delta_NDCG` would be larger *and* the sigmoid would sit near `0.69`, so the gradient would be several times bigger -- LambdaRank automatically concentrates training signal on the mistakes that would actually move the metric, which is precisely the blind spot LambdaMART inherits the fix for from LambdaRank rather than from plain RankNet.
 
 ### 6.7 Broken -> Fix: Evaluating a Ranker With the Wrong Metric and a Leaky Split
 

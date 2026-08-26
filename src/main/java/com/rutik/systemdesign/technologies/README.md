@@ -75,6 +75,7 @@ are *not* here), the module template, and how to add a new technology.
 | 5 | [envoy_proxy](envoy_proxy/envoy_proxy.md) | L7 Proxy & Service-Mesh Data Plane | Advanced | Listener/filter-chain/route/cluster/endpoint model, xDS + ADS ordering, LB policies and locality/priority/panic mode, the `enforcing_*` outlier trap, circuit breaking as five ceilings, retry budgets, the seven-layer timeout stack, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc |
 | 6 | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | Secrets Management | Advanced | Barrier + four-layer key hierarchy, seal/unseal and why recovery keys cannot unseal, Integrated Storage, every secrets engine, the KV v2 `data/` policy trap, leases and the lease-count arithmetic, secret-zero and auth methods, `bound_claims` vs `claim_mappings`, policies + identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, the OpenBao delta |
 | 7 | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) | Change Data Capture | Advanced | Logical decoding and output plugins, what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`), `flush.lsn.source` and the idle-captured-table heartbeat trap, `REPLICA IDENTITY` and `before: null`, TOAST and `__debezium_unavailable_value`, snapshot modes and their removals, the incremental-snapshot watermark algorithm, the four-quadrant position-loss recovery table, the never-compact schema-history topic, ordering per key / per table / never across tables, the five tombstone modes, the `EventRouter` defaults, why `tasks.max` is ignored |
+| 8 | [apache_iceberg](apache_iceberg/apache_iceberg.md) | Lakehouse Table Format | Advanced | Spec v2 vs v3, the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap, hidden partitioning and partition evolution, column-ID schema evolution, copy-on-write vs merge-on-read, deletion vectors, snapshot expiry and orphan-file cleanup, compaction economics, the catalog tier (REST, Polaris, Glue, Nessie), and engine support. The vendor-neutral concept layer lives in [`database/lakehouse_and_table_formats`](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md). |
 
 ---
 
@@ -156,6 +157,7 @@ temporal_durable_execution
   temporal_durable_execution.md  -
 nvidia_triton_inference_server
   nvidia_triton_inference_server.md  -
+  dynamo_and_the_nvidia_serving_stack.md  -
 intel_openvino
   intel_openvino.md  -
 envoy_proxy
@@ -164,6 +166,8 @@ hashicorp_vault
   hashicorp_vault.md  -
 debezium_change_data_capture
   debezium_change_data_capture.md  -
+apache_iceberg
+  apache_iceberg.md  -
 -->
 ## Learning Paths
 

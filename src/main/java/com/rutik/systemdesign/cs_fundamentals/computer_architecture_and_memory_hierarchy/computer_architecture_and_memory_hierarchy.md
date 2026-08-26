@@ -1284,4 +1284,6 @@ Representative figures for an 8-core Intel server CPU; the Java row is the shape
 
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — TLB flush on context switch; OS thread model; per-core stack allocation
 - [memory_management_and_virtual_memory](../memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) — TLB, page tables, physical frames, virtual address space layout; how the MMU translates virtual to physical addresses
-- [../../java/concurrency](../../java/concurrency/concurrency.md) — `@Contended` annotation, false sharing in Java, memory barriers, `volatile` happens-before, `LongAdder` internals, JMM
+- [memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) — what the store buffer means for correctness: TSO vs weak ordering, happens-before, acquire-release, and the store-buffer litmus test
+- [deadlocks_and_synchronization](../deadlocks_and_synchronization/deadlocks_and_synchronization.md) — the primitives built on top: mutex, semaphore, monitor, the Coffman conditions
+- [../../java/concurrency](../../java/concurrency/concurrency.md) — `@Contended` annotation, false sharing in Java, memory barriers, `LongAdder` internals, the JMM as Java's spelling of the memory model

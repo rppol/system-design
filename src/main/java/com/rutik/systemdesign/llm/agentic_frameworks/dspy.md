@@ -8,8 +8,8 @@ DSPy (Declarative Self-improving Python) is a framework from Stanford NLP that r
 
 DSPy shifts the prompt engineering workflow from art to science: you write a metric (e.g., "is the answer correct?"), provide training examples, and DSPy searches the prompt space algorithmically to maximize the metric.
 
-**Current version**: dspy-ai 2.4.x (2024)
-**Production adoption signal**: Used by JetBlue (customer support), VMware (security alerts), and adopted in Stanford NLP research. Growing rapidly in enterprise AI teams that want reproducible, measurable prompt improvement. Heavily cited in 2024 AI engineering research.
+**Current version**: dspy 3.3.1 (released 2026-08-21). The canonical distribution is now `dspy`; `dspy-ai` remains on PyPI as an alias that installs the same release, so either name works, but new code should install and import `dspy`.
+**Production adoption signal**: Used by JetBlue (customer support), VMware (security alerts), and adopted in Stanford NLP research. Growing rapidly in enterprise AI teams that want reproducible, measurable prompt improvement. Heavily cited in AI engineering research.
 
 ---
 
@@ -31,7 +31,7 @@ DSPy shifts the prompt engineering workflow from art to science: you write a met
 
 **Modules**: `dspy.Module` subclasses are composable programs. Built-in modules: `Predict` (single LLM call), `ChainOfThought` (adds rationale field), `ReAct` (tool-calling agent loop), `ProgramOfThought` (generates and executes Python code). Compose them to build multi-step programs.
 
-**Optimizers (Teleprompters)**: `dspy.teleprompt` contains algorithms that optimize program parameters. `BootstrapFewShot` generates few-shot examples from training data. `MIPRO` (Multi-prompt Instruction Proposal Optimizer) optimizes instructions themselves. `BayesianSignatureOptimizer` uses Bayesian optimization over the instruction space.
+**Optimizers (Teleprompters)**: `dspy.teleprompt` contains algorithms that optimize program parameters, also accessible as `dspy.<OptimizerName>`. `BootstrapFewShot` generates few-shot examples from training data. `MIPROv2` (Multi-prompt Instruction Proposal Optimizer, v2) jointly optimizes instructions and few-shot examples via Bayesian optimization. `COPRO` refines instructions alone via coordinate ascent. `GEPA` uses reflective, LLM-driven prompt evolution for the highest-effort optimization runs.
 
 **Metrics**: A Python function that takes `(example, prediction, trace=None)` and returns a score (float or bool). DSPy calls this during optimization to evaluate candidates. The metric is what makes DSPy's optimization meaningful — define it poorly and you get optimized garbage.
 
@@ -58,9 +58,10 @@ DSPy shifts the prompt engineering workflow from art to science: you write a met
 |-----------|---------|------------------------|------|
 | `BootstrapFewShot` | Generate few-shot examples from training data | 10-50 | Low |
 | `BootstrapFewShotWithRandomSearch` | Bootstrap + search over example sets | 50-200 | Medium |
-| `MIPRO` | Bayesian optimization over instructions + examples | 100-500 | High |
-| `BayesianSignatureOptimizer` | Bayesian search over signature instructions | 50-200 | High |
-| `SignatureOptimizer` | Gradient-free instruction optimization | 50-100 | Medium |
+| `COPRO` | Coordinate-ascent instruction refinement (instructions only) | 50-100 | Medium |
+| `MIPROv2` | Bayesian optimization over instructions + examples | 100-500 | High |
+| `SIMBA` | Stochastic sampling of hard examples + self-reflection rules | 100-500 | High |
+| `GEPA` | Reflective, LLM-driven prompt evolution across the full trajectory | 200+ | Highest |
 | `KNNFewShot` | K-nearest neighbors example selection at runtime | Any | Low (no train) |
 
 ### Program Architectures
@@ -365,30 +366,31 @@ class MultiHopRAG(dspy.Module):
         return dspy.Prediction(context=context, answer=answer.answer)
 ```
 
-### DSPy with Assertions
+### DSPy with Refine and BestOfN
+
+`dspy.Assert` and `dspy.Suggest` are deprecated (since DSPy 2.6) and no longer supported; use `dspy.Refine` and `dspy.BestOfN` instead. Both wrap a module and re-run it up to `N` times against a `reward_fn`/`threshold`; `Refine` additionally feeds an LM-generated critique of the failed attempt back in as a hint for the next try, while `BestOfN` just keeps the highest-scoring attempt with no feedback loop.
 
 ```python
-# Assertions enforce constraints during program execution
+# Refine enforces constraints via a scored retry loop, not a raised exception
+def confidence_and_length_reward(args, pred: dspy.Prediction) -> float:
+    valid_confidence = pred.confidence in ["high", "medium", "low"]
+    concise = len(pred.answer.split()) <= 50
+    return 1.0 if (valid_confidence and concise) else 0.0
+
 class FactualQA(dspy.Module):
     def __init__(self):
-        self.generate = dspy.ChainOfThought("question -> answer, confidence")
+        base = dspy.ChainOfThought("question -> answer, confidence")
+        # Retries up to 3 times, using LM-generated feedback between attempts,
+        # until reward_fn returns >= threshold
+        self.generate = dspy.Refine(
+            module=base,
+            N=3,
+            reward_fn=confidence_and_length_reward,
+            threshold=1.0,
+        )
 
     def forward(self, question):
-        pred = self.generate(question=question)
-
-        # Hard assertion: fail if violated
-        dspy.Assert(
-            pred.confidence in ["high", "medium", "low"],
-            "Confidence must be high, medium, or low"
-        )
-
-        # Soft assertion: retry with feedback if violated (backtracking)
-        dspy.Suggest(
-            len(pred.answer.split()) <= 50,
-            "Answer should be concise (under 50 words)"
-        )
-
-        return pred
+        return self.generate(question=question)
 ```
 
 ---
@@ -501,18 +503,22 @@ DSPy modules have `self.predict`, `self.generate`, etc. These accumulate history
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `dspy-ai` | Core framework | `pip install dspy-ai` |
+| `dspy` | Core framework | `pip install dspy` (the `dspy-ai` name still works as an alias) |
 | `dspy.LM` | LM provider | Supports OpenAI, Anthropic, Cohere, Ollama, HuggingFace |
 | `dspy.Retrieve` | Retrieval | Plugs into ChromaDB, Pinecone, Weaviate, ColBERT |
-| `dspy.teleprompt` | Optimizers | BootstrapFewShot, MIPRO, BayesianSignatureOptimizer |
+| `dspy.teleprompt` | Optimizers | BootstrapFewShot, MIPROv2, COPRO, SIMBA, GEPA |
+| `dspy.Refine` | Output constraints | Scored retry loop with LM-generated feedback between attempts; replaces the deprecated `dspy.Assert` |
+| `dspy.BestOfN` | Output constraints | Scored retry loop keeping the top attempt, no feedback; replaces the deprecated `dspy.Suggest` |
 | `dspy.Evaluate` | Evaluation | Runs metric on devset with threading |
 | `MLflow` | Experiment tracking | Log optimizer runs, compare compiled programs |
 | `Weights & Biases` | Experiment tracking | Track optimization runs and metric curves |
 
 **Version notes:**
 - DSPy 1.x: initial release, basic signature/module/optimizer pattern
-- DSPy 2.0+ (2024): `dspy.LM` unified API, `MIPROv2`, assertions, improved `dspy.configure`
-- Python 3.9+ required
+- DSPy 2.0-2.5: `dspy.LM` unified API, `MIPROv2`, `dspy.Assert`/`dspy.Suggest` assertions, improved `dspy.configure`
+- DSPy 2.6: assertions deprecated in favor of `dspy.Refine`/`dspy.BestOfN`
+- DSPy 3.x (current: 3.3.1, 2026-08-21): package renamed from `dspy-ai` to `dspy`; `GEPA` and `SIMBA` optimizers added
+- Python 3.10+ required
 
 ---
 
@@ -546,9 +552,9 @@ Compilation runs the optimizer against training data. The optimizer executes the
 **Short:** Compile offline to JSON, load it at startup, wrap LLM calls in error handling, and log predictions in production to catch drift.
 Four steps: (1) Compile offline with your optimizer and save to JSON — never compile at runtime; (2) Load compiled state at application startup: `program.load("compiled.json")`; (3) Add error handling around LLM calls — DSPy modules can raise exceptions on timeout/API errors; wrap with try/except and fallback logic; (4) Monitor with traces — DSPy integrates with MLflow; log every prediction with input, output, and metric score in production to detect drift. Additionally: version your compiled JSON files alongside your code; re-run optimization whenever your training data or LLM changes.
 
-**Q: What are DSPy assertions and when do you use them?**
-**Short:** `dspy.Assert` forces a retry with feedback on a constraint violation, while `dspy.Suggest` only warns without retrying the call.
-Assertions enforce constraints on module outputs. `dspy.Assert(condition, message)` is a hard constraint: if violated, the module retries the LLM call with the error message appended as feedback (up to `max_backtracks` times). `dspy.Suggest(condition, message)` is a soft constraint: suggests without failing. Use assertions for: output format requirements (JSON must be valid), length constraints, required field presence. Do not overuse: each failed assertion = additional LLM call; with `max_backtracks=3`, a module may make 4 LLM calls on bad outputs. Assertions are powerful for catching model failures during optimization — they reveal how often the model violates constraints.
+**Q: How do you enforce output constraints in DSPy now that assertions are deprecated?**
+**Short:** Wrap the module in `dspy.Refine` (retries with LM-generated feedback) or `dspy.BestOfN` (retries, keeps the top-scoring attempt) against a `reward_fn`/`threshold`.
+The old `dspy.Assert`/`dspy.Suggest` API is deprecated (since DSPy 2.6) and no longer supported; both are replaced by `dspy.Refine` and `dspy.BestOfN`, which wrap a module rather than raising inside `forward()`. Both take `module`, `N` (max attempts), a `reward_fn(args, pred) -> float`, and a `threshold`; they re-run the wrapped module until `reward_fn` clears `threshold` or `N` attempts are exhausted. `dspy.Refine` is the closer analog to the old hard `dspy.Assert`: it additionally has the LM generate feedback on why an attempt failed and feeds that back as a hint for the next try. `dspy.BestOfN` is closer to the old soft `dspy.Suggest`: it just keeps the highest-scoring attempt across `N` tries, with no feedback loop. Use them for: output format requirements (valid JSON), length constraints, required field presence. Do not overuse: each retry is an additional LLM call, so `N=3` can cost up to 3x the calls on bad outputs.
 
 **Q: How does DSPy handle multi-step pipelines where one module's output feeds another?**
 **Short:** Modules are composed inside `forward()`, passing `Prediction` objects between them while DSPy traces the full execution automatically.

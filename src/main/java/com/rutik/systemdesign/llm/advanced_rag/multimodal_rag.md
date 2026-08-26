@@ -58,6 +58,55 @@ Two further axes cut across the choice:
   vision-capable model. Passing the image preserves detail the description dropped; passing the
   description is cheaper and keeps the answer quotable.
 
+### Audio and Video RAG
+
+Audio and video are not "image RAG with more steps" — they add a dimension none of the three
+image strategies above model: **time**. A retrieval hit from a document is a fixed span of
+text; a retrieval hit from a recording is a span of time, and the answer needs to point back
+into the source at the moment the content occurred, not just quote it.
+
+**Audio.** The default path is ASR transcription (Whisper or an equivalent) into a
+timestamp-aligned transcript, chunked the same way a text document would be — except every
+chunk keeps its `(start_s, end_s)` alongside the text, since the transcript is a proxy for the
+audio and the citation has to point at the audio, not at the paraphrase. A native
+audio-embedding path — a CLAP-style model jointly trained on audio and text into one embedding
+space, the audio analogue of what CLIP does for images — beats transcription when the
+information that matters is not *what was said*: non-speech audio (an alarm, a machine fault
+tone, applause), prosody and tone (sarcasm, urgency, a raised voice a transcript flattens to
+plain text), or overlapping speakers that a single-channel ASR model garbles into an unreliable
+transcript. The two are not mutually exclusive — transcript search answers "what was said,"
+audio-embedding search answers "what it sounded like" — but transcription is the default
+because it is cheaper, reuses the text-retrieval stack, and covers most enterprise audio
+(meetings, calls, lectures), where the content genuinely is the words.
+
+**Video.** Video RAG fuses two signals per time span: the transcript (audio track, same ASR
+pipeline as above) and a visual description from sampled frames. **Keyframe sampling** is the
+first cost decision — fixed-interval sampling (one frame every N seconds) is simple but samples
+static content as expensively as fast-changing content, while scene-change detection samples
+only where the visual content actually changes and is what makes video RAG affordable at
+length. Each sampled keyframe is described by a VLM the same way Strategy 1 describes a
+document image, and that description is chunked and indexed alongside the transcript span it
+falls inside. **The chunk-identity problem** is what makes video RAG different from every other
+strategy on this page: a chunk here is not text and not a single image, it is a *time span*, so
+every retrieval hit must carry a `(start_s, end_s)` — an answer that cannot cite "the demo
+starting at 14:32" is not usable in a video interface, however accurate the retrieved text is.
+
+```
+Naive keyframe extraction at 1 fps on a 1-hour video: 3,600 VLM calls.
+Scene-change detection on the same video: roughly 70-360 VLM calls, a 10-50x
+  reduction -- most of a typical video (a talking head, a static slide) has
+  nothing new to describe frame to frame, and fixed-interval sampling pays
+  the same VLM cost for all of it regardless.
+
+Standard mitigation: retrieve on the transcript first (cheap, text-only, and
+already timestamp-aligned), and use the visual description only to RERANK or
+confirm the transcript's candidate spans -- not as the first-pass retrieval
+signal. That turns "one VLM call per sampled frame in the corpus" into "one
+VLM call per frame near a transcript hit," which is the difference between
+describing a video library once at index time and re-describing frames on
+every query.
+```
+
 ---
 
 ## 5. Architecture Diagrams
@@ -159,13 +208,13 @@ from openai import OpenAI
 import base64
 
 def describe_image(image_path: str, context: str = "") -> str:
-    """Generate a detailed text description of an image using GPT-4o."""
+    """Generate a detailed text description of an image using a vision-capable frontier model."""
     with open(image_path, "rb") as f:
         image_data = base64.b64encode(f.read()).decode()
 
     client = OpenAI()
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.6-terra",
         messages=[{
             "role": "user",
             "content": [
@@ -397,7 +446,7 @@ def generate_multimodal_answer(
     content.append({"type": "text", "text": f"Question: {query}"})
 
     response = llm_client.chat.completions.create(
-        model="gpt-4o",  # or any current vision-capable frontier model
+        model="gpt-5.6-terra",  # or any current vision-capable frontier model
         messages=[
             {"role": "system", "content": "Answer based on the provided documents and images. Cite specific figures when referencing visual data."},
             {"role": "user", "content": content}
@@ -516,6 +565,42 @@ Fix: Limit retrieved images to 2-3 per query. Retrieve image descriptions as tex
 Vision LLM occasionally fails to accurately describe complex charts (overlapping bars, dense scatter plots).
 Fix: Include image quality checks; fall back to OCR text for images where vision LLM confidence is low; log description quality metrics.
 
+**7. Merging text and CLIP results by sorting raw scores together**
+CLIP cosine similarity and text-embedding cosine similarity are both numbers in roughly `[0, 1]`, which makes it easy to forget they are scores from two unrelated spaces with different score distributions:
+
+```python
+# BROKEN: text and CLIP hits sorted together as if the scores were comparable
+def retrieve_merged(query: str, text_index, image_index, top_k: int = 10):
+    text_hits = text_index.search(query, top_k=top_k)   # cosine sim, ~0.3-0.9 typical
+    image_hits = image_index.search(query, top_k=top_k)  # CLIP cosine sim, ~0.15-0.35 typical
+    merged = text_hits + image_hits
+    merged.sort(key=lambda hit: hit.score, reverse=True)  # BUG: comparing apples to oranges
+    return merged[:top_k]
+```
+
+CLIP text-image similarity scores cluster far lower than same-modality text-text similarity — a genuinely on-topic image routinely scores `0.25-0.35` where a genuinely on-topic text chunk scores `0.70-0.85` — so a raw sort systematically starves the result list of images regardless of relevance; the top-10 ends up all text even on queries where the answer is a chart.
+Fix: normalize each modality's scores onto a comparable scale (min-max within each result set, or an explicit weighted fusion like this file's `fused = w_text x text_score + w_img x image_score`) before merging, rather than trusting the raw cosine values to already be on the same scale:
+
+```python
+# FIXED: normalize each modality's scores before comparing them
+def _minmax(hits: list) -> list:
+    scores = [h.score for h in hits]
+    lo, hi = min(scores), max(scores)
+    span = hi - lo or 1.0
+    for h in hits:
+        h.score = (h.score - lo) / span
+    return hits
+
+def retrieve_merged(query: str, text_index, image_index, top_k: int = 10):
+    text_hits = _minmax(text_index.search(query, top_k=top_k))
+    image_hits = _minmax(image_index.search(query, top_k=top_k))
+    merged = text_hits + image_hits
+    merged.sort(key=lambda hit: hit.score, reverse=True)
+    return merged[:top_k]
+```
+
+Normalizing per modality (or fusing with explicit weights, as Section 6.3 does) lets an image that is the best of its own candidate set compete on equal footing with a merely-good text chunk, instead of losing to every text hit purely because CLIP's raw score scale sits lower. Reciprocal-rank fusion (RRF) is the scale-free alternative — ranking within each modality and combining `1/(k+rank)` sidesteps the comparability problem entirely, at the cost of discarding the score magnitude.
+
 ---
 
 ## 11. Technologies & Tools
@@ -598,6 +683,18 @@ A: Standard token-based chunking destroys the semantic coherence of mixed-conten
 **Q: How would you build document RAG without a parsing pipeline at all?**
 **Short:** ColPali indexes page-image patch embeddings directly and scores with ColBERT-style MaxSim, skipping OCR and layout parsing while beating text-pipeline retrieval on ViDoRe.
 A: Render each page as an image and index its patch embeddings directly with a visual retriever such as ColPali, skipping layout detection, OCR and captioning entirely. ColPali (Faysse et al., ICLR 2025, arXiv:2407.01449) pushes the page image through a vision-language model and stores 1,024 patch vectors of 128 dimensions per page, then scores queries with ColBERT-style MaxSim so a query token matches the specific region that answers it. This removes the stage that breaks most often in production — layout models and OCR on scanned, multi-column or infographic-heavy pages — and the paper measures both sides of the trade: 81.3 average nDCG@5 on the ViDoRe page-retrieval benchmark versus 65.5 for Unstructured + BM25 and 67.0 for the best caption-based pipeline, at 0.39 s per page to index against 7.22 s for the parsing pipeline, with roughly 30 ms query latency. The cost is index size: 257.5 KB per page in float16 against about 2 KB for a single pooled text vector, which token pooling at factor 3 cuts by two-thirds while retaining 97.8% of the score. Stay with parse-then-embed when documents are text-dominant or when you need the extracted text for anything besides retrieval — citation snippets, keyword filters, compliance export — because a visual index gives you a page, not a string.
+
+**Q: When does audio RAG need a native audio embedding instead of ASR transcription?**
+**Short:** Use a CLAP-style audio embedding when the signal that matters isn't the words — non-speech sound, prosody, or overlapping speakers a transcript loses.
+A: ASR transcription (Whisper or an equivalent) into a timestamp-aligned transcript is the default for audio RAG: it is cheaper, reuses the existing text-retrieval stack, and covers most enterprise audio — meetings, calls, lectures — where the content genuinely is the words spoken. A native audio-embedding path, a CLAP-style model jointly trained on audio and text into one shared space the way CLIP does for images, is worth the extra index when the information that matters is not what was said: non-speech audio such as an alarm tone or a machine fault sound that has no transcript at all, prosody and tone (sarcasm, urgency, a raised voice a transcript flattens to plain text), or overlapping speakers that garble a single-channel ASR transcript into something unreliable to search over. The two approaches are complementary rather than exclusive — transcript search answers "what was said," audio-embedding search answers "what it sounded like" — so a production system typically ships transcription first and adds the audio-embedding path only for the specific query types transcription cannot serve.
+
+**Q: Why is naive video RAG expensive, and what is the standard mitigation?**
+**Short:** Naive 1 fps keyframe extraction on a 1-hour video costs 3,600 VLM calls; scene-change detection and transcript-first retrieval cut that by 10-50x.
+A: Extracting one frame per second from a 1-hour video and describing each with a VLM is 3,600 calls before a single query has been answered, and most of that spend is wasted — a talking-head segment or a static slide has nothing new to describe from one frame to the next, yet fixed-interval sampling pays the same VLM cost regardless. Scene-change detection instead samples only where the visual content actually changes, which typically cuts the same video to roughly 70-360 keyframes, a 10-50x reduction, because it stops re-describing frames that look like the last one it already described. The standard mitigation goes further: retrieve on the transcript first, since it is cheap, text-only, and already timestamp-aligned, and use the visual description only to rerank or confirm the transcript's candidate spans rather than as the first-pass retrieval signal. That turns "one VLM call per sampled frame in the entire corpus" into "one VLM call per frame near a transcript hit," which is the difference between describing a video library once at index time and re-describing it on every query.
+
+**Q: Why does a video (or audio) RAG chunk need to carry a timestamp, and what breaks if it doesn't?**
+**Short:** A video or audio chunk is a time span, not a string, so a retrieval hit without a `(start_s, end_s)` cannot cite the moment its answer actually occurred.
+A: Every strategy elsewhere on this page indexes something with a fixed, quotable identity — a text chunk is a string, an image is a single frame — but a video or audio chunk is a span of time, and the transcript or keyframe description stored for it is only a proxy for that span. If the chunk's metadata does not carry a `(start_s, end_s)` alongside the text, a retrieval hit can surface the right content but the answer has nothing to point back to: "the demo starting at 14:32" is not just a nicer answer than "the demo was discussed," it is the only answer a video interface can act on, since the user still has to find the moment in a 60-minute file. Losing the timestamp also breaks fusion — combining transcript hits with keyframe-description hits from the same time window requires aligning them by time span, not by document ID, so an implementation that drops the timestamp on either side cannot tell that a transcript chunk at 14:20-14:45 and a keyframe description at 14:32 are evidence about the same moment.
 
 ---
 

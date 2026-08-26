@@ -4,12 +4,12 @@ The language-agnostic computer-science spine that every senior-engineer intervie
 
 > **No runtime application** — all content is Markdown with executable-shaped Python / pseudocode blocks.
 
-> **PARKED — to be done later (owner-set 2026-07-29).** This section is out of scope for the
-> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
-> re-opens it. **Parked, not cancelled**: the content is untouched, complete, and still ships
-> in the game. What is paused is **24 audit units (none started)** and **701 Q&As awaiting
-> one-line MCQ summaries**. Do not dispatch audit or migration work here in the meantime.
-> Scope table: root `CLAUDE.md` -> "Deferred / To Be Planned".
+> **Audited and complete (2026-08-04).** The factual audit covered all 24 modules and all 26
+> `dsa_patterns/` files — roughly 2,500 claims verified and ~170 code blocks hand-executed —
+> and every one of the section's **704 quiz Q&As carries an authored `**Short:**` MCQ
+> summary**. The 6 case studies were audited twice, the second pass by executing every code
+> block. Details, including what the audit found and where this section's defects
+> characteristically hide, are in `CLAUDE.md`.
 
 ---
 
@@ -29,17 +29,17 @@ The language-agnostic computer-science spine that every senior-engineer intervie
 
 This section covers:
 
-- **Phase 1 — Complexity & Computation**: asymptotic notation (O/Θ/Ω), amortized analysis, Master theorem, Big-O for common operations; number systems (binary/hex, two's complement, IEEE-754), bitwise operations and tricks, endianness; recursion mechanics and the canonical problem-solving patterns (two-pointer, sliding window, backtracking, divide-and-conquer framing)
+- **Phase 1 — Complexity & Computation**: asymptotic notation (O/Θ/Ω), amortized analysis, Master theorem, Big-O for common operations; the discrete-math toolkit (logic, sets and relations, induction, combinatorics, recurrences, modular arithmetic); number systems (binary/hex, two's complement, IEEE-754), bitwise operations and tricks, endianness; character encoding theory (Unicode code points/planes, UTF-8/16/32, surrogate pairs, normalization, grapheme clusters, mojibake) as the next layer up from raw bytes; recursion mechanics and the canonical problem-solving patterns (two-pointer, sliding window, backtracking, divide-and-conquer framing)
 - **Phase 2 — Data Structures**: dynamic arrays and hash tables (collision resolution, load factor, resize); linked lists, stacks, queues, deques, circular buffers; binary trees, BST, AVL and red-black trees (concept), B/B+ trees as a concept; binary heap, heapify, d-ary heaps, priority queues; graph representations (adjacency list/matrix), trie, union-find/DSU, segment tree, Fenwick tree, Bloom filter concept
 - **Phase 3 — Algorithms**: comparison sorts (merge/quick/heap) and non-comparison sorts (counting/radix), binary search and variants; dynamic programming (memoisation vs tabulation, knapsack/LCS/edit distance/coin change families); greedy algorithms and proofs, divide-and-conquer recurrences, Huffman, interval scheduling; BFS/DFS/Dijkstra/Bellman-Ford/Kruskal/Prim/topological sort; string algorithms (KMP, Rabin-Karp, Z-algorithm)
 - **Phase 4 — Operating Systems**: process vs thread, address spaces, user/kernel mode, syscall overhead, context-switch cost (~1–10 µs); CPU scheduling (FCFS/SJF/Round-Robin/MLFQ/CFS); virtual memory, paging (4 KB pages), TLB, page-replacement algorithms; mutex/semaphore/monitor (concept), Coffman conditions, deadlock prevention/avoidance/detection, dining-philosophers problem
-- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting; character encoding theory (Unicode code points/planes, UTF-8/16/32, surrogate pairs, normalization, grapheme clusters, mojibake)
+- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting; automata, decidability and NP-completeness; how source becomes a running process (lexer/parser/IR/codegen, JIT vs AOT, linker/loader)
 
 ---
 
 ## 2. Scope & Non-Overlap Boundary
 
-This section teaches concepts at the **language-agnostic CS-theory level**. Where a topic has a deep applied treatment elsewhere, this section provides a 2–4 paragraph conceptual foundation and links out — it does not re-teach the full applied depth.
+This section teaches concepts at the **language-agnostic CS-theory level**. Where a topic has a deep applied treatment elsewhere, this section gives a self-contained conceptual treatment — the model, the invariant, the cost — and links out for the applied depth. The dividing line is *theory versus practice*, not *short versus long*: `cryptography_fundamentals`, `database_and_storage_fundamentals` and `networking_fundamentals` each run past 1,400 lines and are the right length, because the CS theory under crypto, storage and networking is genuinely large. What they do not carry is the applied layer — no BCrypt cost tuning, no InnoDB page layout, no congestion-control tuning. That belongs to the sibling sections below.
 
 | Already covered in... | CS Fundamentals does NOT re-teach | CS Fundamentals DOES cover |
 |-----------------------|-----------------------------------|---------------------------|
@@ -86,9 +86,10 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | 18 | [networking_fundamentals](networking_fundamentals/networking_fundamentals.md) | 5 — Systems & Security | Intermediate | OSI vs TCP-IP conceptual primer, IP addresses/CIDR/ports/NAT, TCP (reliable, ordered, connection-oriented) vs UDP (unreliable, stateless), DNS resolution chain, TLS 1.3 handshake concept |
 | 19 | [database_and_storage_fundamentals](database_and_storage_fundamentals/database_and_storage_fundamentals.md) | 5 — Systems & Security | Intermediate | ACID properties (atomicity, consistency, isolation, durability), BASE, transaction concept, isolation levels (read uncommitted/committed/repeatable read/serializable), B+tree index concept, normalisation concept, storage hierarchy (registers → cache → RAM → SSD → HDD) with latency numbers |
 | 20 | [cryptography_fundamentals](cryptography_fundamentals/cryptography_fundamentals.md) | 5 — Systems & Security | Intermediate | Hash functions (one-way, collision resistance, SHA-256), symmetric encryption (AES, shared-key), asymmetric encryption (RSA, public/private key), HMAC, digital signatures, Diffie-Hellman key exchange, salting vs peppering, why bcrypt/scrypt beat SHA for passwords |
-| 21 | [character_encoding_deep_dive](character_encoding_deep_dive/character_encoding_deep_dive.md) | 5 — Systems & Security | Intermediate | Unicode code points/planes (BMP vs astral), UTF-8/UTF-16/UTF-32 transformation formats, surrogate pairs, byte-order mark (BOM), normalization (NFC/NFD/NFKC/NFKD), grapheme clusters (UAX #29), mojibake, IDN homograph attacks |
+| 21 | [character_encoding_deep_dive](character_encoding_deep_dive/character_encoding_deep_dive.md) | 1 — Complexity & Computation | Intermediate | Unicode code points/planes (BMP vs astral), UTF-8/UTF-16/UTF-32 transformation formats, surrogate pairs, byte-order mark (BOM), normalization (NFC/NFD/NFKC/NFKD), grapheme clusters (UAX #29), mojibake, IDN homograph attacks |
 | 22 | [discrete_math_for_engineers](discrete_math_for_engineers/discrete_math_for_engineers.md) | 1 — Complexity & Computation | Intermediate | Propositional/predicate logic, sets/relations/functions, induction & strong induction, combinatorics, recurrences (Master Theorem), probability (linearity of expectation), modular arithmetic |
 | 23 | [theory_of_computation](theory_of_computation/theory_of_computation.md) | 5 — Systems & Security | Advanced | Finite automata (DFA/NFA), regular languages & the pumping lemma, CFG/PDA, Turing machines, the halting problem, P vs NP, NP-completeness (Cook-Levin, SAT) |
+| 24 | [information_theory_and_compression](information_theory_and_compression/information_theory_and_compression.md) | 5 — Systems & Security | Advanced | Entropy and self-information, source and channel coding theorems, KL/cross-entropy, Kolmogorov complexity, entropy/dictionary/transform/lossy coding, erasure coding |
 | 24 | [how_code_runs_compilers_and_interpreters](how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md) | 5 — Systems & Security | Advanced | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
 
 ---
@@ -105,13 +106,13 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    p1("Phase 1 - Complexity and Computation Foundations<br/>complexity_analysis_and_big_o<br/>number_systems_and_bit_manipulation<br/>recursion_and_problem_solving_patterns")
+    p1("Phase 1 - Complexity and Computation Foundations<br/>complexity_analysis_and_big_o, discrete_math_for_engineers<br/>number_systems_and_bit_manipulation<br/>character_encoding_deep_dive<br/>recursion_and_problem_solving_patterns")
     p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures")
     p3("Phase 3 - Algorithms, builds on Phase 2 structures<br/>sorting_and_searching, dynamic_programming<br/>greedy_and_divide_and_conquer<br/>graph_and_string_algorithms")
     p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization")
-    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>character_encoding_deep_dive")
+    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>theory_of_computation<br/>how_code_runs_compilers_and_interpreters")
     cs("Case Studies, all phases<br/>design_lru_cache, top_k_and_streaming_problems<br/>dynamic_programming_patterns, graph_traversal_and_shortest_path<br/>autocomplete_and_string_search, interval_and_scheduling_problems")
-    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>22 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - Blind 75 + NeetCode 150")
+    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>25 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - the problem-list canon")
 
     p1 --> p2 --> p3
     p3 --> p4
@@ -199,8 +200,10 @@ dsa_patterns
   two_heaps.md                      senior
   two_pointers.md                   senior
   union_find.md                     senior
+  ai_assisted_round_playbook.md  senior
 processes_threads_and_context_switching
   processes_threads_and_context_switching.md  senior
+  async_io_and_event_loops.md  senior
 cpu_scheduling_algorithms
   cpu_scheduling_algorithms.md  senior
 memory_management_and_virtual_memory
@@ -226,17 +229,23 @@ case_studies
   graph_traversal_and_shortest_path.md  -
   interval_and_scheduling_problems.md   -
   top_k_and_streaming_problems.md       -
+probabilistic_and_streaming_structures
+  probabilistic_and_streaming_structures.md  senior
+memory_models_and_concurrency_theory
+  memory_models_and_concurrency_theory.md  senior
+information_theory_and_compression
+  information_theory_and_compression.md  -
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Senior** level filter (Full is the default).
 
 ### Full Path (24 modules + DSA pattern playbooks)
 
 The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
 
 <!-- study-path-table senior -->
-### Senior Path (17 modules)
+### Senior Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -248,17 +257,19 @@ The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-
 | 8 | [trees_and_binary_search_trees](trees_and_binary_search_trees/trees_and_binary_search_trees.md) | module page only |
 | 9 | [heaps_and_priority_queues](heaps_and_priority_queues/heaps_and_priority_queues.md) | module page only |
 | 10 | [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) | module page only |
-| 11 | [sorting_and_searching](sorting_and_searching/sorting_and_searching.md) | module page only |
-| 12 | [dynamic_programming](dynamic_programming/dynamic_programming.md) | module page only |
-| 13 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | module page only |
-| 14 | [graph_and_string_algorithms](graph_and_string_algorithms/graph_and_string_algorithms.md) | module page only |
-| 15 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 28 files |
-| 16 | [processes_threads_and_context_switching](processes_threads_and_context_switching/processes_threads_and_context_switching.md) | module page only |
-| 17 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | module page only |
-| 18 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | module page only |
-| 19 | [deadlocks_and_synchronization](deadlocks_and_synchronization/deadlocks_and_synchronization.md) | module page only |
+| 11 | [probabilistic_and_streaming_structures](probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | module page only |
+| 12 | [sorting_and_searching](sorting_and_searching/sorting_and_searching.md) | module page only |
+| 13 | [dynamic_programming](dynamic_programming/dynamic_programming.md) | module page only |
+| 14 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | module page only |
+| 15 | [graph_and_string_algorithms](graph_and_string_algorithms/graph_and_string_algorithms.md) | module page only |
+| 16 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 29 files |
+| 17 | [processes_threads_and_context_switching](processes_threads_and_context_switching/processes_threads_and_context_switching.md) | 2 files |
+| 18 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | module page only |
+| 19 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | module page only |
+| 20 | [deadlocks_and_synchronization](deadlocks_and_synchronization/deadlocks_and_synchronization.md) | module page only |
+| 21 | [memory_models_and_concurrency_theory](memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | module page only |
 
-**Not in this path** (8 of 25, Full Path only): `discrete_math_for_engineers`, `character_encoding_deep_dive`, `computer_architecture_and_memory_hierarchy`, `networking_fundamentals`, `database_and_storage_fundamentals`, `cryptography_fundamentals`, `theory_of_computation`, `how_code_runs_compilers_and_interpreters`
+**Not in this path** (9 of 28, Full Path only): `discrete_math_for_engineers`, `character_encoding_deep_dive`, `computer_architecture_and_memory_hierarchy`, `networking_fundamentals`, `database_and_storage_fundamentals`, `cryptography_fundamentals`, `theory_of_computation`, `information_theory_and_compression`, `how_code_runs_compilers_and_interpreters`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -386,7 +397,7 @@ The full description, templates, and problem banks live in [dsa_patterns/dsa_pat
 |------|---------|
 | [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (25 patterns) |
 | [dsa_patterns/interview_execution_playbook.md](dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
-| [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns, with LeetCode links and suggested order |
+| [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) | The problem-list canon mapped to patterns — which list to work at which stage, with LeetCode links and a suggested order |
 | [dsa_patterns/two_pointers.md](dsa_patterns/two_pointers.md) | Two-pointer template, 3Sum walkthrough, 12+ problems |
 | [dsa_patterns/sliding_window.md](dsa_patterns/sliding_window.md) | Fixed and variable window templates, Minimum Window Substring walkthrough |
 | [dsa_patterns/fast_and_slow_pointers.md](dsa_patterns/fast_and_slow_pointers.md) | Floyd cycle detection, linked list patterns |
@@ -413,13 +424,13 @@ The full description, templates, and problem banks live in [dsa_patterns/dsa_pat
 | [dsa_patterns/bit_manipulation.md](dsa_patterns/bit_manipulation.md) | XOR tricks, bitmask enumeration, set-bit counting |
 | [dsa_patterns/matrix_traversal.md](dsa_patterns/matrix_traversal.md) | Spiral, rotate, diagonal, set-zeroes, in-place grid transforms |
 
-The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **worked-example companions** to the pattern playbooks: each case study implements one high-frequency pattern end-to-end at depth (900–1100 lines), whereas the pattern files are the reusable template library (350–600 lines each).
+The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **worked-example companions** to the pattern playbooks: each case study implements one high-frequency pattern end-to-end at depth (900–1100 lines), whereas the pattern files are the reusable template library (~350–800 lines each — the harder patterns earn the upper end).
 
 ---
 
 ## 7. Build Status & Implementation Tracker
 
-> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Interview-Specific learning path (see "Learning Paths", directly below §4).
+> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Senior learning path (see "Learning Paths", directly below §4).
 >
 > **NEXT UP**: None queued for `cs_fundamentals/`. The prior candidate list (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`, `character_encoding_deep_dive/`) is now fully built — modules 21-24 in the table above — leaving no queued candidates if this section is revisited.
 
@@ -471,6 +482,10 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 | 18 | `networking_fundamentals/networking_fundamentals.md` | 5 | 5 | done | 15 |
 | 19 | `database_and_storage_fundamentals/database_and_storage_fundamentals.md` | 5 | 5 | done | 15 |
 | 20 | `cryptography_fundamentals/cryptography_fundamentals.md` | 5 | 5 | done | 15 |
+| 21 | `character_encoding_deep_dive/character_encoding_deep_dive.md` | 5 | 2026-07-07 | done | 15 |
+| 22 | `discrete_math_for_engineers/discrete_math_for_engineers.md` | 1 | 2026-07-07 | done | 15 |
+| 23 | `theory_of_computation/theory_of_computation.md` | 5 | 2026-07-07 | done | 15 |
+| 24 | `how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md` | 5 | 2026-07-07 | done | 15 |
 
 ### Case Study File Status
 
@@ -524,7 +539,9 @@ MODULE TEMPLATE — 14-section canonical scheme (root CLAUDE.md authoritative):
   ## 2. Intuition     (> blockquote analogy + Mental model + Why it matters + Key insight)
   ## 3. Core Principles
   ## 4. Types / Architectures / Strategies
-  ## 5. Architecture Diagrams            (ASCII art only — no Mermaid, no images)
+  ## 5. Architecture Diagrams            (appeal-first: Mermaid preferred for topological
+                                          diagrams, ASCII for grids/bit layouts/geometry;
+                                          no image files)
   ## 6. How It Works — Detailed Mechanics  (real Python/pseudocode, concrete numbers)
   ## 7. Real-World Examples
   ## 8. Tradeoffs                        (comparison tables)
@@ -537,13 +554,15 @@ MODULE TEMPLATE — 14-section canonical scheme (root CLAUDE.md authoritative):
   ## See Also         (relative links to crosslinked modules)
 
 QUALITY BAR:
-  - 700-1000 lines per module README
+  - ~800-1300 lines per module page; the theory-heavy Phase 5 modules run past 1500
+    and that is correct, not bloat
   - Q&A minimum per the tables above (18 for DSA/algorithm modules, 15 for OS/systems)
   - At least 1 BROKEN->FIX block in §10 and at least 1 in §14
   - Python-first code (type-hinted, runnable-shaped); Java noted only for JVM-specific points
   - Concrete numbers everywhere (cache line 64B, L1 ~1-4ns, RAM ~100ns, page 4KB,
     hash load factor 0.75, context switch ~1-10us, etc.) — never vague ("a few", "some")
-  - ASCII diagrams in fenced code blocks; no emojis; --- between every top-level section
+  - Diagrams appeal-first (Mermaid for topology, ASCII for grids/geometry);
+    no emojis; --- between every top-level section
   - Em-dash in §6 heading: "## 6. How It Works — Detailed Mechanics"
   - Cross-link rather than duplicate: conceptual primer + link to applied module
 
@@ -574,7 +593,8 @@ PATTERN-FILE TEMPLATE — 11-section playbook (dsa_patterns/ sub-section only):
   -> 9. Related Patterns & When to Switch
   -> 10. Cross-links (concept module + applied sections)
   -> 11. Interview Q&A (10+ Q&As; bold question / plain answer)
-  350-600 lines; Python-first runnable-shaped; ASCII diagrams; real LeetCode hyperlinks in §7;
+  ~350-800 lines (harder patterns earn the upper end); Python-first runnable-shaped;
+  diagrams appeal-first; real LeetCode hyperlinks in §7;
   at least 1 BROKEN->FIX; 10+ Q&As; --- rules between sections; no emojis.
   NOTE: LeetCode links in dsa_patterns/ use real URLs — e.g., [Two Sum (LC 1)](https://leetcode.com/problems/two-sum/)
   This is an intentional exception scoped to dsa_patterns/ only.
@@ -598,6 +618,6 @@ Recommended order for interview preparation:
 2. **Week 2 — Algorithms**: Phase 3 (sorting/searching → DP → greedy/D&C → graph/string algorithms). Work the case studies alongside: `design_lru_cache` after Phase 2, `dynamic_programming_patterns` and `graph_traversal_and_shortest_path` after Phase 3.
 3. **Week 3 — OS + Systems**: Phases 4 and 5 (OS scheduling/memory/deadlocks, then architecture/networking/DB/crypto). These are conceptual — reinforce by crosslinking to `java/concurrency`, `backend/`, and `database/` for the applied angle.
 4. **Review**: work the remaining case studies (`autocomplete_and_string_search`, `interval_and_scheduling_problems`, `top_k_and_streaming_problems`). See [case_studies/case_studies.md](case_studies/case_studies.md) for the guided path.
-5. **Interview drill**: once Phases 1–3 are internalized, move to [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) — the recognition engine. Use it to map unseen problems to patterns. Work each pattern playbook's §7 Problem Bank (curated LeetCode sets per pattern) and follow [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) for Blind 75 / NeetCode 150.
+5. **Interview drill**: once Phases 1–3 are internalized, move to [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) — the recognition engine. Use it to map unseen problems to patterns. Work each pattern playbook's §7 Problem Bank (curated LeetCode sets per pattern) and follow [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) for which problem list to work at which stage.
 
 Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/foundations_and_architecture.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.

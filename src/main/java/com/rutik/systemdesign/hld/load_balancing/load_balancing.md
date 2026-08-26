@@ -1,37 +1,6 @@
 # Load Balancing
 
-## Table of Contents
-1. [Concept Overview](#concept-overview)
-2. [Core Principles](#core-principles)
-3. [Types and Strategies](#types-and-strategies)
-4. [Architecture Diagrams](#architecture-diagrams)
-5. [How It Works](#how-it-works)
-6. [Real-World Examples](#real-world-examples)
-7. [Tradeoffs](#tradeoffs)
-8. [When to Use](#when-to-use)
-9. [When NOT to Use](#when-not-to-use)
-10. [Common Pitfalls](#common-pitfalls)
-11. [Technologies and Tools](#technologies-and-tools)
-12. [Interview Questions](#interview-questions)
-13. [Best Practices](#best-practices)
-14. [Metrics and Monitoring](#metrics-and-monitoring)
-15. [Case Study](#case-study)
-
----
-
-## Intuition
-
-> **One-line analogy**: A load balancer is like a restaurant host who directs arriving customers to tables — ensuring no single waiter is overwhelmed while others stand idle.
-
-**Mental model**: Without load balancing, all traffic hits one server — it becomes the bottleneck and single point of failure. A load balancer sits in front of a pool of servers, distributing incoming requests so each server handles a fair share. Health checks ensure unhealthy servers are removed from the pool. Round-robin is the simplest strategy; consistent hashing is best for stateful workloads.
-
-**Why it matters**: Load balancers are the entry point of every large-scale web system. They enable horizontal scaling (add more servers without changing clients), provide redundancy (one server dies, traffic reroutes), and enable zero-downtime deployments (remove one server, update it, re-add).
-
-**Key insight**: L4 (transport layer) load balancers are fast but dumb — they see only IP/port. L7 (application layer) load balancers are smart but slower — they see HTTP headers, URL paths, and cookies, enabling sticky sessions, path-based routing, and SSL termination.
-
----
-
-## Concept Overview
+## 1. Concept Overview
 
 A load balancer is a component that distributes incoming network traffic across multiple backend servers. Its core purpose is to ensure no single server bears too much demand, increasing responsiveness and availability of applications.
 
@@ -52,7 +21,19 @@ Load balancing operates at multiple layers of the network stack. Choosing the ri
 
 ---
 
-## Core Principles
+## 2. Intuition
+
+> **One-line analogy**: A load balancer is like a restaurant host who directs arriving customers to tables — ensuring no single waiter is overwhelmed while others stand idle.
+
+**Mental model**: Without load balancing, all traffic hits one server — it becomes the bottleneck and single point of failure. A load balancer sits in front of a pool of servers, distributing incoming requests so each server handles a fair share. Health checks ensure unhealthy servers are removed from the pool. Round-robin is the simplest strategy; consistent hashing is best for stateful workloads.
+
+**Why it matters**: Load balancers are the entry point of every large-scale web system. They enable horizontal scaling (add more servers without changing clients), provide redundancy (one server dies, traffic reroutes), and enable zero-downtime deployments (remove one server, update it, re-add).
+
+**Key insight**: L4 (transport layer) load balancers are fast but dumb — they see only IP/port. L7 (application layer) load balancers are smart but slower — they see HTTP headers, URL paths, and cookies, enabling sticky sessions, path-based routing, and SSL termination.
+
+---
+
+## 3. Core Principles
 
 ### 1. Health Awareness
 The load balancer must know which backends are healthy. It runs periodic health checks (TCP ping, HTTP probe) and removes unhealthy instances from rotation immediately.
@@ -71,7 +52,7 @@ The load balancer is the first line of defense against backend failures. It dete
 
 ---
 
-## Types and Strategies
+## 4. Types / Architectures / Strategies
 
 ### Load Balancing Algorithms
 
@@ -107,37 +88,9 @@ A more sophisticated version of IP hash. Servers are placed on a "hash ring." Ad
 - **Best for**: Cache servers, where you want the same client to always hit the same cache node
 - **Problem**: More complex to implement than simple IP hash
 
-**What the formula is telling you.** "`server = hash(key) % N` is not a stable mapping — it is a mapping that is redefined every time `N` changes, which is why changing `N` moves almost every key."
+**Why a load balancer cares.** Plain IP hash is `server = hash(key) % N`, which is not a stable mapping — it is redefined every time `N` changes, so a single scale-out or a single failed backend moves roughly **100%** of clients to a different server. A hash ring moves about **1/N** instead: at a 200-node tier, 0.5% rather than ~100%, a 200x difference in how much is disturbed. For a stateless web tier that only costs some churn in sticky routing; for a cache tier it is the difference between a normal deploy and a full-tier cache stampede where every lookup misses at the same instant — the gap between the 41% and 94% flash-sale hit rates in this module's case study.
 
-Modulo hashing looks harmless because it distributes evenly. The failure is not distribution, it is *stability under resize* — and the difference between the two schemes is the entire reason cache tiers use rings.
-
-| Symbol | What it is |
-|--------|------------|
-| `hash(key)` | A large integer derived from the routing key (client IP, `product_id`, cache key) |
-| `N` | Current number of servers in the pool — the value that changes on scale-out or failure |
-| `% N` | Remainder after division; the bucket index. Changing `N` changes every remainder |
-| keys remapped (modulo) | Approaching 100% — nearly every key lands on a different server |
-| keys remapped (ring) | About `1/N` — only the departing/arriving server's arc moves |
-
-**Walk one example.** One key through a modulo pool that grows from 4 servers to 5:
-
-```
-  hash(key) = 1,234,567
-
-  N = 4 :  1,234,567 % 4 = 3   -> server 3
-  N = 5 :  1,234,567 % 5 = 2   -> server 2      <- moved, and it never failed
-
-  Fraction of keys that keep their server when N goes 4 -> 5:
-      only keys where (h % 4) == (h % 5), about 1 in 5 -> ~20% stay, ~80% move
-
-  Consistent hashing at the case study's 200-server cache tier:
-      keys remapped = 1 / N = 1 / 200 = 0.005 = 0.5%
-      modulo        = ~100%
-
-      ratio = 100% / 0.5% = 200x fewer keys disturbed
-```
-
-The operational consequence is a cache stampede, not a correctness bug: after a modulo resize, ~100% of lookups miss and every one becomes an origin fetch at the same instant. At 0.5%, the origin barely notices — which is exactly the difference between the 41% and 94% flash-sale hit rates reported in the case study's results.
+The ring mechanics themselves — virtual nodes, hotspot handling, rebalancing cost, and the rendezvous-hashing alternative — belong to [Consistent Hashing](../consistent_hashing/consistent_hashing.md) and are derived in full there. What matters here is only the routing consequence: choose ring-based hashing whenever the backend holds per-key state, and plain IP hash only when the pool is genuinely static.
 
 #### Random
 Route requests to a randomly selected backend.
@@ -228,6 +181,61 @@ flowchart LR
 
 *L7 fully parses the request, so both visibility and routing power go up — at the cost of decrypting and inspecting every packet.*
 
+### HTTP/3 and QUIC — Why the 4-Tuple Stops Working
+
+Every L4 load balancer above routes on the TCP 4-tuple (source IP, source port, destination
+IP, destination port), and that identity holds for the life of the connection. **QUIC breaks
+both halves of that assumption**, so HTTP/3 changes L4 load balancing structurally rather than
+incrementally.
+
+- **QUIC runs over UDP**, so there is no connection state in the kernel for the balancer to
+  track and no SYN to mark a connection's start. A UDP-mode listener is required — AWS NLB,
+  GCP's L4 balancer, and HAProxy/Nginx all need QUIC/UDP explicitly enabled, and an ACL that
+  permits only TCP/443 silently blocks HTTP/3 while HTTP/2 keeps working, which is a
+  genuinely confusing incident to debug.
+- **Connection migration** (RFC 9000) means the client's IP and port can change mid-connection
+  — a phone moving from Wi-Fi to 5G keeps the same QUIC connection alive rather than
+  reconnecting. This is the feature QUIC is largely *for*, and it invalidates 4-tuple hashing:
+  after migration, the same connection hashes to a different backend, which has none of its
+  state.
+
+The fix is to route on the **connection ID** rather than the 4-tuple. QUIC lets the *server*
+choose the connection IDs it wants clients to use, so a fleet encodes routing information —
+effectively a backend identifier — into the connection ID it issues. The load balancer then
+parses the connection ID from the QUIC header and forwards on that, and migration becomes a
+non-event because the ID travels with the client. This is the approach the IETF QUIC-LB work
+standardizes, and it is what large CDNs already run.
+
+Two further consequences worth naming: **0-RTT resumption** lets a returning client send
+application data in its very first flight, so a backend can receive real requests before any
+handshake round trip completed — replay protection becomes the application's problem for
+non-idempotent requests. And because QUIC terminates TLS itself, a QUIC-aware L7 balancer
+must terminate QUIC to see HTTP semantics at all; there is no plaintext-header shortcut of the
+kind an L7 proxy has with cleartext HTTP/1.1.
+
+### eBPF and XDP — L4 Load Balancing Below the Network Stack
+
+The classic software L4 balancer receives a packet, the kernel walks it up the network stack,
+a userspace process (or `iptables`/IPVS rules) decides a backend, and the packet goes back
+down. Two costs dominate at scale: the per-packet trip through the stack, and rule matching
+that is **O(n) in the number of services** for `iptables` chains. eBPF moves the decision far
+earlier and makes the lookup **O(1)**:
+
+- **XDP (eXpress Data Path)** runs an eBPF program in the NIC driver, *before* the kernel
+  allocates an `sk_buff`. Meta's **Katran** is the canonical example: an XDP-based L4 balancer
+  that rewrites and forwards packets at the driver hook, with backend selection by a hash-map
+  lookup and consistent hashing (Maglev-style) so backend churn barely disturbs existing
+  flows. Forwarding never enters userspace at all.
+- **Cilium** replaces `kube-proxy` entirely, implementing Kubernetes Service load balancing in
+  eBPF hash maps rather than iptables chains. On a cluster with thousands of Services this is
+  the difference between a linear rule scan per packet and a single map lookup, and it removes
+  the iptables rule-reload stall that shows up as latency spikes during large deployments.
+
+The tradeoff is capability, not speed: XDP works at L4 on packets, so anything needing HTTP
+semantics — path routing, header rewriting, cookie-based stickiness — still requires an L7
+proxy behind it. The mature architecture is both tiers: eBPF/XDP for the high-volume L4 hop at
+the edge, Envoy or Nginx for L7 behind it.
+
 ### Sticky Sessions (Session Persistence)
 
 #### Cookie-Based Sticky Sessions
@@ -244,7 +252,7 @@ Client IP is hashed to determine the backend. Consistent for a given IP.
 
 ---
 
-## Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Basic Load Balancer Architecture
 
@@ -353,7 +361,7 @@ stateDiagram-v2
 
 ---
 
-## How It Works
+## 6. How It Works — Detailed Mechanics
 
 ### Request Lifecycle Through a Load Balancer
 
@@ -457,7 +465,7 @@ One Envoy-specific caveat that decides whether any of this fires: each detector 
 
 ---
 
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Google
 - Google Front End (GFE) handles all external traffic before it reaches any Google service
@@ -485,7 +493,7 @@ One Envoy-specific caveat that decides whether any of this fires: each detector 
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Factor | L4 Load Balancing | L7 Load Balancing |
 |--------|-------------------|-------------------|
@@ -509,7 +517,9 @@ One Envoy-specific caveat that decides whether any of this fires: each detector 
 
 ---
 
-## When to Use
+## 9. When to Use / When NOT to Use
+
+### When to Use
 
 - **Serving more traffic than one server can handle** — the primary use case
 - **High availability is required** — zero-tolerance for a single server failure taking down the service
@@ -520,7 +530,7 @@ One Envoy-specific caveat that decides whether any of this fires: each detector 
 
 ---
 
-## When NOT to Use
+### When NOT to Use
 
 - **Single-server deployments during early development** — adds unnecessary complexity
 - **Internal microservice-to-microservice calls at low volume** — direct service discovery may be simpler
@@ -528,7 +538,7 @@ One Envoy-specific caveat that decides whether any of this fires: each detector 
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 ### 1. The Load Balancer as a SPOF
 A single load balancer handling all traffic is itself a single point of failure. Always run load balancers in an active-active or active-passive HA pair. Managed solutions (AWS ALB) handle this automatically.
@@ -553,7 +563,7 @@ Round Robin routes evenly by request count but not by cost. One request that tak
 
 ---
 
-## Technologies and Tools
+## 11. Technologies & Tools
 
 ### Software Load Balancers
 | Tool | Layer | Key Feature |
@@ -563,6 +573,13 @@ Round Robin routes evenly by request count but not by cost. One request that tak
 | Envoy | L7 | Modern; used in service meshes (Istio); gRPC support |
 | Traefik | L7 | Dynamic configuration; native Docker/Kubernetes integration |
 | Caddy | L7 | Automatic HTTPS; simple config |
+
+### Kernel-Bypass / eBPF Load Balancers
+| Tool | Layer | Key Feature |
+|------|-------|-------------|
+| Katran (Meta) | L4 | XDP program in the NIC driver path; consistent hashing for backend selection; forwarding never reaches userspace |
+| Cilium | L4 | eBPF replacement for `kube-proxy`; O(1) hash-map service lookup instead of O(n) iptables chains; no per-pod sidecar |
+| IPVS | L4 | In-kernel L4 balancing; the pre-eBPF answer, still the default in many Kubernetes clusters |
 
 ### Cloud Managed Load Balancers
 | Service | Layer | Key Feature |
@@ -583,7 +600,7 @@ Round Robin routes evenly by request count but not by cost. One request that tak
 
 ---
 
-## Interview Questions
+## 12. Interview Questions with Answers
 
 **Q1: What is the difference between L4 and L7 load balancing?**
 **Short:** L4 routes on IP/port at the transport layer; L7 routes on URL, headers, and cookies at the application layer.
@@ -670,9 +687,19 @@ Because the three traffic classes have opposite needs, and no single algorithm s
 
 Passive health checking ejects a backend based on the real responses it is already returning, rather than on a separate synthetic probe. An active check only proves the backend can answer `GET /health` — a server can pass that in 2ms while returning 503s or 10-second latencies to actual user requests, and between probes the load balancer has no signal at all, so detection has a hard floor of `interval x unhealthy_threshold`. Envoy's outlier detection supplies the missing signal with four triggers: consecutive 5xx, consecutive gateway failure (502/503/504), success rate measured against the cluster mean, and a flat failure-percentage threshold for pools too small for a meaningful mean; AWS exposes a softer form on ALB by combining the `weighted_random` routing algorithm with `anomaly_mitigation`, which shifts traffic share away from anomalous targets instead of removing them. The setting that matters most is `max_ejection_percent`, because a shared-dependency outage makes every backend return 5xx at once and an uncapped ejector would remove the entire fleet. Run both layers — active checks catch a process that is gone, passive checks catch a process that is present and useless.
 
+**Q18: HTTP/3 breaks 4-tuple L4 load balancing — what replaces it?**
+**Short:** Route HTTP/3 on the QUIC connection ID rather than the 4-tuple, because connection migration changes the client's IP and port mid-connection.
+
+Route on the **QUIC connection ID**, not the 4-tuple. Two properties of QUIC break the classic scheme at once. It runs over UDP, so there is no kernel connection state and no SYN marking the start of a flow — the balancer needs an explicit UDP listener, and a firewall rule permitting only TCP/443 blocks HTTP/3 while HTTP/2 keeps working, which is a nasty way to discover the difference. More fundamentally, QUIC supports **connection migration**: a phone moving from Wi-Fi to cellular keeps the same connection while its source IP and port change, so any hash of the 4-tuple sends the migrated packets to a backend holding none of that connection's state. QUIC solves this by letting the server choose the connection IDs clients present, so the fleet encodes backend routing information into the connection ID it issues, and the balancer parses and forwards on that — the identity now travels with the client, and migration becomes a non-event. This is what the IETF QUIC-LB work standardizes and what large CDNs already run. Two follow-ups worth pre-empting: 0-RTT resumption means a backend can receive application data before any round trip completed, so replay protection for non-idempotent requests is the application's job; and because QUIC carries TLS internally, an L7 proxy must terminate QUIC to see HTTP at all.
+
+**Q19: Why would you run an eBPF/XDP load balancer instead of iptables or IPVS?**
+**Short:** eBPF does backend selection with an O(1) hash-map lookup in the NIC driver path, while iptables walks O(n) rules through the full network stack.
+
+Because the packet never has to climb the network stack and the backend lookup stops being linear. With `iptables`, every Service adds rules to a chain that is walked **per packet** — the match cost is O(n) in the number of Services, so a cluster with thousands of them pays a measurable per-packet tax and suffers latency spikes whenever a large deployment triggers a rule reload. An XDP program runs in the NIC driver hook, *before* the kernel even allocates an `sk_buff`, and selects a backend with a single **O(1)** eBPF hash-map lookup; Meta's **Katran** does exactly this, pairing it with Maglev-style consistent hashing so adding or removing a backend barely disturbs existing flows, and forwarding never enters userspace. **Cilium** applies the same idea to Kubernetes by replacing `kube-proxy` outright. The honest limitation is that this is L4: XDP sees packets, not requests, so path routing, header rewriting, and cookie stickiness still need an L7 proxy. The production shape is both tiers — eBPF/XDP absorbing the high-volume L4 hop at the edge, Envoy or Nginx doing L7 behind it.
+
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Always run load balancers in HA pairs.** A single load balancer is a SPOF. Use active-active or deploy behind a managed service.
 2. **Use meaningful health check endpoints.** `/health` should verify DB connectivity, cache availability, and any critical dependencies — not just return 200.
@@ -687,7 +714,7 @@ Passive health checking ejects a backend based on the real responses it is alrea
 
 ---
 
-## Metrics and Monitoring
+### Metrics and Monitoring
 
 ### Load Balancer Metrics
 | Metric | Description | Alert Threshold |
@@ -717,7 +744,7 @@ Passive health checking ejects a backend based on the real responses it is alrea
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement Load Balancing**
 
@@ -732,7 +759,7 @@ Passive health checking ejects a backend based on the real responses it is alrea
 
 ---
 
-## Case Study: Load Balancing a High-Traffic E-Commerce Platform
+## 14. Case Study: Load Balancing a High-Traffic E-Commerce Platform
 
 ### Problem Statement
 

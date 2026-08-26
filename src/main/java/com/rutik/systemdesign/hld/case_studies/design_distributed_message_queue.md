@@ -503,6 +503,34 @@ public class ConsumerGroupCoordinator {
 
 **Static membership** (`group.instance.id`): normally, a consumer that restarts (e.g., during a rolling deploy) gets a *new* member ID, triggering a rebalance both when it leaves and again when it rejoins — two rebalances per restart, times however many instances are being rolled. Configuring a stable `group.instance.id` per consumer instance lets the coordinator recognize "this is the same logical member, just reconnecting" within a grace period (`session.timeout.ms`), skipping the rebalance entirely for a clean restart — directly addressed in War Story 1.
 
+**Share groups — the queue-shaped alternative (KIP-932).** Everything above inherits one
+constraint from the log model: a partition is assigned to at most one consumer in a group, so
+**consumer parallelism is capped at the partition count** and a single slow message blocks its
+partition behind it. That is the right tradeoff when per-key ordering matters and the wrong one
+for a work queue, which is why teams kept reaching for RabbitMQ or SQS alongside Kafka.
+**Share groups** (KIP-932, introduced as an early-access feature in Kafka 4.0) close that gap
+inside Kafka itself.
+
+| | Consumer group | Share group |
+|---|---|---|
+| Partition assignment | Exclusive — one consumer per partition | Shared — **many consumers read the same partition cooperatively** |
+| Consumer parallelism | Capped at the partition count | Independent of partition count |
+| Position tracking | One offset per partition, advanced in order | Per-record **acquisition and acknowledgement**, with in-flight state per record |
+| Failure handling | Reprocess from the committed offset | Redeliver the individual unacknowledged record, with a delivery count and a release/reject path |
+| Ordering | Guaranteed within a partition | **None** — the cost of the model |
+| Fits | Stream processing, per-key ordering, replay | Work queues, task fan-out, slow or variable-cost per-message handlers |
+
+The mechanism is that the broker now tracks per-record in-flight state rather than a single
+advancing offset: a consumer *acquires* records for a bounded lock duration, then acknowledges,
+releases, or rejects each one, and an unacknowledged record becomes available to another
+consumer when its acquisition lock expires. That is the classic queue semantic, implemented on
+top of the same log, so the topic remains replayable by a normal consumer group. The
+architectural consequence for this design is that "queue or log?" is no longer a choice of
+broker — the same topic can serve a stream-processing consumer group and a work-queue share
+group simultaneously, and the decision moves from procurement to a per-consumer configuration.
+Confirm the maturity status for the Kafka version you are actually running before proposing it
+in production; it shipped as early access, not as a stable default.
+
 ### 4.5 Delivery Semantics — Idempotent Producers and Transactions
 
 **The duplicate problem**: with `acks=all`, a producer sends a batch, the leader writes it and replicates it, but the **acknowledgment is lost** (network blip) before reaching the producer. The producer, having received no ack, retries — and now the broker has the batch **twice**. At-least-once delivery is "correct" in the sense that no message is lost, but the topic now contains a duplicate.

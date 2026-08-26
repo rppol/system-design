@@ -14,7 +14,7 @@ Why it matters:
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: API design is like designing a restaurant menu — you decide what dishes to offer (endpoints), what information customers need to order (request format), and what they'll receive (response format). Once published, changing the menu is painful.
 
@@ -26,7 +26,7 @@ Why it matters:
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 **Consistency** — Use the same naming conventions, error formats, and patterns across all endpoints. Developers should be able to predict how a new endpoint works from prior experience with your API.
 
@@ -46,7 +46,7 @@ Why it matters:
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Architectures / Strategies
 
 ### REST (Representational State Transfer)
 The dominant paradigm for HTTP APIs. Leverages HTTP verbs (GET, POST, PUT, PATCH, DELETE) mapped to CRUD operations on resources. Stateless, cacheable, and well-understood.
@@ -88,7 +88,7 @@ Reverse API — the server pushes data to the client by calling a URL registered
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### REST API Request Lifecycle
 
@@ -177,7 +177,7 @@ A single stub call is transparently carried as multiplexed binary Protobuf frame
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### REST Mechanics
 
@@ -343,11 +343,11 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Stripe** — widely considered the gold standard for REST API design. Consistent error objects, idempotency keys on all write operations, webhook signatures for security, excellent versioning (`Stripe-Version` header + date-based versions), comprehensive SDK generation.
 
-**GitHub** — offers both a REST API and a GraphQL API. The REST API is versioned by date via the `X-GitHub-Api-Version` header (currently `2022-11-28`); the GraphQL API exists because REST required many requests to fetch PR data with associated reviews, checks, and comments. Power users migrated to GraphQL for efficiency.
+**GitHub** — offers both a REST API and a GraphQL API. The REST API is versioned by date via the `X-GitHub-Api-Version` header: the current version is `2026-03-10`, while `2022-11-28` remains the **default applied to any request that omits the header**, and each released version is supported for at least 24 months after its successor ships. That combination — an explicit date header, a pinned default for clients who never set one, and a published minimum support window — is the lifecycle policy worth copying, because it makes "what breaks and when" answerable without reading a changelog. The GraphQL API exists for a different reason: REST required many round trips to assemble PR data with its reviews, checks, and comments, so power users migrated to GraphQL for efficiency.
 
 **Twitter/X** — moved from REST to GraphQL-like patterns internally. Public API uses REST with cursor-based pagination (`next_token` in responses).
 
@@ -359,7 +359,7 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 ### REST
 | Gain | Lose |
@@ -384,7 +384,9 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 
 ---
 
-## 8. When to Use
+## 9. When to Use / When NOT to Use
+
+### When to Use
 
 - **REST** — public APIs, mobile/web clients, when HTTP caching matters, when the team knows HTTP well
 - **GraphQL** — complex UIs aggregating multiple data sources, when clients have varying data needs, BFF (Backend for Frontend) pattern
@@ -394,7 +396,7 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 
 ---
 
-## 9. When NOT to Use
+### When NOT to Use
 
 - Do not use **REST** for real-time bidirectional communication (use WebSockets or gRPC streaming)
 - Do not use **GraphQL** for simple CRUD APIs — the complexity overhead is not worth it
@@ -444,7 +446,7 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 
 ---
 
-## 12. Interview Questions
+## 12. Interview Questions with Answers
 
 **Q1: What is the difference between PUT and PATCH?**
 **Short:** PUT replaces the entire resource, while PATCH applies a partial update to it.
@@ -552,7 +554,7 @@ A single GraphQL query can request deeply nested or duplicated fields that fan o
 
 ---
 
-## 14. Metrics & Monitoring
+### Metrics & Monitoring
 
 | Metric | Description | Alert Threshold |
 |--------|-------------|-----------------|
@@ -597,7 +599,7 @@ Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (dist
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement API Design**
 
@@ -612,7 +614,7 @@ Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (dist
 
 ---
 
-## 15. Case Study: Designing the Stripe Payments API
+## 14. Case Study: Designing the Stripe Payments API
 
 **Problem:** Build a payments API that handles card charges from web and mobile clients, supports retries safely, and integrates with partner platforms.
 
@@ -652,7 +654,7 @@ All errors return a consistent shape:
 
 ---
 
-## Case Study: Stripe's Idempotent Payment API
+### Companion Case Study: Stripe's Idempotent Payment API
 
 ### Problem Statement
 

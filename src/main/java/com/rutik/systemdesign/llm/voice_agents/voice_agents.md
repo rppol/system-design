@@ -12,7 +12,7 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 
 **One-line analogy**: A voice agent is like a phone conversation with a human — pauses, interruptions, "uh-huhs", talking-over, all need to feel natural. Latency tolerance is measured in milliseconds, not seconds.
 
-**Mental model**: Three architectures in a spectrum. **Pipeline** (STT → LLM → TTS): independent modules, easier to swap, ~800-1500ms latency, no native prosody. **Hybrid**: pipeline with cascade optimizations (streaming STT, parallel LLM start). **End-to-end audio** (GPT-4o Realtime, Gemini Live): single model takes audio in, emits audio out, ~200-800ms latency, captures intonation/emotion natively. Pick based on latency tolerance, control needs, and budget.
+**Mental model**: Three architectures in a spectrum. **Pipeline** (STT → LLM → TTS): independent modules, easier to swap, ~800-1500ms latency, no native prosody. **Hybrid**: pipeline with cascade optimizations (streaming STT, parallel LLM start). **End-to-end audio** (OpenAI Realtime API's `gpt-realtime-2.1`, Gemini Live): single model takes audio in, emits audio out, ~200-800ms latency, captures intonation/emotion natively. Pick based on latency tolerance, control needs, and budget.
 
 **Why it matters**: Humans tolerate ~300ms latency in conversation; >1s feels broken. Pipeline agents at 1500ms feel like talking to someone over a satellite link. End-to-end at 300ms feels human. The latency budget cascades through every architectural decision — barge-in handling, model choice, deployment topology, telephony integration.
 
@@ -40,7 +40,7 @@ Three modules: Whisper / Deepgram / Speechmatics → Claude / GPT / Gemini → E
 
 ### 4.2 End-to-End Audio Model
 
-OpenAI Realtime API (GPT-4o), Gemini Live, Mistral Voxtral. Single model: audio in → audio out. Latency 200-800ms. Captures prosody, emotion, laughter. Best for: premium UX, low latency required.
+OpenAI Realtime API (`gpt-realtime-2.1`), Gemini Live, Mistral Voxtral. Single model: audio in → audio out. Latency 200-800ms. Captures prosody, emotion, laughter. Best for: premium UX, low latency required.
 
 ### 4.3 Hybrid Cascade
 
@@ -96,7 +96,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    MIC(["Microphone\n(audio in)"]) --> M["GPT-4o Realtime / Gemini Live\nsingle model: audio in -> audio out\nnative prosody, emotion, laughter, interruption"]
+    MIC(["Microphone\n(audio in)"]) --> M["gpt-realtime-2.1 / Gemini Live\nsingle model: audio in -> audio out\nnative prosody, emotion, laughter, interruption"]
     M --> SPK(["Speaker\n(audio out)"])
     M -.->|"tool_calls"| TOOLS["Function execution"]
 
@@ -203,9 +203,9 @@ import websockets
 from pyaudio import PyAudio, paInt16
 
 async def voice_agent_session():
-    """Connect to OpenAI Realtime API; bidirectional audio."""
+    """Connect to OpenAI Realtime API (GA); bidirectional audio."""
     
-    url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+    url = "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "OpenAI-Beta": "realtime=v1"}
     
     async with websockets.connect(url, extra_headers=headers) as ws:
@@ -218,7 +218,7 @@ async def voice_agent_session():
                 "instructions": "You are a helpful customer support agent. Speak naturally.",
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "whisper-1"},
+                "input_audio_transcription": {"model": "gpt-4o-transcribe"},
                 "turn_detection": {
                     "type": "server_vad",  # Server-side VAD
                     "threshold": 0.5,
@@ -335,7 +335,7 @@ async def run_voice_agent():
 
 **Healthcare patient intake** — automated triage call collecting symptoms before nurse callback.
 
-**OpenAI Voice Mode (ChatGPT)** — consumer voice assistant; GPT-4o Realtime backed.
+**OpenAI Voice Mode (ChatGPT)** — consumer voice assistant; Realtime API (`gpt-realtime` family) backed.
 
 **In-car assistants** — BMW IDA, Mercedes MBUX with LLM backends.
 
@@ -347,7 +347,7 @@ async def run_voice_agent():
 |---|---|---|---|---|---|
 | Pipeline (STT→LLM→TTS) | 800-1500ms | Flat, synthetic | $0.05-$0.15/min | Full per-stage | Cost-sensitive, custom voice cloning |
 | Hybrid (streaming pipeline) | 500-900ms | Improved (good TTS) | $0.10-$0.20/min | High | Production telephony |
-| End-to-end (GPT-4o Realtime) | 200-800ms | Natural (model native) | $0.30+/min | Less per-stage | Premium UX, conversational |
+| End-to-end (`gpt-realtime-2.1`) | 200-800ms | Natural (model native) | ~$0.10+/min | Less per-stage | Premium UX, conversational |
 | End-to-end (Gemini Live) | 300-700ms | Natural | varies | Less | Google Cloud stacks |
 
 ---
@@ -415,7 +415,7 @@ if silence_duration > 800:
 
 | Tool | Category | Notes |
 |---|---|---|
-| OpenAI Realtime API | End-to-end audio | GPT-4o; lowest latency |
+| OpenAI Realtime API | End-to-end audio | `gpt-realtime-2.1`; lowest latency |
 | Gemini Live | End-to-end audio | Google; multimodal |
 | Whisper (OpenAI) | STT | High accuracy; not real-time |
 | Deepgram Nova-2 | STT | Streaming, low latency |
@@ -438,8 +438,8 @@ if silence_duration > 800:
 First audio byte should arrive within 300ms after the user finishes speaking for "human-like" conversational latency. Up to 800ms is acceptable. Above 1000ms feels broken — users notice the lag. This budget dictates architecture choice: end-to-end audio models hit 200-800ms; pipelines typically 800-1500ms.
 
 **Q: What's the difference between pipeline and end-to-end audio models?**
-**Short:** A pipeline chains separate STT, LLM, and TTS models with each stage's latency stacking, while an end-to-end model like GPT-4o Realtime emits audio directly.
-Pipeline: STT (speech→text) → LLM (text→response text) → TTS (text→speech). Three independent models, each with its own latency. End-to-end: single model takes audio directly, emits audio directly. GPT-4o Realtime, Gemini Live. Lower latency, native prosody/emotion handling, but less per-stage control.
+**Short:** A pipeline chains separate STT, LLM, and TTS models with each stage's latency stacking, while an end-to-end model like `gpt-realtime-2.1` emits audio directly.
+Pipeline: STT (speech→text) → LLM (text→response text) → TTS (text→speech). Three independent models, each with its own latency. End-to-end: single model takes audio directly, emits audio directly. OpenAI's `gpt-realtime-2.1`, Gemini Live. Lower latency, native prosody/emotion handling, but less per-stage control.
 
 **Q: How does barge-in work?**
 **Short:** Barge-in detects the user speaking over the agent via VAD and immediately stops TTS playback, cancels the in-flight LLM generation, and starts transcribing the new speech.
@@ -458,8 +458,8 @@ Silero VAD is a small (~2MB) ONNX neural VAD trained on 6000+ hours of speech in
 Combine signals: (1) silence threshold (800-1000ms typical), (2) prosodic features (rising/falling pitch indicating completion), (3) semantic completeness (LLM judges if utterance is a complete thought). Pure silence is fast but inaccurate; combined approach is most reliable.
 
 **Q: What's the cost of voice agents?**
-**Short:** An end-to-end model like GPT-4o Realtime costs roughly $0.30/minute versus $0.05-0.17/minute for a pipeline, about 2-3x more for meaningfully better conversational UX.
-GPT-4o Realtime: $0.06/min audio input + $0.24/min audio output = ~$0.30/min total. Pipeline approach: $0.01/min STT + $0.02-$0.10/min LLM + $0.02-$0.05/min TTS = $0.05-$0.17/min. End-to-end is 2-3× more expensive but UX significantly better.
+**Short:** An end-to-end model like `gpt-realtime-2.1` costs roughly $0.10/minute blended versus $0.05-0.17/minute for a pipeline, still pricier for meaningfully better conversational UX.
+`gpt-realtime-2.1`: $32/1M audio input tokens + $64/1M audio output tokens, which at ~600 input / ~1200 output tokens per minute of speech works out to roughly $0.02/min audio input + $0.08/min audio output = ~$0.10/min blended (less with prompt caching). Pipeline approach: $0.01/min STT + $0.02-$0.10/min LLM + $0.02-$0.05/min TTS = $0.05-$0.17/min. End-to-end is pricier but UX is significantly better.
 
 **Q: How do you handle multi-turn conversations with state?**
 **Short:** Multi-turn voice state is handled automatically by the session for end-to-end APIs via a session ID, while a pipeline must maintain and inject conversation history itself.
@@ -482,8 +482,8 @@ Tool calls should be fast (<1s) since user is on a synchronous voice channel. Fo
 Record audio with timestamps + transcripts + LLM text + tool calls all keyed to event timeline. Use observability tools (Vapi has built-in, or roll your own with timeline visualizations). Most common issues: VAD too aggressive (cuts off users), TTS lag spikes (network), LLM hallucinations on misheard input (use confidence-aware prompting).
 
 **Q: How do you handle multilingual voice agents?**
-**Short:** Multilingual pipelines combine multilingual STT and LLM with per-language TTS voices, while end-to-end models like GPT-4o Realtime auto-detect language at varying quality.
-Pipeline: use multilingual STT (Whisper, Deepgram Nova-2 supports 30+ languages) + multilingual LLM + voice cloning per language for TTS. End-to-end: GPT-4o Realtime auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
+**Short:** Multilingual pipelines combine multilingual STT and LLM with per-language TTS voices, while end-to-end models like `gpt-realtime-2.1` auto-detect language at varying quality.
+Pipeline: use multilingual STT (Whisper, Deepgram Nova-2 supports 30+ languages) + multilingual LLM + voice cloning per language for TTS. End-to-end: `gpt-realtime-2.1` auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
 
 **Q: What are the privacy concerns specific to voice agents?**
 **Short:** Voice audio counts as biometric data under GDPR and CCPA requiring explicit consent and encryption, and payment card numbers should use DTMF rather than recorded audio.
@@ -1005,7 +1005,7 @@ Barge-in is the ability for a user to interrupt the agent mid-response by speaki
 **Q: How do you handle sensitive data (credit card numbers, SSNs) in a voice agent?**
 Sensitive data must never enter the LLM context, STT transcript, or application logs. For PCI DSS compliance, use DTMF (touch-tone) collection: the LLM instructs the user to "enter your card number on your keypad," Twilio's Gather TwiML verb collects the digits server-side, sends them directly to a tokenization endpoint, and returns only a payment token to your application. The raw digits never appear in audio, transcripts, or logs. For PII in transcripts, apply regex and NER-based redaction before logging or storing.
 
-**Q: What drives the choice between a pipeline architecture (STT+LLM+TTS) and an end-to-end audio model like GPT-4o Realtime?**
+**Q: What drives the choice between a pipeline architecture (STT+LLM+TTS) and an end-to-end audio model like `gpt-realtime-2.1`?**
 End-to-end models achieve 200-500ms latency vs 800-1500ms for pipelines, and handle prosody, emotion, and laughter natively. Pipelines offer: model swap flexibility (best STT + best LLM + custom TTS voice), cost control (can use cheaper models for parts of the pipeline), multilingual support, and voice cloning (ElevenLabs custom voice). Choose end-to-end when latency is the primary concern and you are on a single-vendor stack; choose pipeline when you need custom voice brand, multilingual support, or the cheapest cost-per-call.
 
 **Q: How do you handle the latency spike caused by tool calls mid-conversation?**

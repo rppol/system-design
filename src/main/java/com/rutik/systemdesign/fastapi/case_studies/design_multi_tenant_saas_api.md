@@ -1,7 +1,33 @@
 # Design a Multi-Tenant SaaS API with FastAPI
 ---
 
-## Problem Statement
+## Intuition
+
+An apartment block, not a gated community per family. Every tenant lives in one building, on
+one set of pipes, and the thing that stops them walking into each other's flat is a lock the
+building enforces — not a rule each resident agrees to remember.
+
+That distinction is the whole design. The naive version scopes every query in application
+code: `WHERE tenant_id = :tid` on all forty repository methods. It works right up until the
+forty-first, written at 6pm by someone who did not know the rule, and then one endpoint
+quietly serves every tenant's rows to whoever asked. There is no exception, no alert, and no
+failing test — the response is a valid `200` with more data in it than it should have.
+
+So push the predicate somewhere it cannot be forgotten. PostgreSQL Row-Level Security attaches
+the filter to the **table**, inside the query executor, and applies it to every statement
+regardless of what the ORM emitted. The application's job shrinks from "remember to filter" to
+"declare who you are, once, at the start of the transaction". A missing filter then returns
+zero rows instead of everyone's rows — the failure mode flips from silent breach to obvious bug.
+
+The second idea is that isolation is a **spectrum priced per tenant**, not a yes/no. AWS's SaaS
+Lens names the three points: *silo* (dedicated resources per tenant), *pool* (shared), and
+*bridge* (mixed). Most businesses end up on the bridge — pooled by default, siloed for the
+enterprise customer whose contract demands it — and the architecture that cannot move a single
+tenant from one to the other is the one that loses that deal.
+
+---
+
+## 1. Requirements Clarification
 
 Design a production-grade multi-tenant SaaS API for a project management tool with the following requirements:
 
@@ -26,9 +52,100 @@ Design a production-grade multi-tenant SaaS API for a project management tool wi
 - Full-text search (handled by a separate search service).
 - Webhooks and async job queues (out of scope for this case study).
 
+**Questions worth asking before designing anything**, because each one changes the answer:
+
+| Question | Why it changes the design |
+|---|---|
+| Does any tenant have a contractual or regulatory data-residency requirement? | One "yes" forces a bridge model — pooled default plus a siloed tier — and that must exist in the schema from day one, not be retrofitted |
+| What is the largest tenant as a fraction of total data and traffic? | A tenant at 40% of volume makes pooling a noisy-neighbour problem before it is a cost saving |
+| Must a tenant's data be *provably* deleted, and on what deadline? | `DELETE WHERE tenant_id = ?` against a shared table is slow and leaves it in backups; `DROP DATABASE` is instant and provable |
+| Can one tenant's users belong to more than one tenant? | Cross-tenant users break the "one `tenant_id` claim per token" model and need a tenant-selection step |
+| Who owns the database role the application connects as? | Decisive for RLS: **a table's owner bypasses row security by default**, so the wrong answer silently disables the entire isolation mechanism (Section 9) |
+
+**Assumptions taken**, and what would overturn each: no tenant exceeds 15% of total volume
+(overturned by a single enterprise signup); no data-residency requirement (overturned by the
+first EU-only contract); tenants are opaque to each other, so no cross-tenant sharing feature
+exists (overturned by any "share this project externally" request, which needs an explicit
+grant table rather than a widened policy).
+
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+Every number below derives from the requirements in Section 1. The point is not the absolute
+values — it is which of them binds first.
+
+**Traffic.**
+
+```
+  tenants                      = 500
+  DAU                          = 50,000            (~100 active users/tenant)
+  requests/user/day            = 200               (a working session in a PM tool)
+  requests/day                 = 50,000 x 200      = 10,000,000
+  average QPS                  = 10,000,000 / 86,400
+                               ~ 116 req/s
+  peak factor                  = 5x                (business hours, one time zone cluster)
+  peak QPS                     ~ 580 req/s
+```
+
+The stated 5,000 *concurrent* requests is a different quantity: at a 120 ms p99 and 580 req/s,
+Little's Law gives `580 x 0.12 = 70` in flight. Five thousand is a burst — a thundering herd
+after a deploy, not the working day. Size the pool for 70 and the shed path for 5,000.
+
+**Data.**
+
+```
+  projects/tenant              = 200
+  tasks/project                = 500
+  tasks total                  = 500 x 200 x 500   = 50,000,000 rows
+  bytes/task row               ~ 400 B             (ids, text, timestamps, fks)
+  task table heap              = 50M x 400 B       ~ 20 GB
+  index overhead               ~ 60% of heap       ~ 12 GB
+  total task storage           ~ 32 GB
+```
+
+32 GB fits inside one PostgreSQL instance, which is the finding that justifies the pool model:
+at this size, sharding is complexity bought for nothing. Notion's published **500 GB per table
+and 10 TB per physical database** marks where that stops being true — two orders of magnitude
+above this design.
+
+**The `tenant_id` index is the one to reason about.** Every RLS-filtered query hits it:
+
+```
+  50M rows x (8 B tenant_id + 6 B ctid + overhead) ~ 1.2 GB btree
+```
+
+That fits in shared_buffers on any reasonable instance, which is why RLS costs so little here. A
+composite `(tenant_id, created_at)` serves "recent tasks in this project" without a sort, and
+per-tenant partitioning is the escalation if one tenant outgrows a single index.
+
+**The connection budget — the arithmetic that kills schema-per-tenant.**
+
+```
+  Postgres max_connections     = 200
+  reserved (admin, monitoring) = 10
+  usable                       = 190
+
+  Pool model (chosen): one pool, any connection serves any tenant
+      pods x pool_size          = 12 x 15          = 180   -> fits, 10 spare
+
+  Schema-per-tenant: a connection is bound to a search_path
+      500 schemas x >=1 conn                       = 500   -> 2.6x over budget
+      ...and PgBouncer cannot multiplex across them, because the
+      search_path is session state the next tenant would inherit
+```
+
+That is the whole argument in four lines. Schema-per-tenant fails on connections before it fails
+on storage or migration effort — and it fails at the point where the pool stops being shareable,
+which is immediately.
+
+**Noisy-neighbour budget.** The fair share across 500 tenants is 0.2%; allowing any one tenant
+15% of peak — `580 x 0.15 ~ 87 req/s` — gives a large customer headroom while capping the blast
+radius at what the remaining 499 can absorb. That number is the rate limit (Section 8).
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart LR
@@ -71,70 +188,14 @@ flowchart LR
     class tbl,pool base
 ```
 
-**Request flow:**
-1. Client sends `Authorization: Bearer <JWT>` with every request.
-2. `JWTMiddleware` decodes the token, verifies signature, and stores `tenant_id` + `user_id` in `request.state`.
-3. `get_db()` opens an `AsyncSession`, then executes `SELECT set_config('app.current_tenant_id', $1, true)` so every subsequent query in the transaction is scoped by the RLS policy.
-4. `get_current_user()` loads the `User` row and their `Role` for the current tenant.
-5. Route handlers query normally; PostgreSQL's RLS policy silently filters all rows to the current tenant.
+The load-bearing step is 3: `get_db()` opens the `AsyncSession` and immediately runs
+`SELECT set_config('app.current_tenant_id', $1, true)`, so by the time the handler at step 5
+issues a query it has already declared who it is — and every statement in that transaction is
+filtered by the policy whether or not the ORM emitted a `WHERE` clause.
 
 ---
 
-## Key Design Decisions
-
-### 1. Tenant Isolation Strategy: RLS over schema-per-tenant
-
-Three options were considered:
-
-| Strategy | Isolation | Ops Complexity | Pool Sharing | Migration Cost |
-|---|---|---|---|---|
-| Database-per-tenant | Strongest | Very High (500 DBs) | Impossible | Per-tenant |
-| Schema-per-tenant | Strong | High (500 schemas) | Limited | Per-tenant |
-| Row-Level Security (RLS) | Strong (DB-enforced) | Low (1 schema) | Full | Single migration |
-
-```mermaid
-quadrantChart
-    title Isolation Strength vs Operational Complexity
-    x-axis Low Complexity --> High Complexity
-    y-axis Weak Isolation --> Strong Isolation
-    quadrant-1 Strong but costly
-    quadrant-2 Ideal - strong and cheap
-    quadrant-3 Weak and cheap
-    quadrant-4 Weak but costly
-    "Database-per-tenant": [0.95, 0.97]
-    "Schema-per-tenant": [0.62, 0.78]
-    "RLS - chosen": [0.15, 0.82]
-```
-
-Plotting the same three strategies on isolation strength vs operational complexity shows RLS alone in the low-complexity, strong-isolation quadrant — schema- and database-per-tenant only buy marginal extra isolation for a much larger jump in ops cost at 500 tenants.
-
-**Decision: RLS with a PostgreSQL session variable.**
-
-PostgreSQL RLS policies run inside the query executor, so once the table is correctly configured a bug in application code cannot bypass them. "Correctly configured" is doing real work in that sentence: `ENABLE ROW LEVEL SECURITY` does not apply to the table's owner, and the application role usually *is* the owner, so the table must also carry `FORCE ROW LEVEL SECURITY` (see the migration below) and the application role must never hold `BYPASSRLS` or superuser. With 500 tenants a schema-per-tenant approach would mean 500 × N tables, making `pg_class` bloat a real operational problem. RLS keeps one schema, one migration path, and allows a fully shared connection pool.
-
-### 2. Tenant Resolution: JWT `tenant_id` claim
-
-Subdomain extraction (`acme.app.io`) requires the reverse proxy to pass the `Host` header and adds failure modes when the API is called directly. JWT claims are present on every request regardless of transport, are verified with the token signature, and cannot be forged by a user with a valid token for a different tenant.
-
-### 3. RBAC: DB-fetched roles via `Depends`
-
-Encoding roles inside the JWT would speed up permission checks but requires token rotation on every role change. For a B2B product where admins frequently adjust member permissions, stale role caches create support incidents. DB-fetched roles via a `Depends` dependency hit an indexed `(tenant_id, user_id)` lookup — typically under 1 ms on a warm connection.
-
-### 4. Connection Pool: Shared `asyncpg` pool with RLS context per transaction
-
-Per-tenant connection pools would require pre-creating 500 min-pools, wasting 500 × `min_size` idle connections. A single shared pool set transaction-locally guarantees that when a connection is returned to the pool the RLS variable resets automatically at transaction end.
-
-The transaction-local scope is the critical part — a session-scoped `SET` would leak the tenant context to the next request that reuses the connection.
-
-**Size the pool against `max_connections`, not against request concurrency.** `get_db` opens the transaction during dependency resolution and holds the connection until the response, so a request in flight is a connection in use. PostgreSQL's `max_connections` defaults to 100, and each backend costs a few MB plus per-backend planner state, so a single cluster realistically serves a few hundred direct connections, not thousands. With 20 connections per pod (`pool_size=5` + 15 overflow), 8 pods already reach 160 — past a stock 100-connection cluster. Two consequences: raise `max_connections` deliberately (and size shared memory with it), and put PgBouncer in **transaction** pooling mode in front so the API's 5,000 concurrent requests multiplex onto a couple of hundred real backends. Transaction pooling is compatible with this design precisely because the tenant context is transaction-local — a session-scoped `SET` would break under PgBouncer, since the client session and the server connection are no longer the same thing.
-
-### 5. Alembic Migration: Single migration deploys RLS policies for all tenants
-
-Because all tenant data lives in one schema, a single `alembic upgrade head` applies RLS policies globally. There is no per-tenant migration step.
-
----
-
-## Implementation
+## 4. Component Deep Dives
 
 ### Database schema and RLS policy setup
 
@@ -148,30 +209,9 @@ CREATE TABLE tenants (
 
 -- Every tenant_id FK cascades. Without ON DELETE CASCADE the GDPR erasure
 -- path below is not a DELETE, it is a foreign-key violation.
-CREATE TABLE users (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email       TEXT NOT NULL,
-    hashed_pw   TEXT NOT NULL,
-    UNIQUE (tenant_id, email)
-);
-
-CREATE TABLE roles (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL CHECK (role IN ('owner','admin','member','viewer')),
-    UNIQUE (tenant_id, user_id)
-);
-
-CREATE TABLE projects (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    created_by  UUID NOT NULL REFERENCES users(id),
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
-
+-- users, roles and projects follow the same shape (the ORM models below
+-- are the full definition): UUID pk, a CASCADE tenant_id FK, and every
+-- natural key scoped -- UNIQUE (tenant_id, email), UNIQUE (tenant_id, name).
 CREATE TABLE tasks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -185,41 +225,27 @@ CREATE TABLE tasks (
 CREATE INDEX ON projects (tenant_id);
 CREATE INDEX ON tasks (tenant_id, project_id);
 
--- Enable RLS on EVERY tenant-scoped table, not just the two the handlers
--- happen to query without a WHERE clause.
-ALTER TABLE users    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE roles    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tasks    ENABLE ROW LEVEL SECURITY;
+-- Every tenant-scoped table needs BOTH statements. ENABLE alone is a no-op
+-- for the table's OWNER, which the application role usually is; FORCE makes
+-- the owner subject to its own policies. Section 9 has the incident.
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['users','roles','projects','tasks'] LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE %I FORCE  ROW LEVEL SECURITY', t);
+        -- One policy per table, identical body. USING with no WITH CHECK
+        -- reuses the expression for INSERT/UPDATE too, so a foreign
+        -- tenant_id cannot be written either.
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation ON %I USING '
+            '(tenant_id = current_setting(''app.current_tenant_id'')::uuid)', t);
+    END LOOP;
+END $$;
 
--- ENABLE alone is NOT enough. Superusers and roles with BYPASSRLS always
--- skip row security, and the TABLE OWNER skips it too unless forced. The
--- application role is normally the owner (migrations created the tables),
--- so with ENABLE only, every policy below is a no-op for the app and all
--- tenants see all rows. FORCE makes the owner subject to its own policies.
-ALTER TABLE users    FORCE ROW LEVEL SECURITY;
-ALTER TABLE roles    FORCE ROW LEVEL SECURITY;
-ALTER TABLE projects FORCE ROW LEVEL SECURITY;
-ALTER TABLE tasks    FORCE ROW LEVEL SECURITY;
-
--- RLS policies — use current_setting() to read the session variable.
--- The single-argument form raises "unrecognized configuration parameter"
--- when the variable was never set, which is the behaviour you want: a
--- forgotten SET LOCAL fails loudly instead of quietly returning nothing.
-CREATE POLICY tenant_isolation_users ON users
-    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-
-CREATE POLICY tenant_isolation_roles ON roles
-    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-
-CREATE POLICY tenant_isolation_projects ON projects
-    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-
-CREATE POLICY tenant_isolation_tasks ON tasks
-    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-
--- A policy with only USING implicitly reuses that expression as its
--- WITH CHECK, so INSERT and UPDATE cannot write a foreign tenant_id either.
+-- The single-argument current_setting() raises "unrecognized configuration
+-- parameter" when the variable was never set — a forgotten SET LOCAL fails
+-- loudly instead of quietly returning nothing.
 
 -- Belt and braces: run the API as a role that owns nothing, so even a
 -- forgotten FORCE cannot open the door.
@@ -227,70 +253,51 @@ CREATE POLICY tenant_isolation_tasks ON tasks
 -- TABLES IN SCHEMA public TO app_api;  -- and never grant it BYPASSRLS.
 ```
 
-The failure mode is worth seeing concretely. With `ENABLE ROW LEVEL SECURITY`
-but no `FORCE`, connecting as the table owner and setting the tenant variable to
-tenant A returns **both** tenants' rows — the policy is simply not applied.
-Adding `FORCE ROW LEVEL SECURITY` returns tenant A's row only. The one-word
-difference is the whole isolation guarantee. This is not a version quirk to grow
-out of: the documentation has said the same thing since the feature shipped, and
-still does — "Table owners normally bypass row security as well, though a table
-owner can choose to be subject to row security with `ALTER TABLE ... FORCE ROW
-LEVEL SECURITY`."
-
-### Application configuration
+### Configuration, engine, and session factory
 
 ```python
-# app/config.py
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
+# app/config.py -- see ../configuration_and_settings_management/ for the pattern
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
-
     database_url: str          # asyncpg DSN
     jwt_secret: str
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 60
-    db_pool_min_size: int = 5
-    db_pool_max_size: int = 20
+    db_pool_size: int = 15     # Section 10: 12 pods x 15 = 180 of a 190 budget
 
 
 settings = Settings()
 ```
 
-### Database engine and session factory
-
 ```python
 # app/database.py
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from app.config import settings
 
 engine = create_async_engine(
     settings.database_url,
-    pool_size=settings.db_pool_min_size,
-    max_overflow=settings.db_pool_max_size - settings.db_pool_min_size,
+    pool_size=settings.db_pool_size,
+    max_overflow=0,            # deliberate -- see below
     echo=False,
 )
 
 AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False,
-    autocommit=False,
+    bind=engine, class_=AsyncSession, expire_on_commit=False,
+    autoflush=False, autocommit=False,
 )
 ```
+
+`max_overflow=0` is load-bearing. A budget computed against `max_connections` is only real if a
+pod cannot exceed its share under burst: leave overflow on and 12 pods quietly become
+12 × (15 + overflow) during exactly the spike the budget was meant to survive, and PostgreSQL
+refuses connections instead of the pool queueing. Take the wait in the application, where it is
+visible and shedable.
 
 ### SQLAlchemy models
 
 ```python
 # app/models.py
 import uuid
-from sqlalchemy import String, ForeignKey, text
+from sqlalchemy import String, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -299,52 +306,58 @@ class Base(DeclarativeBase):
     pass
 
 
-class Tenant(Base):
+class TenantScoped:
+    """Every tenant-owned table carries exactly these two columns."""
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+
+
+class Tenant(Base):                      # the tenant itself is not tenant-scoped
     __tablename__ = "tenants"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class User(Base):
+class User(TenantScoped, Base):
     __tablename__ = "users"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     email: Mapped[str] = mapped_column(String, nullable=False)
     hashed_pw: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class Role(Base):
+class Role(TenantScoped, Base):
     __tablename__ = "roles"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class Project(Base):
+class Project(TenantScoped, Base):
     __tablename__ = "projects"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    # Scoped, NOT UniqueConstraint("name") -- see below.
+    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
     name: Mapped[str] = mapped_column(String, nullable=False)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    tasks: Mapped[list["Task"]] = relationship("Task", back_populates="project", lazy="select")
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project", lazy="select")
 
 
-class Task(Base):
+class Task(TenantScoped, Base):
     __tablename__ = "tasks"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="todo")
-    project: Mapped["Project"] = relationship("Project", back_populates="tasks")
+    project: Mapped["Project"] = relationship(back_populates="tasks")
 ```
+
+Two things carry weight. `tenant_id` is on **every** table — a table without it cannot be
+covered by a policy, so it is not an optional denormalization. And the unique constraint is
+`(tenant_id, name)`, not `(name)`: constraint checks bypass row security, which is a leak
+Section 9 walks through.
 
 ### JWT and tenant context
 
 ```python
 # app/auth.py
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -352,13 +365,10 @@ from fastapi import HTTPException, Request, status
 from app.config import settings
 
 
+@dataclass(frozen=True, slots=True)
 class TenantContext:
     tenant_id: uuid.UUID
     user_id: uuid.UUID
-
-    def __init__(self, tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        self.tenant_id = tenant_id
-        self.user_id = user_id
 
 
 def decode_jwt(token: str) -> TenantContext:
@@ -375,17 +385,13 @@ def decode_jwt(token: str) -> TenantContext:
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except (jwt.InvalidTokenError, KeyError, ValueError):
+        # KeyError/ValueError catch a validly SIGNED token missing tenant_id
+        # or carrying a non-UUID -- a wrong issuer, not a forgery.
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-def create_access_token(tenant_id: uuid.UUID, user_id: uuid.UUID) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
-    payload = {
-        "sub": str(user_id),
-        "tenant_id": str(tenant_id),
-        "exp": expire,
-    }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+# The minting side is the mirror image -- jwt.encode({"sub": ..., "tenant_id":
+# ..., "exp": ...}) -- and lives in the login flow, which Section 1 scoped out.
 ```
 
 ### BROKEN -> FIX: missing RLS context causes cross-tenant data leak
@@ -393,46 +399,19 @@ def create_access_token(tenant_id: uuid.UUID, user_id: uuid.UUID) -> str:
 **BROKEN** — forgetting to set the RLS session variable before querying:
 
 ```python
-# BROKEN: app/deps_broken.py
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.auth import decode_jwt, TenantContext
-from app.database import AsyncSessionLocal
-from app.models import Role, User
-
-bearer = HTTPBearer()
-
-
-async def get_tenant(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer),
-) -> TenantContext:
-    return decode_jwt(credentials.credentials)
-
-
-# BROKEN: opens a session but NEVER sets app.current_tenant_id.
-# PostgreSQL's RLS policy reads current_setting('app.current_tenant_id'),
-# and what that returns depends on whether this CONNECTION ever saw the
-# variable -- which, in a pool, is not the same as whether this REQUEST set
-# it. Both outcomes are loud; neither leaks:
-#   - Fresh connection, one-arg form -> ERROR: unrecognized configuration
-#     parameter "app.current_tenant_id". The request 500s.
-#   - Fresh connection, missing_ok=true -> NULL, so tenant_id = NULL::uuid
-#     is NULL, no row passes, endpoint returns an empty list.
-#   - Recycled connection (a previous request set it transaction-locally
-#     and committed) -> the runtime-created GUC resets to the EMPTY STRING,
-#     not to undefined. The one-arg form now returns '' instead of raising,
-#     and ''::uuid fails with: invalid input syntax for type uuid: "".
-#     missing_ok=true returns '' here too, NOT NULL.
-# The real leak in this file is not here -- it is forgetting
-# FORCE ROW LEVEL SECURITY, which disables the policy entirely for the
-# table owner and returns every tenant's rows.
+# BROKEN: app/deps_broken.py  (imports and get_tenant as in the FIX below)
+# Opens a session but NEVER sets app.current_tenant_id, which the RLS
+# policy reads via current_setting(). Loud, not silent -- it 500s or
+# returns nothing, depending on what this pooled connection saw before.
 async def get_db_broken():
     async with AsyncSessionLocal() as session:
         yield session  # RLS context never set -- 500s or returns nothing
 ```
+
+Which of the two you get depends on the *connection*, not the request: a fresh one raises
+`unrecognized configuration parameter` (a 500), a recycled one returns the empty string the GUC
+resets to and fails on `''::uuid`. Neither path leaks data — the real leak is forgetting
+`FORCE ROW LEVEL SECURITY` (Section 9).
 
 **FIX** — set `app.current_tenant_id` with `SET LOCAL` at transaction start:
 
@@ -462,22 +441,13 @@ async def get_tenant(
 async def get_db(
     ctx: TenantContext = Depends(get_tenant),
 ) -> AsyncGenerator[AsyncSession, None]:
-    """
-    Open a scoped AsyncSession and set the RLS context variable for the
-    current tenant, transaction-scoped rather than session-scoped.
-
-    A transaction-local setting resets automatically when the transaction
-    ends, so the connection returning to the pool never carries stale
-    tenant context.
-    """
+    """Open a session and set the RLS variable TRANSACTION-locally, so the
+    connection returning to the pool never carries stale tenant context."""
     async with AsyncSessionLocal() as session:
         async with session.begin():
             # set_config(name, value, is_local=true) is the parameterizable
-            # equivalent of SET LOCAL. `SET LOCAL app.x = $1` is a SYNTAX
-            # ERROR -- SET is a utility statement and takes a literal, not a
-            # bind parameter, so the driver rejects it before PostgreSQL runs
-            # it. Never build it by string interpolation to work around that:
-            # tenant_id would become an injection point.
+            # equivalent of SET LOCAL, which takes a literal only -- so this
+            # is the form that keeps tenant_id out of the SQL string.
             await session.execute(
                 text("SELECT set_config('app.current_tenant_id', :tid, true)"),
                 {"tid": str(ctx.tenant_id)},
@@ -491,52 +461,47 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> tuple[User, str]:
     """Return (User, role_name) for the current request."""
-    result = await db.execute(
-        select(User).where(
-            User.id == ctx.user_id,
-            User.tenant_id == ctx.tenant_id,
-        )
-    )
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-
-    role_result = await db.execute(
-        select(Role).where(
-            Role.user_id == ctx.user_id,
-            Role.tenant_id == ctx.tenant_id,
-        )
-    )
-    role = role_result.scalar_one_or_none()
-    if role is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No role assigned")
-
-    return user, role.role
+    # One round trip, not two. The redundant tenant_id predicates are
+    # defence in depth: RLS already scopes both tables, but the token
+    # claim is only as trustworthy as whatever issued it.
+    row = (await db.execute(
+        select(User, Role.role)
+        .join(Role, Role.user_id == User.id)
+        .where(User.id == ctx.user_id, User.tenant_id == ctx.tenant_id)
+    )).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    return row[0], row[1]
 
 
 def require_role(*allowed_roles: str):
-    """Factory that returns a dependency enforcing a minimum role."""
+    """Factory returning a Depends that enforces endpoint-level RBAC."""
 
-    async def _check(
-        current: tuple[User, str] = Depends(get_current_user),
-    ) -> tuple[User, str]:
-        _, role = current
-        if role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires one of: {allowed_roles}",
-            )
+    async def _check(current: tuple[User, str] = Depends(get_current_user)):
+        if current[1] not in allowed_roles:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Requires one of: {allowed_roles}")
         return current
 
     return _check
 ```
 
-### Pydantic schemas
+### Route handlers and schemas
+
+Exposing `tenant_id` on the response model is deliberate: a client can assert the rows it got
+back belong to the tenant it believes it is — a cheap end-to-end check on the isolation chain.
 
 ```python
-# app/schemas.py
+# app/routers/projects.py
 import uuid
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.deps import get_db, get_current_user, require_role
+from app.models import Project, User
+
+router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 class ProjectCreate(BaseModel):
@@ -548,39 +513,7 @@ class ProjectOut(BaseModel):
     tenant_id: uuid.UUID
     name: str
     created_by: uuid.UUID
-
-    model_config = {"from_attributes": True}
-
-
-class TaskCreate(BaseModel):
-    title: str
-    project_id: uuid.UUID
-
-
-class TaskOut(BaseModel):
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    project_id: uuid.UUID
-    title: str
-    status: str
-
-    model_config = {"from_attributes": True}
-```
-
-### Route handlers
-
-```python
-# app/routers/projects.py
-import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.deps import get_db, get_current_user, require_role
-from app.models import Project, User
-from app.schemas import ProjectCreate, ProjectOut
-
-router = APIRouter(prefix="/projects", tags=["projects"])
+    model_config = {"from_attributes": True}   # read SQLAlchemy instances directly
 
 
 @router.get("/", response_model=list[ProjectOut])
@@ -588,11 +521,7 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
     current: tuple[User, str] = Depends(get_current_user),
 ) -> list[ProjectOut]:
-    """
-    Returns all projects for the current tenant.
-    RLS policy on the projects table silently filters to tenant rows only.
-    No WHERE tenant_id = ... clause needed in the query itself.
-    """
+    # No WHERE tenant_id -- the RLS policy filters to the current tenant.
     result = await db.execute(select(Project))
     return [ProjectOut.model_validate(p) for p in result.scalars().all()]
 
@@ -637,54 +566,29 @@ async def delete_project(
 ```python
 # app/main.py
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-
 from fastapi import FastAPI
-
 from app.database import engine
-from app.models import Base
 from app.routers import projects
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # Schema is owned by Alembic, not by create_all: metadata.create_all
+async def lifespan(app: FastAPI):
+    # No metadata.create_all here. Schema is owned by Alembic: create_all
     # knows nothing about RLS policies or FORCE ROW LEVEL SECURITY, so a
     # process that bootstrapped its own tables would run with isolation off.
     yield
     await engine.dispose()
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Multi-Tenant SaaS API", lifespan=lifespan)
-    app.include_router(projects.router)
-    return app
-
-
-app = create_app()
+app = FastAPI(title="Multi-Tenant SaaS API", lifespan=lifespan)
+app.include_router(projects.router)
 ```
 
 ---
 
-## Python/FastAPI Components Used
+## 5. Design Decisions & Tradeoffs
 
-| Component | Role in This Design |
-|---|---|
-| `HTTPBearer` dependency | Extracts the `Authorization: Bearer` token from every request without custom middleware. |
-| `Depends()` chaining | `get_db` depends on `get_tenant`; `get_current_user` depends on both. FastAPI resolves the dependency graph once per request and caches results within the request. |
-| `AsyncSession` + `session.begin()` | `async with session.begin()` opens an explicit transaction; the transaction-local RLS setting inside this block is automatically discarded if the handler raises, preventing a half-committed RLS context. |
-| `text()` from SQLAlchemy | Executes the raw `set_config(...)` call that has no ORM abstraction, with a bound parameter (`:tid`) so the tenant id can never be interpolated into SQL. `SET LOCAL` itself accepts no bind parameters, which is precisely why `set_config` is used. |
-| RLS policies in PostgreSQL | Enforced inside the query executor — immune to application-layer bugs *provided* the table carries `FORCE ROW LEVEL SECURITY` and the app role is not superuser/`BYPASSRLS`. Under those conditions a miscoded query that omits a `WHERE tenant_id = ...` clause is still safe. |
-| `require_role()` factory | Returns a parameterized `Depends` — a clean pattern for expressing endpoint-level RBAC without repeating permission checks in every handler. |
-| `model_config = {"from_attributes": True}` | Pydantic v2 setting that allows `model_validate(orm_object)` to work with SQLAlchemy model instances. |
-| `lifespan` context manager | Runs startup and shutdown code exactly once per process, around the `yield`. Ensures the connection pool is disposed cleanly on shutdown, preventing connection leaks in Kubernetes pod restarts. |
-| `mapped_column` + `Mapped[]` | SQLAlchemy 2.0 style — fully typed ORM columns with Python type inference, compatible with mypy. |
-
----
-
-## Tradeoffs and Alternatives
-
-### RLS vs schema-per-tenant vs database-per-tenant
+### 1. Tenant isolation: RLS over schema-per-tenant
 
 | Dimension | RLS (chosen) | Schema-per-tenant | Database-per-tenant |
 |---|---|---|---|
@@ -697,13 +601,42 @@ app = create_app()
 | Regulatory isolation (GDPR delete) | `DELETE WHERE tenant_id = ?` | `DROP SCHEMA` | `DROP DATABASE` |
 | Cost | Low | Medium | High ($$ per DB instance) |
 
-**Why not database-per-tenant:** At 500 tenants each requiring a minimum 2-CPU / 4 GB PostgreSQL instance, the infrastructure cost is 1000 CPU cores and 2 TB RAM at idle. Connection pooling across 500 databases from a shared PgBouncer tier is operationally complex and adds latency. Chosen only when regulatory requirements mandate full data residency separation.
+Read the table down the Cost and Migration rows: the other two buy marginal extra isolation
+for a much larger jump in ops cost at 500 tenants.
 
-**Why not schema-per-tenant:** Schema creation on tenant signup adds latency to onboarding. With 500 schemas and 8 tables each, `pg_class` holds 4,000+ rows, degrading planner performance on DDL operations. Alembic does not natively support per-schema migrations without custom scripting.
+**Decision: RLS with a PostgreSQL session variable.** RLS policies run inside the query
+executor, so once the table is correctly configured a bug in application code cannot bypass
+them. "Correctly configured" is doing real work in that sentence: `ENABLE ROW LEVEL SECURITY`
+does not apply to the table's owner, and the application role usually *is* the owner, so the
+table must also carry `FORCE ROW LEVEL SECURITY` and the application role must never hold
+`BYPASSRLS` or superuser.
 
-### `SET LOCAL` vs `SET` (session-scoped)
+**Why not the other two:** schema-per-tenant fails on the connection budget (Section 2) —
+`search_path` is session state, so the shared pool is gone at 500 tenants — and
+database-per-tenant fails on cost, ~$60,000/month against $1,100 (Section 10). Take either only
+when a contract demands it.
 
-`SET` persists for the lifetime of the database session (connection). In a connection pool, a connection is reused across many requests. Using `SET` would mean tenant A's context bleeds into tenant B's request on the same connection. `SET LOCAL` is automatically reverted when the transaction ends, making it safe to share connections.
+### 2. Tenant resolution: the JWT `tenant_id` claim
+
+Subdomain extraction (`acme.app.io`) makes the reverse proxy parse `Host` and inject an
+`X-Tenant-ID` header — an extra hop, an extra trust boundary, and a new failure mode whenever
+the API is called directly. A JWT claim is self-contained: present on every request regardless
+of transport, and verified by the signature the app already checks.
+
+### 3. RBAC: DB-fetched roles via `Depends`
+
+Encoding roles in the JWT speeds up permission checks but requires token rotation on every role
+change, and in a B2B product where admins adjust permissions constantly, stale role caches
+become support incidents. The `Depends` lookup hits an indexed `(tenant_id, user_id)` — under
+1 ms warm.
+
+### 4. Connection pool: one shared pool, RLS context set per transaction
+
+Per-tenant pools would pre-create 500 min-pools and waste 500 × `min_size` idle connections. One
+shared pool works only because the tenant context is **transaction-local**: a session-scoped
+`SET` lives as long as the connection, which is reused across requests, so tenant A's context
+would still be set when tenant B gets that connection. `SET LOCAL` (or `set_config(..., true)`)
+reverts at transaction end.
 
 ```mermaid
 sequenceDiagram
@@ -734,16 +667,338 @@ sequenceDiagram
     end
 ```
 
-The same pooled connection `C1` is handed to a second, different tenant's request — `SET` leaves tenant A's context on the connection so tenant B's query is silently scoped to the wrong tenant, while `SET LOCAL` reverts at commit so tenant B starts clean.
+The same pooled connection `C1` is handed to a second tenant's request — `SET` leaves tenant
+A's context on it so tenant B's query is silently scoped to the wrong tenant, while `SET LOCAL`
+reverts at commit so tenant B starts clean. Transaction-local context is also what makes
+PgBouncer's transaction pooling compatible with this design at all.
 
-### JWT claims vs subdomain resolution
+### 5. Alembic migration: one migration deploys RLS for every tenant
 
-Subdomain resolution requires the API gateway to parse the `Host` header and inject a custom `X-Tenant-ID` header, which is an additional hop and trust boundary. JWT claims are self-contained and verified by the token signature — no additional infrastructure required.
+All tenant data lives in one schema, so a single `alembic upgrade head` applies RLS policies
+globally — there is no per-tenant migration step.
 
 ---
 
-## Interview Discussion Points
+## 6. Real-World Implementations
 
+### AWS SaaS Lens — the vocabulary everyone else's design is described in
+
+AWS's Well-Architected SaaS Lens names the three isolation models in words interviewers reuse
+verbatim. **Silo** is "an architecture where tenants are provided dedicated resources"; **pool**
+is "a scenario where tenants share resources … to achieve economies of scale, manageability,
+agility"; **bridge** exists to "acknowledge the reality that SaaS businesses aren't always
+exclusively silo or pool".
+
+The bridge is the lesson. AWS names the forces: "the regulatory profile of a service's data
+and its noisy neighbor attributes" steer toward silo, "the agility, access patterns, and cost
+profile" toward pool. That is a *per-service* call — a design treating isolation as one global
+switch has already lost the ability to make it.
+<https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/silo-pool-and-bridge-models.html>
+
+### Salesforce — the pool model at its most extreme
+
+Salesforce runs "a single shared multitenant database with a single schema that stores
+tenant-specific metadata and data". Isolation is by `OrgID`, and the platform physically
+partitions data, metadata and index structures by that column.
+
+The transferable lesson: partitioning by the tenant key is a *performance* mechanism, not only
+an isolation one — it bounds the data any single tenant's query touches, which is why this
+design reaches for a composite `(tenant_id, ...)` index and, later, native partitioning.
+<https://architect.salesforce.com/fundamentals/platform-multitenant-architecture>
+
+### Notion — the numbers that tell you when pooling stops working
+
+Notion sharded its Postgres monolith after "five years and four orders of magnitude of growth",
+landing on **480 logical shards across 32 physical databases** — 15 schemas per machine. They
+name the thresholds they designed against: an "upper bound of 500 GB per table and 10 TB per
+physical database", and "at least 60K total IOPS". The backfill took **three days** on a 96-CPU
+`m5.24xlarge`; the cutover cost **five minutes of scheduled maintenance**.
+
+The 480-over-32 split is deliberate: logical shards outnumber physical machines so rebalancing
+moves a schema rather than re-hashing rows — the cheap escalation path to leave open rather
+than sharding early. And five minutes is what a *planned* cutover of that size costs; the
+unplanned version is measured in hours.
+<https://www.notion.com/blog/sharding-postgres-at-notion>
+
+### Figma — what sharding actually costs in wall-clock time
+
+Figma's database stack "has grown almost 100x since 2020", and their sharding work is the honest
+counterweight to any plan that treats sharding as a sprint: "end to end, it took our team
+roughly nine months to shard our first table". The payoff was a clean cutover — "only ten
+seconds of partial availability on database primaries and no availability impact on replicas" —
+at "a minimal performance overhead in most cases, and less than 10% in the worst cases".
+
+The lesson is a scheduling one: nine months for the first table is why the connection-budget
+arithmetic in Section 2 matters *now* — the model you can still change is the one you have not
+outgrown yet.
+<https://www.figma.com/blog/how-figmas-databases-team-lived-to-tell-the-scale/>
+
+### Shopify — isolation as a blast-radius decision
+
+Shopify runs a "pods" architecture where "a pod consists of a set of shops that live on a fully
+isolated set of datastores", and "every unit of work (web request and delayed job)" is assigned
+to a single pod, so serving a request "only requires one pod to be operational." The motivation
+is stated as a correction: when they first sharded in 2015, "if any of our shards went down,
+that entire action would be unavailable across the platform." Pods fixed that by removing
+cross-pod communication entirely — "since there is no cross-pod communication, adding a new pod
+won't cause unexpected interference with other, pre-existing pods."
+
+This is the bridge model argued from availability rather than compliance. Sharding alone does
+not bound a failure; sharding *plus* the rule that one request touches exactly one shard is what
+does — any siloed tier this design adds should inherit that rule.
+<https://shopify.engineering/a-pods-architecture-to-allow-shopify-to-scale>
+
+---
+
+## 7. Technologies & Tools
+
+| Component | Role in This Design |
+|---|---|
+| `HTTPBearer` dependency | Extracts the `Authorization: Bearer` token from every request without custom middleware. |
+| `Depends()` chaining | `get_db` depends on `get_tenant`; `get_current_user` depends on both. FastAPI resolves the dependency graph once per request and caches results within the request. |
+| `AsyncSession` + `session.begin()` | `async with session.begin()` opens an explicit transaction; the transaction-local RLS setting inside this block is automatically discarded if the handler raises, preventing a half-committed RLS context. |
+| `text()` from SQLAlchemy | Executes the raw `set_config(...)` call with a bound `:tid`, so the tenant id is never interpolated into SQL. |
+| RLS policies in PostgreSQL | Enforced inside the query executor, so a miscoded query missing its `WHERE tenant_id` is still safe — provided the table is FORCEd and the app role holds no `BYPASSRLS`. |
+| `require_role()` factory | Returns a parameterized `Depends` — a clean pattern for expressing endpoint-level RBAC without repeating permission checks in every handler. |
+| `model_config = {"from_attributes": True}` | Pydantic v2 setting that allows `model_validate(orm_object)` to work with SQLAlchemy model instances. |
+| `lifespan` context manager | Runs startup and shutdown code exactly once per process, around the `yield`. Ensures the connection pool is disposed cleanly on shutdown, preventing connection leaks in Kubernetes pod restarts. |
+| `mapped_column` + `Mapped[]` | SQLAlchemy 2.0 style — fully typed ORM columns with Python type inference, compatible with mypy. |
+
+---
+
+## 8. Operational Playbook
+
+### Onboarding a tenant
+
+Pooled onboarding is one `INSERT`, where schema-per-tenant makes it a DDL deployment.
+
+```python
+async def onboard_tenant(session: AsyncSession, name: str, tier: str) -> UUID:
+    tenant_id = uuid4()
+    async with session.begin():
+        await session.execute(
+            text("INSERT INTO tenants (id, name, tier) VALUES (:i, :n, :t)"),
+            {"i": tenant_id, "n": name, "t": tier},
+        )
+    # No DDL, no schema, no migration, no new connection pool.
+    # The tenant is serviceable by every existing pod immediately.
+    return tenant_id
+```
+
+### Offboarding, and proving deletion
+
+The pooled model's weakness. `DELETE FROM tasks WHERE tenant_id = ?` against 50M rows is a
+long-running transaction that bloats the table and leaves the rows in every backup taken since.
+The procedure that actually satisfies a deletion request:
+
+1. **Revoke access first** — flip the tenant to `status = 'deleting'` so tokens stop resolving.
+   Deletion that runs while the tenant can still write is a race.
+2. **Delete in batches**, newest table first, `LIMIT 10000` per transaction with a pause, so
+   autovacuum keeps up and replication lag stays bounded.
+3. **`VACUUM` the affected tables** — the rows are gone logically but the pages still hold them
+   until vacuum reclaims them.
+4. **Record the backup retention boundary.** You cannot delete a tenant from a backup without
+   restoring and rewriting it. The honest answer to "is it gone" is "gone from production now,
+   gone from backups in N days" — publish N.
+
+A siloed tenant makes this trivial (`DROP DATABASE` is instant and provable), which is a real
+argument for putting regulated tenants in a silo that has nothing to do with performance.
+
+### Migrations
+
+One Alembic migration serves every tenant — the model's second advantage. Two rules:
+
+- **Every new table needs its RLS policy in the same migration.** A table created without
+  `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + a policy is unprotected, and
+  nothing in the application will notice. Assert it in CI:
+
+```sql
+-- Fails the build if any tenant-scoped table is missing forced RLS.
+SELECT c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind = 'r'
+  AND EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_name = c.relname AND column_name = 'tenant_id')
+  AND (c.relrowsecurity IS FALSE OR c.relforcerowsecurity IS FALSE);
+```
+
+- **Backfills must be tenant-batched.** A single `UPDATE tasks SET ...` locks rows across all
+  500 tenants at once; batching by `tenant_id` bounds the blast radius of a bad migration to
+  one customer.
+
+### Monitoring — what to alert on
+
+| Signal | Threshold | Why it matters |
+|---|---|---|
+| Requests/s per tenant | > 15% of peak capacity (~87 req/s) | The noisy-neighbour budget from Section 2, enforced |
+| p99 latency, **segmented by tenant** | > 120 ms for any tenant | A fleet-wide p99 hides one tenant at 2 s behind 499 healthy ones |
+| Rows returned per query | > 10,000 | A query returning far more than a page is the signature of a lost RLS context |
+| `relrowsecurity` / `relforcerowsecurity` | any tenant-scoped table false | Catches the migration that shipped an unprotected table |
+| Connection pool saturation | > 80% | The budget in Section 2 has 10 spare connections; there is no slack |
+
+**Tag every metric and log line with `tenant_id`.** Untagged observability is why multi-tenant
+incidents take hours — the dashboards are fleet aggregates, and the one customer having an
+outage is invisible inside them.
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+### The application connects as the table owner, and RLS silently does nothing
+
+The most dangerous failure in this design, because everything looks correct. PostgreSQL's docs
+are explicit: "Superusers and roles with the `BYPASSRLS` attribute always bypass the row
+security system... **Table owners normally bypass row security as well**, though a table owner
+can choose to be subject to row security with `ALTER TABLE ... FORCE ROW LEVEL SECURITY`." So
+the policies exist, `\d+ tasks` shows them attached, the migration ran green — and every query
+returns every tenant's rows, because the application role owns the tables.
+
+```sql
+-- BROKEN: policy present, and entirely inert for the owning role
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON tasks
+    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+```
+
+```sql
+-- FIX: force it, and connect as a role that is neither owner nor BYPASSRLS
+ALTER TABLE tasks FORCE ROW LEVEL SECURITY;
+CREATE ROLE app_runtime LOGIN NOBYPASSRLS;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;
+-- Migrations keep running as the owner; the app never does.
+```
+
+**Impact when it goes unnoticed:** an internal audit found a reporting endpoint returning rows
+for all 500 tenants for eleven weeks. The endpoint was correct, the policy was correct, and the
+deploy role owned the tables. The test that would have caught it is one line — connect as the
+runtime role, set tenant A's context, and assert that a row belonging to tenant B is invisible.
+Run it in CI against real Postgres, not SQLite.
+
+### `SET` instead of `SET LOCAL` — tenant context surviving into the next request
+
+The mechanism is in Section 5; it belongs here because the symptom is so misleading.
+
+**Impact:** intermittent and load-dependent, the worst combination. At low traffic the pool
+hands out a fresh connection almost every time and nothing reproduces; under load, connection
+reuse rises and the leak rate rises with it. A team chased "flaky test data" for six days before
+recognising it as a live cross-tenant read in production — worst exactly when most customers
+were watching.
+
+### A cache key without the tenant id
+
+```python
+# BROKEN: two tenants, one cache entry
+key = f"project:{project_id}:summary"
+```
+
+```python
+# FIX: the tenant is part of the identity of the data, not context around it
+key = f"tenant:{tenant_id}:project:{project_id}:summary"
+```
+
+RLS protects the database and does nothing for Redis. If project ids are sequential integers
+rather than UUIDs, the collision is not even unlikely — it is guaranteed the moment two tenants
+both have a project 1.
+
+**Impact:** a 30-second response cache served one tenant's project summary to another for as
+long as the TTL, on every collision, with a 100% cache-hit rate making it *more* frequent as
+performance improved. Detected by a customer, not by monitoring, because a cache hit is
+indistinguishable from a correct response in every metric.
+
+### Unique constraints leak existence across tenants
+
+A global `UNIQUE (slug)` on projects lets tenant A discover tenant B's slugs: create
+`acme-migration-2026`, get a constraint violation, and you have learned another tenant owns that
+name. Constraint checks bypass row security by design, so the fix is to scope the constraint the
+way the data is scoped — `UNIQUE (tenant_id, slug)` — and the same applies to any foreign key
+that could point across tenants.
+
+### The noisy neighbour that was not rate limited
+
+One tenant ran a bulk import: 40,000 task creations in four minutes, roughly 165 req/s against
+a fleet sized for 580 req/s of mixed traffic. Every write contended on the same `tasks` table
+and the same connection pool.
+
+**Impact:** fleet-wide p99 went from 95 ms to 3.4 s for 22 minutes. 499 tenants were degraded by
+one tenant's legitimate use of a documented endpoint. Nothing was broken — the design simply had
+no per-tenant ceiling. The fix is the 15% budget from Section 2, enforced at the edge on the
+JWT's `tenant_id` claim, plus a separate lower ceiling for bulk endpoints and a `202` + job id
+for imports above a threshold.
+
+### 403 instead of 404 on another tenant's resource
+
+`403` on a resource that exists but belongs to someone else confirms it exists, so an attacker
+walking sequential ids maps every tenant's id space from the `403`/`404` difference. Return
+`404` for both — the indistinguishability in the Section 4 handlers is the feature.
+
+---
+
+## 10. Capacity Planning
+
+**Application tier.** From Section 2: 580 req/s peak, ~70 in flight at a 120 ms p99.
+
+```
+  per-pod safe throughput   = 60 req/s      (single uvicorn process, async, I/O-bound)
+  pods for peak             = 580 / 60      ~ 10
+  + 20% headroom for a rolling deploy       = 12 pods
+  pool_size per pod         = 15
+  total DB connections      = 12 x 15       = 180   (budget 190 -> fits)
+```
+
+The connection budget, not CPU, caps the pod count: 12 pods at `pool_size=15` is 95% of usable
+connections, so pod 13 requires PgBouncer, not a bigger node.
+
+**PgBouncer, when it comes.** Transaction-mode pooling multiplexes many client connections onto
+few server ones, and asyncpg's protocol-level prepared statements are what used to make a bare
+"add PgBouncer in transaction mode" break. The fix now lives on PgBouncer's side:
+`max_prepared_statements` (added in 1.21.0, defaulted to 200 since 1.24.0) makes it track
+prepared statements in transaction and statement pooling modes, rewriting them onto
+per-server-connection names. Check that value before reaching for the old client-side workaround
+— `poolclass=NullPool` plus `statement_cache_size=0` and a unique `prepared_statement_name_func`
+— which is now only needed below 1.21 or where the setting is pinned to 0. See
+[`../async_database_sqlalchemy/async_database_sqlalchemy.md`](../async_database_sqlalchemy/async_database_sqlalchemy.md).
+
+**Database.**
+
+```
+  task heap + indexes                       ~ 32 GB     (Section 2)
+  projects, users, tenants, audit           ~  8 GB
+  total                                     ~ 40 GB
+  working set (hot tenants, recent rows)    ~ 25% = 10 GB
+  -> shared_buffers >= 12 GB, instance RAM >= 32 GB
+  -> db.r6g.xlarge (4 vCPU, 32 GB) with a read replica
+```
+
+The working-set fraction is the number to defend: a PM tool's access pattern is overwhelmingly
+"this month's tasks in my projects", so most of that 40 GB is cold. Sizing RAM for the whole
+dataset is the common overspend.
+
+**Cost per tenant per month.**
+
+```
+  db.r6g.xlarge primary + replica           ~ $700
+  12 pods x 0.5 vCPU / 1 GB                 ~ $250
+  Redis (cache + rate limiter)              ~ $ 90
+  storage 40 GB + backups                   ~ $ 60
+  total                                     ~ $1,100 / month
+  per tenant  = 1,100 / 500                 ~ $2.20 / tenant / month
+```
+
+Compare the silo: a minimum viable dedicated instance is ~$120/month, so 500 siloed tenants cost
+about $60,000/month against $1,100 — **a 55x difference**. That ratio is the commercial case for
+pooling, and also why the bridge is the right shape: a handful of enterprise silos costs a few
+hundred a month and wins contracts, while siloing all 500 would end the business.
+
+**When a tenant graduates to a silo.** Set the trigger explicitly: a contractual residency or
+single-tenancy requirement (a sales event), or sustained consumption above the 15% budget, or
+data above ~20% of the shared instance (capacity events). All three move the tenant the same
+way — possible only if `tenant_id` was the partition key from day one.
+
+---
+
+## 11. Interview Discussion Points
 **Q: Why use `SET LOCAL` instead of `SET` for the RLS context variable?**
 `SET LOCAL` is transaction-scoped and reverts automatically at transaction end. `SET` is session-scoped and persists on the connection even after it returns to the pool, which would cause the next request reusing that connection to execute under the previous tenant's RLS context — a critical data leak. Transaction scope is the only safe choice in a pooled async environment. In code, express it as `set_config('app.current_tenant_id', :tid, true)` rather than the `SET LOCAL` statement: the third argument means "local", and unlike `SET` it accepts a bind parameter, so the tenant id never has to be interpolated into SQL.
 
@@ -752,15 +1007,6 @@ The `async with session.begin()` block rolls back the transaction on any unhandl
 
 **Q: How do you prevent a tenant from enumerating another tenant's resource IDs?**
 The 404 response for `DELETE /projects/{id}` is intentional. Returning 403 (Forbidden) would confirm that the resource exists but belongs to another tenant — leaking information. Returning 404 normalizes the response regardless of whether the ID belongs to a different tenant or simply does not exist. This is called "resource existence hiding."
-
-**Q: How does this design scale when a single tenant generates 80% of the traffic?**
-RLS filtering happens at the query level; a noisy tenant increases PostgreSQL CPU and I/O but does not affect other tenants' connection availability because the pool is shared. To enforce true per-tenant QoS, add a token-bucket rate limiter at the API gateway keyed on `tenant_id` (extracted from the JWT). This limits burst throughput per tenant before the request reaches the database.
-
-**Q: What is the risk of storing `tenant_id` only in the JWT and not re-validating it in every query?**
-The risk is mitigated by RLS. The database enforces `tenant_id` isolation independently of application logic. A user cannot simply edit the `tenant_id` claim — that would invalidate the signature. What the extra check defends against is a *mis-issued* token: a bug in the login path, an admin impersonation feature, or a shared signing key across environments can all mint a correctly signed token whose `user_id` and `tenant_id` do not belong together. The `User` lookup in `get_current_user` includes `User.tenant_id == ctx.tenant_id`, so such a token authenticates but resolves to no user and is rejected. Treat it as defence in depth against your own issuer, not as protection against forgery.
-
-**Q: How would you implement tenant-scoped rate limiting?**
-Use Redis with a sliding window counter keyed on `f"ratelimit:{tenant_id}:{window}"`. Inject it as a FastAPI dependency that runs after `get_tenant()`. Limits can be per-plan (e.g., free tier: 1,000 req/min, pro: 10,000 req/min) stored in a `tenant_config` table and cached in Redis with a short TTL.
 
 **Q: How do you run Alembic migrations without taking downtime?**
 Plan around the lock levels rather than assuming they are cheap. `CREATE POLICY` takes an `ACCESS EXCLUSIVE` lock on the target table — verifiable with `SELECT mode FROM pg_locks` inside an open transaction — so it blocks every reader and writer for its duration. It is fast (a catalog insert, no table rewrite), so the practical rule is: set a short `lock_timeout`, retry, and never let it queue behind a long-running query, because a blocked `ACCESS EXCLUSIVE` request also blocks everything behind it. `ADD COLUMN` likewise takes `ACCESS EXCLUSIVE`, but since PostgreSQL 11 a non-volatile default no longer forces a table rewrite, so the lock is held for milliseconds instead of the length of a full rewrite. The migration runs against the single schema, applies to all tenants simultaneously, and does not require per-tenant steps.
@@ -771,5 +1017,84 @@ Insert a row into `tenants`, create the first user row, assign the `owner` role,
 **Q: How would you implement tenant-level audit logging?**
 Add a PostgreSQL trigger on `projects` and `tasks` that inserts into an `audit_log` table with `(tenant_id, user_id, action, table_name, row_id, changed_at)`. The trigger fires inside the same transaction as the DML, so the audit record is atomically consistent with the data change. For high-volume tenants, partition the `audit_log` table by `tenant_id` hash.
 
-**Q: How do you handle GDPR right-to-erasure for a tenant?**
-Issue a single `DELETE FROM tenants WHERE id = :tid` and let the cascade do the work. That only works because every `tenant_id` foreign key in the schema is declared `ON DELETE CASCADE` — the common bug is to write the erasure runbook against a schema whose FKs default to `NO ACTION`, where the same statement is a foreign-key violation rather than a deletion. Deleting the child rows first (`DELETE FROM users WHERE tenant_id = :tid`) is the wrong shape too: `projects` and `tasks` hang off `tenants`, not off `users`, so they would survive. Because all data is in a single schema, one transaction covers the full deletion. Schema-per-tenant would require `DROP SCHEMA` which is irreversible without a backup; database-per-tenant requires decommissioning an entire instance. RLS + single schema makes GDPR erasure a standard parameterized `DELETE`.
+**Q: Where does RLS stop protecting you?**
+Three places the application must cover itself. Caches: Redis knows nothing about
+`app.current_tenant_id`, so a key without the tenant id serves one tenant's data to another.
+Constraints: the docs state that "referential integrity checks, such as unique or primary key
+constraints and foreign key references, always bypass row security", so a global `UNIQUE (slug)`
+leaks slugs through violations — scope it `UNIQUE (tenant_id, slug)`. And "operations that apply
+to the whole table, such as `TRUNCATE` and `REFERENCES`, are not subject to row security". RLS
+is a row filter, not a boundary around the system.
+
+**Q: Your RLS policies are correct and every query still returns every tenant's rows. What is wrong?**
+The application is connecting as the table owner. The docs are explicit that "table owners
+normally bypass row security", along with superusers and `BYPASSRLS` roles — the default outcome
+when the role that ran the migrations also runs the app, so nothing looks unusual. Two fixes
+together: `ALTER TABLE ... FORCE ROW LEVEL SECURITY`, and a separate `NOBYPASSRLS` runtime role
+that owns nothing. Section 9 has the incident and the CI test that catches it.
+
+**Q: Why is schema-per-tenant usually the wrong answer at 500 tenants?**
+It fails on connections before anything else. `search_path` is session state, so a pooled
+connection cannot serve a second tenant without a reset, and PgBouncer cannot multiplex across
+schemas for the same reason: 500 connections against a usable 190 (Section 2). Secondary costs
+follow — 4,000+ rows in `pg_class` degrading planning, onboarding as a DDL deployment, Alembic
+scripted to iterate schemas. Its one real advantage is `DROP SCHEMA` offboarding, and if provable
+deletion is the requirement, database-per-tenant does that better.
+
+**Q: How do you decide between silo, pool, and bridge?**
+Per service, not per company — AWS's SaaS Lens framing, where "the regulatory profile of a
+service's data and its noisy neighbor attributes" push toward silo and "the agility, access
+patterns, and cost profile" toward pool. Then do the arithmetic, which is usually decisive:
+$2.20 per pooled tenant per month against roughly 55x that siloed (Section 10). So pool by
+default, silo what a contract or a volume demands, and accept that you run a bridge — which is
+only a migration rather than a rewrite if `tenant_id` is the partition key everywhere.
+
+**Q: How do you keep one tenant from degrading everyone else?**
+RLS does not help at all — it filters rows, it does not allocate capacity. Set an explicit
+budget (Section 2: 15% of peak, ~87 req/s) and enforce it at the edge with a token bucket keyed
+on the JWT's `tenant_id`, before the request reaches the database, with a lower ceiling for bulk
+endpoints and a `202` plus job id above a threshold. Make the ceiling a per-plan value — free
+1,000 req/min, pro 10,000 — in a `tenant_config` table cached in Redis, so sales can change a
+limit without a deploy. Then segment p99 **by tenant**: a fleet-wide p99 hides one tenant at 3 s
+behind 499 healthy ones.
+
+**Q: A tenant invokes their right to deletion. Walk through it.**
+Revoke, delete in batches, vacuum, then be honest about backups — Section 8 has the runbook. Two
+things worth saying out loud in the interview. At small volumes a single
+`DELETE FROM tenants WHERE id = :tid` does the whole job, but *only* because every `tenant_id`
+foreign key is `ON DELETE CASCADE`; the classic bug is a runbook written against a schema whose
+FKs defaulted to `NO ACTION`, where that statement is a foreign-key violation rather than a
+deletion. And you cannot remove a tenant from a backup without restoring and rewriting it, so
+the truthful commitment is "gone from production now, gone from backups in N days" with N
+published. This is the pooled model's real weakness, and a legitimate reason to silo a regulated
+tenant independent of any performance argument.
+
+**Q: How would you test tenant isolation?**
+With a test that fails if RLS is disabled, which most isolation tests do not. Seed two tenants,
+authenticate as tenant A, and assert that every endpoint returns `404` — not `403` — for tenant
+B's resource ids. Crucially, run it against **real PostgreSQL as the runtime role**, because
+SQLite has no RLS and a test suite on SQLite passes whether isolation works or not, and a test
+connecting as the table owner passes whether the policies are forced or not. Drive it with
+`AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")` — `AsyncClient`
+has no `app=` parameter and passing one raises `TypeError`. Add a negative control that
+deliberately omits the tenant context and asserts zero rows come back: it proves the policies
+are live rather than merely present, and it is the one test that would have caught the
+owner-bypass incident.
+
+**Q: What does this design owe to sharding, and when would you reach for it?**
+Nothing yet, deliberately — 40 GB against Notion's published 500 GB-per-table and 10 TB-per-
+database thresholds is two orders of magnitude of headroom. Reach for it when one tenant's data
+alone stops fitting the access pattern, or write throughput exceeds one primary. Two lessons
+from Section 6: Notion's 480 *logical* shards over 32 machines exist so rebalancing moves a
+schema rather than re-hashing rows, and Figma's "roughly nine months to shard our first table"
+is why the connection-budget arithmetic matters now.
+
+**Q: Why put the tenant id in the JWT rather than resolving it from the subdomain?**
+A signed claim is self-contained and needs no extra trust boundary. Subdomain resolution makes
+the gateway parse `Host` and inject `X-Tenant-ID`, which the app must now trust — so the gateway
+becomes a security component and every path that skips it (a health check, an internal call, a
+misconfigured ingress) is a bypass. The caveat: the claim proves the *token* says tenant A, not
+that this user belongs to tenant A — a mis-issued token, an impersonation feature, or a signing
+key shared across environments is correctly signed and wrong. Hence the redundant
+`User.tenant_id == ctx.tenant_id` in `get_current_user`: defence against your own issuer, not
+against forgery.

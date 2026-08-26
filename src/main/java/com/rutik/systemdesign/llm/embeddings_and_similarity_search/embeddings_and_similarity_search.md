@@ -42,18 +42,37 @@ Together, embeddings + similarity search power the retrieval component in [RAG s
 
 ### 4.1 Sentence Embeddings
 
+> **Dated snapshot (August 2026) — re-check the live leaderboard before quoting a rank.**
+> MTEB is not one static benchmark: it runs multiple boards (English v2, the multilingual
+> MMTEB/Multilingual leaderboard), and **v2 (2026) scores are not comparable to v1 scores** —
+> the retrieval task set and scoring changed. An "MTEB score" quoted without its board name
+> and version is close to meaningless, and the top of every board shifts month to month. The
+> models below are the current leaders as of this snapshot, not a permanent ranking.
+
+**Current leaders (August 2026):**
+- **`gemini-embedding-001`** (Google, GA since mid-2025) — tops the MTEB **Multilingual**
+  board: 68.32 overall, 67.71 retrieval.
+- **Cohere `embed-v4`** — leads the MTEB **English v2** board at 65.2, ahead of OpenAI
+  `text-embedding-3-large` (64.6) and BGE-M3 (63.0).
+- **Voyage 4** (Voyage AI, January 2026) — shares one embedding space across text and image
+  modalities, so a text query and an image can be compared directly.
+- **Qwen3-Embedding** — tops MTEB v2 among **open-weight** models; the 8B variant averages
+  roughly 75%.
+
 **all-MiniLM-L6-v2** (SentenceTransformers)
 - 384 dimensions, 22.7M params, extremely fast; truncates input past 256 word pieces
 - Trained on 1B+ sentence pairs (1,170,060,424 tuples)
-- Best for low-latency production use
+- Best for low-latency production use; no longer leaderboard-competitive, but still the
+  reasonable default for cheap, self-hosted, low-latency retrieval
 
 **GTE (General Text Embeddings, Alibaba)**
 - GTE-base (768d), GTE-large (1024d), gte-Qwen2-7B-instruct (3584d — Qwen2-7B's hidden size)
 - Strong multilingual performance
 
 **BGE (BAAI General Embeddings)**
-- BGE-small/base/large; strong MTEB performance
-- BGE-M3: multilingual, multi-granularity (dense + sparse + colbert)
+- BGE-small/base/large; BGE-M3: multilingual, multi-granularity (dense + sparse + colbert)
+- Still a strong, widely-deployed open-weight baseline, though no longer the open-weight
+  MTEB leader (see Qwen3-Embedding above)
 
 **E5 (Microsoft)**
 - Requires "query: " / "passage: " prefix — different query/passage representations
@@ -62,6 +81,8 @@ Together, embeddings + similarity search power the retrieval component in [RAG s
 **OpenAI text-embedding-3**
 - text-embedding-3-small (1536d) / text-embedding-3-large (3072d)
 - Supports Matryoshka truncation (see below)
+- Kept here as the pricing anchor: it is still the commonly-quoted OpenAI API price point,
+  even though `gemini-embedding-001` and `embed-v4` now rank above it on quality
 
 ### 4.2 Contrastive Learning
 
@@ -727,12 +748,15 @@ Embeddings in production can drift when:
 | HNSW | ~97-99% | Very fast | Higher | Good (100M) |
 | HNSW-PQ | ~92-95% | Fast | Medium | Excellent |
 
-| Embedding Model | Dims | Speed | Quality | Cost |
+| Embedding Model | Dims | Speed | Quality (Aug 2026 snapshot) | Cost |
 |----------------|------|-------|---------|------|
 | all-MiniLM-L6 | 384 | Fastest | Good | Free |
 | BGE-base | 768 | Fast | Very good | Free |
-| text-embedding-3-small | 1536 | API | Excellent | $0.02/1M tokens |
-| text-embedding-3-large | 3072 | API | Best | $0.13/1M tokens |
+| Qwen3-Embedding (8B) | varies | Self-hosted | Top open-weight, MTEB v2 | Free (self-hosted) |
+| text-embedding-3-small | 1536 | API | Good | $0.02/1M tokens |
+| text-embedding-3-large | 3072 | API | Very good (64.6 MTEB English v2) | $0.13/1M tokens |
+| Cohere embed-v4 | varies | API | Leads MTEB English v2 (65.2) | API-priced (check current rate card) |
+| gemini-embedding-001 | varies | API | Leads MTEB Multilingual (68.32) | API-priced (check current rate card) |
 
 ---
 

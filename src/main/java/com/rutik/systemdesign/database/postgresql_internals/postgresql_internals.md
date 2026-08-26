@@ -1,5 +1,12 @@
 # PostgreSQL Internals
 
+> **Version anchor — August 2026.** **PostgreSQL 18** is the current stable release and
+> everything below is PG18 behaviour unless tagged inline. **PostgreSQL 19** is in beta
+> (beta 1 on 4 June 2026, beta 2 on 16 July 2026 with the feature set frozen, beta 3 in
+> August; GA on track for September/October 2026) and changes two long-standing *defaults*
+> plus the bloat story this module spends most of §6 on — see §11.1 before you plan an
+> upgrade.
+
 ## 1. Concept Overview
 
 PostgreSQL is a fully ACID-compliant, multi-process relational database with an extensible architecture. Understanding its internals — process model, VACUUM mechanics, query planner, replication, partitioning, and extensions — is essential for building high-throughput production systems and diagnosing performance issues.
@@ -569,6 +576,47 @@ A low-traffic database had autovacuum disabled in development. After 2 years, th
 | `WAL-G / pgBackRest` | WAL archiving, PITR, compressed backups |
 | `Patroni` | High availability, automatic failover using etcd/Consul |
 | `PgBouncer` | Connection pooling (session, transaction, statement modes) |
+| `pg_plan_advice` / `pg_stash_advice` | `[19]` Planner control and plan stability — attach advice to a query id |
+
+### 11.1 What changes in PostgreSQL 19
+
+PostgreSQL 19 is in beta (beta 1 on 4 June 2026, feature-frozen at beta 2 on 16 July,
+GA expected September/October 2026). Two of its changes rewrite advice given elsewhere in
+this module, and two are **default flips** that change behaviour on upgrade without anyone
+editing a config file.
+
+**`REPACK` and `REPACK CONCURRENTLY` — bloat reclamation moves in-core.** §6 and §10 above
+tell you to prefer the `pg_repack` extension over `VACUUM FULL`, because `VACUUM FULL` takes
+an ACCESS EXCLUSIVE lock for the whole rewrite. PG19 makes that a built-in command:
+`REPACK` replaces `VACUUM FULL`, and `REPACK ... CONCURRENTLY` rebuilds a bloated table
+without the exclusive lock. On PG19 the answer to "how do I shrink this table" stops being
+"install an extension" and becomes one SQL statement — but on PG18 and earlier `pg_repack`
+is still the answer, which is why every recipe above still names it.
+
+**`pg_plan_advice` — plan stability, finally.** Postgres has never had Oracle-style hints in
+core, so the only levers for a plan that flips under you were `enable_*` GUCs, statistics
+tuning, and query rewriting. PG19 adds the `pg_plan_advice` extension, plus `pg_stash_advice`
+to apply advice automatically by query identifier. That means a plan you have verified can
+be pinned to the query that produced it, which is the missing piece in every "the plan
+changed at 3am after autovacuum updated the stats" incident.
+
+**Parallel autovacuum** (`autovacuum_max_parallel_workers`) lets a single autovacuum run
+parallelise its index vacuum phase, which is the phase that dominates on a wide table with
+many indexes — directly relevant to the 1-billion-row bloat war story in §10.
+
+**The two default flips, and why they matter on upgrade:**
+
+| Setting | PG18 default | PG19 default | Consequence |
+|---|---|---|---|
+| `jit` | `on` (since PG12) | **`off`** | JIT compilation added latency to short OLTP queries for no benefit on most workloads. Analytical queries that relied on it must now enable it explicitly. |
+| `default_toast_compression` | `pglz` | **`lz4`** | LZ4 compresses and decompresses faster than pglz at a slightly lower ratio. New TOASTed values use LZ4; existing pglz values stay readable, so this is a forward-only change. |
+
+Also landing in 19 and worth knowing about: **SQL/PGQ** property-graph pattern matching over
+ordinary relational tables (see
+[`graph_databases`](../graph_databases/graph_databases.md)), `FOR PORTION OF` for temporal
+`UPDATE`/`DELETE`, `ALTER TABLE ... MERGE PARTITIONS` / `SPLIT PARTITIONS`, `GROUP BY ALL`,
+online data checksums that can be toggled without a restart, and `io_method=worker` now
+auto-scaling between `io_min_workers` and `io_max_workers`.
 
 ---
 

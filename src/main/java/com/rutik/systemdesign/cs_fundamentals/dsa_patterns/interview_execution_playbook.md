@@ -723,6 +723,9 @@ pattern's Problem Bank).
 - [dsa_patterns/study_plans.md](study_plans.md) — once you can execute
   UMPIRE smoothly, use the study plan to drill problems in a structured
   order
+- [dsa_patterns/ai_assisted_round_playbook.md](ai_assisted_round_playbook.md) —
+  the AI-era companion to this playbook: the same round run with an AI
+  assistant in the pad, where the rubric shifts from solving to verifying
 - [recursion_and_problem_solving_patterns/](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)
   §8 "Pattern Selection Guide" — the original seed of the pattern-matching
   skill this playbook assumes
@@ -745,7 +748,7 @@ recomputing something). Silence while you privately search for the "right"
 pattern produces zero signal; a stated brute force produces a working
 baseline AND signal.
 
-**How much should I talk while actively typing code?**
+**Q: How much should I talk while actively typing code?**
 **Short:** Narrate one sentence per logical step, enough that the interviewer is never unsure what you're doing for more than about 30 seconds.
 Enough that the
 interviewer is never unsure what you're doing for more than ~30 seconds.

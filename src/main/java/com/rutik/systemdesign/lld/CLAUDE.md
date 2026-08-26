@@ -14,7 +14,9 @@ LLD describes how individual components are implemented — class relationships,
 | File/Directory | Topic |
 |----------------|-------|
 | `solid_principles/` | SRP, OCP, LSP, ISP, DIP — with violation examples and fixes |
+| `dependency_injection_and_testability/` | Constructor injection, seams, test doubles, designing for substitution without a framework |
 | `anti_patterns/` | God Object, Blob, Golden Hammer, Spaghetti Code, Copy-Paste, Magic Numbers, etc. |
+| `refactoring/` | Code smells, the refactoring catalogue, changing a design safely under test |
 | `pattern_comparisons/` | When to use which pattern; comparison tables across GoF patterns |
 
 ### Creational Patterns
@@ -57,7 +59,7 @@ LLD describes how individual components are implemented — class relationships,
 
 ### LLD Interview Problems
 
-12 problems, each with a `<Name>.md` (problem statement, ASCII class diagram, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`:
+15 problems, each with a `<Name>.md` (problem statement, Mermaid `classDiagram`, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`. **Every `<Name>.md` must link its `<Name>.java` and say what the code demonstrates** — the implementations are longer than the pages that present them and were invisible until 2026-08-25. The same rule holds for the four `concurrency_patterns/<Name>.java` companions.
 
 | Problem | Key Patterns | File |
 |---------|-------------|------|
@@ -86,6 +88,7 @@ LLD describes how individual components are implemented — class relationships,
 | `behavioral/strategy/` | `../../java/functional_programming/` — lambda as strategy object |
 | `behavioral/chain_of_responsibility/` | `../../spring/filters_and_interceptors/` — Spring filter chain |
 | `solid_principles/` | `../../java/design_patterns_in_java/` — SOLID applied to GoF patterns |
+| `oop_and_uml_foundations/` | `../../java/core_language/` — encapsulation, composition vs inheritance, and reading UML |
 | `design_principles/` | `../../java/design_patterns_in_java/` — SOLID + principles applied in Java |
 | `concurrency_patterns/` | `../../java/concurrency/` — ExecutorService internals, ThreadPoolExecutor tuning, deep Java concurrency |
 | `concurrency_patterns/` | `../../java/java_memory_model/` — happens-before, volatile semantics, DCL correctness |
@@ -134,9 +137,38 @@ pasted into a file and compiled. Two consequences follow, and **neither is a def
   optimizes away, an override that is unreachable, an inverted mechanism.
 - A duplicate type that is **not** a broken/fixed pair, i.e. two genuinely different classes
   that happen to collide on a name.
-- Minimum 10 Q&As per pattern module
+- **Minimum 15 Q&As per page** — the repo-wide hard floor in root `CLAUDE.md`, and it applies to
+  every content page here: pattern pages, principle sub-files, anti-pattern sub-files, comparison
+  files and problem pages alike. This line used to read "minimum 10 per pattern module", which was
+  both below the floor and scoped to only one of the nine modules; corrected 2026-08-25.
 - Always include: when to use vs when NOT to use, common misuse/anti-pattern of this pattern
 - Cross-reference to HLD when the pattern has a system-design analogue (e.g., Observer → Event-Driven Architecture)
+
+### Q&A format — this section has lost 262 questions to getting it wrong
+
+The full contract is in root `CLAUDE.md`; these are the three mistakes `lld` has actually made, and
+each of them deletes questions from the quiz bank **silently**, with a green build:
+
+1. **The heading must match `^##\s+.*interview\s+q`** (case-insensitive). `## 12. Interview Questions
+   with Answers` is canonical; `## Interview Questions` and `## Interview Questions and Answers` also
+   match. `## Interview Tips`, `## Interview Answer Template` and `## Interview Discussion Points` do
+   **not** — 23 pattern modules and 5 comparison files once used the first two and lost 217 Q&As
+   between them.
+2. **A question line must start at column 0 with `**`.** `1. **"question?"**` is not a question
+   boundary, so the whole section becomes unreachable — six files lost 45 Q&As this way, three of
+   them yielding garbage pseudo-questions that then fed the distractor pool. Never number Q&As as a
+   Markdown list.
+3. **Every Q&A carries an authored `**Short:**` line** as the FIRST non-blank line of its answer,
+   15–220 characters, self-contained, no code fence and no list. It ships as the graded-correct
+   option in the MCQ, so any pass that changes an answer must update the `**Short:**` above it in the
+   same edit.
+
+`## Interview Relevance` in the five Shape-A `anti_patterns/` files is the one deliberate exception:
+it sits over answerless bullet prompts, so renaming it would inject fragments into the bank. Leave it
+alone and add a real `## Interview Questions with Answers` section alongside it.
+
+After adding or editing Q&As, confirm they landed: `python3 game/extract.py` prints a per-section
+count, and `lld` should go up by exactly what you wrote.
 
 ---
 
@@ -163,7 +195,7 @@ below). The README also carries a Knowledge-Question Map and a 6-week Study Plan
 no path impact). The Study Plan pairs each week with a practice problem from
 `system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
 holds only a learning-path index (`case_studies/case_studies.md`: pattern-dependency map +
-interview shortcuts) over the same 12 problems, not separate case-study write-ups.
+interview shortcuts) over the same 15 problems, not separate case-study write-ups.
 
 ## Adding a New LLD Pattern
 

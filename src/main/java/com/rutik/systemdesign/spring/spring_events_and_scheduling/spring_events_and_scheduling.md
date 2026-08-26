@@ -649,20 +649,138 @@ The dual-write problem: after a DB write, publishing a Kafka message in a separa
 
 ## 14. Case Study
 
-See the Spring case study: [Design Spring Boot Event-Driven Microservice](../case_studies/design_event_driven_microservice.md)
+**Scenario: the nightly payout job that ran twice during a rolling deploy**
 
-**Quick scenario:** An e-commerce order service:
-- Writes the order to PostgreSQL inside `@Transactional`
-- Publishes `OrderCreatedEvent`
-- `@TransactionalEventListener(AFTER_COMMIT)` fires: async email notification and a Kafka message to the inventory service
-- `@Scheduled(cron="0 0 2 * * *")` + ShedLock: nightly batch cleanup of expired draft orders
+See the full design in the Spring case study:
+[Design Spring Boot Event-Driven Microservice](../case_studies/design_event_driven_microservice.md).
+This section covers one incident from the scheduling half of that design.
 
-**Key tradeoff demonstrated:** The `@Async @TransactionalEventListener` approach achieves sub-100 ms p99 latency for the HTTP response (email notification runs off the hot path) but provides only at-most-once delivery. A production variant adds an outbox table + Debezium CDC relay for exactly-once Kafka delivery to the inventory service.
+**Context.** A marketplace settlement service pays out to 42,000 sellers. At 02:00 every
+night, `@Scheduled(cron = "0 0 2 * * *")` selects the day's cleared transactions, writes a
+NACHA payout file, and hands it to the bank's SFTP drop. The job runs for roughly 40
+seconds. The service runs 6 pods on Kubernetes, and ShedLock guards the schedule:
+
+```java
+@Scheduled(cron = "0 0 2 * * *", zone = "Europe/London")
+@SchedulerLock(name = "nightly-payout", lockAtMostFor = "PT10M")
+public void generatePayouts() { ... }
+```
+
+That configuration ran without incident for nine months.
+
+### The incident
+
+A routine rolling deploy was scheduled through a change window that happened to overlap
+02:00. Two pods of the new version came up while two pods of the old version were still
+draining. The bank rejected the morning's submission for a duplicate batch id, and
+reconciliation found **two payout files for the same date, 4.3 seconds apart, totalling
+£1.87M of duplicate instructions**. A little over £200k of it had already settled before the
+bank's own duplicate check stopped the rest.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P1 as Pod-1 (old, clock +0.0s)
+    participant DB as shedlock table
+    participant P4 as Pod-4 (new, clock -4.1s)
+    P1->>DB: 02:00:00 UPDATE shedlock WHERE lock_until is in the past
+    DB-->>P1: acquired, lock_until = 02:10:00
+    Note over P1: generatePayouts() runs for 40s
+    P1->>DB: 02:00:40 release, lock_until = now()
+    Note over DB: lockAtLeastFor was never set, so the lock<br/>is freed the moment the task returns
+    P4->>DB: 02:00:44 its own 02:00 tick fires late
+    DB-->>P4: lock_until has passed, acquired
+    Note over P4: generatePayouts() runs a SECOND time<br/>same cleared transactions, new batch id
+```
+
+**Root cause, in two parts.**
+
+1. **`lockAtLeastFor` was never set**, so it defaulted to zero and the lock was released as
+   soon as the task returned — 40 seconds after it was taken, not 10 minutes.
+2. **The pods' clocks disagreed.** Pod-4 had just started on a node whose NTP sync was
+   4.1 seconds behind. Its scheduler fired its own `02:00:00` tick at what Pod-1 already
+   considered `02:00:44`. By then the lock row said the window was over.
+
+Neither fault is sufficient alone. With a correct `lockAtLeastFor`, the skewed clock is
+harmless. With perfectly synchronised clocks, the missing `lockAtLeastFor` is harmless.
+The rolling deploy supplied the second fault by introducing a freshly booted node — which
+is exactly why the schedule survived nine months of steady state and failed on the first
+deploy that touched 02:00.
+
+`lockAtMostFor = "PT10M"` did nothing here. It is the crash valve — the upper bound after
+which a dead lock-holder stops blocking everyone — not the lower bound that defends
+against skew. Reading it as "the lock is held for 10 minutes" is the trap.
+
+### The fix
+
+```java
+@Scheduled(cron = "0 0 2 * * *", zone = "Europe/London")
+@SchedulerLock(
+        name         = "nightly-payout",
+        lockAtMostFor  = "PT10M",   // upper bound: a dead pod frees the lock after 10 min
+        lockAtLeastFor = "PT5M")    // lower bound: nobody else may run within 5 min
+public void generatePayouts() { ... }
+```
+
+```java
+@Bean
+LockProvider lockProvider(DataSource dataSource) {
+    return new JdbcTemplateLockProvider(
+        JdbcTemplateLockProvider.Configuration.builder()
+            .withJdbcTemplate(new JdbcTemplate(dataSource))
+            .withTableName("shedlock")
+            .usingDbTime()          // every lock comparison uses the DATABASE clock
+            .build());
+}
+```
+
+`usingDbTime()` is the structural half of the fix and the more important one.
+Without it, each pod writes `lock_until` from its own `System.currentTimeMillis()`, so the
+lock's validity is only as good as the worst clock in the cluster. With it, every
+comparison and every timestamp comes from a single PostgreSQL `now()`, and node clock skew
+stops being able to affect correctness at all. `lockAtLeastFor` then covers the remaining
+case — two pods whose *scheduler triggers* fire at different wall-clock moments.
+
+Sizing rule the team adopted: **`lockAtLeastFor` ≥ the worst tolerated clock skew, and
+`lockAtMostFor` ≥ 2 × the p99 task duration.** Here: 5 minutes and 10 minutes against a
+40-second job.
+
+The change-window policy changed too — deploys are blocked for 15 minutes either side of
+any cron in the service. A distributed lock makes double-firing unlikely; it does not make
+it impossible, and a rolling deploy is the moment when the assumptions behind it are
+weakest.
+
+### Why ShedLock and not Quartz or an advisory lock
+
+The post-incident review asked whether the whole mechanism was wrong. It was not, but the
+alternatives are worth knowing, because each fails differently:
+
+| | ShedLock + `@Scheduled` | Quartz clustered | Postgres advisory lock |
+|---|---|---|---|
+| Who owns the trigger | Every pod's own scheduler | The cluster, via the JDBC job store | Every pod's own scheduler |
+| Extra tables | 1 (`shedlock`) | 11 (`QRTZ_*`) | 0 |
+| Missed-fire recovery | None — a skipped tick is simply skipped | Misfire policies, replays a missed trigger | None |
+| Dynamic schedule changes | Redeploy | At runtime, through the API | Redeploy |
+| Failure mode to fear | Clock skew and a too-short lock (this incident) | Misfire storms after a long GC or a cluster-wide pause | The lock dying with the connection mid-task |
+| Setup cost | ~15 lines | A schema, a config file, and an operational model | ~5 lines |
+
+The advisory-lock option is the tempting one — `SELECT pg_try_advisory_lock(74112)` needs
+no library and no table. Its catch is that a session-scoped advisory lock is released when
+the connection is returned to the pool or the connection drops, which for a 40-second job
+holding a pooled connection is a genuinely narrow guarantee. `pg_advisory_xact_lock` is
+safer but ties the lock's lifetime to a transaction you probably do not want open for the
+whole job.
+
+Quartz was rejected on cost, not capability: 11 tables and a misfire model to operate, to
+solve a problem that two annotation attributes solve. The team's rule of thumb — **if the
+schedule is static and a missed run is recoverable on the next tick, ShedLock is enough;
+if a missed run must be replayed, you need a real scheduler.**
 
 **Cross-links:**
 - [Spring Transactions](../spring_transactions/spring_transactions.md) — `@TransactionalEventListener` transaction phases
 - [Spring Messaging](../spring_messaging/spring_messaging.md) — Kafka integration + outbox pattern
-- [Spring Batch](../spring_batch/spring_batch.md) — scheduled batch jobs with ShedLock
+- [Spring Batch](../spring_batch/spring_batch.md) — restartability when a scheduled job is a batch job
+- [Concurrency Control & Locking](../../database/concurrency_control_and_locking/concurrency_control_and_locking.md) — advisory locks and lease semantics underneath ShedLock
 
 ---
 

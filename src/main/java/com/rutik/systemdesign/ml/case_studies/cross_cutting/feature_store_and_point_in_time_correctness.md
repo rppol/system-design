@@ -422,7 +422,7 @@ def detect_training_serving_skew(
 | Tool | Type | Strengths | Weaknesses |
 |---|---|---|---|
 | Feast (open source) | Self-hosted OSS | PIT-correct by API design, Spark offline, Redis/DynamoDB online | Requires infrastructure management; no first-party managed offering |
-| Tecton | Managed SaaS | Production-grade, stream + batch, monitoring built in | Expensive |
+| Tecton (Databricks) | Managed, real-time | Production-grade, stream + batch, monitoring built in | Expensive |
 | Hopsworks | Open source managed | Full stack incl. training pipelines | Complex to self-host |
 | Chronon (Airbnb OSS) | Self-hosted | Single definition → dual compute | Requires event-sourced data |
 | Feathr (LinkedIn OSS) | Self-hosted (Spark) | Cross-platform, Azure/AWS/GCP; LF AI & Data project | Upstream dormant since April 2024 — check before adopting |

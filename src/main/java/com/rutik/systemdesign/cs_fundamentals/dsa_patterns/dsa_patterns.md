@@ -614,7 +614,8 @@ See [interview_execution_playbook.md](interview_execution_playbook.md) for the f
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — Master theorem, amortized analysis, recurrences
 - [dynamic_programming](../dynamic_programming/dynamic_programming.md) — DP family deep-dive: memoisation, tabulation, 4 families
 - [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — Union-find, trie, segment tree, Fenwick tree
-- [study_plans.md](study_plans.md) — Blind 75 + NeetCode 150, pattern-mapped with links and suggested order
+- [study_plans.md](study_plans.md) — which curated problem list to work at which stage, pattern-mapped with links and a 7-phase order
+- [ai_assisted_round_playbook.md](ai_assisted_round_playbook.md) — the AI-enabled coding round: how to tell which round you are in, what the platforms record, the prompt-quality ladder, and the verification checklist graders actually score
 - [`../../java/collections_internals/collections_internals.md`](../../java/collections_internals/collections_internals.md) — HashMap, PriorityQueue, TreeMap, ArrayDeque internals
 - [`../../hld/caching/caching.md`](../../hld/caching/caching.md) — LRU/LFU as applied data structures (heap + hashmap pattern)
 - [`../../hld/rate_limiting/rate_limiting.md`](../../hld/rate_limiting/rate_limiting.md) — sliding window counter in production systems

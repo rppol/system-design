@@ -153,6 +153,68 @@ public class OrderService {
 }
 ```
 
+### Native Histograms — One Series Instead of N
+
+`publishPercentileHistogram()` above emits a **classic** histogram: `_sum`, `_count`, and one
+`_bucket` series per boundary. Micrometer's default percentile-histogram bucket set is roughly
+70 boundaries, so a single `http.server.requests` timer with `{method, uri, status, outcome}`
+costs `70 + 2 = 72` series *per label combination*. Across 40 URIs × 4 methods × 6 status
+classes that is `40 × 4 × 6 × 72 ≈ 69,000` series from one timer. You then have to choose your
+buckets in advance, and a p99.9 you did not budget a boundary for is unrecoverable.
+
+A **native histogram** replaces the whole bucket family with **one time series** whose value is
+a sparse, exponentially-bucketed sketch. Resolution comes from a `schema` factor (schema 3 gives
+~9% relative bucket width) rather than from hand-picked boundaries, so `histogram_quantile()`
+works at any percentile without re-instrumenting. The same timer above costs `40 × 4 × 6 = 960`
+series — a **72× reduction**, and re-aggregation across labels stays exact because the sketches
+merge.
+
+Native histograms are a **stable** Prometheus feature from **v3.8.0** and ship in the
+**v3.13.0 LTS (1 July 2026)**. Scraping is opt-in on the server:
+
+```yaml
+# prometheus.yml
+global:
+  scrape_native_histograms: true      # or per-scrape_config; negotiates protobuf exposition
+scrape_configs:
+  - job_name: order-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["order-service:8080"]
+```
+
+On the JVM side, Micrometer 1.13+ runs on the Prometheus Java client 1.x
+(`io.micrometer:micrometer-registry-prometheus`), which produces native histograms when the
+client's histogram properties are set — the same knobs are available as builder methods:
+
+```java
+// io.prometheus.metrics.core.metrics.Histogram
+Histogram.builder()
+    .name("order_processing_duration_seconds")
+    .nativeOnly()                    // drop the classic _bucket family entirely
+    .nativeInitialSchema(3)          // ~9% relative bucket width
+    .nativeMaxNumberOfBuckets(160)   // cap memory; the client widens the schema if exceeded
+    .register();
+```
+
+```properties
+# equivalently, via prometheus.properties / -D system properties
+io.prometheus.metrics.histogram_native_only=true
+io.prometheus.metrics.histogram_native_initial_schema=3
+io.prometheus.metrics.histogram_native_max_number_of_buckets=160
+```
+
+Run **both** flavours during migration (omit `nativeOnly()`): a metric may expose a classic and
+a native histogram under the same name, so dashboards and recording rules can be cut over one at
+a time. Two constraints to plan for: native histograms require the **protobuf** exposition
+format, which is why the scrape flag exists, and long-lived high-resolution sketches need
+`nativeMaxNumberOfBuckets` set or a pathological latency distribution will grow the sketch until
+the client widens the schema under you.
+
+Prometheus 3 also **ingests OTLP directly** at `/api/v1/otlp/v1/metrics`, so an OTel-instrumented
+service can reach the TSDB without a Collector hop when you do not need Collector-side
+processing.
+
 ### Cardinality Trap — The Anti-Pattern
 
 ```java
@@ -439,7 +501,8 @@ management:
 | Head-based sampling | Low overhead, simple | May miss rare errors in sampled-out traces |
 | Tail-based sampling | Keeps important traces | High memory (buffer entire trace before decision) |
 | Client-side percentiles | Exact at the source, no query-time computation | Fixed percentiles, cannot re-aggregate; per-instance memory overhead in the app |
-| Server-side histograms | Flexible percentile computation | Larger cardinality in Prometheus |
+| Classic bucket histograms | Flexible percentile computation, works with any scrape format | One `_bucket` series per boundary (~72 series per label set with Micrometer's default buckets); boundaries must be chosen up front |
+| Native histograms | One series regardless of resolution, any percentile after the fact, exact re-aggregation | Requires protobuf exposition and `scrape_native_histograms: true`; needs a bucket cap to bound sketch memory |
 | Structured JSON logs | Machine-queryable, enriched | Larger log volume, less human-readable |
 
 ---
@@ -483,9 +546,10 @@ OTEL_TRACES_SAMPLER_ARG=0.01                   # the ratio, 0.0-1.0 (1% here)
 |------|---------|
 | Micrometer | Metrics facade (Prometheus, Datadog, InfluxDB backends) |
 | Spring Boot Actuator | Exposes /actuator/prometheus, /health, /info |
-| Prometheus | Pull-based metrics TSDB, PromQL query language |
+| Prometheus | Pull-based metrics TSDB, PromQL query language; native histograms (stable since v3.8.0, in the v3.13 LTS) and direct OTLP ingest at `/api/v1/otlp/v1/metrics` |
 | Grafana | Dashboard and alerting UI |
 | OpenTelemetry (OTel) | Vendor-neutral instrumentation SDK + collector |
+| Grafana Alloy | OTel-Collector-distribution agent — scrape, transform, and route metrics/logs/traces/profiles from one binary |
 | Jaeger / Zipkin | Distributed trace storage and UI (Jaeger v2 is built on the OTel Collector and ingests OTLP natively) |
 | Grafana Tempo | Cost-effective trace storage (no indexes) |
 | Grafana Loki | Log aggregation (indexed labels only, log content not indexed) |
@@ -506,6 +570,11 @@ Metrics are aggregated numeric measurements (counters, gauges, histograms) with 
 **Short:** Each unique label-value combination creates a separate time series, and high cardinality can exhaust the metrics store.
 
 Each unique combination of label values creates a separate time series. A metric with labels `{status="200", method="GET", userId="12345"}` creates one series per user. With 1 million users, that's 1 million time series. Prometheus stores each series in memory; high cardinality exhausts heap, increases scrape latency, and can crash the TSDB. Solution: only use low-cardinality, finite-set values as metric labels. High-cardinality values belong in trace span attributes or structured log fields.
+
+**Q: A classic histogram costs one series per bucket. How do you get p99 latency without paying that?**
+**Short:** Use a Prometheus native histogram, which stores the whole distribution as a single sparse exponential-sketch series instead of one series per bucket boundary.
+
+Use a native histogram. A classic histogram emits `_sum`, `_count`, and one `_bucket` series per boundary — Micrometer's default percentile-histogram bucket set is around 70 boundaries, so one `http.server.requests` timer across 40 URIs, 4 methods and 6 status classes costs roughly `40 × 4 × 6 × 72 ≈ 69,000` series. A native histogram replaces the entire bucket family with a single series carrying a sparse, exponentially-bucketed sketch, taking the same timer to 960 series — a 72× reduction — and its resolution comes from a `schema` factor rather than boundaries you had to guess in advance, so `histogram_quantile()` answers p99.9 even if you never budgeted a bucket for it. Sketches also merge exactly, so re-aggregating across labels stays correct where classic buckets only approximate. It is a stable Prometheus feature from v3.8.0 and ships in the v3.13 LTS, but scraping is opt-in — set `scrape_native_histograms: true`, because the format requires protobuf exposition rather than the text format. Migrate by exposing both flavours at once (do not set `nativeOnly()` on day one), cut dashboards and recording rules over one at a time, and always set `nativeMaxNumberOfBuckets` so a pathological latency distribution cannot grow the sketch unbounded.
 
 **Q: What is the difference between head-based and tail-based sampling in distributed tracing?**
 **Short:** Head-based sampling decides at the trace root cheaply but can miss rare slow requests; tail-based decides after all spans arrive.

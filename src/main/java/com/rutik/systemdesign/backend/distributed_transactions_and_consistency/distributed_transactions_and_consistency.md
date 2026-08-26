@@ -927,7 +927,7 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 |---|---|
 | Debezium | Open-source CDC connector for PostgreSQL, MySQL, MongoDB, Oracle; runs on Kafka Connect |
 | Maxwell's Daemon | MySQL binlog CDC; simpler than Debezium, fewer connectors |
-| Postgres logical replication + custom | A custom relay consuming a replication slot. `pgoutput` is built into PostgreSQL 10+ and needs no extension; any other output plugin is a separate extension you install and maintain yourself |
+| Postgres logical replication | A hand-rolled relay consuming a replication slot. `pgoutput` is built into PostgreSQL 10+ and needs no extension; any other output plugin is a separate extension you install and maintain yourself |
 | AWS DMS | Managed CDC service for databases hosted on AWS |
 
 ### Message Brokers

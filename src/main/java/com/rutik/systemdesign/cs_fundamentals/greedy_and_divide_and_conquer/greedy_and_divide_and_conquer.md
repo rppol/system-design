@@ -498,6 +498,24 @@ def huffman_codes(frequencies: Dict[str, int]) -> Dict[str, str]:
     return codes
 ```
 
+### Entropy — the floor Huffman is greedy toward
+
+Huffman is the one greedy algorithm in this module whose optimality is not just provable but
+*quantifiable*. Shannon's source coding theorem makes the source entropy
+`H(X) = -sum p(x) log2 p(x)` a hard floor on the average bits per symbol of any lossless
+code, and Huffman always lands in `[H, H+1)` — optimal among prefix codes, with the slack
+coming from its inability to spend a fractional number of bits per symbol. On the six-symbol
+source coded above (p = 0.40, 0.25, 0.15, 0.10, 0.06, 0.04), `H(X) = 2.2008` bits/symbol
+against Huffman's weighted average of `2.2500` — a gap of **0.049 bits**, comfortably inside
+the guaranteed `+1`. Over a 1,000-symbol message: 2,201 bits is the floor, Huffman spends
+2,250, and a fixed 3-bit code spends 3,000.
+
+The theory behind that bound — self-information, entropy, the source coding theorem, KL
+divergence and cross-entropy, Kolmogorov complexity, and the derivation of the
+`Omega(n log n)` comparison-sort lower bound as the same entropy argument applied to a
+uniform prior over permutations — lives in
+[information_theory_and_compression](../information_theory_and_compression/information_theory_and_compression.md).
+
 ### Divide and Conquer — Merge Sort (Reference Implementation)
 
 ```python
@@ -1006,7 +1024,10 @@ def fixed_compress(text: str) -> Tuple[str, dict[str, str]]:
 
 ## See Also
 
-- [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — merge sort as a D&C proof; binary search
+- [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — merge sort as a D&C proof; binary search. Its `Omega(n log n)` comparison bound is the entropy bound applied to a uniform prior over permutations — same theorem, different hat; the derivation is in [information_theory_and_compression](../information_theory_and_compression/information_theory_and_compression.md)
+- [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — the sketch structures (Bloom, Count-Min, HyperLogLog) are the other place this section spends a *bounded number of bits per element* and accepts a quantified error for it
+- [information_theory_and_compression](../information_theory_and_compression/information_theory_and_compression.md) — the theory Huffman's optimality rests on: self-information, entropy, the source coding theorem, KL divergence and cross-entropy, Kolmogorov complexity
+- [`ml/`](../../ml/README.md) — cross-entropy loss is `H(p, q)` with `p` the label distribution and `q` the model's prediction
 - [dynamic_programming](../dynamic_programming/dynamic_programming.md) — when greedy fails, DP is the fallback
 - [graph_and_string_algorithms](../graph_and_string_algorithms/graph_and_string_algorithms.md) — Dijkstra (greedy), Kruskal/Prim (greedy MST)
 - [heaps_and_priority_queues](../heaps_and_priority_queues/heaps_and_priority_queues.md) — Huffman min-heap; Prim's priority queue

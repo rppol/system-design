@@ -7,15 +7,17 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
-## Module List — 18 Modules
+## Module List — 25 Modules
 
 | Module | Key Concepts |
 |--------|-------------|
 | `scalability/` | Vertical vs horizontal, stateless services, replication, partitioning strategies |
+| `capacity_estimation/` | Back-of-the-envelope QPS, storage, bandwidth and connection math derived from DAU |
 | `load_balancing/` | L4 vs L7, algorithms (round-robin, least-conn, IP hash), health checks, sticky sessions |
 | `caching/` | Cache-aside, write-through, TTL, eviction, Redis vs Memcached, CDN as cache |
 | `database_design/` | Schema design principles, denormalization, indexing strategy, OLTP vs OLAP |
 | `api_design/` | REST maturity levels, versioning, pagination, idempotency, backward compatibility |
+| `realtime_updates/` | Polling vs SSE vs WebSockets, connection budgets, fan-out cost, gap-fill and resume |
 | `cap_theorem/` | CAP, PACELC, consistency models, partition tolerance, CP vs AP systems |
 | `message_queues/` | Producer-consumer, pub/sub, at-least-once vs exactly-once, DLQ, backpressure |
 | `microservices/` | Decomposition, bounded contexts, inter-service communication, data ownership |
@@ -23,19 +25,24 @@ HLD is the architectural overview layer. The `backend/` section contains product
 | `rate_limiting/` | Token bucket, sliding window, leaky bucket, distributed rate limiting |
 | `cdn/` | Edge caching, cache invalidation, geo-routing, origin shield, cache-control headers |
 | `database_sharding/` | Horizontal partitioning, shard key selection, resharding, cross-shard queries |
+| `geospatial_indexing/` | Geohash, S2, H3, quadtrees; proximity and k-nearest search, cell-boundary handling |
 | `consensus_algorithms/` | Raft leader election + log replication, Paxos variants, PBFT, ZAB, etcd/ZooKeeper internals, quorum sizing, term numbers |
+| `multi_region_and_data_residency/` | Active-active vs active-passive, write locality, consensus latency, residency constraints |
 | `event_sourcing_cqrs/` | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency |
+| `stream_processing/` | Watermarks, windowing, exactly-once, state backends, rescaling a stateful job |
 | `distributed_transactions/` | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys |
+| `coordination_and_contention/` | Distributed locks, leases, fencing tokens, hot keys, when coordination is the bottleneck |
 | `observability/` | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, sampling, distributed tracing |
 | `security_and_auth/` | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit, secrets management |
 | `resilience_patterns/` | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover, load shedding |
+| `cell_based_architecture/` | Cells as blast-radius containment, cell routing, poison-pill isolation, per-cell capacity |
 | `case_studies/` | HLD case study problems |
 
 ---
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 18 modules = "Recommended Learning Order")
+`README.md` documents the **Full Path** (all 25 modules = "Recommended Learning Order")
 plus two curated tiers: **Senior** (14 modules) and **Principal** (11). They are
 different cuts, not nested depths — senior is the craft, principal is the judgment
 (which approach at what cost, what failure domains, what you tell a team *not* to do),
@@ -70,7 +77,7 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `microservices/` | `../backend/microservices_fundamentals/`, `../backend/api_gateway_patterns/`, `../backend/service_mesh_and_service_discovery/` | — |
 | `message_queues/` | `../backend/kafka_deep_dive/`, `../backend/event_driven_fundamentals/`, `../backend/messaging_patterns/` | — |
 | `caching/` | `../backend/caching_strategies_deep_dive/` | `../database/database_caching_patterns/`, `../database/key_value_stores/` |
-| `database_design/` | `../backend/database_internals_and_indexing/`, `../backend/query_optimization/` | `../database/README.md` (all 29 modules) |
+| `database_design/` | `../backend/database_internals_and_indexing/`, `../backend/query_optimization/` | `../database/README.md` (all 33 modules) |
 | `database_sharding/` | — | `../database/sharding_and_partitioning/` |
 | `cap_theorem/` | — | `../database/consistency_models_and_consensus/`, `../database/database_fundamentals/` |
 | `rate_limiting/` | `../backend/rate_limiting_in_depth/` | — |

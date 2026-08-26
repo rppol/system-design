@@ -521,7 +521,6 @@ nothing about its container choices being correct.
 ### 6.6 Command Pattern
 
 ```python
-from __future__ import annotations
 import dataclasses
 from collections import deque
 from typing import Protocol
@@ -1103,7 +1102,6 @@ class PaymentService:
 # FIX: Strategy for provider, Observer for notifications,
 # Repository for persistence, Factory for validator selection.
 
-from __future__ import annotations
 import dataclasses
 import weakref
 from collections import defaultdict

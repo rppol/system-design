@@ -52,6 +52,15 @@ All configuration is expressed as `SecurityFilterChain` beans built with the lam
 | SAML 2.0 | `Saml2WebSsoAuthenticationFilter` | `OpenSaml5AuthenticationProvider` |
 | Remember-Me | `RememberMeAuthenticationFilter` | `RememberMeAuthenticationProvider` |
 | Anonymous | `AnonymousAuthenticationFilter` | (sets `AnonymousAuthenticationToken` if no auth yet) |
+| Passkey / WebAuthn | `http.webAuthn(...)` DSL | Built in; endpoints under `/webauthn/**` and `/login/webauthn` |
+| One-time token (magic link) | `http.oneTimeTokenLogin(...)` DSL | `OneTimeTokenService` generates, you deliver |
+
+**Factors, not just mechanisms.** Spring Security 7 records *which* mechanisms
+authenticated the current user as `FactorGrantedAuthority` values on the
+`Authentication` — `PASSWORD_AUTHORITY`, `OTT_AUTHORITY`, `WEBAUTHN_AUTHORITY`,
+`X509_AUTHORITY`, `AUTHORIZATION_CODE_AUTHORITY`. That is what makes multi-factor
+authorization expressible as authorization rather than as a bespoke filter: see
+§6 "Modern authentication" below.
 
 ### Authorization Strategies
 
@@ -362,6 +371,140 @@ public class DocumentService {
     }
 }
 ```
+
+### Modern Authentication: Passkeys, One-Time Tokens, and MFA
+
+Three mechanisms that used to be somebody's hand-rolled filter are now DSL calls.
+
+**Passkeys (WebAuthn).** A passkey is a key pair bound to the user's device, so there
+is no shared secret to phish, replay, or leak in a breach. The `webAuthn()` DSL
+registers the whole ceremony:
+
+```java
+@Bean
+SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        .formLogin(withDefaults())
+        .webAuthn(webAuthn -> webAuthn
+            .rpId("example.com")                       // the relying-party id
+            .allowedOrigins("https://example.com")     // exact origins that may authenticate
+        );
+    return http.build();
+}
+```
+
+That registers `POST /webauthn/register/options`, `POST /webauthn/register`,
+`POST /webauthn/authenticate/options` and `POST /login/webauthn`, plus a default
+registration page at `/webauthn/register`.
+
+**The production trap is persistence, and it is silent.** Two SPIs hold your
+credentials — `PublicKeyCredentialUserEntityRepository` and `UserCredentialRepository`
+— and **both default to in-memory implementations**. Everything works in development
+and in a single-instance test; then you scale to two pods and half the assertions fail
+because the credential was registered on the other one, or you deploy and every
+passkey in the estate evaporates. Wire the JDBC implementations before you ship:
+
+```java
+@Bean
+PublicKeyCredentialUserEntityRepository userEntities(JdbcOperations jdbc) {
+    return new JdbcPublicKeyCredentialUserEntityRepository(jdbc);
+}
+
+@Bean
+UserCredentialRepository userCredentials(JdbcOperations jdbc) {
+    return new JdbcUserCredentialRepository(jdbc);
+}
+```
+
+The third repository, `PublicKeyCredentialCreationOptionsRepository`, holds the
+in-flight challenge and defaults to the `HttpSession` — which is correct if your
+session is shared (see [Spring Session](../spring_session/spring_session.md)) and
+broken if it is per-JVM. `rpId` is the other thing people get wrong: it identifies
+the relying party and a credential registered under one `rpId` will not authenticate
+against another, so an `app.example.com` / `example.com` inconsistency across
+environments locks users out of their own passkeys.
+
+The WebAuthn specification itself is still moving: Level 3 is a **W3C Candidate
+Recommendation Snapshot dated 26 May 2026**, not yet a Recommendation. That is not a
+reason to avoid passkeys — browser and platform support is broad — but it is worth
+knowing when someone asks whether this is a finished standard.
+
+**One-time token login.** The magic-link pattern, without the hand-rolled token table:
+
+```java
+http.oneTimeTokenLogin(withDefaults());
+```
+
+`GenerateOneTimeTokenFilter` listens on `POST /ott/generate`, the submit page is served
+at `GET /login/ott`, and `OneTimeTokenService` (`InMemoryOneTimeTokenService` or
+`JdbcOneTimeTokenService`) generates and consumes tokens with a five-minute default
+expiry. The one thing Spring Security cannot decide for you is delivery — it has no
+idea whether your token goes by email, SMS or push — so a
+`OneTimeTokenGenerationSuccessHandler` bean is **mandatory**, not optional.
+
+**Multi-factor as authorization, not as a filter.** The old approach chained a second
+`AuthenticationProvider` and hoped nothing bypassed it. Spring Security 7 instead
+records each factor on the `Authentication` and lets you *require* factors the same
+way you require a role:
+
+```java
+@Configuration
+@EnableMultiFactorAuthentication(authorities = {
+        FactorGrantedAuthority.PASSWORD_AUTHORITY,
+        FactorGrantedAuthority.OTT_AUTHORITY })
+class MfaConfig {}
+```
+
+Rolling MFA out to an existing password estate is the realistic version of this, and
+`when` is what makes it possible without a flag day — require the second factor only
+from users who have actually registered a passkey:
+
+```java
+@Configuration
+@EnableMultiFactorAuthentication(
+        authorities = { FactorGrantedAuthority.PASSWORD_AUTHORITY,
+                        FactorGrantedAuthority.WEBAUTHN_AUTHORITY },
+        when = MultiFactorCondition.WEBAUTHN_REGISTERED)
+class ProgressiveMfaConfig {}
+```
+
+Programmatically the same thing is an `AuthorizationManagerFactory`, which adds
+per-factor freshness and arbitrary conditions:
+
+```java
+@Bean
+AuthorizationManagerFactory<Object> authz() {
+    return AuthorizationManagerFactories.multiFactor()
+            .requireFactors(FactorGrantedAuthority.PASSWORD_AUTHORITY,
+                            FactorGrantedAuthority.OTT_AUTHORITY)
+            .when(auth -> "admin".equals(auth.getName()))   // only for admins
+            .build();
+}
+
+// "A password, but one entered in the last 30 minutes" -- step-up for a sensitive action.
+var recentPassword = AuthorizationManagerFactories.multiFactor()
+        .requireFactor(factor -> factor.passwordAuthority().validDuration(Duration.ofMinutes(30)))
+        .build();
+```
+
+When two different combinations are equally acceptable — a passkey alone, *or* a
+password plus a one-time token — compose them with `anyOf`:
+
+```java
+var webauthn = AllRequiredFactorsAuthorizationManager.<Object>builder()
+        .requireFactor(factor -> factor.webauthnAuthority()).build();
+var passwordAndOtt = AllRequiredFactorsAuthorizationManager.<Object>builder()
+        .requireFactor(factor -> factor.passwordAuthority())
+        .requireFactor(factor -> factor.ottAuthority()).build();
+
+var mfa = new DefaultAuthorizationManagerFactory<>();
+mfa.setAdditionalAuthorization(AllRequiredFactorsAuthorizationManager.anyOf(webauthn, passwordAndOtt));
+```
+
+The factor list lives on the `Authentication`, which means it lives in the
+`SecurityContext` — so it is subject to exactly the same replication concerns as
+everything else there. A factor list that does not survive session replication silently
+demotes a fully-authenticated user mid-session.
 
 ### CORS Configuration
 
@@ -806,6 +949,13 @@ http.authorizeHttpRequests(auth -> auth
 | `spring-security-oauth2-resource-server` | JWT/opaque token validation for APIs | `http.oauth2ResourceServer(...)` |
 | `spring-security-oauth2-client` | OAuth2 login (social login, SSO) | Handles authorization code flow |
 | `spring-security-test` | `@WithMockUser`, `@WithUserDetails`, `MockMvc` security testing | `SecurityMockMvcRequestPostProcessors.csrf()` |
+| `http.webAuthn(...)` | Passkey registration and assertion | Endpoints under `/webauthn/**` and `/login/webauthn`; the credential repositories default to in-memory |
+| `JdbcPublicKeyCredentialUserEntityRepository` | Persists WebAuthn user entities | Required in production; the default is in-memory |
+| `JdbcUserCredentialRepository` | Persists WebAuthn credentials | Required in production; the default is in-memory |
+| `http.oneTimeTokenLogin(...)` | Magic-link login | `JdbcOneTimeTokenService`; a `OneTimeTokenGenerationSuccessHandler` is mandatory for delivery |
+| `@EnableMultiFactorAuthentication` | Factor-aware authorization | `authorities = {...}`, `when = MultiFactorCondition.WEBAUTHN_REGISTERED` |
+| `AuthorizationManagerFactories.multiFactor()` | Programmatic MFA rules | `requireFactors`, `when`, per-factor `validDuration` for step-up |
+| `AllRequiredFactorsAuthorizationManager.anyOf(...)` | Alternative factor combinations | "Passkey alone, or password plus one-time token" |
 | Nimbus JOSE + JWT | JWT parsing and validation | Used internally by Spring Security OAuth2 Resource Server |
 | Argon2 | Memory-hard password hashing (OWASP recommended) | `spring-security-crypto`; requires Bouncy Castle |
 | BCrypt | Default password hashing; cost factor 10–12 | ~100ms–300ms encode time intentionally |
@@ -972,6 +1122,26 @@ Spring Security evaluates authorization matchers top-to-bottom and applies the *
 **Short:** `FilterChainProxy` holds an ordered list of chains and runs only the filters of the first chain whose `securityMatcher` matches.
 
 You can define several `SecurityFilterChain` beans, each with its own `securityMatcher` (e.g. one for `/api/**` that is stateless + JWT, one for everything else that is form-login + sessions). `FilterChainProxy` holds the ordered list and, per request, selects the *first* chain whose `securityMatcher` matches — only that chain's filters run. Use `@Order` to control evaluation order, and make the most specific matcher first; a chain with no `securityMatcher` matches everything and must come last — publish it anywhere earlier and startup fails with "a filter chain that matches any request has already been configured". This is how one application applies different security models to different parts of itself.
+
+**Q: What is the single most likely way a passkey rollout breaks in production?**
+**Short:** The credential repositories default to in-memory, so passkeys work on one instance and vanish on the next deploy or the second pod.
+
+Persistence, and it fails silently. The `webAuthn()` DSL gives you registration and assertion for free, but the two SPIs that hold the credentials — `PublicKeyCredentialUserEntityRepository` and `UserCredentialRepository` — default to in-memory implementations. Everything passes locally and in a single-instance test, then you scale to two pods and roughly half of all assertions fail because the credential was registered against the other one, and every deploy wipes the estate's passkeys entirely. Wire `JdbcPublicKeyCredentialUserEntityRepository` and `JdbcUserCredentialRepository` before you ship. The near miss is the third repository, `PublicKeyCredentialCreationOptionsRepository`, which holds the in-flight challenge and defaults to the `HttpSession` — correct if your session is shared through Spring Session, broken if it is per-JVM. The other classic is `rpId` drift: a credential registered under `app.example.com` will not authenticate against `example.com`, so an inconsistency between environments locks users out of their own passkeys with no useful error.
+
+**Q: How does Spring Security 7 express "require a second factor" as authorization rather than as another filter?**
+**Short:** It records each mechanism as a FactorGrantedAuthority on the Authentication, so you require factors the way you require roles.
+
+By making the factor a first-class part of the `Authentication`. Every mechanism that authenticates the user contributes a `FactorGrantedAuthority` — `PASSWORD_AUTHORITY`, `OTT_AUTHORITY`, `WEBAUTHN_AUTHORITY`, `X509_AUTHORITY`, `AUTHORIZATION_CODE_AUTHORITY` — so "this endpoint needs two factors" becomes an authorization rule instead of a hand-chained `AuthenticationProvider` that any new filter chain might bypass. Declaratively that is `@EnableMultiFactorAuthentication(authorities = { PASSWORD_AUTHORITY, OTT_AUTHORITY })`; programmatically it is `AuthorizationManagerFactories.multiFactor().requireFactors(...)`, which also supports `.when(auth -> ...)` for conditional application and a per-factor `validDuration` so you can demand "a password entered in the last 30 minutes" for a sensitive action. `AllRequiredFactorsAuthorizationManager.anyOf(...)` composes alternatives — a passkey alone, or a password plus a one-time token. The architectural payoff is that MFA now sits in the same place as every other access decision, so it is enforced by `AuthorizationManager` rather than by the ordering of your filter chain.
+
+**Q: How do you add MFA to an existing password-based estate without a flag day?**
+**Short:** Use @EnableMultiFactorAuthentication's when attribute to demand the second factor only from users who have already registered a passkey.
+
+You gate the requirement on the user's own state rather than on a date. `@EnableMultiFactorAuthentication(authorities = { PASSWORD_AUTHORITY, WEBAUTHN_AUTHORITY }, when = MultiFactorCondition.WEBAUTHN_REGISTERED)` requires the second factor only from users who have actually registered a passkey, so day one changes nothing for anyone: existing users keep signing in with a password, and each user who enrolls a passkey is upgraded to two factors the moment they do. That inverts the usual migration risk — instead of a cutover where you find out at 09:00 which fraction of your users cannot get in, adoption drives enforcement one user at a time, and the blast radius of a mistake is the users who opted in most recently. Pair it with a `when` predicate on the programmatic factory for populations you want to move faster, such as `.when(auth -> isAdmin(auth))` to make MFA unconditional for privileged accounts while everyone else migrates voluntarily. The remaining work is the boring part: an enrollment page, a recovery path for a lost device, and confirming that the factor list survives session replication.
+
+**Q: Why does one-time-token login require a bean from you when passkeys do not?**
+**Short:** Spring Security can generate and consume the token but has no idea how to deliver it, so a OneTimeTokenGenerationSuccessHandler is mandatory.
+
+Because delivery is the one part of the flow that is entirely your infrastructure. `oneTimeTokenLogin()` wires the mechanics — `GenerateOneTimeTokenFilter` on `POST /ott/generate`, a submit page at `GET /login/ott`, and an `OneTimeTokenService` (in-memory or `JdbcOneTimeTokenService`) that generates and consumes tokens with a five-minute default expiry — but Spring Security has no way to know whether your token travels by email, SMS, push notification, or a chat message, so it requires a `OneTimeTokenGenerationSuccessHandler` bean and refuses to guess. Passkeys need no such hook because the credential never leaves the user's device: the browser and authenticator handle the ceremony, so there is nothing to deliver. The practical consequence is that a one-time-token rollout is mostly a deliverability project — bounce handling, rate limiting on `/ott/generate` so it cannot be used to spam an address, and short expiry — while the Spring Security configuration is a single line.
 
 ---
 

@@ -2,7 +2,7 @@
 
 A comprehensive, one-stop reference for mastering **FastAPI** — from the ASGI protocol and Pydantic v2's Rust validation core, through dependency injection and async SQLAlchemy, to production concerns (authentication, observability, deployment, and OWASP hardening). FastAPI is to Python APIs what Spring Boot is to Java — convention-over-configuration, production-ready defaults, built-in dependency injection, and a strong opinion on how to structure an application. These modules assume familiarity with the [pure-Python fundamentals](../python/README.md) (data model, asyncio, the type system) covered in the Python section.
 
-> **No runtime application** — all content is Markdown with executable-shaped Python 3.11/3.12 + FastAPI code blocks.
+> **No runtime application** — all content is Markdown with executable-shaped Python 3.13/3.14 + FastAPI code blocks.
 
 ---
 
@@ -14,7 +14,7 @@ This section covers:
 - **Production Concerns** — async SQLAlchemy 2.0, Alembic migrations, N+1 avoidance; JWT/OAuth2 auth; WebSockets/SSE; Celery/ARQ task queues; `httpx`/`aiohttp` clients; `aiokafka` event-driven patterns
 - **Deployment, Observability & Scale** — Gunicorn+Uvicorn worker sizing, K8s probes, graceful shutdown; OpenTelemetry tracing; Prometheus metrics; Redis caching; OWASP API Top 10 hardening
 
-**Primary stack:** FastAPI + Python 3.11/3.12, Pydantic v2, SQLAlchemy 2.0. Version tags mark features introduced in earlier or later releases.
+**Primary stack:** FastAPI + Python 3.13/3.14, Pydantic v2, SQLAlchemy 2.0. Version tags mark features introduced in earlier or later releases.
 
 ---
 
@@ -140,7 +140,8 @@ observability_and_monitoring
 caching_and_performance
   caching_and_performance.md  senior
 api_design_and_versioning
-  api_design_and_versioning.md  principal
+  api_design_and_versioning.md  senior
+  openapi_31_and_client_generation.md  senior
 security_hardening_and_owasp
   security_hardening_and_owasp.md  principal
 case_studies
@@ -150,6 +151,12 @@ case_studies
   design_async_web_scraper.md         senior
   design_ml_inference_api_fastapi.md  senior
   design_multi_tenant_saas_api.md     principal
+  design_llm_gateway_fastapi.md       senior, principal
+python_api_framework_landscape
+  python_api_framework_landscape.md  senior
+serving_llm_and_ai_workloads
+  serving_llm_and_ai_workloads.md  senior, principal
+  mcp_servers_from_fastapi.md  senior, principal
 -->
 ## Learning Paths
 
@@ -160,25 +167,28 @@ This section is exhaustive by design — 19 modules spanning the full FastAPI re
 The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-phase-learning-path). Use it for genuine mastery: every layer of the FastAPI request lifecycle (routing, middleware, configuration, WebSockets/SSE), and the complete production-hardening set (FastAPI-specific testing, external HTTP clients, message-queue consumers, background job queues, API versioning, OWASP hardening). Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (13 modules)
+### Senior Path (16 modules)
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) | module page only |
-| 2 | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) | 2 files |
-| 4 | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) | 2 files |
-| 5 | [middleware_and_lifecycle](middleware_and_lifecycle/middleware_and_lifecycle.md) | module page only |
-| 7 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | module page only |
-| 8 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | module page only |
-| 9 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | module page only |
-| 11 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | module page only |
-| 12 | [testing_fastapi](testing_fastapi/testing_fastapi.md) | module page only |
-| 13 | [http_clients_and_external_apis](http_clients_and_external_apis/http_clients_and_external_apis.md) | module page only |
-| 15 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | module page only |
-| 16 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
-| 17 | [caching_and_performance](caching_and_performance/caching_and_performance.md) | module page only |
+| 1 | [python_api_framework_landscape](python_api_framework_landscape/python_api_framework_landscape.md) | module page only |
+| 2 | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) | module page only |
+| 3 | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) | 2 files |
+| 5 | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) | 2 files |
+| 6 | [middleware_and_lifecycle](middleware_and_lifecycle/middleware_and_lifecycle.md) | module page only |
+| 8 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | module page only |
+| 9 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | module page only |
+| 10 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | module page only |
+| 12 | [serving_llm_and_ai_workloads](serving_llm_and_ai_workloads/serving_llm_and_ai_workloads.md) | 2 files |
+| 13 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | module page only |
+| 14 | [testing_fastapi](testing_fastapi/testing_fastapi.md) | module page only |
+| 15 | [http_clients_and_external_apis](http_clients_and_external_apis/http_clients_and_external_apis.md) | module page only |
+| 17 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | module page only |
+| 18 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
+| 19 | [caching_and_performance](caching_and_performance/caching_and_performance.md) | module page only |
+| 20 | [api_design_and_versioning](api_design_and_versioning/api_design_and_versioning.md) | 2 files |
 
-**Not in this path** (6 of 19, Full Path only): `routing_and_request_handling`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `message_queues_and_event_driven`, `api_design_and_versioning`, `security_hardening_and_owasp`
+**Not in this path** (5 of 21, Full Path only): `routing_and_request_handling`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `message_queues_and_event_driven`, `security_hardening_and_owasp`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior FastAPI / backend interview** actually probes, anchored on the framework core and the production spine. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -194,16 +204,16 @@ A ruthless cut to what a **senior FastAPI / backend interview** actually probes,
 
 | # | Module | Files |
 |---|--------|-------|
-| 7 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | module page only |
-| 8 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | module page only |
-| 9 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | module page only |
-| 11 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | module page only |
-| 15 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | module page only |
-| 16 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
-| 18 | [api_design_and_versioning](api_design_and_versioning/api_design_and_versioning.md) | module page only |
-| 19 | [security_hardening_and_owasp](security_hardening_and_owasp/security_hardening_and_owasp.md) | module page only |
+| 8 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | module page only |
+| 9 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | module page only |
+| 10 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | module page only |
+| 12 | [serving_llm_and_ai_workloads](serving_llm_and_ai_workloads/serving_llm_and_ai_workloads.md) | 2 files |
+| 13 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | module page only |
+| 17 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | module page only |
+| 18 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
+| 21 | [security_hardening_and_owasp](security_hardening_and_owasp/security_hardening_and_owasp.md) | module page only |
 
-**Not in this path** (11 of 19, Full Path only): `fastapi_fundamentals_asgi`, `pydantic_v2_deep_dive`, `routing_and_request_handling`, `dependency_injection_in_fastapi`, `middleware_and_lifecycle`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `testing_fastapi`, `http_clients_and_external_apis`, `message_queues_and_event_driven`, `caching_and_performance`
+**Not in this path** (13 of 21, Full Path only): `python_api_framework_landscape`, `fastapi_fundamentals_asgi`, `pydantic_v2_deep_dive`, `routing_and_request_handling`, `dependency_injection_in_fastapi`, `middleware_and_lifecycle`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `testing_fastapi`, `http_clients_and_external_apis`, `message_queues_and_event_driven`, `caching_and_performance`, `api_design_and_versioning`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes service-shape judgment rather than framework mechanics: where async actually pays, how a deployment survives a bad release, and which boundaries you refuse to blur. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -217,7 +227,7 @@ The highest-frequency FastAPI *knowledge* questions mapped to the file that answ
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
 | How does the ASGI protocol (scope/receive/send) work, and how does it differ from WSGI? | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) |
-| How does Pydantic v2 differ from v1, and why is validation 5-50x faster? | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) |
+| How does Pydantic v2 differ from v1, and how much faster is validation really? | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) |
 | How does FastAPI resolve the `Depends` graph, and how do `yield` dependencies clean up after the response is sent? | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) |
 | How do you avoid N+1 queries in async SQLAlchemy 2.0? | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) |
 | Walk through the OAuth2 password flow and JWT validation in FastAPI. | [authentication_and_security](authentication_and_security/authentication_and_security.md) |
@@ -244,30 +254,33 @@ A 3-week plan over the Senior Path. Each week pairs modules with case studies to
 | Library | Version | Key Changes |
 |---------|---------|------------|
 | Pydantic | 1.x | `@validator`, `.dict()`, `orm_mode = True` in `Config` class |
-| Pydantic | 2.0+ (2023) | `@field_validator`, `.model_dump()`, `model_config = ConfigDict(...)`, `pydantic-core` Rust — 5–50x faster |
-| FastAPI | 0.95+ | First `lifespan` context manager support |
+| Pydantic | 2.0+ (2023) | `@field_validator`, `.model_dump()`, `model_config = ConfigDict(...)`, `pydantic-core` Rust engine — measured ~2.7x on a flat 3-field model, ~13x on a collection-heavy one (CPython 3.13.11, 1.10.26 vs 2.13.4) |
+| FastAPI | 0.93+ (2023-03-07) | First `lifespan` context manager support, superseding `startup`/`shutdown` events |
 | FastAPI | 0.100+ | Official Pydantic v2 support |
 | FastAPI | 0.110+ | `lifespan` replaces `on_startup`/`on_shutdown` as recommended pattern |
-| Starlette | 0.27+ | ASGI 3 protocol standardized; `lifespan` event type |
+| FastAPI | 0.134+ | Native JSON Lines streaming — return `AsyncIterable[Model]`, served as `application/jsonl` |
+| FastAPI | 0.135+ | Native SSE — `fastapi.sse.EventSourceResponse` / `ServerSentEvent`, with keep-alive, `X-Accel-Buffering: no` and `Last-Event-ID` handled |
+| Starlette | 1.x (current 1.6.0) | ASGI 3 throughout; `lifespan` event type; requires Python 3.10+ |
 | SQLAlchemy | 1.4 | Legacy `Query` API + new 2.0-style `select()` statements, both supported |
 | SQLAlchemy | 2.0 (2023) | Unified 2.0-style only; `AsyncSession`/`async_engine` stable; typed ORM models |
+| SQLAlchemy | 2.1 (beta; 2.0.x is current) | greenlet moves into the `[asyncio]` extra — pin `sqlalchemy[asyncio]` (already valid on 2.0) so the upgrade does not drop `AsyncSession` |
 | SQLModel | 0.0.14+ | Pydantic v2 + SQLAlchemy 2.0 unified models |
 | Alembic | 1.13+ | `--autogenerate` with async support via `run_sync` |
-| httpx | 0.24+ | `AsyncClient` with connection limits, event hooks |
+| httpx | 0.28.1 | `AsyncClient` with connection limits and event hooks. The `app=` shortcut was **removed in 0.28.0** — use `transport=httpx.ASGITransport(app=app)`, which does not run `lifespan` |
 | anyio | 3.x / 4.x | Backend-agnostic structured concurrency; FastAPI/Starlette use anyio internally |
 
 ---
 
 ## 5. Case Studies
 
-All 6 case studies live in [case_studies/](case_studies/case_studies.md) and use the 7-section legacy template (Problem Statement, Architecture Overview, Key Design Decisions, Implementation, Python/FastAPI Components Used, Tradeoffs and Alternatives, Interview Discussion Points).
+All 6 case studies live in [case_studies/](case_studies/case_studies.md) and follow the repo-wide 11-section principal template (Intuition, 1. Requirements Clarification, 2. Scale Estimation, 3. High-Level Architecture, 4. Component Deep Dives, 5. Design Decisions & Tradeoffs, 6. Real-World Implementations, 7. Technologies & Tools, 8. Operational Playbook, 9. Common Pitfalls & War Stories, 10. Capacity Planning, 11. Interview Discussion Points).
 
 | Case Study | Core Concepts | Difficulty |
 |------------|--------------|-----------|
 | [Design a Rate-Limited API with FastAPI](case_studies/design_rate_limited_api_fastapi.md) | Token-bucket via Redis Lua, `Depends`-injected rate limiter, async middleware, 429 error handling | Advanced |
-| [Design a Multi-Tenant SaaS API](case_studies/design_multi_tenant_saas_api.md) | Async SQLAlchemy tenant isolation, JWT/RBAC, `Depends` scoping, schema-per-tenant pattern | Advanced |
+| [Design a Multi-Tenant SaaS API](case_studies/design_multi_tenant_saas_api.md) | PostgreSQL row-level security with a transaction-local tenant context, `FORCE ROW LEVEL SECURITY`, async SQLAlchemy, JWT identity + DB-fetched RBAC | Advanced |
 | [Design a Real-Time Chat System with FastAPI](case_studies/design_realtime_chat_fastapi.md) | WebSockets, Redis pub/sub fan-out, connection registry, backpressure, horizontal scaling | Advanced |
-| [Design an Async Task Queue System](case_studies/design_async_task_queue.md) | ARQ/Celery/Dramatiq comparison, idempotency, retries + exponential backoff, dead-letter queues | Advanced |
+| [Design an Async Task Queue System](case_studies/design_async_task_queue.md) | ARQ/Celery/Dramatiq/TaskIQ/Temporal comparison, idempotency, retries + exponential backoff with jitter, dead-letter queues | Advanced |
 | [Design an Async Web Scraper](case_studies/design_async_web_scraper.md) | asyncio + aiohttp, `Semaphore` rate limiting, producer/consumer, crawl budget/politeness | Intermediate |
 | [Design an ML Inference API with FastAPI](case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async Redis cache, `lifespan` model loading, SSE streaming | Advanced |
 

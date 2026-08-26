@@ -108,7 +108,7 @@ Trading wall-clock time for VRAM is the entire deal. Accumulation buys you the *
 
 The memory rows are the point: activations are freed after each micro-batch, and gradients accumulate into the same buffer rather than stacking, so peak VRAM tracks `local_batch` and not the effective batch. The `no_sync()` row is Pitfall 5 in Section 10 — a team that skipped it paid `4x` the communication and ran 2.8x slower than plain DDP.
 
-**Checkpointing discipline**: in distributed training, only rank 0 should write checkpoints to avoid N processes writing the same file simultaneously. With FSDP, each rank holds a shard — use FSDP's built-in `state_dict_type` context manager to gather and save.
+**Checkpointing discipline**: in distributed training, only rank 0 should write checkpoints to avoid N processes writing the same file simultaneously. With FSDP2, each rank holds a shard — use `torch.distributed.checkpoint.state_dict.get_model_state_dict` to gather a full state dict for a single-file save, or save the default sharded form in parallel with `torch.distributed.checkpoint.save` and skip the gather entirely.
 
 **MFU (Model FLOP Utilization)**: actual FLOP/s ÷ peak theoretical FLOP/s. A100 peak is 312 TFLOP/s (BF16 with sparsity). Well-tuned LLM training achieves 38-45% MFU. Memory-bound operations (layer norms, embeddings) drag MFU down; computation-bound (large matmuls) push it up.
 
@@ -122,8 +122,8 @@ Single-process, multi-thread, one GPU is the master. Master sends model to other
 **DistributedDataParallel (DDP)**
 Multi-process (one process per GPU), symmetric AllReduce — no master bottleneck. Uses NCCL backend over NVLink/InfiniBand. Overlaps gradient communication with backward computation (gradient buckets: default bucket size 25 MB). The production standard for data-parallel training on 1-64 GPUs.
 
-**FSDP (Fully Sharded Data Parallel)**
-PyTorch 1.12+. Shards model parameters, gradients, and optimizer states across all ranks. Each rank holds 1/N of every parameter. Before each forward pass, parameters are gathered via AllGather; after backward pass, gradients are reduced via ReduceScatter. Memory per GPU scales as ~1/N of model size, enabling training models that exceed single-GPU VRAM. Overhead: 2x communication compared to DDP, but enables models 10-100x larger.
+**FSDP2 (`fully_shard`)**
+Converts each parameter to a per-parameter `DTensor` with a `Shard(dim=0)` placement, in place — not the FlatParameter-per-wrapper approach of the original FSDP class (deprecated; `fully_shard` is the current frontend). Each rank holds 1/N of every parameter, individually addressable rather than flattened into one opaque buffer. Before each forward pass, parameters are gathered via AllGather; after the backward pass, gradients are reduced via ReduceScatter. Memory per GPU scales as ~1/N of model size, enabling training models that exceed single-GPU VRAM. Overhead: roughly 2x communication compared to DDP, but enables models 10-100x larger. Per-parameter DTensor sharding also means sharded state dicts need no communication to save or load, and it composes directly with tensor and pipeline parallelism through a shared `DeviceMesh`.
 
 **DeepSpeed ZeRO**
 Stage 1: shard only optimizer states — 4x memory reduction. Stage 2: + gradient sharding — 8x memory reduction. Stage 3: + parameter sharding — equal to FSDP in memory but with more communication. ZeRO-Infinity offloads to CPU RAM and NVMe SSD for near-infinite model capacity.
@@ -261,7 +261,7 @@ flowchart LR
 
 Every GPU holds a full model copy and a different data shard; after the backward pass NCCL AllReduce sums and averages gradients across all 8 GPUs, then each GPU applies the identical update — which is why all copies stay in lockstep with no master bottleneck.
 
-### FSDP / ZeRO-3: shard params, grads, and optimizer state
+### FSDP2 / ZeRO-3: shard params, grads, and optimizer state
 
 ```mermaid
 flowchart LR
@@ -288,7 +288,7 @@ flowchart LR
     class fwd base
 ```
 
-Each rank permanently holds only 1/N of parameters, gradients, and optimizer state (~10M/N bytes total). Before a layer runs, AllGather transiently materializes its full weights, which are freed right after; after backward, ReduceScatter distributes reduced gradients back to shards — trading roughly 2× the communication of DDP for a linear cut in per-GPU memory.
+Each rank permanently holds only 1/N of parameters, gradients, and optimizer state (~10M/N bytes total) — in FSDP2 each parameter is its own per-parameter `DTensor` shard rather than a flattened buffer. Before a layer runs, AllGather transiently materializes its full weights, which are freed right after; after backward, ReduceScatter distributes reduced gradients back to shards — trading roughly 2× the communication of DDP for a linear cut in per-GPU memory.
 
 ### Pipeline parallelism: 1F1B schedule and the bubble
 
@@ -612,65 +612,58 @@ Per-GPU communication volume is **bounded by twice the gradient size no matter h
 
 **So why does scaling still degrade?** Because the right-hand column is not bounded. Step count is `2(N-1)`, growing linearly forever, and every step pays one network latency. At `N = 8` you eat 14 latencies; at `N = 1024`, 2,046 of them. With a 5 microsecond hop that is 70 microseconds versus 10 milliseconds — the volume stayed flat while the latency floor rose 146x. That is the real reason large clusters move to hierarchical AllReduce: reduce inside each node over NVLink first, then run a much shorter ring of 128 nodes rather than one ring of 1,024 GPUs.
 
-### PyTorch FSDP — Large Model Training
+### PyTorch FSDP2 — Large Model Training
 
 ```python
 import torch
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    MixedPrecision,
-    ShardingStrategy,
-    StateDictType,
-    FullStateDictConfig,
-)
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-import functools
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from transformers import AutoModelForCausalLM
 
 
-def setup_fsdp_model(model_name: str, min_num_params: int = 1_000_000) -> FSDP:
+def setup_fsdp2_model(model_name: str) -> torch.nn.Module:
     """
-    Wrap a HuggingFace model with FSDP.
-    size_based_auto_wrap_policy wraps any submodule with >= min_num_params parameters.
-    For a 7B model with 32 transformer blocks, each block is ~218M params — all wrapped.
+    Wrap a HuggingFace model with FSDP2.
+    fully_shard() converts each wrapped module's parameters to per-parameter
+    DTensors with Shard(dim=0) placements, IN PLACE -- there is no wrapper
+    class and no auto_wrap_policy. Call it on each sharding unit yourself:
+    one call per transformer block, then one call on the root module.
     """
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
 
-    # Auto-wrap policy: wrap modules with >= 1M parameters
-    auto_wrap_policy = functools.partial(
-        size_based_auto_wrap_policy,
-        min_num_params=min_num_params,
-    )
-
-    # BF16 mixed precision: safe on A100/H100, avoids FP16 overflow
-    bf16_policy = MixedPrecision(
+    # BF16 for compute, FP32 for the gradient reduction -- avoids underflow
+    # in the all-reduce that a pure-BF16 reduction would risk.
+    mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.bfloat16,
-        buffer_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
     )
 
-    fsdp_model = FSDP(
+    # Shard each transformer block (the standard sharding unit), root last.
+    # reshard_after_forward=True is the default: free the all-gathered
+    # params after forward and re-all-gather them in backward -- the
+    # FULL_SHARD / ZeRO-3 memory profile.
+    # reshard_after_forward=False keeps params unsharded after forward and
+    # skips the backward all-gather -- the SHARD_GRAD_OP / ZeRO-2 profile.
+    for block in model.model.layers:
+        fully_shard(block, mp_policy=mp_policy)
+    fully_shard(model, mp_policy=mp_policy)
+    return model
+
+
+def save_fsdp2_checkpoint(model: torch.nn.Module, save_path: str) -> None:
+    """
+    Save an FSDP2 model checkpoint with torch.distributed.checkpoint (DCP).
+    get_model_state_dict(full_state_dict=True) gathers every rank's DTensor
+    shard onto rank 0 -- no state_dict_type context manager needed. Saving
+    the default SHARDED_STATE_DICT form instead needs no gather at all,
+    since each rank's shard is already local; that is DCP's whole point.
+    """
+    full_sd = get_model_state_dict(
         model,
-        auto_wrap_policy=auto_wrap_policy,
-        mixed_precision=bf16_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,  # ZeRO Stage 3 equivalent
-        # SHARD_GRAD_OP = ZeRO Stage 2 (shard grads + optimizer, not params)
-        device_id=torch.cuda.current_device(),
-        use_orig_params=True,  # required for torch.compile compatibility
+        options=StateDictOptions(full_state_dict=True, cpu_offload=True),
     )
-    return fsdp_model
-
-
-def save_fsdp_checkpoint(fsdp_model: FSDP, save_path: str, rank: int) -> None:
-    """
-    Save FSDP model checkpoint. Must gather shards to rank 0 first.
-    """
-    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(fsdp_model, StateDictType.FULL_STATE_DICT, save_policy):
-        cpu_state = fsdp_model.state_dict()
-
-    if rank == 0:
-        torch.save(cpu_state, save_path)
+    if torch.distributed.get_rank() == 0:
+        torch.save(full_sd, save_path)
 ```
 
 ### DeepSpeed ZeRO Configuration
@@ -722,16 +715,20 @@ ds_config = {
 | Strategy | Memory/GPU | Communication | Complexity | Max Model Size | Use When |
 |---|---|---|---|---|---|
 | DDP | Full model × N | AllReduce (gradients only) | Low | Fits in 1 GPU | Standard multi-GPU training |
-| FSDP SHARD_GRAD_OP | Full params + 1/N optimizer+grad | ReduceScatter + AllGather | Medium | ~1.5x single GPU | Model just exceeds GPU memory |
-| FSDP FULL_SHARD | 1/N params + 1/N optimizer+grad | 2× communication | Medium | N × GPU VRAM | Large models (7B-70B) |
-| DeepSpeed ZeRO-3 | Same as FSDP FULL_SHARD | Similar | High (JSON config) | N × GPU VRAM | Large models, DeepSpeed ecosystem |
+| FSDP2, `reshard_after_forward=False` | Full params + 1/N optimizer+grad | ReduceScatter + AllGather | Medium | ~1.5x single GPU | Model just exceeds GPU memory |
+| FSDP2, `reshard_after_forward=True` (default) | 1/N params + 1/N optimizer+grad | 2× communication | Medium | N × GPU VRAM | Large models (7B-70B) |
+| DeepSpeed ZeRO-3 | Same as FSDP2 default | Similar | High (JSON config) | N × GPU VRAM | Large models, DeepSpeed ecosystem |
 | ZeRO-Infinity | ~1/N GPU + CPU/NVMe | Much slower | Very high | Virtually unlimited | Research, very large models |
 
 | Precision | Memory | Stability | Hardware | Notes |
 |---|---|---|---|---|
 | FP32 | 4 bytes/param | Very stable | All GPUs | Too slow and large for LLMs |
 | FP16 | 2 bytes/param | Overflow risk | All GPUs | Needs GradScaler; master weights in FP32 |
-| BF16 | 2 bytes/param | Stable (same range as FP32) | A100/H100/TPU | Preferred for modern LLM training |
+| BF16 | 2 bytes/param | Stable (same range as FP32) | A100/H100/H200/B200/TPU | Preferred for modern LLM training |
+| FP8 | 1 byte/param | Needs per-tensor scaling | H100/H200/B200 (Transformer Engine) | ~2x BF16 matmul throughput; Transformer Engine manages scaling automatically |
+| FP4 | 0.5 bytes/param | Narrow range, needs careful scaling | B200 (Blackwell) | Emerging for inference and select training recipes, not yet standard for full pretraining |
+
+**FP8 training on Hopper and Blackwell.** H100/H200 and B200 GPUs carry native FP8 Tensor Cores; NVIDIA's Transformer Engine wraps linear layers and attention with automatic per-tensor dynamic scaling, so FP8 matmuls stay numerically stable without hand-tuned loss scaling. FP8 roughly doubles matmul throughput over BF16 and halves activation memory for the layers it covers, while gradients and the optimizer's master weights typically stay in BF16/FP32 — only the compute-heavy matmuls run in FP8. B200 adds FP4 support for further throughput at the cost of a narrower usable range, used today mostly for inference and select training recipes rather than full pretraining.
 
 ---
 
@@ -739,7 +736,7 @@ ds_config = {
 
 **Use DDP when**: model fits on a single GPU, you want maximum simplicity, training on 2-64 GPUs, team is familiar with PyTorch but not distributed systems.
 
-**Use FSDP when**: model parameters exceed single GPU VRAM, training 7B-70B parameter models, using PyTorch 1.12+ and want native PyTorch solution without external dependencies.
+**Use FSDP2 when**: model parameters exceed single GPU VRAM, training 7B-70B parameter models, and you want a native PyTorch solution without external dependencies. The choice is gated by whether the model composes cleanly with per-parameter DTensor sharding (virtually all `nn.Module` architectures do), not by a PyTorch version floor — `fully_shard` is the current, actively maintained frontend.
 
 **Use DeepSpeed ZeRO when**: working in a DeepSpeed ecosystem (Megatron-DeepSpeed), need ZeRO-Infinity (NVMe offload) for very large models, need CPU-Adam optimizer for massive optimizer state offload.
 
@@ -759,16 +756,16 @@ ds_config = {
 Production incident: a team used `DistributedSampler` but did not call `sampler.set_epoch(epoch)` at the start of each epoch. The sampler uses the epoch number to seed its shuffle — without updating it, all epochs trained on the same data order. The model converged to a worse local minimum (0.7% lower accuracy) and the team spent 2 weeks investigating optimizer hyperparameters before discovering the root cause. Fix: always call `sampler.set_epoch(epoch)` at the top of the epoch loop.
 
 **Pitfall 2 — Saving checkpoint from all ranks**
-In DDP training, a team had every process call `torch.save(model.state_dict(), path)`. With 64 processes all writing to the same NFS path simultaneously, they hit filesystem corruption (partial overwrites). Fix: gate checkpoint writes with `if dist.get_rank() == 0`. For FSDP, use `StateDictType.FULL_STATE_DICT` with `rank0_only=True` to gather the full model only on rank 0 before saving.
+In DDP training, a team had every process call `torch.save(model.state_dict(), path)`. With 64 processes all writing to the same NFS path simultaneously, they hit filesystem corruption (partial overwrites). Fix: gate checkpoint writes with `if dist.get_rank() == 0`. For FSDP2, use `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` to gather the full model onto rank 0 before saving — or better, save the default `SHARDED_STATE_DICT` form with `torch.distributed.checkpoint.save`, which needs no gather at all since each rank already holds its own shard.
 
 **Pitfall 3 — Using DataParallel instead of DDP**
 A team's training throughput scaled from 1 GPU to 4 GPUs as: 1 GPU → 3.2x (not 4x). They were using `nn.DataParallel` (single-process, all GPUs on one thread). The master GPU held all activations for all sub-batches before the gather step — causing 70% GPU memory utilization on rank 0 and only 30% on ranks 1-3. Migrating to `torchrun` + DDP achieved 3.8x speedup with 4 GPUs. DP is single-process; DDP is multi-process — always use DDP.
 
-**Pitfall 4 — FSDP and non-wrapped shared parameters**
-A model had an embedding layer shared (tied weights) between the input embedding and the output projection (standard in transformer LMs). FSDP wrapped them separately, creating two shards of what should be one tensor. Gradient updates desynchronized the tied weights over training — loss oscillated instead of decreasing. Fix: use `FSDP.set_state_dict_type` and handle tied weights explicitly; or apply `ignored_modules` to one of the tied layers so FSDP does not shard it independently.
+**Pitfall 4 — FSDP2 and separately-sharded tied parameters**
+A model had an embedding layer shared (tied weights) between the input embedding and the output projection (standard in transformer LMs). The team called `fully_shard` on the input embedding and the output projection as two separate units, which sharded what should have been one tensor into two independent DTensor shards. Gradient updates desynchronized the tied weights over training — loss oscillated instead of decreasing. Fix: call `fully_shard` on a single module that contains both tied parameters so they shard together as one unit, or exclude the tied pair from sharding entirely via `ignored_params` on the `fully_shard` call.
 
-**Pitfall 5 — Gradient accumulation without no_sync()**
-A team implemented gradient accumulation with FSDP but did not use `model.no_sync()` for the non-update steps. Each backward pass triggered a ReduceScatter (gradient sync), not just the final step. With 4 accumulation steps, they paid 4x the communication cost instead of 1x. This made training 2.8x slower than DDP despite the memory savings. Fix: wrap intermediate backward passes with `model.no_sync()` context manager.
+**Pitfall 5 — Gradient accumulation without set_requires_gradient_sync(False)**
+A team implemented gradient accumulation with FSDP2 but never called `model.set_requires_gradient_sync(False)` for the non-update steps. Each backward pass triggered a full ReduceScatter (gradient sync), not just the final step. With 4 accumulation steps, they paid 4x the communication cost instead of 1x. This made training 2.8x slower than DDP despite the memory savings. Fix: call `model.set_requires_gradient_sync(False)` before the intermediate backward passes and re-enable it (`set_requires_gradient_sync(True)`) before the final one, so only the last backward pass in the accumulation window synchronizes gradients.
 
 ---
 
@@ -777,7 +774,7 @@ A team implemented gradient accumulation with FSDP but did not use `model.no_syn
 | Tool | Purpose |
 |---|---|
 | PyTorch DDP | Standard data-parallel training (multi-process) |
-| PyTorch FSDP | Fully sharded data parallel (ZeRO-3 equivalent) |
+| PyTorch FSDP2 (`fully_shard`) | Per-parameter DTensor sharding; ZeRO-2/ZeRO-3 equivalent via `reshard_after_forward` |
 | DeepSpeed | ZeRO optimizer, ZeRO-Infinity, pipeline parallelism |
 | Megatron-LM | Tensor + pipeline parallelism for LLMs (NVIDIA) |
 | torchrun | PyTorch distributed launcher (replaces torch.multiprocessing.spawn) |
@@ -807,13 +804,13 @@ AllReduce is a collective operation: every process sends its tensor, the operati
 **Short:** Gradient accumulation delays the optimizer step across M micro-batches to reach a larger effective batch size, using model.no_sync() to skip AllReduce on intermediate steps.
 Gradient accumulation postpones the optimizer update by accumulating gradients across M steps before calling `optimizer.step()`. The effective batch size becomes `local_batch × n_gpus × M`. Use it when: (1) the target batch size exceeds what fits in VRAM for a single step; (2) you want to match a larger-batch baseline without adding GPUs; (3) training with FSDP/ZeRO where per-GPU batch is small. Critical implementation detail: in DDP, use `model.no_sync()` for all non-update steps to suppress AllReduce on each intermediate backward pass — only AllReduce on the final accumulation step.
 
-**Q: How does FSDP reduce memory usage compared to DDP?**
-**Short:** FSDP shards parameters, gradients, and optimizer states across N GPUs to roughly 1/N of DDP's per-GPU memory, temporarily AllGathering full parameters only during each forward pass.
-In DDP, each GPU holds: full model parameters (M bytes) + full gradients (M bytes) + full optimizer states (for Adam: 8M bytes for momentum and variance) = ~10M bytes total. With FSDP FULL_SHARD across N GPUs, each GPU holds: M/N bytes for parameters + M/N bytes for gradients + 8M/N bytes for optimizer states ≈ 10M/N bytes total — a linear memory reduction. Before each forward pass, FSDP issues AllGather to temporarily materialize the full parameter tensor on each GPU (then frees after use). This means peak memory during forward pass exceeds 1/N, but the steady-state footprint is 1/N.
+**Q: How does FSDP2 reduce memory usage compared to DDP?**
+**Short:** FSDP2 shards each parameter as a DTensor to roughly 1/N of DDP's per-GPU memory, temporarily AllGathering full parameters only during each forward pass.
+In DDP, each GPU holds: full model parameters (M bytes) + full gradients (M bytes) + full optimizer states (for Adam: 8M bytes for momentum and variance) = ~10M bytes total. With FSDP2's default configuration (`reshard_after_forward=True`) across N GPUs, each GPU holds: M/N bytes for parameters + M/N bytes for gradients + 8M/N bytes for optimizer states ≈ 10M/N bytes total — a linear memory reduction. FSDP2 shards each parameter individually as a `DTensor` rather than flattening a wrapping unit's parameters into one buffer, so parameters stay individually addressable. Before each forward pass, `fully_shard` issues AllGather to temporarily materialize the full parameter tensor on each GPU (then frees it after use, unless `reshard_after_forward=False`). This means peak memory during forward pass exceeds 1/N, but the steady-state footprint is 1/N.
 
 **Q: What is ZeRO and how do its stages differ?**
-**Short:** ZeRO Stage 1 shards optimizer states, Stage 2 adds gradient sharding, and Stage 3 additionally shards parameters, matching FSDP's full-shard memory profile.
-ZeRO (Zero Redundancy Optimizer, from DeepSpeed) progressively eliminates memory redundancy across data-parallel ranks: Stage 1 shards optimizer states (Adam m/v) — each rank holds 1/N of optimizer state, reducing optimizer memory by N×. Stage 2 additionally shards gradients — gradients are immediately discarded on each rank after ReduceScatter, saving another ~M bytes. Stage 3 additionally shards parameters — equivalent to FSDP FULL_SHARD. ZeRO-Infinity extends Stage 3 by offloading parameter and optimizer shards to CPU RAM and NVMe storage, enabling trillion-parameter models at the cost of slower training (PCIe bandwidth ~32 GB/s vs NVLink 600 GB/s).
+**Short:** ZeRO Stage 1 shards optimizer states, Stage 2 adds gradient sharding, and Stage 3 additionally shards parameters, matching FSDP2's default sharding profile.
+ZeRO (Zero Redundancy Optimizer, from DeepSpeed) progressively eliminates memory redundancy across data-parallel ranks: Stage 1 shards optimizer states (Adam m/v) — each rank holds 1/N of optimizer state, reducing optimizer memory by N×. Stage 2 additionally shards gradients — gradients are immediately discarded on each rank after ReduceScatter, saving another ~M bytes. Stage 3 additionally shards parameters — equivalent to FSDP2's default configuration, which shards every parameter, gradient, and optimizer state. ZeRO-Infinity extends Stage 3 by offloading parameter and optimizer shards to CPU RAM and NVMe storage, enabling trillion-parameter models at the cost of slower training (PCIe bandwidth ~32 GB/s vs NVLink 600 GB/s).
 
 **Q: Why is BF16 preferred over FP16 for training large language models?**
 **Short:** BF16 keeps FP32's 8 exponent bits so it avoids the gradient underflow and overflow that forces FP16 training to rely on a GradScaler.
@@ -821,7 +818,7 @@ BF16 (Brain Float 16) and FP16 both use 2 bytes per value, but BF16 allocates 8 
 
 **Q: How do you implement checkpointing in distributed training without bugs?**
 **Short:** Distributed checkpointing must save only from rank 0, barrier before other ranks proceed, and unwrap DDP's .module state dict to avoid partial or mismatched saves.
-Three rules: (1) only rank 0 writes checkpoints — gate all save calls with `if dist.get_rank() == 0`; (2) add a `dist.barrier()` after the save so no other rank proceeds until rank 0 finishes writing (prevents processes from loading a partially-written checkpoint); (3) save `model.module.state_dict()` (unwrap DDP) not `model.state_dict()`. For FSDP: use `FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True))` context manager to gather all shards to rank 0's CPU RAM before saving — this keeps checkpoint files identical to non-FSDP checkpoints.
+Three rules: (1) only rank 0 writes checkpoints — gate all save calls with `if dist.get_rank() == 0`; (2) add a `dist.barrier()` after the save so no other rank proceeds until rank 0 finishes writing (prevents processes from loading a partially-written checkpoint); (3) save `model.module.state_dict()` (unwrap DDP) not `model.state_dict()`. For FSDP2: call `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` to gather all DTensor shards to rank 0's CPU RAM before saving — no context manager needed. For large models, skip the gather and save the default `SHARDED_STATE_DICT` form with `torch.distributed.checkpoint.save` instead, which writes each rank's shard in parallel with zero communication and can be reloaded onto a different world size (resharding).
 
 **Q: What is the linear scaling rule and when does it break down?**
 **Short:** The linear scaling rule multiplies learning rate by N when data-parallel workers multiply by N, holding reliably up to about 8x before needing an LR warmup.
@@ -881,7 +878,7 @@ ZeRO-Infinity extends ZeRO-3 by offloading parameter and optimizer shards to CPU
 - Apply BF16 mixed precision on A100/H100 hardware — do not use FP16 for training LLMs (overflow risk); use FP32 for loss computation and accumulation in scaler if FP16 is unavoidable
 - Profile with `torch.profiler.profile()` for 2-3 steps before tuning — identify whether training is compute-bound or communication-bound before adding nodes
 - Match global batch size to the `O(sqrt(dataset_size))` heuristic for stable training; do not increase batch size purely because more GPUs are available without adjusting LR
-- Use `torch.compile()` (PyTorch 2.0+) together with FSDP and `use_orig_params=True` for up to 20-30% additional throughput from kernel fusion and graph optimization
+- Use `torch.compile()` together with FSDP2 for up to 20-30% additional throughput from kernel fusion and graph optimization — FSDP2's per-parameter DTensor sharding composes with `torch.compile` natively, with no `use_orig_params` flag needed
 - Monitor GPU utilization per rank with `nvidia-smi dmon` or W&B system metrics — uneven utilization across ranks indicates data skew or communication bottlenecks
 - Set `drop_last=True` in DistributedSampler to avoid incomplete batches that cause hangs when all-reduce operations expect equal-size inputs from all ranks
 
@@ -1023,7 +1020,7 @@ model = DDP(model, bucket_cap_mb=100)  # 10 AllReduce calls → 2× throughput
 
 **How does ZeRO Stage 3 achieve linear memory scaling with the number of GPUs?** ZeRO Stage 3 shards optimizer states (Stage 1), gradients (Stage 2), and model parameters (Stage 3) across all GPU workers. With N GPUs and a 70B-parameter model: each GPU holds only 1/N of the parameters in memory at any time (70B/N × 2 bytes/param for BF16). During the forward pass, parameters are gathered from all GPUs via `all_gather`, used locally, then freed. This reduces per-GPU memory from O(model_size) to O(model_size/N), enabling models larger than single-GPU VRAM. The cost: 3× more `all_gather` communication volume vs. DDP.
 
-**When should you prefer FSDP over DDP for model training?** Use DDP when the model fits in single-GPU memory with a reasonable batch size — DDP is simpler and faster (no sharding overhead). Switch to FSDP (or DeepSpeed ZeRO) when: (1) the model doesn't fit in single-GPU memory (e.g., > 40GB on an 80GB A100 with activations + optimizer states); (2) you want to scale to hundreds of GPUs without pipeline parallelism complexity; (3) you need gradient checkpointing combined with sharding. FSDP's `auto_wrap_policy` with `transformer_auto_wrap_policy` is the standard setup for LLM training.
+**When should you prefer FSDP over DDP for model training?** Use DDP when the model fits in single-GPU memory with a reasonable batch size — DDP is simpler and faster (no sharding overhead). Switch to FSDP2 (or DeepSpeed ZeRO) when: (1) the model doesn't fit in single-GPU memory (e.g., > 40GB on an 80GB A100 with activations + optimizer states); (2) you want to scale to hundreds of GPUs without pipeline parallelism complexity; (3) you need gradient checkpointing combined with sharding. Calling `fully_shard` on each transformer block in a loop, then once on the root module, is the standard setup for LLM training — there is no wrap-policy object to configure.
 
 **What is gradient accumulation and when does it substitute for a larger batch size?** Gradient accumulation runs N forward-backward passes before calling `optimizer.step()`, simulating an effective batch size of `batch_size × N`. It allows training with effective batch sizes (e.g., 4096) on GPUs with limited VRAM (which can only fit 256 samples per step) without multi-GPU infrastructure. The trade-off: N sequential passes take N× longer than one large batch would — throughput is identical to a smaller batch but memory is lower. Use gradient accumulation when: you need a large batch size for training stability (LLM training typically uses effective batch 1M+ tokens), but GPU VRAM limits the physical batch size.
 

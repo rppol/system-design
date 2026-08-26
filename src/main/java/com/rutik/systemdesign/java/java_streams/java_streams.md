@@ -558,7 +558,7 @@ The 10,000-element rule of thumb above is really the N x Q heuristic with Q assu
     so the best case is ~8x, and Amdahl's law caps it lower
 ```
 
-The fourth row is the trap. `sorted()` clears the work threshold easily but is a stateful barrier: every worker must finish before the merge sort begins, so the parallel speedup applies only to the stages upstream of it. Clearing `N x Q > 10,000` is necessary, not sufficient — the pipeline also has to be splittable, stateless, and non-blocking, which is exactly the four-item list above.
+The fourth row is the trap. `sorted()` clears the work threshold easily but is a stateful barrier: every worker must finish before the merge sort begins, so the parallel speedup applies only to the stages upstream of it. Clearing `N x Q > 10,000` is necessary, not sufficient — the pipeline also has to be splittable, stateless, and non-blocking, which is exactly the four-item list above [Effective Java Item 45: "Use streams judiciously"].
 
 ---
 
@@ -590,7 +590,7 @@ stream.filter(s -> s.startsWith("A"))
       .map(String::toUpperCase)
       .collect(toList());
 ```
-`peek()` may be skipped if the JVM determines it has no downstream effect — especially with short-circuit terminals. **Fix**: Use `forEach()` as the terminal op if side effects are the goal, or collect and then post-process.
+`peek()` may be skipped if the JVM determines it has no downstream effect — especially with short-circuit terminals. **Fix**: Use `forEach()` as the terminal op if side effects are the goal, or collect and then post-process [Effective Java Item 46: "Prefer side-effect-free functions in streams"].
 
 ### War Story 5: Non-thread-safe collection in `parallelStream().forEach()`
 ```java
@@ -732,7 +732,7 @@ Parallel streams split work across the common `ForkJoinPool` (parallelism = CPU 
 3. **Stateful intermediates** — `sorted()`, `distinct()`, `limit()` require global coordination (barriers, sorted merge phases) that can make parallel slower than sequential for moderate-sized data.
 4. **Blocking inside the lambda** — I/O, DB calls, `Thread.sleep()` starve the shared `ForkJoinPool` and harm all other tasks using it (e.g., `CompletableFuture` pipelines). Use `Executors.newVirtualThreadPerTaskExecutor()` for blocking fan-out instead.
 
-Practical rule: benchmark with JMH under realistic data sizes before shipping `parallel()`; the default answer is "don't" unless the data is CPU-bound and large.
+Practical rule: benchmark with JMH under realistic data sizes before shipping `parallel()`; the default answer is "don't" unless the data is CPU-bound and large [Effective Java Item 48: "Use caution when making streams parallel"].
 
 ---
 

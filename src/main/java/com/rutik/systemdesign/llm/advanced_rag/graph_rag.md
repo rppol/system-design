@@ -251,24 +251,9 @@ Step 4: LLM generation from specific context
   No community summaries needed; answer from subgraph context
 ```
 
-```
-neighborhood(h) = Sum over i = 1..h of d^i
+**The hop fan-out formula (`d^h`, exponential not linear) is canonical in [Advanced RAG §4.3](advanced_rag.md)** — the derivation, the symbol table, and its own worked example (a 12-degree legal citation graph at `hop_depth = 2`) live there rather than being re-derived per file. The short version: with an average node degree `d`, hop `h` reaches `d^h` new nodes and the whole neighborhood after `h` hops is `d + d^2 + ... + d^h`, so traversal depth is a knob that multiplies context size and must be chosen against the graph's density, not picked as a round number.
 
-  d^i  = nodes newly reached at exactly hop i   <- d^1, d^2, ..., d^h stack as hops go deeper
-```
-
-**Stated plainly.** "Traverse `h` hops from the query's entities" is exponential, not linear: with an average node degree `d`, hop `h` reaches `d^h` new nodes and the whole neighborhood is `d + d^2 + ... + d^h`. Depth is a knob that multiplies context size, so it must be chosen against the graph's density, not picked as a round number.
-
-| Symbol | What it is |
-|--------|------------|
-| `d` | Average out-degree — how many relationships a typical entity has |
-| `h` | Traversal depth; `depth = 3` in the case study's `multi_hop_retrieve` |
-| `d^h` | Nodes newly reached at exactly hop `h` |
-| `Σ d^i` for `i = 1..h` | Total neighborhood size — everything assembled into context |
-| `\|V\|` | Entity count in the graph; 41,000 after deduplication in Section 14 |
-| tokens/node | Entity description length fed to the LLM, roughly 50 tokens |
-
-**Walk one example.** Three graph densities at `depth = 3`, against the case study's 41,000-entity graph:
+**Walk one example, specific to this file's 41,000-entity graph.** Three graph densities at `depth = 3`:
 
 ```
   d     hop 1   hop 2    hop 3     total     context @50 tok/node   share of graph
@@ -466,6 +451,58 @@ Fix: Build an incremental indexing pipeline: extract entities/relations for new 
 **6. Leiden algorithm on small graphs**
 On corpora with fewer than 1000 entities, the Leiden algorithm may not produce meaningful communities.
 Fix: For small corpora, skip Graph RAG entirely or use manual category hierarchies instead of algorithmic community detection.
+
+**7. Naming a traversal endpoint `end` collides with a reserved Cypher keyword**
+Cypher uses `END` to close a `CASE` expression, so a path variable literally named `end` is a syntax error, not a logic bug that runs and produces wrong results:
+
+```python
+# BROKEN: `end` collides with Cypher's CASE ... END keyword
+cypher = """
+MATCH path = (start)-[*1..{depth}]-(end)
+WHERE start.name IN $entities
+RETURN path
+""".format(depth=depth)
+paths = neo4j.run(cypher, entities=entities)
+# Neo4j raises a syntax error on `end` before the query ever runs -- the whole
+# multi-hop retrieval path fails, not just the entity the query cared about.
+```
+
+Because this fails loudly at query time rather than silently, it is easy to catch in testing — but only if a multi-hop test case exists at all; a codebase that only exercises the global/local paths can ship this and find out in production the first time a user asks an entity-chain question.
+Fix: rename the endpoint variable to anything that is not a reserved word:
+
+```python
+# FIXED: `finish` carries no special meaning to Cypher
+cypher = """
+MATCH path = (start)-[*1..{depth}]-(finish)
+WHERE start.name IN $entities
+RETURN path
+""".format(depth=depth)
+paths = neo4j.run(cypher, entities=entities)
+```
+
+The fix costs nothing at runtime — it is purely a naming choice — which is why it is worth checking Cypher's reserved-word list (`END`, `WHERE`, `MATCH`, `AS`, and others) before picking variable names for any path or node the query introduces.
+
+**8. `zip()` silently drops the last node of a graph path**
+A Cypher path of `depth` hops has `depth` relationships but `depth + 1` nodes — one more node than edges, since every edge sits between two nodes. Pairing them with a plain `zip()` truncates to the shorter list:
+
+```python
+# BROKEN: zip() stops at the shorter sequence, dropping the terminal node
+def path_summary(nodes: list[str], rels: list[str]) -> str:
+    # nodes has len(rels) + 1 elements for any real path
+    return " -> ".join(f"{n} ({r})" for n, r in zip(nodes, rels))
+```
+
+For a 3-hop path (4 nodes, 3 relationships), `zip()` yields exactly 3 pairs and silently discards `nodes[3]` — and that fourth node is usually the entity the multi-hop query was traversing *toward* ("Which clients adopted frameworks recommended by our financial services practice?" loses the client name, the one answer the query needed). The path summary still looks well-formed, so nothing errors; the context handed to the LLM is just missing its own conclusion.
+Fix: append the terminal node explicitly, since `zip()` has no way to see past the shorter list:
+
+```python
+# FIXED: append the terminal node after zipping, since zip() can't see past rels
+def path_summary(nodes: list[str], rels: list[str]) -> str:
+    paired = [f"{n} ({r})" for n, r in zip(nodes, rels)]
+    return " -> ".join(paired + [nodes[-1]])
+```
+
+Every path summary now includes its destination node, which for an entity-chain query is frequently the entity the answer hinges on.
 
 ---
 

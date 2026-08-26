@@ -99,12 +99,12 @@ Stage 2: Instruction fine-tuning
 | Model | Vision Encoder | LLM | Context | Strengths |
 |-------|---------------|-----|---------|-----------|
 | LLaVA-1.6 | CLIP ViT-L | LLaMA 7B | 4K | Open; baseline |
-| LLaMA 3.2 Vision | Custom | LLaMA 3.2 | 128K | Open; 11B/90B |
-| InternVL2 | InternViT | InternLM2 | 8K | Best open-source quality |
-| GPT-4o | Unknown | GPT-4o | 128K | Best overall; closed |
-| Gemini 1.5 Pro | Proprietary | Gemini | 1M | Long context; multimodal |
-| Claude 3.5 Sonnet | Unknown | Claude 3.5 | 200K | Best OCR; document understanding |
-| Qwen-VL | ViT | Qwen | 32K | Multilingual; open |
+| Llama 4 (Scout/Maverick) | MetaCLIP-based, early fusion | Llama 4 (MoE) | Long (Scout: 10M advertised) | Open; native multimodal pre-training |
+| InternVL3.5 | InternViT | InternLM | Long | Best open-source pure image understanding |
+| GPT-5.6 | Unknown | GPT-5.6 | 1M | Best overall; closed |
+| Gemini 3.1 Pro | Proprietary | Gemini | 1M | Long context; multimodal |
+| Claude Opus 5 / Sonnet 5 | Unknown | Claude Opus 5 / Sonnet 5 | 1M | Best OCR; document understanding |
+| Qwen3-VL | ViT | Qwen3 | Long | Multilingual; open; OCR/GUI leader |
 
 ### 4.2 Diffusion Models (Text-to-Image)
 
@@ -626,6 +626,9 @@ An e-commerce platform serving 80 million active users needs multimodal product 
 - p99 latency SLA: < 300ms end-to-end (image upload → ranked results)
 - Cold-start: new products indexed within 60 seconds of listing
 - Revenue requirement: visual search must achieve CTR within 15% of text search
+
+For the CLIP-vs-LLaVA model-selection reasoning behind the retrieval path at a smaller scale
+(50M items, 2K QPS), see [Vision-Language Models — Visual Product Search at 50M Product Scale](../vision_language_models/vision_language_models.md).
 
 **Architecture Overview**
 

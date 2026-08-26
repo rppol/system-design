@@ -1,5 +1,17 @@
 # MySQL InnoDB Internals
 
+> **Version anchor — August 2026.** **MySQL 9.7 LTS** (2026) is the current
+> long-term-support line and, per the MySQL manual, "the final release line using the
+> sequential versioning model." Everything after it — Innovation *and* LTS — uses
+> **calendar versioning** in `YY.M` form, where `YY` is the year and `M` the scheduled
+> release month with no leading zero: **26.7** is the July 2026 release, 27.7 would be
+> July 2027. An LTS keeps its `YY.M` fixed for its whole lifecycle (all 26.7 LTS
+> releases stay `26.7.x`). The two tracks are otherwise unchanged: LTS gets bug and
+> security fixes only, with 5 years premier plus 3 years extended support; Innovation
+> gets new features, behaviour changes and deprecation removals, and is supported only
+> until the next Innovation release. Everything in this module is InnoDB behaviour
+> common to 8.4 LTS and later unless tagged inline like `[9.7]`.
+
 ## 1. Concept Overview
 
 InnoDB is MySQL's default storage engine. It provides full ACID compliance, MVCC, row-level locking, foreign key enforcement, and crash recovery. Understanding InnoDB's internal architecture — especially its dual-log design, clustered index structure, and buffer pool mechanics — is essential for optimizing MySQL performance and diagnosing production issues.
@@ -554,7 +566,7 @@ REPEATABLE READ (default): uses record locks + gap locks + next-key locks. Gap l
 
 ## 14. Case Study
 
-**Scenario**: A MySQL 8.4 LTS production database (32GB RAM, `innodb_buffer_pool_size=24GB`) serving a marketplace application receives reports of 500ms+ query latency during peak hours (3-5 PM daily). Off-peak latency is 5ms.
+**Scenario**: A MySQL 9.7 LTS production database (32GB RAM, `innodb_buffer_pool_size=24GB`) serving a marketplace application receives reports of 500ms+ query latency during peak hours (3-5 PM daily). Off-peak latency is 5ms.
 
 **Diagnosis**:
 ```sql

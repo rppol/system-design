@@ -413,8 +413,8 @@ public class RedisConfig {
         template.setConnectionFactory(factory);
         template.setKeySerializer(new StringRedisSerializer());
         template.setHashKeySerializer(new StringRedisSerializer());
-        template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
-        template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
+        template.setValueSerializer(new GenericJacksonJsonRedisSerializer());
+        template.setHashValueSerializer(new GenericJacksonJsonRedisSerializer());
         return template;
     }
 }
@@ -648,7 +648,7 @@ a search index.
 |---|---|---|---|
 | `JdkSerializationRedisSerializer` (default) | None (binary) | None — JVM only | High — `serialVersionUID` breaks on refactor |
 | `StringRedisSerializer` | Full (plain text) | Full | None — you own the format |
-| `GenericJackson2JsonRedisSerializer` | Full (JSON) | Full | Low — tolerant of added/removed fields |
+| `GenericJacksonJsonRedisSerializer` | Full (JSON) | Full | Low — tolerant of added/removed fields |
 
 ### Blocking vs Reactive Repositories
 
@@ -733,7 +733,7 @@ public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory f) {
     RedisTemplate<String, Object> t = new RedisTemplate<>();
     t.setConnectionFactory(f);
     t.setKeySerializer(new StringRedisSerializer());
-    t.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+    t.setValueSerializer(new GenericJacksonJsonRedisSerializer());
     return t;
 }
 ```
@@ -879,7 +879,7 @@ which writes Java's binary serialization format, not human-readable text. This i
 `redis-cli GET` on an unconfigured template's key shows garbage bytes, why non-JVM clients
 can't read it, and why renaming a cached class's field can break deserialization entirely.
 Always configure `StringRedisSerializer` for keys and a JSON serializer
-(`GenericJackson2JsonRedisSerializer`) for values explicitly.
+(`GenericJacksonJsonRedisSerializer`) for values explicitly.
 
 **Q: Why can't a `@RedisHash` repository query a field unless it's annotated `@Indexed`?**
 **Short:** Redis has no secondary-index engine, so only fields marked @Indexed can be queried by repositories.
@@ -1056,7 +1056,7 @@ fallback path.
 
 1. **Never rely on `@Indexed` alone in production.** Create indexes explicitly (Mongock or
    a gated startup step) and verify with `explain("executionStats")`.
-2. **Configure `StringRedisSerializer` for keys and `GenericJackson2JsonRedisSerializer` for
+2. **Configure `StringRedisSerializer` for keys and `GenericJacksonJsonRedisSerializer` for
    values on every `RedisTemplate` you define.** Never leave the JDK default in place.
 3. **Page or stream MongoDB queries; never call `findAll()` against a production-sized
    collection.** Materializing everything into a `List` is an OOM waiting for enough rows.
@@ -1092,7 +1092,7 @@ and Redis 7.2 for session state, shopping carts, and a "trending now" leaderboar
 - 12,000 catalog read req/sec at peak, 40 catalog writes/sec (price/stock updates)
 - 2M concurrent sessions during flash sales, average session size 4KB
 - Trending leaderboard recomputed from roughly 500 view-events/sec
-- Spring Boot 3.2, Java 17, Spring Data MongoDB 4.2, Spring Data Redis 3.2, Lettuce 6.3
+- Spring Boot 4.1 / Java 25, Spring Data BOM 2026.0.0 (managing the MongoDB/Redis/Lettuce module versions)
 
 The original implementation called `mongoTemplate.findAll(Product.class)` on the category
 browse endpoint and filtered in the application layer; sessions used the default,
@@ -1217,7 +1217,7 @@ Two rows of this table share one cause: the JDK serializer. It is why sessions c
 | Symbol | What it is |
 |--------|------------|
 | JDK serialization | Java binary format — embeds class names, field metadata, and `serialVersionUID` per object |
-| JSON serialization | Text format via `GenericJackson2JsonRedisSerializer` — field names only, no class metadata |
+| JSON serialization | Text format via `GenericJacksonJsonRedisSerializer` — field names only, no class metadata |
 | per-session delta | `1.9 - 0.6` = **1.3 KB** saved on every session |
 | session count | **~2M** active, from the deserialization-failures row |
 | `serialVersionUID` | The version stamp JDK serialization checks; a mismatch throws `InvalidClassException` |
@@ -1263,7 +1263,7 @@ Page<Product> page = productRepository.findByCategory(category, pageable);
 
 ```java
 // BROKEN: unconfigured RedisTemplate<String, Object> -> JDK serialization
-// FIXED: explicit StringRedisSerializer (keys) + GenericJackson2JsonRedisSerializer (values)
+// FIXED: explicit StringRedisSerializer (keys) + GenericJacksonJsonRedisSerializer (values)
 ```
 
 **Pitfall 3 — recently-viewed events vanished on failover.**

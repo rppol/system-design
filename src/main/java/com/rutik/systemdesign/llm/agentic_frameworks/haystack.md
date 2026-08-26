@@ -6,9 +6,9 @@
 
 Haystack is an open-source LLM framework from deepset (now Haystack.ai) built around the concept of pipelines — directed acyclic graphs of components that transform data. Where LangChain uses a Python pipe operator and LangGraph uses state machines, Haystack uses a declarative pipeline definition with typed inputs and outputs, making it particularly suited for production NLP and RAG deployments.
 
-Haystack 2.0 (released early 2024) was a complete rewrite from Haystack 1.x, introducing: a cleaner component protocol, typed pipeline connections, native async support, and a more Pythonic API. It is the most production-grade pipeline framework for RAG, with strong support for document processing, hybrid retrieval, and custom component development.
+Haystack 2.0 (released early 2024) was a complete rewrite from Haystack 1.x, introducing: a cleaner component protocol, typed pipeline connections, native async support, and a more Pythonic API. Haystack 3.0 built on that foundation rather than rewriting it again: a leaner core (many optional-dependency components, including the Sentence Transformers embedders/rankers and Azure OCR, moved into separate `haystack-core-integrations` packages), an Agent that owns tool execution end-to-end (the standalone `ToolInvoker` was removed), and the retirement of the legacy text-completion Generators (`OpenAIGenerator`, `AzureOpenAIGenerator`) in favor of Chat Generators, which now also accept a plain string as input. It is the most production-grade pipeline framework for RAG, with strong support for document processing, hybrid retrieval, and custom component development.
 
-**Current version**: haystack-ai 2.x (2024)
+**Current version**: haystack-ai 3.1.0 (released 2026-08-24)
 **Production adoption signal**: Used by Airbus, Accenture, BMW, Deutsche Telekom for production NLP and RAG systems. deepset's commercial product (deepset Cloud) is built on Haystack.
 
 ---
@@ -45,14 +45,13 @@ Haystack 2.0 (released early 2024) was a complete rewrite from Haystack 1.x, int
 
 | Category | Examples | Purpose |
 |----------|---------|---------|
-| Embedders | `OpenAITextEmbedder`, `SentenceTransformersTextEmbedder` | Generate embeddings |
+| Embedders | `OpenAITextEmbedder`, `SentenceTransformersTextEmbedder` (in the separate `sentence-transformers-haystack` package as of 3.0) | Generate embeddings |
 | Retrievers | `InMemoryBM25Retriever`, `InMemoryEmbeddingRetriever`, `FilterRetriever` | Retrieve documents |
-| Converters | `TextFileToDocument`, `PDFToTextConverter`, `HTMLToDocument` | Load + convert files |
+| Converters | `TextFileToDocument`, `PyPDFToDocument`, `HTMLToDocument` | Load + convert files |
 | Splitters | `DocumentSplitter`, `RecursiveCharacterTextSplitter` | Chunk documents |
-| Generators | `OpenAIGenerator`, `HuggingFaceLocalGenerator`, `AzureOpenAIGenerator` | LLM text generation |
-| Chat generators | `OpenAIChatGenerator`, `AnthropicChatGenerator` | Chat-based LLM calls |
+| Chat generators | `OpenAIChatGenerator`, `AnthropicChatGenerator` | LLM calls — the only Generator family since 3.0 removed the legacy text-completion Generators; all now also accept a plain `str` input |
 | Prompt builders | `PromptBuilder`, `ChatPromptBuilder` | Format prompts from templates |
-| Rankers | `TransformersSimilarityRanker`, `CohereRanker` | Rerank retrieved documents |
+| Rankers | `SentenceTransformersSimilarityRanker` (separate package as of 3.0), `CohereRanker` | Rerank retrieved documents |
 | Writers | `DocumentWriter` | Write documents to document store |
 | Evaluators | `DeepEvalEvaluator`, `RAGASEvaluator` | Evaluate pipeline quality |
 
@@ -96,9 +95,9 @@ flowchart LR
         Q(["Query:<br/>What is Haystack?"])
         QEMB(["OpenAITextEmbedder"])
         RET(["InMemoryEmbeddingRetriever<br/>top_k=10"])
-        RANK(["TransformersSimilarityRanker<br/>top_k=3"])
+        RANK(["SentenceTransformersSimilarityRanker<br/>top_k=3"])
         PB(["PromptBuilder"])
-        GEN(["OpenAIGenerator<br/>gpt-4o"])
+        GEN(["OpenAIChatGenerator<br/>gpt-4o"])
         OUT(["Answer"])
         Q -->|"str"| QEMB -->|"embedding"| RET -->|"List[Document]"| RANK -->|"reranked docs"| PB -->|"prompt"| GEN -->|"replies"| OUT
     end
@@ -124,7 +123,7 @@ flowchart TD
     BM25["BM25Retriever\n(keyword)"]
     EMBD["EmbeddingRetriever\n(dense)"]
     JOIN["DocumentJoiner\n(concatenate + dedup)"]
-    RANK["TransformersSimilarityRanker\n→ top-3 docs"]
+    RANK["SentenceTransformersSimilarityRanker\n→ top-3 docs"]
     PB["PromptBuilder"]
     GEN["Generator (LLM)"]
     ANS["Answer"]
@@ -168,7 +167,7 @@ pipeline.connect("query_input", "ranker.query")               # str → str ✓
 from haystack import Pipeline, Document
 from haystack.document_stores.in_memory import InMemoryDocumentStore
 from haystack.components.retrievers.in_memory import InMemoryBM25Retriever
-from haystack.components.generators import OpenAIGenerator
+from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.components.builders import PromptBuilder
 from haystack.components.converters import TextFileToDocument
 from haystack.components.preprocessors import DocumentSplitter
@@ -198,15 +197,17 @@ Answer:
 rag_pipeline = Pipeline()
 rag_pipeline.add_component("retriever", InMemoryBM25Retriever(document_store=document_store))
 rag_pipeline.add_component("prompt_builder", PromptBuilder(template=prompt_template))
-rag_pipeline.add_component("llm", OpenAIGenerator(model="gpt-4o"))
+# OpenAIChatGenerator (the only Generator family since 3.0) accepts the
+# PromptBuilder's plain-string "prompt" output directly via its "messages" input
+rag_pipeline.add_component("llm", OpenAIChatGenerator(model="gpt-4o"))
 rag_pipeline.connect("retriever.documents", "prompt_builder.documents")
-rag_pipeline.connect("prompt_builder.prompt", "llm.prompt")
+rag_pipeline.connect("prompt_builder.prompt", "llm.messages")
 
 result = rag_pipeline.run({
     "retriever": {"query": "What is Haystack?", "top_k": 3},
     "prompt_builder": {"query": "What is Haystack?"}
 })
-print(result["llm"]["replies"][0])
+print(result["llm"]["replies"][0].text)  # replies are ChatMessage objects; .text extracts the string
 ```
 
 ### Vector RAG with Persistent Store
@@ -245,7 +246,7 @@ rag.add_component(
 )
 rag.add_component(
     "ranker",
-    TransformersSimilarityRanker(model="cross-encoder/ms-marco-MiniLM-L-6-v2", top_k=3)
+    SentenceTransformersSimilarityRanker(model="cross-encoder/ms-marco-MiniLM-L-6-v2", top_k=3)
 )
 rag.add_component("prompt_builder", PromptBuilder(template=prompt_template))
 rag.add_component("llm", OpenAIChatGenerator(model="gpt-4o"))
@@ -479,7 +480,8 @@ Default `top_k=1` or `top_k=3` in retrievers is insufficient for diverse corpora
 **Version notes:**
 - Haystack 1.x: legacy, `Pipeline.add_node()`, `EmbeddingRetriever`, `Generator`
 - Haystack 2.0 (Jan 2024): complete rewrite, `@component` protocol, `Pipeline.add_component()`, typed connections
-- `haystack-ai` package (new name for 2.x); `farm-haystack` is the 1.x package
+- Haystack 3.0 (2026): leaner core — Sentence Transformers embedders/rankers and Azure OCR moved to separate `haystack-core-integrations` packages; legacy text-completion Generators removed in favor of Chat Generators (which now also accept a plain `str`); `ToolInvoker` folded into the Agent
+- `haystack-ai` package (current: 3.1.0, 2026-08-24; the name has covered every 2.x/3.x release since the 1.x-era `farm-haystack` package)
 
 ---
 
@@ -495,7 +497,7 @@ The `@component` decorator marks a class as a Haystack component. The class must
 
 **Q: How does Haystack handle hybrid retrieval?**
 **Short:** Run BM25 and embedding retrievers in parallel, merge their results with a `DocumentJoiner`, then rerank with a cross-encoder model.
-Haystack implements hybrid retrieval by running BM25 and embedding retrievers in parallel, then merging and reranking results. In the pipeline: connect the query to both `InMemoryBM25Retriever` and `InMemoryEmbeddingRetriever`; both outputs connect to `DocumentJoiner`; the joiner deduplicates (by document ID) and merges the lists; the merged list goes to a `TransformersSimilarityRanker` which reranks using a cross-encoder model. The pipeline DAG supports fan-out (one input → multiple components) and fan-in (multiple inputs → one component) natively.
+Haystack implements hybrid retrieval by running BM25 and embedding retrievers in parallel, then merging and reranking results. In the pipeline: connect the query to both `InMemoryBM25Retriever` and `InMemoryEmbeddingRetriever`; both outputs connect to `DocumentJoiner`; the joiner deduplicates (by document ID) and merges the lists; the merged list goes to a `SentenceTransformersSimilarityRanker` which reranks using a cross-encoder model. The pipeline DAG supports fan-out (one input → multiple components) and fan-in (multiple inputs → one component) natively.
 
 **Q: How does Haystack pipeline serialization work?**
 **Short:** `to_dict()`/`from_dict()` round-trip a pipeline through YAML, enabling version control and config-driven, code-free deployment.
@@ -528,8 +530,8 @@ Supported operators: `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`. Combine w
 Haystack 2.0 is a complete rewrite with breaking changes: (1) Component protocol — `@component` decorator and `run()` method replace `@pipeline.node()` and various base classes; (2) Pipeline construction — `add_component()` + `connect()` replace `add_node()` with node names; (3) Type validation — added at connection time in 2.0; absent in 1.x; (4) Removed `Finder` class — replaced by Pipeline; (5) Package rename — `farm-haystack` (1.x) → `haystack-ai` (2.x); (6) Better async support; (7) Simplified document model. 1.x code requires significant rewriting to migrate to 2.x.
 
 **Q: How do you build a conversational RAG pipeline in Haystack?**
-**Short:** Swap in `ChatPromptBuilder` and `OpenAIChatGenerator`, and pass externally maintained chat history into the pipeline on every turn.
-Add `ChatPromptBuilder` instead of `PromptBuilder`, and `OpenAIChatGenerator` instead of `OpenAIGenerator`. Maintain `ChatHistory` externally and pass it to the pipeline on each turn:
+**Short:** Swap in `ChatPromptBuilder` in place of `PromptBuilder`, and pass externally maintained chat history into the pipeline on every turn.
+Add `ChatPromptBuilder` instead of `PromptBuilder`, so the chat history template variable renders alongside retrieved context (the Generator side needs no change — `OpenAIChatGenerator` is already the only Generator family since 3.0). Maintain `ChatHistory` externally and pass it to the pipeline on each turn:
 ```python
 from haystack.components.builders import ChatPromptBuilder
 from haystack.components.generators.chat import OpenAIChatGenerator
@@ -561,7 +563,7 @@ for user_input in user_inputs:
 
 **Q: How do you handle PDF documents with tables in Haystack?**
 **Short:** Standard pypdf-based converters lose table structure, so use `PDFMinerToDocument`, Azure OCR, or Unstructured.io for table-heavy PDFs.
-Standard converters (`PDFToTextConverter` using `pypdf`) lose table structure. Better options: (1) `PDFMinerToDocument` (better table extraction than pypdf); (2) `AzureOCRDocumentConverter` (Azure Cognitive Services, handles scanned PDFs); (3) Unstructured.io integration (`UnstructuredFileConverter`) — commercial API that handles tables, headers, and complex layouts. For critical table data (financial documents, regulatory filings): use Unstructured or Azure OCR. After conversion, customize the `DocumentSplitter` to respect table boundaries — don't split in the middle of a table row.
+Standard converters (`PyPDFToDocument`, using `pypdf`) lose table structure. Better options: (1) `PDFMinerToDocument` (better table extraction than pypdf); (2) `AzureOCRDocumentConverter` (Azure Cognitive Services, handles scanned PDFs; moved into the separate `azure-form-recognizer-haystack` package as of Haystack 3.0); (3) Unstructured.io integration (`UnstructuredFileConverter`) — commercial API that handles tables, headers, and complex layouts. For critical table data (financial documents, regulatory filings): use Unstructured or Azure OCR. After conversion, customize the `DocumentSplitter` to respect table boundaries — don't split in the middle of a table row.
 
 **Q: What is the DocumentJoiner component and when do you use it?**
 **Short:** `DocumentJoiner` merges and deduplicates document lists from multiple retrievers; reciprocal rank fusion beats plain concatenation.
@@ -569,7 +571,7 @@ Standard converters (`PDFToTextConverter` using `pypdf`) lose table structure. B
 
 **Q: How do you scale Haystack for high-throughput production?**
 **Short:** Run pipelines async and stateless behind a load balancer, use managed vector stores, cache query embeddings, and rerank on GPU.
-Scaling approaches: (1) Async pipeline — use `pipeline.run_async()` and `asyncio.gather()` to process multiple requests concurrently; (2) Horizontally scale the API layer — Haystack pipelines are stateless (no internal state between calls); deploy behind a load balancer; (3) Use managed vector stores — Pinecone Serverless or OpenSearch Service scale independently; don't run your own vector DB under high load; (4) Embedding caching — cache query embeddings for repeated questions; reduces OpenAI API calls and latency; (5) Reranker on GPU — if using `TransformersSimilarityRanker`, run on GPU; CPU reranking adds 500ms+ at 100+ documents. Benchmark: Haystack pipeline overhead (excluding LLM calls) is typically <50ms.
+Scaling approaches: (1) Async pipeline — use `pipeline.run_async()` and `asyncio.gather()` to process multiple requests concurrently; (2) Horizontally scale the API layer — Haystack pipelines are stateless (no internal state between calls); deploy behind a load balancer; (3) Use managed vector stores — Pinecone Serverless or OpenSearch Service scale independently; don't run your own vector DB under high load; (4) Embedding caching — cache query embeddings for repeated questions; reduces OpenAI API calls and latency; (5) Reranker on GPU — if using `SentenceTransformersSimilarityRanker`, run on GPU; CPU reranking adds 500ms+ at 100+ documents. Benchmark: Haystack pipeline overhead (excluding LLM calls) is typically <50ms.
 
 **Q: How does Haystack's Pipeline abstraction handle branching and conditional logic?**
 **Short:** Router components inspect intermediate results and direct the pipeline's fan-out to different downstream components conditionally.
@@ -589,14 +591,14 @@ Haystack pipelines serialize to YAML and can be deployed using Hayhooks, the off
 
 1. **Use type annotations in custom components** — Haystack infers input types from `run()` signatures; missing annotations cause runtime failures.
 2. **Start with `InMemoryDocumentStore` for development** — switch to persistent store before QA testing.
-3. **Always rerank retrieved documents** — raw vector search accuracy is often insufficient; `TransformersSimilarityRanker` or `CohereRanker` significantly improves precision (cross-encoder mechanics: [Reranking](../rag_fundamentals/reranking.md)).
+3. **Always rerank retrieved documents** — raw vector search accuracy is often insufficient; `SentenceTransformersSimilarityRanker` or `CohereRanker` significantly improves precision (cross-encoder mechanics: [Reranking](../rag_fundamentals/reranking.md)).
 4. **Retrieve more than needed, then rerank** — `top_k=20` + rerank to `top_n=3` beats `top_k=3` directly.
 5. **Add document metadata during indexing** — source file, date, section, department; enables filtering at query time.
 6. **Test pipeline construction before deployment** — `pipeline.run({"component": {"input": dummy_value}})` validates all connections.
 7. **Serialize pipelines to YAML** — enables config-driven changes without code deployments.
 8. **Use `DocumentSplitter` split_by="sentence"** for conversational content; split_by="word" for technical documentation.
 9. **Evaluate retrieval separately from generation** — MRR/Recall metrics tell you if the retrieval component is the bottleneck.
-10. **Pin haystack-ai version** — Haystack 2.x is actively developed; breaking changes in minor versions can occur.
+10. **Pin haystack-ai version** — Haystack 3.x is actively developed; breaking changes in minor versions can occur.
 
 ---
 
@@ -633,7 +635,7 @@ flowchart LR
         QEMB(["OpenAITextEmbedder"])
         MF(["MetadataFilter<br/>practice_area IN user.practice_areas"])
         RET(["OpenSearchEmbeddingRetriever<br/>top_k=20"])
-        RANK(["TransformersSimilarityRanker<br/>top_k=5"])
+        RANK(["SentenceTransformersSimilarityRanker<br/>top_k=5"])
         PB(["PromptBuilder +<br/>citation template"])
         GEN(["OpenAIChatGenerator<br/>gpt-4o"])
         OUT(["Response +<br/>5 source citations"])

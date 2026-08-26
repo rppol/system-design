@@ -6,12 +6,13 @@
 
 gRPC is a contract-first, HTTP/2-based RPC framework: you write a `.proto` service definition, generate strongly-typed stubs, and call remote methods as if they were local. The wire mechanics — Protobuf varint encoding, HTTP/2 stream multiplexing, the four RPC modes — are covered in depth in [gRPC & Protobuf (pure Java)](../../java/grpc_protobuf/grpc_protobuf.md) and [gRPC & Protobuf (backend design)](../../backend/grpc_and_protobuf/grpc_and_protobuf.md). This module is about the *Spring* layer on top: how a gRPC server and its channels become managed beans, how cross-cutting concerns (auth, logging, metrics, tracing) plug in through interceptors, and how gRPC composes with Spring Security and Micrometer.
 
-Raw grpc-java requires you to build a `Server`, register `BindableService` implementations, manage a `ManagedChannel` lifecycle, and wire interceptors by hand. Spring removes that boilerplate. Two projects do this:
+Raw grpc-java requires you to build a `Server`, register `BindableService` implementations, manage a `ManagedChannel` lifecycle, and wire interceptors by hand. Spring removes that boilerplate.
 
-1. **Spring gRPC** — the official project (1.0 GA, 2025), part of the Spring portfolio. Starters `spring-grpc-server-spring-boot-starter` / `spring-grpc-client-spring-boot-starter`; properties under `spring.grpc.*`; annotate a service bean with `@GrpcService` (`org.springframework.grpc.server.service.GrpcService`).
-2. **grpc-spring-boot-starter** — the community project (`net.devh`, currently `3.1.0.RELEASE`), the de-facto standard for years before the official one. Properties under `grpc.server.*` / `grpc.client.*`; `@GrpcService` (`net.devh.boot.grpc.server.service.GrpcService`) for servers and `@GrpcClient` for injecting stubs.
+**Spring Boot 4.1 auto-configures gRPC natively** — this is the current path for any new project. Add `org.springframework.boot:spring-boot-starter-grpc-server` and/or `org.springframework.boot:spring-boot-starter-grpc-client` and Boot wires a Netty-backed gRPC server (or, if you also pull in a Servlet starter, exposes gRPC over HTTP/2 through the servlet container), registers your `@GrpcService` beans (`org.springframework.grpc.server.service.GrpcService`), and configures channels from `spring.grpc.client.channel.<name>.*` properties. Client stubs are injected with `@ImportGrpcClients`, not hand-wired. This native support is built on the same Spring gRPC project (`org.springframework.grpc`) that shipped standalone before 4.1 — Boot now ships and auto-configures it itself instead of requiring a separate `spring-grpc-*-starter` dependency, and there is a documented migration path from Spring gRPC 1.0 to 1.1 for projects moving onto Boot 4.1.
 
-Both auto-configure the Netty-based gRPC server (default port **9090**), register your `@GrpcService` beans, expose `ManagedChannel` factories, and let you contribute `ServerInterceptor` / `ClientInterceptor` beans that Spring orders and applies globally. This module covers that wiring, the error-mapping and deadline mechanics that bite in production, and the integrations with Spring Security and Micrometer Tracing.
+**If you're still on Boot 4.0 or earlier**, native auto-configuration isn't available, and the two options were the standalone Spring gRPC starters (`spring-grpc-server-spring-boot-starter` / `spring-grpc-client-spring-boot-starter`, `spring.grpc.*` properties) or **grpc-spring-boot-starter**, the community project (`net.devh`), the de-facto standard for years before either official option existed — properties under `grpc.server.*` / `grpc.client.*`, `@GrpcService` (`net.devh.boot.grpc.server.service.GrpcService`) for servers, `@GrpcClient` for injecting stubs, and a richer built-in security module than the official project shipped at the time.
+
+All of these auto-configure the gRPC server, register your `@GrpcService` beans, expose channel factories, and let you contribute `ServerInterceptor` / `ClientInterceptor` beans that Spring orders and applies globally. This module covers that wiring, the error-mapping and deadline mechanics that bite in production, and the integrations with Spring Security and Micrometer Tracing.
 
 ---
 
@@ -45,16 +46,20 @@ Key insight: gRPC does not use `HttpServletRequest`, so none of Spring MVC's ser
 
 ## 4. Types / Architectures / Strategies
 
-### The two Spring gRPC frameworks
+### Boot 4.1 native gRPC vs the legacy net.devh starter
 
-| Dimension | Spring gRPC (official, 1.0) | grpc-spring-boot-starter (net.devh, 3.1.x) |
-|-----------|------------------------------|---------------------------------------------|
-| Server annotation | `@GrpcService` (`org.springframework.grpc...`) | `@GrpcService` (`net.devh.boot.grpc...`) |
-| Client injection | `GrpcChannelFactory` + generated stub bean | `@GrpcClient("name")` on a stub field |
-| Config prefix | `spring.grpc.server.*`, `spring.grpc.client.*` | `grpc.server.*`, `grpc.client.<name>.*` |
-| Global interceptor | `ServerInterceptor` / `GlobalServerInterceptor` bean | `@GrpcGlobalServerInterceptor` bean |
-| Security module | Compose with Spring Security manually via interceptor | Built-in `grpc-server-spring-boot-starter` security (`GrpcSecurity`, `@Secured`) |
-| Maturity | Newer, portfolio-backed, actively converging | Battle-tested, huge install base |
+| Dimension | Boot 4.1 native (current) | grpc-spring-boot-starter (net.devh, legacy) |
+|-----------|----------------------------|-----------------------------------------------|
+| Starters | `spring-boot-starter-grpc-server`, `spring-boot-starter-grpc-client` | `grpc-server-spring-boot-starter`, `grpc-client-spring-boot-starter` |
+| Server annotation | `@GrpcService` (`org.springframework.grpc.server.service.GrpcService`) | `@GrpcService` (`net.devh.boot.grpc.server.service.GrpcService`) |
+| Client injection | `@ImportGrpcClients(types = ...)` — Boot injects the stub bean | `@GrpcClient("name")` on a stub field |
+| Config prefix | `spring.grpc.server.*`, `spring.grpc.client.channel.<name>.*` | `grpc.server.*`, `grpc.client.<name>.*` |
+| Channel customization | `GrpcChannelBuilderCustomizer` bean | `grpc.client.<name>.*` YAML properties |
+| Security | `GrpcSecurity` / `@PreAuthorize` (Netty), or standard Spring Security config over the servlet transport | Built-in `grpc-server-spring-boot-starter` security (`GrpcSecurity`, `@Secured`) |
+| Test slice | `@AutoConfigureTestGrpcTransport` (in-process transport) | No dedicated Boot test slice — roll your own in-process channel |
+| When to use | Any project on Boot 4.1+ | Pinned to Boot 4.0 or earlier |
+
+The command to remember: on Boot 4.1+, reach for the native starters first. `net.devh` is worth knowing because it was the mainstream choice for years and plenty of existing services still run it, but it is not the starting point for new work.
 
 ### The four RPC modes in a Spring service
 
@@ -81,9 +86,11 @@ Reactive variants (`Mono`/`Flux` signatures) come from `reactor-grpc` (Salesforc
 
 | Strategy | How | When |
 |----------|-----|------|
-| `@GrpcExceptionHandler` (`@GrpcAdvice`) | Central class maps exception → `Status` | Clean, controller-advice-like |
-| `onError(StatusRuntimeException)` per call | Manual `responseObserver.onError(...)` | Fine-grained, per-method control |
+| `@GrpcExceptionHandler` (`@GrpcAdvice`, net.devh only) | Central class maps exception → `Status` | Clean, controller-advice-like; not available on the Boot 4.1 native path |
+| `onError(StatusRuntimeException)` per call | Manual `responseObserver.onError(...)` | Fine-grained, per-method control; the portable choice under Boot 4.1 native |
 | Rich error model | `StatusProto.toStatusRuntimeException` with `google.rpc.ErrorInfo` / `BadRequest` details | Machine-readable structured errors |
+
+Boot 4.1's native gRPC support has no documented `@GrpcAdvice`-style central exception mapper — its own error-mapping story is `SecurityGrpcExceptionHandler` for security-specific failures and manual `Status` mapping (per call, or inside a shared `ServerInterceptor`) for everything else. A project moving off net.devh's `@GrpcAdvice` should consolidate its exception→`Status` mapping into one `ServerInterceptor` rather than looking for a like-for-like annotation.
 
 ---
 
@@ -194,69 +201,55 @@ A bidirectional stream stays `Active` while either side sends. Half-close (`onCo
 
 ## 6. How It Works — Detailed Mechanics
 
-### Protobuf build (Maven)
+### Protobuf build (Maven) — Boot-managed plugin (current)
 
-The `os-maven-plugin` extension detects the OS/arch classifier so the `protobuf-maven-plugin` can download the right `protoc` and gRPC codegen binaries.
+Spring Boot 4.1 provides dependency management for `io.github.ascopes:protobuf-maven-plugin`, so a project parented on `spring-boot-starter-parent` needs no manual `protoc`/codegen version pinning or OS-classifier plugin.
 
 ```xml
+<parent>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-parent</artifactId>
+  <version>4.1.1</version>
+</parent>
+
 <build>
-  <extensions>
-    <extension>
-      <groupId>kr.motd.maven</groupId>
-      <artifactId>os-maven-plugin</artifactId>
-      <version>1.7.1</version>
-    </extension>
-  </extensions>
   <plugins>
     <plugin>
-      <groupId>org.xolstice.maven.plugins</groupId>
+      <groupId>io.github.ascopes</groupId>
       <artifactId>protobuf-maven-plugin</artifactId>
-      <version>0.6.1</version>
-      <configuration>
-        <protocArtifact>com.google.protobuf:protoc:3.25.5:exe:${os.detected.classifier}</protocArtifact>
-        <pluginId>grpc-java</pluginId>
-        <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.64.0:exe:${os.detected.classifier}</pluginArtifact>
-      </configuration>
-      <executions>
-        <execution>
-          <goals>
-            <goal>compile</goal>       <!-- message classes -->
-            <goal>compile-custom</goal> <!-- gRPC service stubs -->
-          </goals>
-        </execution>
-      </executions>
     </plugin>
   </plugins>
 </build>
 ```
 
-`.proto` files live in `src/main/proto/`; generated sources land in `target/generated-sources/protobuf/{java,grpc-java}`.
+`.proto` files live in `src/main/proto/`. The old pairing — `org.xolstice.maven.plugins:protobuf-maven-plugin` plus the `kr.motd.maven:os-maven-plugin` classifier extension, each with a hand-pinned `protoc`/`protoc-gen-grpc-java` version — still works but is no longer what Boot's own docs show; prefer the managed `io.github.ascopes` plugin on new projects.
 
-### Server autoconfiguration and @GrpcService (net.devh)
+### Server autoconfiguration — Boot 4.1 native (current)
 
 ```xml
 <dependency>
-  <groupId>net.devh</groupId>
-  <artifactId>grpc-server-spring-boot-starter</artifactId>
-  <version>3.1.0.RELEASE</version>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-grpc-server</artifactId>
 </dependency>
 ```
 
 ```yaml
 # application.yml
-grpc:
-  server:
-    port: 9090                 # default; 0 = in-process/random
-    max-inbound-message-size: 4MB   # grpc-java default is 4 MiB
-    security:
-      enabled: false           # set true + certChain/privateKey for TLS
+spring:
+  grpc:
+    server:
+      port: 9090                       # default; 0 = random (pair with @LocalGrpcServerPort in tests)
+      reflection:
+        enabled: true                  # needed for grpcurl; disable in hardened prod
+      ssl:
+        enabled: false                 # true + a configured SSL bundle for TLS
 ```
 
 ```java
-import net.devh.boot.grpc.server.service.GrpcService;
+import org.springframework.grpc.server.service.GrpcService;
 import io.grpc.stub.StreamObserver;
 
-@GrpcService  // auto-registered with the embedded gRPC server, no manual bind
+@GrpcService  // discovered and bound to the auto-configured server, no manual bind
 public class UserGrpcService extends UserServiceGrpc.UserServiceImplBase {
 
     private final UserRepository repo;
@@ -274,30 +267,100 @@ public class UserGrpcService extends UserServiceGrpc.UserServiceImplBase {
 }
 ```
 
-### Server autoconfiguration (official Spring gRPC)
+The same `spring-boot-starter-grpc-server` dependency backs a standalone Netty server by default; adding a Servlet starter alongside it (and excluding `io.grpc:grpc-netty` in favor of `io.grpc:grpc-servlet-jakarta`) instead exposes the same `@GrpcService` beans over HTTP/2 through the servlet container — useful when the app already terminates HTTP/2 for other traffic and you don't want a second listening port.
+
+**If you're on Boot 4.0 or earlier**, native auto-configuration doesn't exist yet; the net.devh community starter was (and remains) the common choice there:
+
+```xml
+<dependency>
+  <groupId>net.devh</groupId>
+  <artifactId>grpc-server-spring-boot-starter</artifactId>
+  <version>3.1.0.RELEASE</version>
+</dependency>
+```
 
 ```yaml
-# application.yml — official Spring gRPC
-spring:
-  grpc:
-    server:
-      port: 9090
-      max-inbound-message-size: 4MB
-    client:
-      channels:
-        user-service:
-          address: "static://localhost:9090"
-          negotiation-type: plaintext   # or TLS
+grpc:
+  server:
+    port: 9090
+    max-inbound-message-size: 4MB
+    security:
+      enabled: false
 ```
 
 ```java
-import org.springframework.grpc.server.service.GrpcService;
-
-@GrpcService
-public class UserGrpcService extends UserServiceGrpc.UserServiceImplBase { /* same body */ }
+import net.devh.boot.grpc.server.service.GrpcService;
+// same @GrpcService-annotated class shape as above, different import
 ```
 
-### Injecting a client stub
+### Injecting a client stub — @ImportGrpcClients (current)
+
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-grpc-client</artifactId>
+</dependency>
+```
+
+```java
+import org.springframework.grpc.client.ImportGrpcClients;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication(proxyBeanMethods = false)
+@ImportGrpcClients(target = "user-service", types = UserServiceGrpc.UserServiceBlockingStub.class)
+public class OrderApplication { }
+```
+
+```java
+@Service
+public class OrderService {
+
+    private final UserServiceGrpc.UserServiceBlockingStub userStub;   // injected by @ImportGrpcClients
+
+    public OrderService(UserServiceGrpc.UserServiceBlockingStub userStub) {
+        this.userStub = userStub;
+    }
+
+    public UserResponse lookup(long id) {
+        return userStub
+            .withDeadlineAfter(200, TimeUnit.MILLISECONDS)   // ALWAYS set a deadline
+            .getUser(GetUserRequest.newBuilder().setId(id).build());
+    }
+}
+```
+
+```yaml
+spring:
+  grpc:
+    client:
+      channel:
+        user-service:
+          target: "static://user-service:9090"     # or discovery:/// via a LB
+          ssl:
+            enabled: false
+          inbound:
+            message:
+              max-size: 8MB
+```
+
+Customize the underlying `ManagedChannelBuilder` (auth headers, keepalive, load-balancing policy) with a `GrpcChannelBuilderCustomizer` bean rather than reaching into the channel manually:
+
+```java
+import org.springframework.grpc.client.GrpcChannelBuilderCustomizer;
+import org.springframework.grpc.client.interceptor.security.BasicAuthenticationInterceptor;
+
+@Configuration(proxyBeanMethods = false)
+public class GrpcClientConfig {
+
+    @Bean
+    GrpcChannelBuilderCustomizer<?> userServiceChannelCustomizer() {
+        return GrpcChannelBuilderCustomizer.matching("user-service",
+            (builder) -> builder.intercept(new BasicAuthenticationInterceptor("service", "token")));
+    }
+}
+```
+
+**If you're on Boot 4.0 or earlier**, inject with net.devh's `@GrpcClient` instead:
 
 ```java
 // net.devh style
@@ -309,7 +372,7 @@ public class OrderService {
 
     public UserResponse lookup(long id) {
         return userStub
-            .withDeadlineAfter(200, TimeUnit.MILLISECONDS)   // ALWAYS set a deadline
+            .withDeadlineAfter(200, TimeUnit.MILLISECONDS)
             .getUser(GetUserRequest.newBuilder().setId(id).build());
     }
 }
@@ -319,20 +382,9 @@ public class OrderService {
 grpc:
   client:
     user-service:
-      address: "static://user-service:9090"   # or discovery:///user-service
+      address: "static://user-service:9090"
       negotiation-type: plaintext
       deadline: 500ms            # default per-call deadline if none set on the stub
-```
-
-```java
-// Official Spring gRPC style — build a stub from a channel bean
-@Configuration
-class GrpcClientConfig {
-    @Bean
-    UserServiceGrpc.UserServiceBlockingStub userStub(GrpcChannelFactory channels) {
-        return UserServiceGrpc.newBlockingStub(channels.createChannel("user-service"));
-    }
-}
 ```
 
 ### Server interceptor — auth, ordered, populating SecurityContext
@@ -520,9 +572,10 @@ public void getUser(GetUserRequest req, StreamObserver<UserResponse> obs) {
   <artifactId>opentelemetry-exporter-otlp</artifactId></dependency>
 ```
 
+Under Boot 4.1 native gRPC, `ObservationGrpcClientInterceptor` is **auto-configured automatically whenever Micrometer is on the classpath** — no `@Bean` needed; disable it with `spring.grpc.client.observation.enabled=false` if you don't want it. The server side has no documented auto-configuration equivalent, so `ObservationGrpcServerInterceptor` still needs a manual `@Bean`:
+
 ```java
 import io.micrometer.core.instrument.binder.grpc.ObservationGrpcServerInterceptor;
-import io.micrometer.core.instrument.binder.grpc.ObservationGrpcClientInterceptor;
 
 @Configuration
 public class GrpcObservabilityConfig {
@@ -532,15 +585,42 @@ public class GrpcObservabilityConfig {
     ObservationGrpcServerInterceptor grpcServerObservation(ObservationRegistry reg) {
         return new ObservationGrpcServerInterceptor(reg);
     }
-
-    @Bean
-    ObservationGrpcClientInterceptor grpcClientObservation(ObservationRegistry reg) {
-        return new ObservationGrpcClientInterceptor(reg);
-    }
 }
 ```
 
 These interceptors serialize the current trace into the W3C `traceparent` metadata key on the client (`00-<32-hex trace>-<16-hex span>-01`) and deserialize it on the server, so a single trace ID spans the whole gRPC call graph — the same mechanism described in [Observability & Tracing](../observability_and_tracing/observability_and_tracing.md), just carried over gRPC `Metadata` instead of HTTP headers.
+
+### Testing — the in-process gRPC test slice (current)
+
+`spring-boot-starter-grpc-server-test` and `spring-boot-starter-grpc-client-test` (or the combined `spring-boot-grpc-test` module) add `@AutoConfigureTestGrpcTransport`, which replaces real network channels with in-process ones — no port binding, no flaky "address already in use" failures in CI:
+
+```java
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.grpc.test.autoconfigure.AutoConfigureTestGrpcTransport;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.grpc.client.ImportGrpcClients;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@SpringBootTest
+@AutoConfigureTestGrpcTransport
+@ImportGrpcClients(types = UserServiceGrpc.UserServiceBlockingStub.class)
+class UserGrpcServiceTests {
+
+    @Autowired
+    private UserServiceGrpc.UserServiceBlockingStub userStub;
+
+    @Test
+    void getUserReturnsMatch() {
+        UserResponse resp = userStub.getUser(
+            GetUserRequest.newBuilder().setId(1L).build());
+        assertThat(resp.getName()).isEqualTo("Ada");
+    }
+}
+```
+
+To test against a real bound port instead — e.g. verifying TLS or a load balancer target — set `spring.grpc.server.port=0` and inject the actual port with `@LocalGrpcServerPort` rather than hardcoding 9090. See [Spring Testing](../spring_testing/spring_testing.md) for how this test slice fits alongside `@SpringBootTest` and the other test slices.
 
 ---
 
@@ -571,15 +651,16 @@ These interceptors serialize the current trace into the W3C `traceparent` metada
 | Browser | Needs gRPC-Web proxy | Native | Native |
 | Best for | Internal service-to-service | Public APIs, broad clients | Client-shaped aggregation |
 
-### Spring gRPC (official) vs net.devh starter
+### Boot 4.1 native gRPC vs net.devh starter
 
-| Dimension | Spring gRPC (official) | net.devh starter |
-|-----------|------------------------|------------------|
-| Backing | Spring portfolio | Community, very mature |
-| Security | Manual composition | Built-in `GrpcSecurity`, `@Secured` |
+| Dimension | Boot 4.1 native | net.devh starter |
+|-----------|------------------|-------------------|
+| Backing | Auto-configured by Spring Boot itself | Community, very mature |
+| Security | `GrpcSecurity`/`@PreAuthorize` (Netty) or standard Spring Security (servlet transport) | Built-in `GrpcSecurity`, `@Secured` |
 | Config | `spring.grpc.*` | `grpc.*` |
-| Momentum | Growing, will converge | Stable, huge adoption |
-| Recommendation | New greenfield on latest Boot | Existing systems, richest security |
+| Test support | Dedicated `@AutoConfigureTestGrpcTransport` slice | No dedicated Boot test slice |
+| Momentum | Current, ships with every Boot 4.1+ app | Stable, huge existing install base |
+| Recommendation | Default choice on Boot 4.1+ | Only when pinned to Boot 4.0 or earlier |
 
 ### gRPC vs HTTP for internal traffic
 
@@ -720,14 +801,18 @@ large the result set grows.
 
 ```yaml
 # FIXED (prefer): paginate or server-stream instead of one giant message.
-# If you truly must, raise the limit on both server and client:
-grpc:
-  server:
-    max-inbound-message-size: 8MB
-  client:
-    user-service:
-      max-inbound-message-size: 8MB
+# If you truly must, raise the client-side limit (Boot 4.1 native):
+spring:
+  grpc:
+    client:
+      channel:
+        user-service:
+          inbound:
+            message:
+              max-size: 8MB
 ```
+
+The server side has no dedicated Boot property for this — override it with a custom `ServerBuilder`/`NettyServerBuilder` post-processor bean, or, on net.devh, the equivalent `grpc.server.max-inbound-message-size` / `grpc.client.user-service.max-inbound-message-size` properties. Either way, raising the cap is the fallback, not the fix — pagination or streaming keeps peak memory bounded regardless of how large the result set grows.
 
 ### Pitfall 5: Trace/security context lost across a thread boundary
 
@@ -778,17 +863,20 @@ grpc:
 
 | Tool | Role | Notes |
 |------|------|-------|
-| `spring-grpc-server-spring-boot-starter` | Official Spring gRPC server autoconfig | `spring.grpc.*`; Boot 3.x |
-| `spring-grpc-client-spring-boot-starter` | Official Spring gRPC client / channels | `GrpcChannelFactory` |
-| `grpc-server-spring-boot-starter` (net.devh) | Community server autoconfig | `@GrpcService`, `grpc.server.*` |
-| `grpc-client-spring-boot-starter` (net.devh) | Community client autoconfig | `@GrpcClient`, `grpc.client.*` |
-| `grpc-spring-boot-starter` security (net.devh) | `GrpcSecurity`, `@Secured` on gRPC | Bridges to `SecurityContextHolder` |
-| `protobuf-maven-plugin` + `os-maven-plugin` | Codegen from `.proto` | `compile` + `compile-custom` goals |
-| `micrometer-core` (`binder.grpc.*`) | `Observation*Interceptor` for gRPC | Propagates `traceparent` in Metadata |
+| `spring-boot-starter-grpc-server` | Boot 4.1 native server autoconfig | `spring.grpc.server.*`; current |
+| `spring-boot-starter-grpc-client` | Boot 4.1 native client autoconfig | `spring.grpc.client.channel.*`; current |
+| `spring-boot-starter-grpc-server-test` | Boot 4.1 native server test slice | pairs with `@AutoConfigureTestGrpcTransport` |
+| `spring-boot-starter-grpc-client-test` | Boot 4.1 native client test slice | pairs with `@AutoConfigureTestGrpcTransport` |
+| `GrpcChannelBuilderCustomizer` | Customizes a named channel's `ManagedChannelBuilder` | e.g. attach `BasicAuthenticationInterceptor` |
+| `grpc-server-spring-boot-starter` (net.devh) | Legacy community server autoconfig | `@GrpcService`, `grpc.server.*`; Boot 4.0 and earlier |
+| `grpc-client-spring-boot-starter` (net.devh) | Legacy community client autoconfig | `@GrpcClient`, `grpc.client.*`; Boot 4.0 and earlier |
+| `grpc-spring-boot-starter` security (net.devh) | Legacy `GrpcSecurity`, `@Secured` on gRPC | Bridges to `SecurityContextHolder` |
+| `protobuf-maven-plugin` (`io.github.ascopes`) | Boot-managed `.proto` codegen | Replaces the old `org.xolstice` plugin plus `os-maven-plugin` pairing |
+| `micrometer-core` (`binder.grpc.*`) | `Observation*Interceptor` for gRPC | Client interceptor auto-configured by Boot 4.1; server interceptor still manual |
 | `micrometer-tracing-bridge-otel` | Trace bridge to OTLP | Exports to Tempo/Jaeger |
-| Envoy gRPC-Web filter | Browser ↔ gRPC translation | For SPA clients |
+| Envoy gRPC-Web filter | Browser to gRPC translation | For SPA clients |
 | `grpcurl` | CLI to call gRPC by reflection | The `curl` of gRPC; needs reflection service |
-| gRPC server reflection | Runtime service/method discovery | Enable for `grpcurl`, disable in prod if sensitive |
+| gRPC server reflection | Runtime service/method discovery | `spring.grpc.server.reflection.enabled=false` to disable in prod if sensitive |
 
 ---
 
@@ -830,17 +918,33 @@ The client interceptor serializes the current trace into the W3C `traceparent` m
 **Short:** grpc-java caps inbound messages at 4 MiB by default on both the server and the client.
 Because grpc-java caps inbound messages at 4 MiB by default on both the server and the client, so a 6 MB response throws `RESOURCE_EXHAUSTED: gRPC message exceeds maximum size 4194304`. The right fix is to paginate or switch to server streaming so no single message is huge; only if unavoidable, raise `max-inbound-message-size` on both ends — a large limit invites memory pressure and makes a single call able to OOM the process.
 
-**Q: What is the difference between the official Spring gRPC and net.devh's starter?**
-**Short:** The official Spring gRPC is portfolio-backed under spring.grpc, while net.devh is the mature community project.
-The official Spring gRPC (1.0) is portfolio-backed and configured under the `spring.grpc` properties, while net.devh's starter is the mature community project under the `grpc` prefix. net.devh adds a richer built-in security module (`GrpcSecurity`, `@Secured`, `@GrpcGlobalServerInterceptor`), while both auto-configure the Netty server, register `@GrpcService` beans, and support global interceptors. Choose the official one for greenfield on the latest Boot; keep net.devh for existing systems that lean on its security bridge.
+**Q: What is the difference between Boot 4.1's native gRPC support and net.devh's starter?**
+**Short:** Boot 4.1 auto-configures gRPC natively under spring.grpc; net.devh is the legacy community project under grpc.
+Boot 4.1 auto-configures gRPC natively via `spring-boot-starter-grpc-server`/`-client`, configured under the `spring.grpc` properties, while net.devh's starter is the community project under the `grpc` prefix that was the de-facto standard before native support existed. Both auto-configure the server, register `@GrpcService` beans, and support global interceptors; net.devh still has the richer built-in security bridge (`GrpcSecurity`, `@Secured`, `@GrpcGlobalServerInterceptor`). Choose the native starters on Boot 4.1+; keep net.devh only when pinned to Boot 4.0 or earlier.
 
 **Q: How does cancellation propagate, and how should a streaming handler react?**
 **Short:** A client cancel or expired deadline cancels the server's gRPC Context and fires an onCancel callback.
 When a client cancels or its deadline expires, the server's gRPC `Context` becomes cancelled and a `ServerCallStreamObserver.setOnCancelHandler` callback fires. A long-running or streaming handler should check `Context.current().isCancelled()` before expensive steps and register an on-cancel handler to release resources (close cursors, cancel downstream calls). Ignoring cancellation wastes CPU producing results no one will read and can leak connections on long streams.
 
 **Q: How do you inject a gRPC stub as a Spring bean?**
-**Short:** Annotate a field with @GrpcClient, or build the stub from a GrpcChannelFactory-created channel.
-With net.devh, annotate a stub field with `@GrpcClient("channel-name")` and Spring injects a stub bound to the named channel from `grpc.client.<name>.*`. With the official starter, build the stub in a `@Bean` from a `GrpcChannelFactory.createChannel("name")`. Prefer a blocking stub for unary request/response, an async stub for streaming, and always apply `withDeadlineAfter` on each call rather than trusting a global default.
+**Short:** Annotate the application class with @ImportGrpcClients naming the stub type to inject.
+Under Boot 4.1 native gRPC, annotate the application (or a config class) with `@ImportGrpcClients(target = "channel-name", types = MyServiceGrpc.MyServiceBlockingStub.class)` and Spring injects the stub bean bound to the channel named in `spring.grpc.client.channel.<name>.*`. On Boot 4.0 or earlier with net.devh, annotate a stub field with `@GrpcClient("channel-name")` instead, bound to `grpc.client.<name>.*`. Prefer a blocking stub for unary request/response, an async stub for streaming, and always apply `withDeadlineAfter` on each call rather than trusting a global default.
+
+**Q: What exactly does Spring Boot 4.1 add for gRPC that Boot 4.0 didn't have?**
+**Short:** Boot 4.1 ships gRPC starters that auto-configure the server and client without a separate dependency.
+Boot 4.1 ships `spring-boot-starter-grpc-server` and `spring-boot-starter-grpc-client`, which auto-configure a Netty-backed server (or, alongside a Servlet starter, expose gRPC over HTTP/2 through the servlet container), register `@GrpcService` beans, and configure channels from `spring.grpc.*` properties — all built into Boot itself. Before 4.1 you had to add the standalone `spring-grpc-*-spring-boot-starter` dependency (the Spring gRPC project, pre-1.1) to get any of that; the underlying `org.springframework.grpc` classes are the same, only the delivery and auto-configuration moved into Boot.
+
+**Q: How does `@ImportGrpcClients` differ from just declaring a `@Bean` for a stub?**
+**Short:** It scans for generated stub types and registers each as a bean bound to a named channel, no boilerplate method.
+`@ImportGrpcClients(target = "name", types = ...)` registers one bean per listed stub type, each bound to the channel named by `target` (or, with `basePackages`, scans for every generated stub under a package) — no `@Bean` factory method needed per stub. Declaring the stub yourself in a `@Configuration` class still works and is useful when the channel needs per-stub customization beyond what `GrpcChannelBuilderCustomizer` covers, but for the common case `@ImportGrpcClients` is the one-line replacement for that boilerplate.
+
+**Q: How do you customize a gRPC client channel's transport settings under Boot 4.1 native gRPC?**
+**Short:** Register a GrpcChannelBuilderCustomizer bean scoped to the channel name, instead of touching the channel directly.
+Register a `GrpcChannelBuilderCustomizer<?>` bean, typically built with the static `GrpcChannelBuilderCustomizer.matching("channel-name", builder -> ...)` helper, so it only applies to the named channel's `ManagedChannelBuilder`. This is where you attach a `BasicAuthenticationInterceptor`, tune keepalive, or set a load-balancing policy — properties in `spring.grpc.client.channel.<name>.*` cover the common cases (target, SSL, message size), and the customizer covers what a property can't express.
+
+**Q: How do you test a `@GrpcService` without opening a real network port?**
+**Short:** Add @AutoConfigureTestGrpcTransport to a @SpringBootTest so the stub talks over an in-process channel.
+Add `@AutoConfigureTestGrpcTransport` alongside `@SpringBootTest` and `@ImportGrpcClients`; it swaps the real network channels for in-process ones, so the test injects a working stub with no port binding and no risk of a CI "address already in use" flake. It's the gRPC equivalent of `MockMvc` skipping the servlet container. For a test that must exercise the real transport (TLS, a load balancer target), set `spring.grpc.server.port=0` and read the bound port with `@LocalGrpcServerPort` instead.
 
 **Q: What are the four gRPC streaming modes and their Spring method shapes?**
 **Short:** Unary, server-streaming, client-streaming, and bidirectional-streaming, each with a distinct method shape.
@@ -876,16 +980,18 @@ Choose gRPC for internal service-to-service traffic where a strict typed contrac
 
 1. Set `withDeadlineAfter` on every client call and a channel-level `deadline` backstop; an unbounded internal RPC is never acceptable.
 2. Terminate every `StreamObserver` exactly once — `onCompleted()` on success, `onError()` on failure — or the peer hangs until its deadline.
-3. Centralize error mapping in one `@GrpcAdvice`/`@GrpcExceptionHandler` class and always include a catch-all so nothing degrades to `UNKNOWN`.
+3. Centralize error mapping in one place and always include a catch-all so nothing degrades to `UNKNOWN` — a `@GrpcAdvice`/`@GrpcExceptionHandler` class on net.devh, or a shared `ServerInterceptor` on Boot 4.1 native, which has no advice-style equivalent.
 4. Put cross-cutting concerns in global interceptors, not method bodies: observation at order 0, auth at 100, authorization at 150, logging at 200, metrics innermost.
 5. Carry identity, trace, and tenant in `Metadata` and the gRPC `Context`; never smuggle them into the Protobuf message.
 6. Authenticate in an interceptor, authorize with `@Secured`/`@PreAuthorize` — keep the "who" and "may you" checks separate, mapping to `UNAUTHENTICATED` and `PERMISSION_DENIED`.
-7. Register `ObservationGrpcServerInterceptor` and `ObservationGrpcClientInterceptor` so `traceparent` propagates across the gRPC call graph into your tracing backend.
+7. Register `ObservationGrpcServerInterceptor` (still manual under Boot 4.1 native) alongside the auto-configured `ObservationGrpcClientInterceptor` so `traceparent` propagates across the whole gRPC call graph into your tracing backend.
 8. Prefer pagination or server streaming over raising `max-inbound-message-size`; a large limit lets one call OOM the process.
 9. Wrap any executor/async offload with `Context.current().wrap(...)` (and a context-propagating executor for Micrometer) so security and trace context survive the thread hop.
 10. Keep `.proto` field numbers stable and follow the schema-evolution rules from [gRPC & Protobuf (pure Java)](../../java/grpc_protobuf/grpc_protobuf.md); never renumber or reuse a field tag.
 11. Enable server reflection only where `grpcurl` debugging is needed; disable it in hardened production to avoid exposing the service catalog.
-12. Pin `protoc`, `protoc-gen-grpc-java`, and the runtime `io.grpc` versions together to avoid generated-vs-runtime incompatibilities.
+12. Pin `protoc`, `protoc-gen-grpc-java`, and the runtime `io.grpc` versions together to avoid generated-vs-runtime incompatibilities — the Boot-managed `io.github.ascopes:protobuf-maven-plugin` does this for you when the project is parented on `spring-boot-starter-parent`.
+13. Start new projects on the Boot 4.1 native starters (`spring-boot-starter-grpc-server`/`-client`); reach for net.devh only when the project is pinned to Boot 4.0 or earlier.
+14. Test with `@AutoConfigureTestGrpcTransport` and `@ImportGrpcClients` for in-process gRPC tests — no bound port, no CI flake from a stale port still in `TIME_WAIT`.
 
 ---
 
@@ -1009,3 +1115,4 @@ During a later incident, the pricing engine hit a 4-second GC pause. Because the
 - [Spring WebFlux](../spring_webflux/spring_webflux.md) — the reactive model behind `Mono`/`Flux` gRPC stubs
 - [Observability & Tracing](../observability_and_tracing/observability_and_tracing.md) — Micrometer Observation, W3C `traceparent`, OTLP export
 - [Spring Security Architecture](../spring_security_architecture/spring_security_architecture.md) — `FilterChainProxy`, authentication vs authorization, method security
+- [Spring Testing](../spring_testing/spring_testing.md) — test slices, `@SpringBootTest`, where `@AutoConfigureTestGrpcTransport` fits alongside the others

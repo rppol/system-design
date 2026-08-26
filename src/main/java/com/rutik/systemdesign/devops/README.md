@@ -4,12 +4,13 @@ A comprehensive, one-stop reference for mastering **DevOps, SRE, Cloud, and Plat
 
 > **No runtime application** — all content is Markdown with executable-shaped YAML / HCL / Dockerfile / Bash / PromQL / Rego / Go code blocks.
 
-> **PARKED — to be done later (owner-set 2026-07-29).** This section is out of scope for the
-> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
-> re-opens it. **Parked, not cancelled**: the content is untouched, complete, and still ships
-> in the game. What is paused is **27 audit units (none started)** and **650 Q&As awaiting
-> one-line MCQ summaries**. Do not dispatch audit or migration work here in the meantime.
-> Scope table: root `CLAUDE.md` -> "Deferred / To Be Planned".
+> **Audited and migrated (2026-08-04).** The repo-wide factual audit is **complete for all 41
+> modules** (~1,560 claims verified, ~215 corrections — commits `7f98bf4`, `9462731`,
+> `ecd9414`), and every one of the section's **650 module Q&As carries an authored
+> `**Short:**` MCQ summary** (commit `6ce35a6`). The 13 case studies and 7 cross-cutting
+> primitives were audited too, and re-audited 2026-08-05. This section is the most
+> version-exposed in the repo: see `CLAUDE.md` -> "What the audit found" before writing here,
+> and audit a claim before writing a `**Short:**` line against it.
 
 ---
 
@@ -96,7 +97,7 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | 6 — Observability & SRE | Advanced | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir/Cortex, cardinality |
 | 30 | [observability_logging](observability_logging/observability_logging.md) | 6 — Observability & SRE | Intermediate | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
 | 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation — plus 1 deep-dive sub-file |
-| 32 | [visualization_and_alerting](visualization_and_alerting/visualization_and_alerting.md) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty/OpsGenie, alert fatigue, SLO burn-rate alerts |
+| 32 | [visualization_and_alerting](visualization_and_alerting/visualization_and_alerting.md) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty / Jira Service Management Operations, alert fatigue, SLO burn-rate alerts |
 | 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | 6 — Observability & SRE | Advanced | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
 | 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | 6 — Observability & SRE | Intermediate | Incident command, severity levels, on-call rotations, blameless postmortems, runbooks, MTTR/MTTD |
 | 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | 7 — DevSecOps & Reliability | Advanced | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels, secret scanning |
@@ -219,6 +220,7 @@ kubernetes_storage_and_state
   kubernetes_storage_and_state.md  -
 kubernetes_scheduling_and_autoscaling
   kubernetes_scheduling_and_autoscaling.md  senior
+  device_scheduling_and_dra.md  senior
 kubernetes_security
   kubernetes_security.md  senior
 helm_and_package_management
@@ -252,7 +254,8 @@ serverless_and_faas
 cloud_networking_and_cdn
   cloud_networking_and_cdn.md  senior
 cloud_cost_optimization_finops
-  cloud_cost_optimization_finops.md  -
+  cloud_cost_optimization_finops.md  senior, principal
+  gpu_and_ai_finops.md  senior, principal
 observability_metrics_prometheus
   observability_metrics_prometheus.md  senior
 observability_logging
@@ -267,15 +270,18 @@ sre_principles_and_slos
 incident_management_and_oncall
   incident_management_and_oncall.md  senior
 devsecops_and_supply_chain_security
-  devsecops_and_supply_chain_security.md  -
+  devsecops_and_supply_chain_security.md  senior
+  regulated_supply_chain.md  senior
 policy_as_code_and_compliance
   policy_as_code_and_compliance.md  -
 disaster_recovery_and_resilience
   disaster_recovery_and_resilience.md  -
 platform_engineering_and_idp
-  platform_engineering_and_idp.md  -
+  platform_engineering_and_idp.md  senior, principal
+  ai_workloads_and_agent_operations.md  senior, principal
 ml_platform_and_gpu_infrastructure
-  ml_platform_and_gpu_infrastructure.md  -
+  ml_platform_and_gpu_infrastructure.md  senior, principal
+  gpu_scheduling_and_inference_ops.md  senior, principal
 event_streaming_operations
   event_streaming_operations.md  -
 performance_and_load_testing
@@ -304,7 +310,7 @@ This section is exhaustive by design — 41 modules from Linux/OS internals and 
 The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-phase-learning-path). Use it for genuine mastery: Linux/OS and Git foundations, the full Kubernetes stack (storage, Helm, Operators/CRDs), every CI/CD and IaC alternative, GCP/Azure alongside AWS, FinOps, the complete DevSecOps & Reliability phase, and the Specialized Platforms electives (GPU/MLOps, event streaming, performance testing). Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (22 modules)
+### Senior Path (26 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -314,7 +320,7 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 | 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | module page only |
 | 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | module page only |
 | 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | module page only |
-| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | module page only |
+| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 files |
 | 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | module page only |
 | 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | module page only |
 | 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | module page only |
@@ -325,13 +331,17 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 | 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) | module page only |
 | 26 | [serverless_and_faas](serverless_and_faas/serverless_and_faas.md) | module page only |
 | 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | module page only |
+| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 2 files |
 | 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | module page only |
 | 30 | [observability_logging](observability_logging/observability_logging.md) | module page only |
 | 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 2 files |
 | 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | module page only |
 | 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | module page only |
+| 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | 2 files |
+| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 2 files |
+| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 2 files |
 
-**Not in this path** (19 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `cloud_cost_optimization_finops`, `visualization_and_alerting`, `devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `platform_engineering_and_idp`, `ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`
+**Not in this path** (15 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `visualization_and_alerting`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `event_streaming_operations`, `performance_and_load_testing`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview** actually probes, anchored on the phases this section already flags as highest-yield (the Kubernetes core, CI/CD & GitOps, and Observability & SRE). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -347,6 +357,25 @@ A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview*
 | SRE & Incident Response | Error-budget math and incident command/blameless postmortems separate senior candidates from mid — a near-guaranteed technical-behavioral hybrid question |
 
 ---
+
+
+---
+
+## Principal Path
+
+The judgment cut: which approach at what cost, what fails and how you would know, what you would tell a team NOT to do. Roughly half of this list is material the Senior path never sees — it is a different cut, not a deeper one.
+
+<!-- study-path-table principal -->
+### Principal Path (3 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 2 files |
+| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 2 files |
+| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 2 files |
+
+**Not in this path** (38 of 41, Full Path only): `linux_and_os_fundamentals`, `shell_scripting_and_automation`, `networking_for_devops`, `version_control_and_git_workflows`, `containers_and_docker`, `container_runtimes_and_oci`, `kubernetes_architecture`, `kubernetes_workloads_and_objects`, `kubernetes_networking`, `kubernetes_storage_and_state`, `kubernetes_scheduling_and_autoscaling`, `kubernetes_security`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `ci_cd_fundamentals`, `ci_cd_platforms`, `deployment_strategies`, `gitops_argocd_flux`, `artifact_and_registry_management`, `infrastructure_as_code_terraform`, `terraform_advanced_and_alternatives`, `configuration_management`, `secrets_management`, `cloud_fundamentals_and_aws`, `gcp_and_azure_essentials`, `serverless_and_faas`, `cloud_networking_and_cdn`, `observability_metrics_prometheus`, `observability_logging`, `observability_tracing_and_otel`, `visualization_and_alerting`, `sre_principles_and_slos`, `incident_management_and_oncall`, `devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `event_streaming_operations`, `performance_and_load_testing`
+<!-- /study-path-table -->
 
 ## Knowledge-Question Map
 
@@ -412,7 +441,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | Managed relational DB | RDS / Aurora | Cloud SQL / AlloyDB | Azure SQL / Flexible Server |
 | Message queue | SQS / SNS | Pub/Sub | Service Bus |
 | CDN | CloudFront | Cloud CDN | Azure CDN / Front Door |
-| Infra-as-code native | CloudFormation / CDK | Deployment Manager / Config Connector | ARM / Bicep |
+| Infra-as-code native | CloudFormation / CDK | Infrastructure Manager / Config Connector | ARM / Bicep |
 | Managed Prometheus | AMP | Managed Service for Prometheus | Azure Monitor managed Prometheus |
 
 ---
@@ -430,7 +459,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 2. **How does a canary deployment shift traffic?** A controller (Argo Rollouts/Flagger) creates a canary ReplicaSet, points a weighted route (mesh/ingress) at it, queries metrics against a success threshold, and either promotes (100%) or aborts (0%) — all declaratively.
 
 ### Infrastructure as Code
-1. **What is Terraform state and why does it matter?** State maps real resources to config; `plan` diffs desired config against state, not against the live cloud. Stale/lost state causes resource orphaning or destructive re-creation. Use a remote backend (S3 + DynamoDB lock) so the team shares one locked state.
+1. **What is Terraform state and why does it matter?** State maps real resources to config; `plan` diffs desired config against state, not against the live cloud. Stale/lost state causes resource orphaning or destructive re-creation. Use a remote backend (S3 with `use_lockfile = true` for S3-native locking) so the team shares one locked state.
 2. **How do you do a zero-downtime resource replacement?** `create_before_destroy` lifecycle, or refactor to avoid the replacing attribute; for things like an RDS instance, replacement is destructive — plan a migration, not an apply.
 
 ### Observability & SRE
@@ -486,50 +515,50 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 ### Module File Status
 
-| # | Module | Phase | Chunk | Status | Q&A Target |
+| # | Module | Phase | Chunk | Status | Q&A Floor |
 |---|--------|-------|-------|--------|-----------|
-| 1 | `linux_and_os_fundamentals/linux_and_os_fundamentals.md` | 1 | 1 | done | 12 |
-| 2 | `shell_scripting_and_automation/shell_scripting_and_automation.md` | 1 | 1 | done | 10 |
-| 3 | `networking_for_devops/networking_for_devops.md` | 1 | 1 | done | 12 |
-| 4 | `version_control_and_git_workflows/version_control_and_git_workflows.md` | 1 | 1 | done | 10 |
-| 5 | `containers_and_docker/containers_and_docker.md` | 2 | 2 | done | 12 |
-| 6 | `container_runtimes_and_oci/container_runtimes_and_oci.md` | 2 | 2 | done | 12 |
-| 7 | `kubernetes_architecture/kubernetes_architecture.md` | 2 | 2 | done | 15 |
-| 8 | `kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md` | 2 | 2 | done | 12 |
-| 9 | `kubernetes_networking/kubernetes_networking.md` | 2 | 2 | done | 15 |
-| 10 | `kubernetes_storage_and_state/kubernetes_storage_and_state.md` | 2 | 3 | done | 12 |
-| 11 | `kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md` | 2 | 3 | done | 12 |
-| 12 | `kubernetes_security/kubernetes_security.md` | 2 | 3 | done | 15 |
-| 13 | `helm_and_package_management/helm_and_package_management.md` | 2 | 3 | done | 10 |
-| 14 | `kubernetes_operators_and_crds/kubernetes_operators_and_crds.md` | 2 | 3 | done | 12 |
-| 15 | `ci_cd_fundamentals/ci_cd_fundamentals.md` | 3 | 4 | done | 12 |
-| 16 | `ci_cd_platforms/ci_cd_platforms.md` | 3 | 4 | done | 10 |
-| 17 | `deployment_strategies/deployment_strategies.md` | 3 | 4 | done | 12 |
-| 18 | `gitops_argocd_flux/gitops_argocd_flux.md` | 3 | 4 | done | 12 |
-| 19 | `artifact_and_registry_management/artifact_and_registry_management.md` | 3 | 4 | done | 10 |
-| 20 | `infrastructure_as_code_terraform/infrastructure_as_code_terraform.md` | 4 | 5 | done | 15 |
-| 21 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md` | 4 | 5 | done | 12 |
-| 22 | `configuration_management/configuration_management.md` | 4 | 5 | done | 10 |
-| 23 | `secrets_management/secrets_management.md` | 4 | 5 | done | 12 |
-| 24 | `cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md` | 5 | 6 | done | 12 |
-| 25 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | 5 | 6 | done | 10 |
-| 26 | `serverless_and_faas/serverless_and_faas.md` | 5 | 6 | done | 12 |
-| 27 | `cloud_networking_and_cdn/cloud_networking_and_cdn.md` | 5 | 6 | done | 12 |
-| 28 | `cloud_cost_optimization_finops/cloud_cost_optimization_finops.md` | 5 | 6 | done | 10 |
-| 29 | `observability_metrics_prometheus/observability_metrics_prometheus.md` | 6 | 7 | done | 15 |
-| 30 | `observability_logging/observability_logging.md` | 6 | 7 | done | 12 |
-| 31 | `observability_tracing_and_otel/observability_tracing_and_otel.md` | 6 | 7 | done | 12 |
-| 31a | `observability_tracing_and_otel/opentelemetry_deep_dive.md` | 6 | 7 | done | 36 |
-| 32 | `visualization_and_alerting/visualization_and_alerting.md` | 6 | 7 | done | 10 |
-| 33 | `sre_principles_and_slos/sre_principles_and_slos.md` | 6 | 7 | done | 15 |
-| 34 | `incident_management_and_oncall/incident_management_and_oncall.md` | 6 | 7 | done | 12 |
-| 35 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | 7 | 8 | done | 12 |
-| 36 | `policy_as_code_and_compliance/policy_as_code_and_compliance.md` | 7 | 8 | done | 12 |
-| 37 | `disaster_recovery_and_resilience/disaster_recovery_and_resilience.md` | 7 | 8 | done | 12 |
-| 38 | `platform_engineering_and_idp/platform_engineering_and_idp.md` | 7 | 8 | done | 10 |
-| 39 | `ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` | 8 | 11 | done | 15 |
-| 40 | `event_streaming_operations/event_streaming_operations.md` | 8 | 11 | done | 12 |
-| 41 | `performance_and_load_testing/performance_and_load_testing.md` | 8 | 11 | done | 12 |
+| 1 | `linux_and_os_fundamentals/linux_and_os_fundamentals.md` | 1 | 1 | done | 15 |
+| 2 | `shell_scripting_and_automation/shell_scripting_and_automation.md` | 1 | 1 | done | 15 |
+| 3 | `networking_for_devops/networking_for_devops.md` | 1 | 1 | done | 15 |
+| 4 | `version_control_and_git_workflows/version_control_and_git_workflows.md` | 1 | 1 | done | 15 |
+| 5 | `containers_and_docker/containers_and_docker.md` | 2 | 2 | done | 15 |
+| 6 | `container_runtimes_and_oci/container_runtimes_and_oci.md` | 2 | 2 | done | 15 |
+| 7 | `kubernetes_architecture/kubernetes_architecture.md` | 2 | 2 | done | 18 |
+| 8 | `kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md` | 2 | 2 | done | 15 |
+| 9 | `kubernetes_networking/kubernetes_networking.md` | 2 | 2 | done | 18 |
+| 10 | `kubernetes_storage_and_state/kubernetes_storage_and_state.md` | 2 | 3 | done | 15 |
+| 11 | `kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md` | 2 | 3 | done | 15 |
+| 12 | `kubernetes_security/kubernetes_security.md` | 2 | 3 | done | 18 |
+| 13 | `helm_and_package_management/helm_and_package_management.md` | 2 | 3 | done | 15 |
+| 14 | `kubernetes_operators_and_crds/kubernetes_operators_and_crds.md` | 2 | 3 | done | 15 |
+| 15 | `ci_cd_fundamentals/ci_cd_fundamentals.md` | 3 | 4 | done | 15 |
+| 16 | `ci_cd_platforms/ci_cd_platforms.md` | 3 | 4 | done | 15 |
+| 17 | `deployment_strategies/deployment_strategies.md` | 3 | 4 | done | 15 |
+| 18 | `gitops_argocd_flux/gitops_argocd_flux.md` | 3 | 4 | done | 15 |
+| 19 | `artifact_and_registry_management/artifact_and_registry_management.md` | 3 | 4 | done | 15 |
+| 20 | `infrastructure_as_code_terraform/infrastructure_as_code_terraform.md` | 4 | 5 | done | 18 |
+| 21 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md` | 4 | 5 | done | 15 |
+| 22 | `configuration_management/configuration_management.md` | 4 | 5 | done | 15 |
+| 23 | `secrets_management/secrets_management.md` | 4 | 5 | done | 15 |
+| 24 | `cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md` | 5 | 6 | done | 15 |
+| 25 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | 5 | 6 | done | 15 |
+| 26 | `serverless_and_faas/serverless_and_faas.md` | 5 | 6 | done | 15 |
+| 27 | `cloud_networking_and_cdn/cloud_networking_and_cdn.md` | 5 | 6 | done | 15 |
+| 28 | `cloud_cost_optimization_finops/cloud_cost_optimization_finops.md` | 5 | 6 | done | 15 |
+| 29 | `observability_metrics_prometheus/observability_metrics_prometheus.md` | 6 | 7 | done | 18 |
+| 30 | `observability_logging/observability_logging.md` | 6 | 7 | done | 15 |
+| 31 | `observability_tracing_and_otel/observability_tracing_and_otel.md` | 6 | 7 | done | 15 |
+| 31a | `observability_tracing_and_otel/opentelemetry_deep_dive.md` | 6 | 7 | done | 15 |
+| 32 | `visualization_and_alerting/visualization_and_alerting.md` | 6 | 7 | done | 15 |
+| 33 | `sre_principles_and_slos/sre_principles_and_slos.md` | 6 | 7 | done | 18 |
+| 34 | `incident_management_and_oncall/incident_management_and_oncall.md` | 6 | 7 | done | 15 |
+| 35 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | 7 | 8 | done | 15 |
+| 36 | `policy_as_code_and_compliance/policy_as_code_and_compliance.md` | 7 | 8 | done | 15 |
+| 37 | `disaster_recovery_and_resilience/disaster_recovery_and_resilience.md` | 7 | 8 | done | 15 |
+| 38 | `platform_engineering_and_idp/platform_engineering_and_idp.md` | 7 | 8 | done | 15 |
+| 39 | `ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` | 8 | 11 | done | 18 |
+| 40 | `event_streaming_operations/event_streaming_operations.md` | 8 | 11 | done | 15 |
+| 41 | `performance_and_load_testing/performance_and_load_testing.md` | 8 | 11 | done | 15 |
 
 ### Case Study & Cross-Cutting File Status
 
@@ -564,7 +593,7 @@ MODULE TEMPLATE — 14-section canonical scheme (matches the rest of the repo):
   ## 2. Intuition     (> blockquote analogy + Mental model + Why it matters + Key insight)
   ## 3. Core Principles
   ## 4. Types / Architectures / Strategies
-  ## 5. Architecture Diagrams            (ASCII art only — no Mermaid, no images)
+  ## 5. Architecture Diagrams            (Mermaid preferred; ASCII only for grids/masks)
   ## 6. How It Works — Detailed Mechanics   (real YAML/HCL/Bash/PromQL/Go, concrete numbers)
   ## 7. Real-World Examples
   ## 8. Tradeoffs                        (comparison tables)
@@ -573,20 +602,39 @@ MODULE TEMPLATE — 14-section canonical scheme (matches the rest of the repo):
   ## 11. Technologies & Tools            (comparison table)
   ## 12. Interview Questions with Answers  (bold Q, plain A; targets in tables above)
   ## 13. Best Practices
-  ## 14. Case Study   (scenario + ASCII diagram + real code + BROKEN/FIX + metrics + Discussion Qs)
+  ## 14. Case Study   (scenario + diagram + real code + BROKEN/FIX + metrics + Discussion Qs)
+
+  The page is named for its folder — `<module>/<module>.md`. A `README.md` below the section
+  root is NOT a module page and is invisible to `extract.py`.
 
 QUALITY BAR:
-  - 700-1000 lines per module README
-  - Q&A minimum per the tables above (15 for: kubernetes_architecture, kubernetes_networking,
-    kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus,
-    sre_principles_and_slos)
+  - 700-1000 lines per module page. Measured 2026-08-25: 30 of 41 modules are under 700, so
+    treat this as the target for a NEW deep module, not as a claim about the current section.
+  - Q&A floor is 15 per module, repo-wide and hard (root CLAUDE.md). Seven deep modules aim
+    for 18+: kubernetes_architecture, kubernetes_networking, kubernetes_security,
+    infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos,
+    ml_platform_and_gpu_infrastructure. CLAUDE.md's list is the authority; the "Q&A Target"
+    column in the status table above restates it and nothing else.
+  - Every Q&A carries an authored **Short:** line as the FIRST non-blank line of its answer
+    (15-220 chars, self-contained, no code fence, no list). If you change what an answer says,
+    update its **Short:** in the same edit — a stale one ships as the CORRECT MCQ option.
+  - Version-sensitive claims carry a dated version anchor blockquote under the H1. Pattern:
+    observability_tracing_and_otel/opentelemetry_deep_dive.md line 3. This section is the
+    repo's most version-exposed; the anchor is what makes the next audit cheap.
   - At least 1 BROKEN->FIX block in §10 and at least 1 in §14
   - AWS as the default cloud; GCP/Azure in comparison tables (see §5 mapping)
-  - Concrete numbers everywhere (etcd 8GB default quota, HPA 15s sync, Prometheus 15s scrape /
-    2h block, K8s 110 pods/node default, cgroup v2 memory.high, etc.) — no "a few"/"some"
-  - ASCII diagrams in fenced code blocks; no emojis; --- between every top-level section
+  - Concrete numbers everywhere (etcd 2 GiB default --quota-backend-bytes, HPA 15s sync,
+    Prometheus 1m default scrape_interval / 2h block, K8s 110 pods/node default,
+    cgroup v2 memory.high, etc.) — no "a few"/"some". VERIFY the number before writing it:
+    the audit's largest class was wrong numbers in modules nobody suspected.
+  - Mermaid diagrams in fenced mermaid blocks, One-Dark classDef on every node, flowchart LR
+    default, rounded shapes, short labels wrapped with <br/>. Validate with
+    `node scripts/check_render.mjs <file>` — a fence that fails to parse takes the deploy red.
+    ASCII stays only for constraint grids, alignment-critical maps and vector geometry.
+  - No emojis; --- between every top-level section
   - Em-dash in §6 heading: "## 6. How It Works — Detailed Mechanics"
-  - Cross-link to other sections via relative paths: ../backend/..., ../database/..., ../hld/...
+  - Cross-link to other sections via relative paths, always to the PAGE not the directory:
+    ../backend/x/x.md, ../database/x/x.md, ../hld/x/x.md
 
 CASE STUDY TEMPLATE — 11-section principal template (matches llm/ml):
   Reference file: ../llm/case_studies/design_gpu_inference_platform.md
@@ -597,12 +645,19 @@ CASE STUDY TEMPLATE — 11-section principal template (matches llm/ml):
   900-1100 lines; min 4 cross-refs to cross_cutting/; real code in §4; broken-then-fix once;
   §6 names actual companies; §9 has quantified impact ($/users/SLA).
 
-MAINTENANCE RULE when completing a chunk:
-  1. Flip Status "pending" -> "done" for each completed file in the tables above
-  2. Advance the NEXT UP pointer at the top of §8
-  3. Update case_studies/case_studies.md if new case studies were added
-  4. Update root README.md and CLAUDE.md counts if the total changed
-  5. Update the devops-section.md memory file if structure changed
+MAINTENANCE RULE when adding a file:
+  1. Add the file's line to the <!-- study-paths --> block in THIS README, tagging the tiers
+     it belongs to ("-" = Full path only), IN THE SAME COMMIT. A file on disk missing from the
+     block — or listed there and absent from disk — is FATAL under extract.py --strict.
+     Content files carry NO structural metadata; never put a study-paths block in a module page.
+  2. Add a new MODULE dir to STUDY_ORDER.devops in game/app.js at its phase position. A new
+     deep-dive SUB-FILE needs no entry — it groups under its parent via splitModulePath().
+  3. Add a row to the tables above
+  4. Update case_studies/case_studies.md if new case studies were added
+  5. Update root README.md and CLAUDE.md counts if the total changed
+  6. Run `python3 game/extract.py --write-paths` (regenerates the tier tables between the
+     <!-- study-path-table --> markers — never hand-edit those), then `--strict`, then the
+     full scripts/build_banks.sh, whose own verifier runs AFTER --strict and can still fail
 ```
 
 ---

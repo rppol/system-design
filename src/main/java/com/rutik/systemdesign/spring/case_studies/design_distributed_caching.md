@@ -14,6 +14,34 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 
 ---
 
+## Intuition
+
+Think of the two-level cache as a coffee shop's counter versus its walk-in fridge versus
+the wholesale supplier. The counter (L1 Caffeine) holds only the handful of drinks made in
+the last few minutes — no network hop, the barista just reaches for it, and it can only
+hold so much before something gets thrown out to make room. The walk-in fridge (L2 Redis)
+holds far more, shared by every register in the store, but getting to it costs a short
+walk. The supplier (the database) can produce anything, but a delivery takes real time and
+the supplier was never sized to restock the counter one drink at a time for every customer
+in the city.
+
+The mental model that matters here is capacity planning, not correctness: the whole point
+of the design is that the database is provisioned for the *miss* rate, not the request
+rate. At 85% hit rate the database only ever expects to see 15% of total traffic. This
+means a cache outage is not "things get 5ms slower" — it is the full request rate landing
+on infrastructure sized for a fraction of it, which is why §1 lists "database survives L2
+outage" as a hard non-functional requirement, not a stretch goal.
+
+The second idea worth internalizing is why there are *two* levels rather than one bigger
+Redis. Redis going down is not rare enough to treat as a tail risk — failovers happen,
+networks partition, someone fat-fingers a destructive command. L1 Caffeine's entire job is
+to survive exactly that window: it lives inside each JVM, needs no network, and keeps
+serving the hot half of traffic while Redis recovers. It is not there merely to shave off
+Redis's ~1ms latency (which it also does); it is there so the database is still alive when
+Redis comes back.
+
+---
+
 ## 1. Requirements Clarification
 
 **Functional requirements:**
@@ -134,6 +162,8 @@ flowchart TD
 | `CacheInvalidationListener` | `MessageListener` on "cache-invalidation" channel; evicts Caffeine L1 entries |
 | `CacheWarmingRunner` | `ApplicationRunner`: pre-loads top 10,000 products before readiness probe passes |
 | `CacheMetricsRegistrar` | Registers Micrometer `Gauge` for L1 hit rate, size, eviction count |
+| `ProductExistenceFilter` | Redisson Bloom filter (§4.9); rejects enumerable IDs that were never created in O(1) |
+| `DistributedLoadCoordinator` | Optional cross-node loader lock (§4.11) for the rare case where 5 concurrent DB loads is still too many |
 
 ---
 
@@ -393,6 +423,181 @@ passes (assuming the K8s readiness probe polls `/actuator/health/readiness`). Th
 the instance is not included in load balancer rotation until warming is complete, preventing
 cold-start stampedes after rolling deployments.
 
+### 4.8 BROKEN/FIX — Cache Penetration via Uncached Exceptions
+
+```java
+// BROKEN (this is literally §4.3's getProduct): @Cacheable never caches an exception, so
+// a request for an ID that does not exist bypasses the cache on EVERY call -- a scraper
+// enumerating IDs, or a bug retrying a typo'd ID, hits the DB every single time
+@Cacheable(value = "products", key = "#productId", sync = true)
+public Product getProduct(String productId) {
+    return productRepository.findById(productId)
+        .orElseThrow(() -> new ProductNotFoundException(productId)); // exception -> never cached
+}
+```
+
+```java
+// FIX: cache a sentinel for the miss case; unwrap and throw at the public boundary so
+// callers see the same contract, but a repeated miss now costs one L1/L2 lookup instead
+// of a DB round-trip
+private static final Product MISS = new Product("__MISS__", null, null);
+
+@Cacheable(value = "products", key = "#productId", sync = true)
+public Product getProductOrSentinel(String productId) {
+    return productRepository.findById(productId).orElse(MISS);
+}
+
+public Product getProduct(String productId) {
+    Product p = getProductOrSentinel(productId);
+    if (p == MISS) throw new ProductNotFoundException(productId);
+    return p;
+}
+// register "products" misses with a short entryTtl variant, or accept the 1h default --
+// a non-existent ID becoming a real product moments after being probed is rare
+```
+
+### 4.9 Bloom Filter for Enumerable IDs
+
+Sentinel-caching (§4.8) still costs one L1/L2 round-trip per miss. For an ID space that is
+enumerable (sequential integers, guessable slugs), a Bloom filter rejects a definitely-absent
+ID in O(1) before touching any cache tier at all:
+
+```java
+@Component
+public class ProductExistenceFilter {
+
+    private final RedissonClient redisson;
+
+    public boolean mightExist(String productId) {
+        RBloomFilter<String> bf = redisson.getBloomFilter("products-bloom");
+        return bf.contains(productId); // O(1); false positives possible, false negatives never
+    }
+}
+// Populated once at startup from the full catalog, and incrementally on every product
+// creation: bf.add(productId). A negative here means the DB (and both cache tiers) are
+// never even reached for an ID that was never created -- the strongest defense against
+// ID-enumeration scraping, because the false-positive rate is tunable (§10) and false
+// negatives are structurally impossible.
+```
+
+### 4.10 Cache Metrics Registrar
+
+```java
+@Component
+public class CacheMetricsRegistrar {
+
+    public CacheMetricsRegistrar(CaffeineCacheManager caffeineCacheManager,
+                                  MeterRegistry registry) {
+        for (String name : caffeineCacheManager.getCacheNames()) {
+            var nativeCache = ((CaffeineCache) caffeineCacheManager.getCache(name))
+                .getNativeCache();
+            CaffeineCacheMetrics.monitor(registry, nativeCache, name);
+            // registers cache.gets{result=hit|miss}, cache.evictions, cache.size,
+            // cache.eviction.weight -- all tagged with cache=<name>
+        }
+    }
+}
+```
+
+`CaffeineCacheMetrics.monitor()` throws unless the underlying `Caffeine` builder called
+`.recordStats()` — §4.1 already does, but it is easy to drop when copy-pasting a new cache
+config, and the failure is a startup exception, not a silently-empty dashboard. Caffeine
+only tracks hit/miss counters when explicitly asked because the bookkeeping has a real
+per-access cost; it is not free instrumentation.
+
+### 4.11 Distributed Lock for Cross-Node Stampede Prevention
+
+§11 explains why `@Cacheable(sync=true)` only coalesces loaders *within one JVM* — with 5
+instances, an expired hot key still produces 5 concurrent DB loads, not 500. When even that
+is too many, wrap the loader in an explicit distributed lock:
+
+```java
+@Component
+public class DistributedLoadCoordinator {
+
+    private final RedissonClient redisson;
+
+    public <T> T loadWithLock(String lockKey, Supplier<T> dbLoader) {
+        RLock lock = redisson.getLock("load-lock:" + lockKey);
+        try {
+            if (lock.tryLock(2, 10, TimeUnit.SECONDS)) {  // wait up to 2s, hold up to 10s
+                try {
+                    return dbLoader.get();
+                } finally {
+                    lock.unlock();
+                }
+            }
+            // Did not get the lock -- another instance is loading. Caller re-reads from
+            // cache on its next call rather than falling through to the DB itself.
+            Thread.sleep(50);
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted acquiring load lock", e);
+        }
+    }
+}
+```
+
+Use this only when the DB genuinely cannot take N-instances concurrent loaders (N = 5
+here, usually fine as-is). It adds a Redis round-trip to *every* cache miss, not just
+contested ones — measure before adopting it; 5 concurrent loaders on a rare stampede is
+often a cheaper cost than the added complexity and the new failure mode (a stuck lock).
+
+### 4.12 Redis Connection Configuration (Lettuce + Redisson)
+
+`RedisCacheManager` (§4.1) and `ProductExistenceFilter`/`DistributedLoadCoordinator`
+(§4.9, §4.11) use two separate clients against the same Redis instance — Lettuce for the
+cache abstraction, Redisson for Bloom filter and locking primitives Lettuce does not
+provide. Both need explicit pool sizing; leaving either on its single-connection default
+undersizes it the moment §2's 20k req/sec traffic lands.
+
+```java
+@Configuration
+public class RedisConnectionConfig {
+
+    @Bean
+    public LettuceConnectionFactory redisConnectionFactory(
+            @Value("${spring.data.redis.host}") String host,
+            @Value("${spring.data.redis.port}") int port) {
+        LettucePoolingClientConfiguration poolConfig = LettucePoolingClientConfiguration
+            .builder()
+            .poolConfig(buildPoolConfig(16, 16, 4))   // maxTotal, maxIdle, minIdle
+            .commandTimeout(Duration.ofMillis(200))
+            .build();
+        return new LettuceConnectionFactory(
+            new RedisStandaloneConfiguration(host, port), poolConfig);
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RedissonClient redissonClient(
+            @Value("${spring.data.redis.host}") String host,
+            @Value("${spring.data.redis.port}") int port) {
+        Config config = new Config();
+        config.useSingleServer()
+            .setAddress("redis://" + host + ":" + port)
+            .setConnectionPoolSize(16)
+            .setConnectionMinimumIdleSize(4)
+            .setTimeout(3000);
+        return Redisson.create(config);
+    }
+
+    private GenericObjectPoolConfig<?> buildPoolConfig(int maxTotal, int maxIdle, int minIdle) {
+        var cfg = new GenericObjectPoolConfig<>();
+        cfg.setMaxTotal(maxTotal);
+        cfg.setMaxIdle(maxIdle);
+        cfg.setMinIdle(minIdle);
+        return cfg;
+    }
+}
+```
+
+Redisson opens its own connection pool, entirely separate from the Lettuce pool above —
+the two clients never share connections, so size Redis's `maxclients` for both pools
+combined, not just the Lettuce side. A common miss: sizing only the cache-facing Lettuce
+pool because it is the one visible in `RedisCacheManager`'s own config, then discovering
+under load that Redisson's default pool (also non-trivial) was never tuned at all.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -432,6 +637,8 @@ cold-start stampedes after rolling deployments.
 **AWS ElastiCache and other managed Redis** expose the same trap this design is built around: the cache is sized and priced as an optimization, but the database behind it is provisioned for post-cache traffic, which quietly makes the cache a hard availability dependency. This is why §1 lists "database survives L2 outage" as a non-functional *requirement* rather than a nice-to-have, and why the L1 tier exists at all.
 
 **Caffeine** (the L1 here) is worth understanding rather than treating as an LRU: it uses **W-TinyLFU**, a frequency sketch that admits a new entry only if it is estimated to be more valuable than the victim it would evict. That is why a 50,000-entry L1 holds the genuinely hot working set instead of being scanned out by a single sweep over the catalog — a plain LRU of the same size would be, and the cache-warming runner in §4.7 would be undone by the first bulk export job.
+
+**Netflix EVCache:** built on Memcached, EVCache's central idea is replicating the same cache entry across multiple AWS availability zones and reading from the nearest healthy replica, so a single AZ outage costs latency, not a cache-miss storm. That is a different axis of the same problem this design solves with L1 Caffeine — EVCache buys resilience through cross-AZ redundancy at the L2 tier itself, while this design buys it with an in-process tier that needs no network at all. The two are not mutually exclusive: a Redis Cluster with cross-AZ replicas plus a Caffeine L1 gets both properties, at the cost of running and paying for both.
 
 ---
 
@@ -496,6 +703,12 @@ Breakout:
 - Mitigate: prefix all affected keys with service namespace immediately; existing collided keys can be deleted (`redis-cli del user:42`) — they will be re-populated with the correct type on next cache miss
 - Resolve: enforce namespace convention (`service:model:id`) in all `@Cacheable` cache names; add integration test asserting two services use different key prefixes
 
+**Runbook 5: Cache warming fails silently, cold-start stampede on deploy**
+- Symptom: after a rolling deploy, DB CPU spikes for the first 30-60s per new pod; `cache.l1.hit.rate` starts near 0% instead of inheriting a warm state
+- Diagnose: check `CacheWarmingRunner` (§4.7) logs for `warmedEntries`; if 0 or an exception was swallowed, the readiness probe still passed, because `ApplicationRunner` failures do not block startup by default
+- Mitigate: usually nothing urgent if L2 Redis is healthy — the pod's L1 fills from L2 within seconds as real traffic arrives, at ~1ms per miss instead of ~0.1ms; only urgent if L2 is *also* cold (e.g., a full Redis cluster restart coincided with the deploy)
+- Resolve: make warming failures loud — wrap the runner body in try/catch that increments a `cache.warming.failure` counter and logs at ERROR, so a swallowed exception is visible instead of silently producing a cold pod that still looks healthy; add `cache.warming.duration` as a timer and alert if it exceeds 30s
+
 ---
 
 ## 9. Common Pitfalls & War Stories
@@ -536,6 +749,18 @@ cacheConfigs.put("products", defaultConfig.entryTtl((key, value) ->
     baseTtl.plusSeconds(ThreadLocalRandom.current().nextLong(-spread, spread))));
 ```
 The jitter spreads expiry over a 12-minute window (±6 minutes around 1 hour), eliminating the synchronized mass-expiry spike.
+
+### War Story 5: Product-ID Scraper Causes Cache Penetration
+
+A competitor's scraper enumerated sequential numeric product IDs to build a pricing feed; most of the guessed IDs did not exist (real product IDs are UUIDs). Every request threw `ProductNotFoundException` inside the cached method (§4.8's BROKEN example, which is the design's own §4.3 code), which meant nothing was ever cached, and the roughly 4,000 req/sec of scraping traffic hit the database directly, on top of normal load. DB CPU held at 95% for 40 minutes before the pattern was identified from access logs.
+
+**Fix:** applied the sentinel-caching pattern from §4.8 so repeated misses hit L1/L2 instead of the DB, and added a Redisson Bloom filter (§4.9) in front of the lookup so IDs that were never real are rejected in O(1) before touching any cache tier. **Impact:** 40 minutes of degraded checkout latency (P99 rose from 45ms to 1.8s) for legitimate customers sharing the DB connection pool with the scraper traffic.
+
+### War Story 6: A GC Pause Looked Like a Redis Outage
+
+After a routine JVM heap bump (`-Xmx1g` to `-Xmx2g`) to reduce OOM risk, P99 read latency became spiky in a new way: bursts of ~180ms latency for a handful of requests every few minutes, with `cache.redis.fallback.count` flat at zero — Redis was healthy the whole time. The on-call engineer spent 25 minutes chasing a phantom Redis network issue before looking at GC logs.
+
+**Root cause:** the larger heap gave G1GC more to collect per pause, and the default `MaxGCPauseMillis` target (200ms) meant occasional pauses landed right at the edge of the alerting threshold — long enough to make every in-flight cache lookup on that instance look stalled simultaneously. A GC pause blocks every thread, cache-hit or cache-miss alike, which is a different failure shape than a Redis outage (which only stalls the 15-30% of requests that miss L1). **Fix:** set `-XX:MaxGCPauseMillis=50` explicitly (§10) instead of relying on the default, and added a `jvm.gc.pause` panel next to the cache dashboards so a GC pause and a Redis blip are visually distinguishable during the next incident review.
 
 ---
 
@@ -590,6 +815,34 @@ TTL jitter:   ±10% per key to spread expiry across time and prevent synchronize
 Redis key TTL check: `redis-cli ttl <key>` — if remaining TTL > 90% of max, key was just set; if <10%, about to expire
 ```
 
+### Bloom filter memory budget (§4.9)
+
+```
+Products tracked:          500,000 (full catalog, including inactive)
+Target false-positive rate: 1% (acceptable -- a false positive just costs one wasted
+                             L1/L2/DB lookup, same as an ordinary cold miss)
+Redisson RBloomFilter sizing: m = -(n * ln(p)) / (ln(2))^2
+  n = 500,000, p = 0.01 -> m ~ 4.8M bits ~ 600 KB
+Hash functions (k):        k = (m/n) * ln(2) ~ 6.6 -> 7 hash functions
+Total memory:               ~600 KB in Redis -- three orders of magnitude cheaper than
+                             the 1.5 GB working set it protects, for a mechanism that
+                             turns unbounded scraper traffic (War Story 5) into O(1)
+                             rejections that never reach L1, L2, or the DB
+```
+
+### JVM heap and GC budget for the L1 tier
+
+```
+Caffeine L1 target:        100 MB live objects per instance (50k entries x 2KB, §2)
+Default G1GC pause target: 200ms -- acceptable for most reads, but self-defeating if the
+                            read-path P99 SLA is tighter than that, since a GC pause then
+                            becomes indistinguishable from an outage (War Story 6)
+If P99 read SLA < 50ms:    -XX:MaxGCPauseMillis=50 keeps a GC pause from itself causing
+                            the cache-miss-latency spike this whole design exists to avoid
+Fleet-wide L1 footprint:   100 MB x 5 instances = 500 MB total, each instance's L1
+                            independently warm to its own local access pattern
+```
+
 ---
 
 ## 11. Interview Discussion Points
@@ -633,3 +886,27 @@ A: Write-through writes to cache and database synchronously in sequence — stro
 **Q: How do cache invalidations work across regions?**
 
 A: Keep caches region-local (synchronous cross-region Redis replication adds 80–150ms per write and risks split-brain). Propagate invalidations explicitly: when one region writes and evicts a key, publish an event (Redis Pub/Sub to the same region's subscribers, or a Kafka topic read by all regions) that other regions consume to evict stale entries from their local caches. This bounds cross-region staleness to the event propagation lag (typically seconds). Accept this bounded staleness for most data; only near-globally-consistent requirements warrant write-through plus cross-region invalidation at the cost of higher write latency.
+
+**Q: Why does throwing an exception inside a `@Cacheable` method defeat caching, and how do you fix it without changing the method's public contract?**
+
+A: Spring's cache abstraction only caches a *return value* — an exception propagates straight past the caching interceptor, so a method that signals "not found" by throwing (§4.3's `getProduct`, via `orElseThrow`) never populates the cache for that key, and every repeated request for the same missing ID re-executes the full loader, DB query included. The fix (§4.8) is to make the cached method return a sentinel value instead of throwing, and add a thin uncached wrapper that unwraps the sentinel and throws at the boundary — callers see the exact same contract, but the cache now actually does its job for the miss case.
+
+**Q: Beyond caching nulls, how do you defend against cache penetration from an enumerable ID space?**
+
+A: A Bloom filter (§4.9) sitting in front of the cache lookup entirely. Unlike sentinel caching, which still costs one L1/L2 round-trip per repeated miss, a Bloom filter answers "definitely absent" in O(1) with no cache or DB access at all, at the cost of a small, tunable false-positive rate (§10: ~600 KB for 500,000 products at 1% false-positive rate) and zero false negatives — a real product is never incorrectly filtered out. Populate it once from the full catalog at startup and update it on every product creation; it only helps when the ID space is guessable or sequential, since a Bloom filter checked against random UUIDs offers no protection a scraper would actually trigger.
+
+**Q: When would you choose Caffeine's `maximumWeight` over `maximumSize`, and what changes?**
+
+A: `maximumSize` assumes every entry costs about the same to hold, which is true here because product records are a fairly uniform ~2 KB (§2). `maximumWeight` is for a cache whose entries vary widely in cost — a mix of small pricing records and large serialized category trees, for instance — where capping by entry *count* either wastes memory (many small entries fit) or overflows it (a few large entries dominate). Switching requires a `Weigher<K, V>` that returns an entry's cost (e.g., serialized byte size) and a `maximumWeight` instead of `maximumSize`; W-TinyLFU's admission logic works the same way underneath, just accounting in weight units instead of entry counts.
+
+**Q: How does Netflix's EVCache approach cache resilience differently from this design's L1/L2 split, and would you ever want both?**
+
+A: EVCache replicates the same Memcached entry across multiple AWS availability zones and reads from the nearest healthy replica, so an AZ failure costs latency, not a miss storm — resilience bought at the L2 tier through redundancy. This design instead buys resilience with an in-process L1 that needs no network at all, surviving even a total L2 outage, not just one AZ of it. The two solve different failure radii and are not mutually exclusive: a cross-AZ-replicated Redis Cluster as L2, fronted by a Caffeine L1, tolerates both an AZ-scoped Redis failure (masked by cross-AZ replication) and a full Redis outage (masked by L1) — the added cost is running and paying for the cross-AZ replication on top of the two-level design already here.
+
+**Q: §1 scopes Redis Cluster migration out — what would actually change in this design moving from a single Redis instance to a cluster?**
+
+A: Three things change, none of them at the application's `@Cacheable` call sites. First, keys must hash to the same slot for any multi-key Redis operation to work — not an issue here since every cache operation in §4 is single-key, but it rules out a future `MGET` across arbitrary product IDs without hash tags (`{tenant}:product:id`). Second, Pub/Sub (§4.4) broadcasts to every node in a cluster by default, so the invalidation channel keeps working unmodified, but `pubsub numsub` in Runbook 3 now needs summing across nodes, not read from one. Third, and most operationally relevant: `RedisCacheManager`'s connection factory needs `RedisClusterConfiguration` instead of `RedisStandaloneConfiguration`, and Lettuce's cluster client handles `MOVED`/`ASK` redirects transparently — but a resharding event mid-migration can transiently increase p99 latency as keys relocate, which is worth a maintenance window rather than a live cutover.
+
+**Q: What happens if two application instances race to write different values for the same key at nearly the same time?**
+
+A: Whichever `@CachePut` completes last wins in both L1 and L2 — there is no ordering guarantee across instances, so a genuine race produces a correctness gap: the loser's write is silently lost from the cache even though it may have been the more recent one from the caller's perspective (clock skew and network jitter mean "last to arrive at Redis" is not the same as "last committed at the DB"). For most catalog and pricing data this is acceptable because the database remains the source of truth and the cache is eventually consistent with it. Where it is not acceptable — concurrent updates to the same entity from two instances that must not silently clobber each other — the fix belongs at the database layer (optimistic locking with a version column, §5's write-pattern table) rather than in the cache: reject the losing DB write with an `OptimisticLockException`, and only then does `@CachePut` run, on the write that actually succeeded.

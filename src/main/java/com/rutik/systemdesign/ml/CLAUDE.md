@@ -35,7 +35,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `experiment_tracking_and_versioning/` | 5 | MLflow, W&B, Optuna, DVC, reproducibility | — |
 | `mlflow_deep_dive/` | 5 | Tracking server + schema, `MLmodel` format, signatures, registry aliases, autolog gaps, MLflow 3 migration, tracing/prompts/gateway | — |
 | `gpu_and_hardware_optimization/` | 5 | CUDA, tensor cores, profiling, gradient checkpointing | — |
-| `model_serving_and_inference/` | 6 | TorchServe, ONNX, dynamic batching, canary, shadow mode | — |
+| `model_serving_and_inference/` | 6 | Triton, ONNX, dynamic batching, canary, shadow mode | — |
 | `model_compression_and_efficiency/` | 6 | PTQ, QAT, pruning, knowledge distillation, TensorRT | — |
 | `monitoring_and_drift_detection/` | 6 | Data/concept drift, PSI, KS test, SHAP monitoring | — |
 | `mlops_and_ci_cd/` | 6 | MLflow Registry, Kubeflow Pipelines, canary, rollback | — |

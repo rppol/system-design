@@ -911,7 +911,14 @@ public void onOrder(OrderEvent event, Channel channel,
 
 ```java
 // FIXED: requeue=false on non-transient errors; rely on DLX for dead-letter handling
-// For transient errors: use Spring Retry with a delay before requeue
+// For transient errors: retry with backoff before the message goes back on the wire.
+//
+// IMPORT CHECK: two @Retryable annotations exist and they count differently.
+//   org.springframework.retry.annotation.Retryable   -> maxAttempts = 3  (3 calls total)
+//   org.springframework.resilience.annotation.Retryable -> maxRetries = 2  (3 calls total)
+// Framework 7's core annotation needs @EnableResilientMethods to take effect at all.
+// This example uses Spring Retry's; picking the other one by IDE auto-import
+// compiles fine and quietly changes your retry budget by one.
 
 @RabbitListener(queues = "orders")
 @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))

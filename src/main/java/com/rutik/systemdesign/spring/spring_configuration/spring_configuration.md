@@ -808,14 +808,6 @@ public PricingEngine newPricingEngine() { return new NewPricingEngine(); }
 public PricingEngine legacyPricingEngine() { return new LegacyPricingEngine(); }
 ```
 
-**Additional interview Q&As:**
-
-**What is the difference between @Configuration full mode and lite mode?** A class annotated with `@Configuration` (full mode) is subclassed by CGLIB — inter-`@Bean` method calls are intercepted so that the container returns the same singleton instance each time. A `@Component` or `@Bean` class without `@Configuration` (lite mode) is not proxied — calling one `@Bean` method from another creates a new instance, bypassing the singleton guarantee. Always use `@Configuration` for beans with inter-dependencies; use lite mode, or the explicit `@Configuration(proxyBeanMethods = false)`, for performance when the `@Bean` methods are independent.
-
-**When should you use @Import vs component scanning?** `@Import` explicitly imports a configuration class — useful for library starters, infrastructure configuration, or test configurations that must not be auto-detected. Component scanning (`@ComponentScan`) discovers all `@Component`-annotated classes in a package — useful for application beans but gives up explicit control. In library code (starters, framework modules), always use `@Import` to avoid polluting application scan paths.
-
-**How does @Conditional work under the hood?** Spring evaluates `@Conditional` during the `BeanDefinition` post-processing phase, before bean instantiation. The `Condition.matches()` method receives a `ConditionContext` (access to `Environment`, `BeanDefinitionRegistry`, `ResourceLoader`) and a `AnnotatedTypeMetadata` (access to the annotation's attributes). Spring Boot's `@ConditionalOnProperty`, `@ConditionalOnClass`, and `@ConditionalOnMissingBean` are all implemented as `Condition` implementations that inspect these contexts.
-
 ---
 
 ## Related / See Also

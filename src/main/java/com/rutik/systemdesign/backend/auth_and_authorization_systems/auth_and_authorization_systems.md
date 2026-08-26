@@ -249,6 +249,32 @@ flowchart LR
 
 Powerful for complex enterprise scenarios. Evaluated against a policy engine (OPA — Open Policy Agent). More complex to implement and audit.
 
+### Passkeys and WebAuthn
+
+A passkey is a discoverable (resident) WebAuthn credential — a public/private key pair created by an authenticator, where the relying party stores only the public key and the private key never leaves the device that created it (or the credential provider it was synced into). WebAuthn defines two ceremonies: attestation (registration, `navigator.credentials.create()`) and assertion (authentication, `navigator.credentials.get()`). WebAuthn is maintained by the W3C in collaboration with the FIDO Alliance; the current spec generation, WebAuthn Level 3, reached Proposed Recommendation status on 20 July 2026 (Advisory Committee review in progress — not yet a full W3C Recommendation), having been a Candidate Recommendation Snapshot from 26 May 2026.
+
+Passkeys come in two forms:
+
+- **Synced passkeys** — stored in a credential provider (iCloud Keychain, Google Password Manager, 1Password) and roam across a user's devices. Convenient, but the credential's blast radius on device loss is bounded by the provider account, not the device.
+- **Device-bound passkeys** — never leave the authenticator that created them (typically a hardware security key). Stronger isolation, but each new device needs its own enrollment.
+
+WebAuthn Level 3 adds several capabilities already in production use: the **PRF extension**, which derives a stable symmetric encryption key from a passkey (used by Bitwarden, 1Password, Yubico-backed flows, and WhatsApp encrypted-backup login); **Related Origin Requests**, letting one passkey work across a family of related domains instead of being pinned to a single origin; the **Signal API**, which lets a relying party tell a credential provider that a stored credential is stale, so the provider's picker stays in sync with the server; `getClientCapabilities()` for feature detection; JSON serialization helpers (`parseCreationOptionsFromJSON`/`parseRequestOptionsFromJSON`); and **conditional create**, which offers passkey enrollment inline during a password-autofill prompt.
+
+Server-side verification of a passkey ceremony checks three things: the `clientDataJSON` (the ceremony `type`, the `challenge` matches what the server issued, and the `origin` matches the relying party); the `authenticatorData` (the RP ID hash, the user-present/user-verified flags, and `signCount`); and the signature, verified against the public key stored at registration. The honest hard problem is **account recovery**: a passkey removes the phishable password, but not the recovery path behind it — a weak recovery flow (an email magic link, an SMS code) reintroduces exactly the phishable factor the passkey was meant to remove. See §10 for a concrete failure of this kind.
+
+### Authorization Models: RBAC, ABAC, ReBAC, and Policy-as-Code
+
+RBAC and ABAC (above) are not the whole picture once permissions vary **per object** rather than per role or per static attribute — "anne can view this specific document because someone shared it with her" is neither a role nor an attribute, it is a relationship. **Zanzibar-style ReBAC** (relationship-based access control, named for Google's internal Zanzibar system) models exactly this: every permission is a **relation tuple** `object#relation@subject` — for example `document:roadmap#viewer@user:anne` — and a **namespace / authorization model** defines how relations compose, e.g. "a viewer of a folder is also a viewer of every document inside it." A permission check is then a graph traversal over the tuple store rather than a row lookup. **OpenFGA** (CNCF Incubating since October 2025, Apache-2.0, originated at Auth0/Okta), **SpiceDB** (Authzed's gRPC-first implementation, used by OpenAI for ChatGPT Enterprise), and **Permify** are the three notable open-source Zanzibar implementations. **AWS Cedar** — the policy language behind the managed **AWS Verified Permissions** service — is policy-based and ABAC-flavoured, not relation-tuple ReBAC; it belongs in the policy-as-code column below, not alongside OpenFGA/SpiceDB/Permify.
+
+| Model | Unit of decision | Example | Pick this when |
+|-------|-------------------|---------|-----------------|
+| RBAC | Role membership | `hasRole('MANAGER')` | A small, fixed set of roles whose meaning does not vary per object |
+| ABAC | Attribute predicate over subject/resource/action/environment | `subject.dept == resource.dept AND time BETWEEN 09:00-18:00` | Context-sensitive rules (time, classification, tenant) not tied to per-object relationships |
+| ReBAC (Zanzibar-style: OpenFGA, SpiceDB, Permify) | Relation-tuple graph reachability | `document:roadmap#viewer@user:anne` | Per-object, per-user permissions at scale — sharing, nested folders, team/group inheritance |
+| Policy-as-code (OPA/Rego, AWS Cedar) | Declarative policy evaluated by an engine | Rego rule; Cedar `permit(principal, action, resource) when {...}` | Centrally authored, versioned, auditable policy logic; Cedar adds a managed evaluation service (Verified Permissions) |
+
+The central operational tradeoff in a Zanzibar-style system is that **`Check` (is this specific access allowed?) is cheap and cacheable, while `ListObjects` (what may this user see, across all objects?) is expensive** — it is a graph walk that cannot be pushed into a SQL `WHERE` clause, because the permission may be derived through arbitrary relation composition rather than stored as a flat row. See §6 for both calls side by side. The consistency knob follows from the same graph model: a **new-enemy problem** arises when a `Check` reads a replica that has not caught up with a very recent revocation, letting a just-removed user through for a short window; Zanzibar's paper calls the consistency token that pins a read to at-least-this-recent state a **zookie**, and OpenFGA and SpiceDB both expose the same idea (SpiceDB calls it a **ZedToken**), trading latency for recency on a per-call basis.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -333,6 +359,35 @@ sequenceDiagram
 ```
 
 *Reuse of an already-rotated refresh token is itself the breach signal — the server cannot tell attacker from legitimate client, so it revokes the whole token family and logs both out.*
+
+### WebAuthn Registration and Authentication Ceremonies
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant B as Browser/Authenticator
+    participant S as Relying Party Server
+
+    Note over B,S: Registration - attestation
+    B->>S: request registration options
+    S-->>B: challenge, rp id, user id
+    B->>U: prompt biometric or PIN
+    U->>B: approve
+    B->>B: generate key pair in authenticator
+    B->>S: attestationObject, clientDataJSON, public key
+    S->>S: verify origin, challenge, store public key and signCount
+
+    Note over B,S: Authentication - assertion
+    B->>S: request authentication options
+    S-->>B: challenge
+    B->>U: prompt biometric or PIN
+    U->>B: approve
+    B->>B: sign challenge with private key
+    B->>S: authenticatorData, clientDataJSON, signature
+    S->>S: verify signature against stored public key
+```
+
+*The private key never crosses the wire in either ceremony — the server only ever receives a public key at registration and a signature at each subsequent login, which is what makes a captured network trace or a phished lookalike origin useless to an attacker.*
 
 ---
 
@@ -707,6 +762,154 @@ large value instead of `exp − now` and that same workload grows without limit,
 usual reason a "revocation is easy, just use Redis" design eventually runs the auth cache out
 of memory.
 
+### Passkey Registration and Verification with WebAuthn4J
+
+```java
+// Server-side passkey verification. Dependency: com.webauthn4j:webauthn4j-core
+// The browser-side navigator.credentials.create()/get() calls are JavaScript and out of scope here.
+
+@Service
+public class PasskeyService {
+
+    private final WebAuthnManager webAuthnManager = WebAuthnManager.createNonStrictWebAuthnManager();
+    private final ChallengeRepository challengeRepository;       // Redis: challenge keyed by session id, 5-min TTL
+    private final PasskeyCredentialRepository credentialRepository;
+
+    private static final String RP_ID = "example.com";
+    private static final Set<Origin> EXPECTED_ORIGINS = Set.of(Origin.create("https://example.com"));
+
+    // --- Registration (attestation) ---
+
+    public String startRegistration(String userId) {
+        Challenge challenge = new DefaultChallenge();
+        challengeRepository.save(userId, challenge, Duration.ofMinutes(5));
+        return Base64UrlUtil.encodeToString(challenge.getValue());
+    }
+
+    public void finishRegistration(String userId, String attestationObjectB64, String clientDataJsonB64) {
+        Challenge expectedChallenge = challengeRepository.get(userId)
+            .orElseThrow(() -> new SecurityException("No pending registration challenge"));
+
+        RegistrationRequest request = new RegistrationRequest(
+            Base64UrlUtil.decode(attestationObjectB64),
+            Base64UrlUtil.decode(clientDataJsonB64));
+        RegistrationParameters parameters = new RegistrationParameters(
+            new ServerProperty(RP_ID, EXPECTED_ORIGINS, expectedChallenge),
+            /* pubKeyCredParams */ null,
+            /* userVerificationRequired */ true,
+            /* userPresenceRequired */ true);
+
+        RegistrationData registrationData;
+        try {
+            registrationData = webAuthnManager.verify(request, parameters);
+        } catch (VerificationException e) {
+            // Covers: origin mismatch, challenge mismatch, invalid attestation signature
+            throw new SecurityException("Passkey registration failed", e);
+        }
+
+        AttestedCredentialData credentialData = registrationData.getAttestationObject()
+            .getAuthenticatorData().getAttestedCredentialData();
+
+        credentialRepository.save(PasskeyCredential.builder()
+            .userId(userId)
+            .credentialId(credentialData.getCredentialId())
+            .publicKey(credentialData.getCOSEKey())
+            .signCount(registrationData.getAttestationObject().getAuthenticatorData().getSignCount())
+            .build());
+
+        challengeRepository.delete(userId);
+    }
+
+    // --- Authentication (assertion) ---
+
+    public void finishAuthentication(String userId, byte[] credentialId, String authenticatorDataB64,
+                                      String clientDataJsonB64, String signatureB64) {
+        Challenge expectedChallenge = challengeRepository.get(userId)
+            .orElseThrow(() -> new SecurityException("No pending authentication challenge"));
+        PasskeyCredential stored = credentialRepository.findByCredentialId(credentialId)
+            .orElseThrow(() -> new SecurityException("Unknown credential"));
+
+        AuthenticationRequest request = new AuthenticationRequest(
+            credentialId,
+            Base64UrlUtil.decode(authenticatorDataB64),
+            Base64UrlUtil.decode(clientDataJsonB64),
+            Base64UrlUtil.decode(signatureB64));
+        AuthenticationParameters parameters = new AuthenticationParameters(
+            new ServerProperty(RP_ID, EXPECTED_ORIGINS, expectedChallenge),
+            stored.toCredentialRecord(),
+            /* userVerificationRequired */ true,
+            /* userPresenceRequired */ true);
+
+        AuthenticationData authenticationData;
+        try {
+            authenticationData = webAuthnManager.verify(request, parameters);
+        } catch (VerificationException e) {
+            throw new SecurityException("Passkey authentication failed", e);
+        }
+
+        // signCount clone detection: a rising counter proves the private key lives in one
+        // physical authenticator. A synced passkey (iCloud Keychain, Google Password Manager)
+        // is deliberately copied across devices, so its signCount is 0 on every assertion —
+        // a naive "reject if newCount <= storedCount" check locks out most real users in 2026.
+        // Apply the strict comparison only to authenticators known to be device-bound; for
+        // synced credentials, skip counter comparison and rely on origin + challenge + signature.
+        long newSignCount = authenticationData.getAuthenticatorData().getSignCount();
+        if (stored.isDeviceBound() && newSignCount != 0 && newSignCount <= stored.getSignCount()) {
+            throw new SecurityException("Possible cloned authenticator — signCount did not advance");
+        }
+        credentialRepository.updateSignCount(credentialId, newSignCount);
+
+        challengeRepository.delete(userId);
+    }
+}
+```
+
+### ReBAC with OpenFGA: Authorization Model, Check, and ListObjects
+
+```
+# OpenFGA authorization model: a document inherits "viewer" from its parent folder
+model
+  schema 1.1
+
+type user
+
+type folder
+  relations
+    define owner: [user]
+    define viewer: [user] or owner
+
+type document
+  relations
+    define parent: [folder]
+    define owner: [user]
+    define viewer: [user] or owner or viewer from parent
+```
+
+```
+# Relation tuples written to the store
+document:roadmap#parent@folder:product
+folder:product#viewer@user:anne
+```
+
+```java
+// Check: cheap and cacheable. One graph traversal that stops at the first satisfying path —
+// here "anne" resolves to "viewer" via document:roadmap -> parent -> folder:product -> viewer.
+CheckRequest checkRequest = new CheckRequest().tupleKey(
+    new CheckRequestTupleKey().user("user:anne").relation("viewer")._object("document:roadmap"));
+CheckResponse checkResponse = fgaClient.check(checkRequest).get();
+boolean allowed = checkResponse.getAllowed(); // true
+
+// ListObjects: expensive. Answers "which documents can anne view" — this cannot become a
+// SQL WHERE clause, because "viewer" is derived (direct grant OR owner OR inherited from a
+// parent folder), so the authorization server must walk the relation graph for every candidate.
+ListObjectsRequest listRequest = new ListObjectsRequest()
+    .user("user:anne").relation("viewer").type("document");
+ListObjectsResponse listResponse = fgaClient.listObjects(listRequest).get();
+List<String> visibleDocuments = listResponse.getObjects(); // e.g. ["document:roadmap", ...]
+```
+
+Use `Check` on the hot path for a single access decision (rendering one page, gating one API call). Reserve `ListObjects` for building "what can this user see" views, and never approximate it with a loop of per-object `Check` calls — see §10 for what that costs at scale.
+
 ---
 
 ## 7. Real-World Examples
@@ -739,6 +942,21 @@ of memory.
 | Auditability | Simple — role assignments       | Complex — policy evaluation trail          |
 | Performance | Fast — role check in token claims | Slower — policy engine evaluation         |
 | Use case | Most SaaS, API access control   | Healthcare, finance, multi-tenant platforms |
+
+| Factor                        | Password                          | Passkey (WebAuthn)                        | TOTP (authenticator app)               | SMS OTP                                |
+|--------------------------------|------------------------------------|--------------------------------------------|-------------------------------------------|-------------------------------------------|
+| Phishing resistance            | None — can be typed into a fake site | High — origin-bound, a lookalike site cannot obtain a valid assertion | Medium — a code can be relayed to a fake site in real time | Low — a code can be relayed; SIM swap bypasses possession entirely |
+| Recovery cost                  | Low — reset via email link        | Medium-high — must re-enroll a new authenticator; strength depends on the recovery flow (§10) | Low — re-scan a backup QR code            | Low — carrier reissues a SIM              |
+| Device-loss blast radius       | None — independent of device      | Low for synced passkeys (roams via credential provider); moderate for device-bound (re-enroll per relying party) | Moderate — backup codes or manual re-enrollment per service | Low — number ports to a new device        |
+| Server-side secret stored      | Salted hash (bcrypt/Argon2id)     | Public key only — no shared secret to steal | Shared TOTP seed — a DB breach lets an attacker generate all future codes | None stored — phone number only           |
+
+| Dimension                | RBAC                        | ABAC                                  | ReBAC (Zanzibar-style)                       | Policy-as-code (Cedar/OPA)              |
+|---------------------------|------------------------------|------------------------------------------|--------------------------------------------------|--------------------------------------------|
+| Unit of decision          | Role membership             | Attribute predicate                       | Relation-tuple graph reachability                 | Declarative policy evaluated per request   |
+| Per-object permissions    | No — same role, same access everywhere | Possible, but modeled as attributes, not relationships | Native — the whole point of the model             | Cedar: yes, via resource attributes; OPA: however you write it |
+| Cheap operation           | Role check (in-token)       | Single attribute lookup                   | `Check` (is X allowed on Y?)                      | Single policy evaluation                   |
+| Expensive operation       | N/A                          | Cross-cutting audit of all policies       | `ListObjects` (what can X see?) — a graph walk, not a SQL `WHERE` | Enumerating every resource a policy would permit |
+| Consistency concern       | None — role assignment is simple state | None beyond normal DB consistency | New-enemy problem — a stale check lets a just-revoked user through; solved with a zookie/ZedToken | None beyond policy store consistency       |
 
 ---
 
@@ -776,6 +994,10 @@ of memory.
 
 **Pitfall 7 — API keys stored in plaintext in DB:** A startup stored API keys in plaintext in the `api_keys` table. A SQL injection vulnerability exposed the table, giving the attacker every active API key. Fix: hash API keys with SHA-256 before storage. The raw key is shown once at creation. Hash-before-store is non-negotiable, exactly as for passwords — but the *algorithm* differs: a random 256-bit key only needs a fast hash, while a password needs a slow KDF (Argon2id, bcrypt, PBKDF2).
 
+**Pitfall 8 — Passkey account recovery reintroduces phishing:** A consumer app rolled out passkeys for every login and watched phishing-driven takeover on the login path drop to nearly zero. Its recovery path did not get the same scrutiny: "lost every device" fell back to a plain email magic link with a 10-minute TTL and no secondary check, and that link's only job was to let the user enroll a brand-new passkey. In the first quarter after launch, roughly 340 of about 4,800 recovery requests were attacker-initiated — phish the email account first, then use the recovery link to enroll an attacker-controlled passkey, at which point the phishing-resistant login the team had just shipped was gone. Fix: treat recovery as at least as strong as the primary factor — a second independent verification step plus a mandatory cooldown before a freshly enrolled passkey can touch high-privilege actions, even though that makes recovery slower.
+
+**Pitfall 9 — `ListObjects` approximated with a `Check` loop:** A team building a "documents shared with me" page implemented it by calling the authorization server's `Check` once per candidate document in the workspace. At 100 documents the page returned in 40 ms and nobody noticed the design. Once a large customer's workspace grew to 100,000 documents nested across a dozen folder levels, the same page fired 100,000 sequential `Check` calls, took upward of 90 seconds, and blew past the API gateway's 30-second timeout on every load. The fix was to replace the loop with a single `ListObjects` call, which the authorization server answers as one bounded graph traversal instead of N independent ones; the same page returned in roughly 280 ms at 100,000 documents after the change. The lesson: reach for `ListObjects` for "what can this user see" from day one — a `Check` loop does not degrade gracefully, it works fine until the object count crosses exactly the threshold where per-object permissions start to matter.
+
 ---
 
 ## 11. Technologies and Tools
@@ -793,6 +1015,13 @@ of memory.
 | Casbin                            | Multi-model access control library (RBAC/ABAC)        |
 | Redis                             | Token blocklist, refresh token family storage         |
 | HashiCorp Vault                   | Secrets management, JWT issuing via JWT auth method   |
+| WebAuthn4J                        | Java library for server-side FIDO2/WebAuthn registration and assertion verification |
+| SimpleWebAuthn                    | Node.js/TypeScript library for a WebAuthn relying-party server and browser helpers |
+| FIDO Alliance conformance tools   | Test suite for validating authenticator and relying-party WebAuthn/FIDO2 conformance |
+| OpenFGA                           | CNCF Incubating open-source Zanzibar-style ReBAC engine — relation tuples, `Check`, `ListObjects` |
+| SpiceDB (Authzed)                 | gRPC-first open-source Zanzibar implementation; ZedToken consistency; used by OpenAI for ChatGPT Enterprise |
+| Permify                           | Open-source Zanzibar-style relationship-based authorization service |
+| AWS Cedar + Verified Permissions  | Policy language (ABAC-flavoured, not relation-tuple ReBAC) and its managed AWS evaluation service |
 
 ---
 
@@ -877,6 +1106,46 @@ JWT expiry (`exp`) is an absolute Unix timestamp. If the issuing server and the 
 **Short:** Token introspection lets a resource server ask the authorization server whether an opaque token is still active.
 
 Token introspection is an endpoint on the authorization server that resource servers call to validate an opaque token: `POST /introspect, token=<opaque_token>`. The authorization server returns whether the token is active and its associated metadata (scope, sub, exp). It is used when: (1) tokens are opaque (not JWTs) and cannot be validated locally; (2) immediate revocation is required and maintaining a blocklist is impractical; (3) token metadata is too large for a JWT and must be fetched on demand. Downside: every API request requires a call to the introspection endpoint, adding latency and creating a central bottleneck. Cache introspection results with a TTL shorter than the token's expiry to reduce load.
+
+**Q: What is a passkey, and how is it different from a traditional password?**
+**Short:** A passkey is a discoverable WebAuthn credential using public-key cryptography instead of a shared secret.
+
+A passkey is a discoverable (resident) WebAuthn credential: a public/private key pair where the private key never leaves the authenticator (a device secure enclave, a synced credential provider, or a hardware security key) and the relying party stores only the public key. Unlike a password, there is no shared secret transmitted or stored on the server that an attacker can phish or a breach can leak. Registration is the attestation ceremony (`navigator.credentials.create()`); login is the assertion ceremony (`navigator.credentials.get()`), where the authenticator signs a server-issued challenge with the private key. Passkeys come in two flavors: synced passkeys live in a credential provider (iCloud Keychain, Google Password Manager, 1Password) and roam across a user's devices; device-bound passkeys never leave the authenticator that created them. Because the assertion is bound to the origin that requested it, a phishing site presenting a lookalike domain cannot obtain a usable signature — this is what makes passkeys phishing-resistant in a way passwords and OTP codes are not.
+
+**Q: What does the signCount field do in WebAuthn, and why does it break for synced passkeys?**
+**Short:** signCount detects cloned authenticators via a rising counter, but synced passkeys report 0 by design.
+
+signCount is a counter the authenticator increments on every assertion and returns in `authenticatorData`; the relying party is expected to reject an assertion whose signCount does not exceed the last stored value, since a cloned physical authenticator would produce a diverging count. This works for device-bound authenticators like hardware security keys, where the private key genuinely lives in one physical device. It breaks for synced passkeys: because the private key is deliberately replicated across a user's devices via a credential provider, there is no single incrementing counter to track, and providers such as iCloud Keychain and Google Password Manager report signCount as 0 on every assertion. A naive "reject if newCount <= storedCount" check then locks out real users on every login. The fix is to apply strict signCount comparison only to authenticators known to be device-bound, and to treat a signCount of 0 as "not tracked" for synced credentials rather than as a rollback attack, relying on origin, challenge, and signature checks for that class of credential.
+
+**Q: What new capabilities does WebAuthn Level 3 add, and what is its standardization status?**
+**Short:** WebAuthn Level 3 adds PRF, related origin requests, and the Signal API; it is a Proposed Recommendation, not final.
+
+WebAuthn Level 3 was a W3C Candidate Recommendation Snapshot from 26 May 2026 and reached Proposed Recommendation status on 20 July 2026, with Advisory Committee review still in progress — it is not yet a full W3C Recommendation. It adds the PRF extension, which lets an authenticator derive a stable symmetric key from a passkey for client-side encryption (already used in production by Bitwarden, 1Password, and WhatsApp encrypted-backup login); Related Origin Requests, which let one passkey be used across a set of related domains instead of being pinned to a single origin; the Signal API, which lets a relying party tell a credential provider that a stored credential is stale or deleted so the provider's UI stays in sync with the server; `getClientCapabilities()`, for feature-detecting what an authenticator supports before starting a ceremony; JSON serialization helpers (`parseCreationOptionsFromJSON`/`parseRequestOptionsFromJSON`); and conditional create, which lets a site offer passkey enrollment inline during a password-autofill prompt rather than as a separate step. WebAuthn is maintained by the W3C in collaboration with the FIDO Alliance.
+
+**Q: What is the biggest practical weakness in most passkey deployments, and how do you fix it?**
+**Short:** Account recovery, because a weak recovery flow reintroduces the phishing risk passkeys removed.
+
+A passkey removes the password as a phishable factor, but it does not remove the need for account recovery when a user loses every device holding their passkeys. If recovery falls back to a plain email magic link or an SMS code, an attacker who only needs to phish or SIM-swap the recovery channel can enroll a new attacker-controlled passkey and inherit full account access — the exact attack passkeys were meant to close, just moved one step sideways. The fix is to make recovery at least as strong as the primary factor: require a second independent verification step (a live identity check, a mandatory cooldown before a newly enrolled passkey can perform high-privilege actions, or notification plus a delay window on the user's other channels) rather than a single-message reset link. Treat "how do we recover a passkey account" as a first-class design question before rollout, not an afterthought bolted on after support tickets start arriving.
+
+**Q: What is Zanzibar-style ReBAC, and how does OpenFGA implement it?**
+**Short:** ReBAC expresses permissions as relation tuples in a graph; OpenFGA is an open-source Zanzibar implementation.
+
+Zanzibar-style relationship-based access control (ReBAC) expresses every permission as a relation tuple of the form `object#relation@subject` — for example `document:roadmap#viewer@user:anne` — and an authorization model defines how relations compose, such as "a viewer of a folder is a viewer of every document inside it." A permission check becomes a graph traversal: is there a path from the subject to the object through the relations the model allows. OpenFGA is a CNCF Incubating (as of October 2025) open-source implementation of this model, originated at Auth0/Okta and licensed Apache-2.0; SpiceDB (from Authzed) and Permify are the other two notable open-source implementations, with SpiceDB being gRPC-first and used in production by OpenAI for ChatGPT Enterprise. ReBAC is the right fit when permissions are inherently per-object and relationship-driven — nested folders, team membership, document sharing — a shape that RBAC's fixed roles and ABAC's attribute predicates both handle awkwardly.
+
+**Q: Why is ListObjects expensive in a Zanzibar-style system while Check is cheap?**
+**Short:** Check tests one reachability path and is cacheable; ListObjects walks the whole graph per user.
+
+`Check` answers a single yes/no question — does this specific path from subject to object exist in the relation graph — so it can stop at the first satisfying path and is trivially cacheable per subject/object/relation triple. `ListObjects` answers a fundamentally different question — of all objects of this type, which ones is this subject related to — which requires walking the graph outward from the subject because the relation may be derived through arbitrary composition, such as folder inheritance or group membership, and cannot be expressed as a SQL `WHERE` clause against a flat permissions table. This is the tradeoff that breaks naive "just filter in the application layer" designs: a loop that calls `Check` once per candidate object degrades linearly with the object count and collapses at scale, while `ListObjects` is answered as one bounded traversal by the authorization server. Use `Check` on the hot path for a single access decision, and `ListObjects` for building "what can this user see" views.
+
+**Q: What is the new-enemy problem in Zanzibar-style authorization, and how is it addressed?**
+**Short:** A stale check can let a just-revoked user through; a zookie or ZedToken pins the read to recent state.
+
+The new-enemy problem occurs when an authorization check reads from a replica that has not yet caught up with a very recent write — most dangerously, a permission revocation — so a user who was just removed from access is still permitted for a short window after the revocation should have taken effect. Google's original Zanzibar paper solves this with a consistency token called a zookie, which a client can pass on a `Check` call to require the read be at least as recent as the write that produced the zookie; OpenFGA and SpiceDB both implement the same idea, with SpiceDB calling its token a ZedToken. The tradeoff is latency: requiring strong, pinned consistency on every check costs more than reading from the nearest replica, so both systems expose tunable consistency levels and leave the choice — accept a small staleness window for speed, or pin recency for correctness — to the application, made per call rather than globally.
+
+**Q: When should you choose RBAC over ReBAC, and when does that choice break down?**
+**Short:** Choose RBAC for a small fixed set of roles that do not vary per object; ReBAC once access is per-object.
+
+RBAC is the right default when the number of distinct permission levels is small and fixed and does not vary from one resource instance to the next — an admin/manager/viewer split on a SaaS product, where "manager" means the same thing everywhere in the system. It breaks down the moment access needs to vary per object: a document-sharing feature where any user can grant any other user viewer or editor access to any specific document, or a folder hierarchy where permission should flow to everything nested inside it. Modeling that in RBAC means minting a new role per document or per folder, which explodes the role count and becomes unmanageable to audit. That per-object, relationship-driven shape is exactly what Zanzibar-style ReBAC (OpenFGA, SpiceDB, Permify) was built for — do not deploy a full ReBAC system to model five fixed roles, and do not keep bolting per-object hacks onto RBAC once the object-level sharing requirement shows up.
 
 ---
 

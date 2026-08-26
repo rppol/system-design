@@ -11,9 +11,9 @@ PEP 696 type-parameter defaults [3.13], and PEP 649/749 deferred annotation eval
 `annotationlib` introspection module [3.14].
 
 Core machinery lives in the `typing` module (standard library), with `typing_extensions` backporting
-newer constructs. Static type checkers (mypy, pyright) consume annotations at analysis time; the
-Python runtime itself does **not** enforce them unless explicitly instructed via libraries such as
-Pydantic or beartype.
+newer constructs. Static type checkers (mypy, pyright, pyrefly, ty) consume annotations at analysis
+time; the Python runtime itself does **not** enforce them unless explicitly instructed via libraries
+such as Pydantic or beartype.
 
 Key constructs covered in this module:
 
@@ -23,7 +23,7 @@ Key constructs covered in this module:
 - `Annotated`, `Literal`, `TypeGuard` / `TypeIs`, `Self`, `LiteralString`
 - PEP 695 `type` statement and bracketed syntax [3.12]; PEP 696 defaults `[T = int]` [3.13]
 - Runtime introspection: `get_type_hints()`, `__annotations__`, `annotationlib` [3.14]
-- Toolchain: mypy, pyright, ruff, beartype
+- Toolchain: mypy, pyright, pyrefly, ty, ruff, beartype
 - FastAPI integration: parameter introspection via `get_type_hints()` + `inspect.signature()`
 
 ---
@@ -751,9 +751,87 @@ def clamp[T: (int, float)](value: T, lo: T, hi: T) -> T:
 
 PEP 695 syntax is not pure sugar — the type parameters are lazily evaluated in their own scope, which
 is why a `type` alias can reference a name defined later in the file — but the runtime does still
-build `TypeVar` objects, reachable via `Stack.__type_params__`. Both major checkers handle it out of
-the box; mypy turned it on by default in 1.12 (it was behind
-`--enable-incomplete-feature=NewGenericSyntax` in 1.11).
+build `TypeVar` objects, reachable via `Stack.__type_params__`. Every actively maintained checker
+(mypy, pyright, pyrefly, ty) handles it out of the box; mypy turned it on by default in 1.12 (it was
+behind `--enable-incomplete-feature=NewGenericSyntax` in 1.11).
+
+### 4.13 PEP 705 `ReadOnly` [3.13] — TypedDict field-level immutability
+
+```python
+from typing import TypedDict, ReadOnly  # [3.13]; typing_extensions>=4.9 backports it
+
+class CachedUser(TypedDict):
+    id: ReadOnly[int]          # must not change after the entry is cached
+    name: str                  # still freely mutable
+
+def refresh_name(entry: CachedUser, new_name: str) -> None:
+    entry["name"] = new_name       # OK — name is not read-only
+    entry["id"] = entry["id"] + 1  # mypy ERROR: "id" is read-only
+```
+
+A plain `TypedDict` field is mutable by anyone holding the dict — a real correctness hole whenever a
+field is meant to stay fixed after construction, such as a cache key or a parsed response's primary
+key. `ReadOnly[...]` documents and statically defends that invariant the same way `Final` does for a
+plain variable, but it is checker-enforced only: nothing stops `entry["id"] = 999` at runtime, so it
+catches the mistake in CI, not in production.
+
+### 4.14 PEP 702 `@deprecated` [3.13] — checker-visible deprecation
+
+```python
+from warnings import deprecated
+
+@deprecated("Use fetch_v2() instead; removed in v3.0")
+def fetch(id: int) -> dict: ...
+
+def fetch_v2(id: int) -> dict: ...
+
+fetch(42)
+# mypy/pyright/pyrefly: warning — "fetch" is deprecated: Use fetch_v2() instead; removed in v3.0
+# runtime: also emits DeprecationWarning, unless @deprecated(msg, category=None) was used
+```
+
+`warnings.deprecated()` [PEP 702] stores the deprecation message on the decorated function, method,
+or class so both the static checker and the runtime can surface it — every caller sees a warning at
+the call site, not a comment nobody's tooling reads. Use it to version your own library API: mark the
+old entry point deprecated the moment the replacement ships, and a checker turns every remaining
+caller into a visible line item instead of a silent liability.
+
+### 4.15 PEP 696 TypeVar Defaults [3.13] — explicit and inline forms
+
+Explicit `TypeVar` form:
+
+```python
+from typing import Generic, TypeVar
+
+T = TypeVar("T", default=int)
+
+class Box(Generic[T]):
+    def __init__(self, value: T | None = None) -> None:
+        self.value = value
+
+reveal_type(Box())       # Box[int]      -- no argument given, default kicks in
+reveal_type(Box[str]())  # Box[str]      -- explicit argument overrides the default
+```
+
+PEP 695 inline form:
+
+```python
+class Box[T = int]:
+    def __init__(self, value: T | None = None) -> None:
+        self.value = value
+
+def wrap[T = str](x: T | None = None) -> list[T]:
+    return [] if x is None else [x]
+```
+
+**Ordering rule:** once a type parameter has a default, every type parameter declared after it must
+also have one — the same left-to-right rule Python already enforces for function parameters with
+defaults.
+
+```python
+class Bad[T1 = int, T2]: ...     # checker ERROR — T2 has no default but follows one
+class Good[T1, T2 = int]: ...    # OK — defaults are trailing
+```
 
 ### 6.11 `get_type_hints()` vs `__annotations__`
 
@@ -1152,8 +1230,20 @@ hints = get_type_hints(handler, include_extras=True)
 |---|---|---|---|---|---|
 | **mypy** | Static type checker (reference implementation of the typing PEPs) | High (`--strict` mode); gradual by default | Moderate (~seconds on large codebases); compiled with mypyc | VS Code via the Mypy Type Checker extension; PyCharm built-in | None |
 | **pyright** | Static type checker (Microsoft) | Very high; stricter than mypy on generics and narrowing | Fast, incremental; written in TypeScript and run on Node, so it needs no Python environment of its own | VS Code Pylance (Pylance is the pyright-backed extension); Neovim via LSP | None |
+| **pyrefly** | Static type checker (Meta), written in Rust; reached v1.0.0 on 2026-05-12, current v1.2.0 | High; default checker for Instagram's ~20M-line codebase, also adopted by PyTorch, JAX, and the NumPy/Pandas stubs | Very fast — on pyrefly's own benchmarks, checking pandas takes 1.9s versus pyright's 144s | VS Code extension | None |
+| **ty** | Static type checker (Astral), written in Rust; still beta, 0.0.x versioning with breaking changes possible between releases | Improving, but not yet a safe team default given the beta status | Very fast — Astral claims 10x-100x mypy/pyright on cold checks | VS Code extension | None |
 | **ruff** | Linter + formatter; `ruff check --select=ANN` for annotation enforcement | Linting rules, not full type inference | Extremely fast (Rust) | VS Code ruff extension; pre-commit | None |
 | **beartype** | Runtime type checker | Enforces annotations at function call time | ~0.1–1 µs per decorated call, measured on CPython 3.13; O(1) strategy avoids full traversal | Minimal — decorators | Sub-microsecond per call |
+
+**Choosing among them in 2026:** mypy is the reference implementation and the conservative default —
+slower, but the most predictable and the one every other checker is measured against. pyright leads
+on conformance breadth and is the engine behind Pylance, so VS Code users get it for free. pyrefly is
+the production-proven fast option — Rust-based, hit 1.0 this year, and already the default at Meta
+for Instagram. ty is comparably fast but still beta with breaking changes possible between any two
+releases, so it is one to watch rather than one to standardise a team on yet. The official
+`python/typing` conformance suite reports only per-category results (e.g. a checker's score on "Type
+annotations" vs. "Generics") with no blended overall percentage — treat any single conformance number
+you see quoted elsewhere as someone else's aggregation, not an official figure.
 
 **mypy configuration (`pyproject.toml`):**
 
@@ -1356,6 +1446,34 @@ general parameter = subtype of callable). A `Callable[[Dog], Dog]` is a subtype 
 `Callable[[Dog], Animal]` — a function returning a Dog satisfies anywhere a function returning
 Animal is expected (return types are covariant). This mirrors how function types work mathematically
 and is enforced by mypy's callable variance rules.
+
+**Q16: What problem does PEP 705's `ReadOnly[...]` solve for `TypedDict`?**
+**Short:** ReadOnly marks a TypedDict field so a checker rejects any write to it, closing a mutability hole plain TypedDict leaves open.
+A plain `TypedDict` field is mutable by any code holding a reference to the dict, even when the
+producer relies on that field never changing after construction — a real correctness hole for a
+cache key or a parsed response's primary key. `ReadOnly[int]` [PEP 705, 3.13] tells the type checker
+to reject any assignment to that field after construction, the same discipline `Final` gives a plain
+variable. It is enforced only by the type checker — nothing stops a plain `dict.__setitem__` write at
+runtime — so it documents and statically defends an invariant it cannot police at runtime.
+
+**Q17: How does `@deprecated` from PEP 702 change the discipline of retiring an API?**
+**Short:** warnings.deprecated() marks a callable so every static checker flags callers, turning a comment convention into an enforced signal.
+`warnings.deprecated(msg)` [PEP 702, 3.13] decorates a function, method, or class and stores the
+message where both the type checker and the runtime can see it. mypy, pyright, and pyrefly report
+every call site as a warning naming the decorated symbol and your message; at runtime the decorator
+also emits a `DeprecationWarning` through the normal `warnings` machinery, unless you pass
+`category=None` to keep it static-only. This replaces the old convention of a `# deprecated, use X
+instead` comment nobody's tooling reads — the discipline is versioning your own API so every caller
+gets a build-time nudge, not a runtime surprise months later.
+
+**Q18: What ordering rule governs TypeVar defaults under PEP 696, and why?**
+**Short:** A TypeVar with a default cannot precede one without a default, the same left-to-right rule Python enforces for function parameters.
+PEP 696 [3.13] lets a `TypeVar` carry a `default` (`T = TypeVar("T", default=int)`, or inline
+`class Box[T = int]:`) so a generic can be used unparameterized and still resolve to a concrete type.
+The ordering rule mirrors positional function parameters: once a type parameter has a default, every
+type parameter after it must also have one — `class Bad[T1 = int, T2]:` is a checker error because
+`T2` would have no way to receive a value when `T1` falls back to its default. Keep defaulted
+parameters trailing, exactly like optional function arguments.
 
 ---
 

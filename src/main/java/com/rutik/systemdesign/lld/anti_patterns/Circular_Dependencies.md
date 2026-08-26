@@ -569,6 +569,68 @@ A system had two configuration classes with a static initialization cycle simila
 
 ---
 
+## Interview Questions with Answers
+
+**Q: How do you break a circular dependency without introducing a god interface that both classes depend on?**
+**Short:** Use a domain event through a mediator when no return value is needed, or extract a narrow interface owned by one side when it is.
+This file's decision flowchart gives the exact branch: if the caller doesn't need a synchronous return value, publish a domain event through `ApplicationEventPublisher` and let a separate listener react — no compile-time reference back to the caller at all. If the caller does need a value back (like validating a user exists before creating an order), extract a narrow interface — `UserLookup` with just `findById()` — owned by the upstream module, and have the downstream module depend on that interface rather than the concrete class. Neither fix requires a single god interface bundling every method both classes need; each targets the specific cycle-causing call.
+
+**Q: Why does Spring throw `BeanCurrentlyInCreationException` for circular constructor-injected beans?**
+**Short:** Spring cannot determine a valid construction order when bean A's constructor needs bean B and B's constructor needs A.
+Constructor injection requires the constructor to run to completion with all its arguments already available — but if `UserService`'s constructor needs a fully-constructed `OrderService`, and `OrderService`'s constructor needs a fully-constructed `UserService`, there is no valid order in which either can finish constructing first. Spring detects this cycle while building the bean graph and fails fast with `BeanCurrentlyInCreationException` at startup, which is actually the safer failure — it happens immediately and deterministically rather than being silently deferred.
+
+**Q: Why is fixing a Spring circular dependency with `@Lazy` a trap rather than a real fix?**
+**Short:** @Lazy replaces a loud, deterministic startup failure with a silent one whose timing depends on when the proxy is first dereferenced.
+Adding `@Lazy` to one side of the injection makes Spring inject a lazy-resolution proxy instead of the real bean, so the application context starts cleanly and the cycle "looks resolved" — but the underlying bean graph is still cyclic. The failure that used to happen loudly and deterministically at startup is now deferred to the first request that actually dereferences the proxy, meaning its timing depends on traffic patterns rather than being caught in CI. The design defect — the bidirectional call loop and the untestability it causes — remains completely untouched; only the symptom's visibility changed.
+
+**Q: Why can a circular dependency's cycle not be visible from reading just one file?**
+**Short:** It only emerges from the aggregate of import statements and constructor parameters across multiple files.
+`UserService`'s file shows it importing and depending on `OrderService` — that alone looks like an ordinary one-directional dependency. Only when you also read `OrderService`'s file and see it importing and depending on `UserService` does the cycle become apparent. This is why the anti-pattern is described as insidious: no single file "looks wrong" in isolation, and detecting the cycle requires either tracing across files manually or using tooling like ArchUnit's `beFreeOfCycles()` or SonarQube's architecture rules that analyze the whole dependency graph at once.
+
+**Q: What is the fundamental design signal a circular dependency is telling you, according to this file's Key Insight?**
+**Short:** It is a design-boundary problem, not a coding problem — a shared concept was never extracted into its own module.
+The fix is almost always to extract the shared concept that both classes depend on into a third module, breaking the cycle by introducing the abstraction that was missing — not to rearrange imports or add workarounds like `@Lazy`. In the worked example, `getUserTier()` living in `UserService` but really depending on `OrderService` data was the actual signal: the responsibility was misplaced, and moving it into a new `UserTierService` that sits above both (and that nothing depends back on) resolved the cycle by fixing the underlying misplaced logic, not by hiding it.
+
+**Q: Walk through why a single `createOrder()` call is a "live call loop," not just a compile-time cycle.**
+**Short:** One createOrder() call crosses the OrderService/UserService boundary twice at runtime — getUser(), then notifyUserOfOrderConfirmation().
+The sequence diagram in this file shows `createOrder()` calling `UserService.getUser()` to validate the user, then later calling back into `UserService.notifyUserOfOrderConfirmation()` after the order is saved — two separate runtime crossings of the same boundary within one logical operation. `getUserTier()` then adds a third cross-call in the opposite direction (`UserService` calling `OrderService.getOrderCount()`). This demonstrates the cycle isn't merely a static reference in code that never actually executes both directions — it's a genuine ping-pong at runtime, which is what makes reasoning about the actual call graph so difficult.
+
+**Q: How does the static-initialization cycle between `ConfigA` and `ConfigB` produce a silently wrong value?**
+**Short:** JLS 12.4.2 does not re-enter a class already initializing on the same thread; it returns the field's default value (0) instead.
+`ConfigA.TIMEOUT` triggers `ConfigB`'s initialization, which reads back `ConfigA.TIMEOUT` — but if `ConfigA`'s own initialization is already in progress on that thread, the JVM does not re-enter it per JLS 12.4.2, and the read simply returns the field's default value of `0` rather than throwing an error. This means `ConfigB.EXTENDED` silently computes to `500` instead of the intended `700` when `ConfigA` happens to be touched first — with no exception, no warning, just a wrong number that depends entirely on which class the process happens to touch first. This is explicitly called out as "a class of bug that is nearly impossible to reproduce in tests."
+
+**Q: Why do the constant-expression semantics of `static final int` matter for whether this initialization cycle bug even appears?**
+**Short:** A true compile-time constant is inlined by javac at every use site under JLS 13.1, so no class-init code ever runs and the bug is invisible.
+If `ConfigB.BASE_TIMEOUT` were written as `static final int BASE_TIMEOUT = 100;` — a genuine compile-time constant expression — javac would inline the literal `100` directly at every use site under JLS 13.1, meaning no class initialization would actually execute at those use points and the ordering-dependent bug would never manifest. The bug in this file's example only appears because the initializers use `Integer.parseInt("100")` and similar non-constant expressions, which force real class-initialization code to run — a reminder that the constant-inlining rule can mask exactly this class of cycle bug until a refactor removes the "constant-ness" that was hiding it.
+
+**Q: What is the Acyclic Dependencies Principle (ADP), and how do you enforce it in CI?**
+**Short:** Robert C. Martin's ADP states the package dependency graph must have no cycles, enforceable via ArchUnit's beFreeOfCycles().
+ADP is an architectural rule: the dependency graph of packages in a system must be a DAG, with no cycles at all. It's enforced in this file's example via ArchUnit's `slices().matching("com.example.(*)..").should().beFreeOfCycles()`, which fails a build the moment two packages form a cycle. This turns architectural discipline from a rule people are expected to remember into a fitness function that runs automatically on every CI build, catching new cycles before they're merged rather than relying on manual review to spot them.
+
+**Q: What is JDepend, and why does this file specifically warn against adding it to a new build?**
+**Short:** JDepend last shipped in 2005, reads pre-generics bytecode, and knows nothing about JPMS modules — it should not be added today.
+JDepend is the tool most older blog posts still reference for detecting package cycles, but its last release (2.9.1) shipped in 2005, meaning it reads pre-generics-era bytecode and has no awareness of the Java Platform Module System introduced years later. SonarQube's newer architecture rules — `javaarchitecture:S7027` for same-package cycles and `javaarchitecture:S7091` for cross-package cycles — are the modern replacement, having superseded SonarQube's older Package Tangle Index and Dependency Structure Matrix metrics, which were dropped in SonarQube 5.2.
+
+**Q: Why is "package by feature" a cycle-prevention strategy, not just an organizational preference?**
+**Short:** Vertical slicing makes cross-package imports visible at a glance; layer-based packaging hides cycles inside one package.
+Structuring packages by feature (`com.example.order`, `com.example.user`) means a dependency between features shows up as a visible cross-package import, which is exactly what tools like ArchUnit are checking for — cycles are structurally forced into visibility. Structuring by layer instead (`com.example.service`, `com.example.repository`) puts `OrderService` and `UserService` in the same `service` package, where a cycle between them is just two classes calling each other within one package — invisible to cross-package cycle detection and much easier to miss during manual review.
+
+**Q: Why does the database circular-foreign-key example matter for HLD, and what workaround does it force?**
+**Short:** Table A referencing Table B and B referencing A means inserting either row first violates referential integrity, forcing nullable FK columns.
+If Table A has a foreign key to Table B and Table B has a foreign key to Table A, inserting a new row into either table first would violate the other table's foreign key constraint, since the referenced row doesn't exist yet — you cannot insert both simultaneously in a single atomic statement in most systems. The typical workaround is making one of the foreign key columns nullable, inserting both rows with that column null, then updating it afterward — an application-level two-phase workaround for a schema-level cycle that mirrors the same "there is no valid order" problem circular class dependencies cause at startup.
+
+**Q: What is the difference between Solution 1 (domain event) and Solution 2 (extracted interface) in this file, and how do you choose?**
+**Short:** Choose the event when the caller needs no return value; choose the interface when the caller needs a synchronous answer back.
+Solution 1 (`ApplicationEventPublisher` + `@EventListener`) fits `notifyUserOfOrderConfirmation()`, a fire-and-forget notification where `OrderService` doesn't need anything back from whoever handles the event. Solution 2 (extracting `UserLookup` as an interface `UserService` implements) fits `createOrder()`'s need to validate a user exists before proceeding — that's a synchronous check requiring an actual return value, which an async event can't easily provide. The file's decision flowchart makes this the single branch point: does the caller need a value back, yes or no.
+
+**Q: In the fixed design, why can `UserTierService` depend on both `UserService` and `OrderService` without recreating the cycle?**
+**Short:** Nothing depends back on UserTierService, so adding it as a new node above both keeps the graph a DAG instead of a cycle.
+A dependency graph only becomes a cycle when there is a path leading back to where you started; `UserTierService` sits at a higher layer, depending on both `UserService` and `OrderService`, but neither of those two classes depends on `UserTierService` in return — there's no path back. This is the general pattern for legitimately needing two collaborators' data together: introduce a new coordinating class above both rather than making either of the two original classes depend on the other, which is exactly how `getUserTier()`'s original placement inside `UserService` created the cycle in the first place.
+
+**Q: Why does the `@Lazy` "fix" in the Spring Boot Startup Failure scenario count as a trap rather than a legitimate workaround?**
+**Short:** It swaps a deterministic, CI-visible failure for a traffic-dependent one, while leaving the untestable bidirectional call loop intact.
+Before `@Lazy`, `BeanCurrentlyInCreationException` failed every CI run the moment the cycle existed, forcing the team to fix it before merging. After `@Lazy`, the context starts cleanly because Spring defers real bean creation behind a proxy until the first dereference — so the cycle's existence is no longer visible in CI at all, and whether it causes a problem now depends on production traffic timing instead of a deterministic build check. The two services are still untestable in isolation and still coupled exactly as before; only the failure's visibility changed, which is why this file frames it as trading a loud problem for a quiet one rather than solving it.
+
 ## Quick Reference Summary
 
 | Dimension | Details |

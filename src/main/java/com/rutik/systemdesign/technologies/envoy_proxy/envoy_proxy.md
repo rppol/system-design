@@ -262,6 +262,28 @@ AWS **App Mesh** was Envoy-based and belongs here historically only: it **closed
 
 The conceptual half of this table — what a service mesh is for, whether you should run one at all, and Istio's CRD authoring surface — belongs to [`backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md). This module deliberately shows the xDS **output** those CRDs compile into, never the CRD input.
 
+### 4.8 Gateway API Inference Extension — Envoy's own ext_proc, turned on LLM traffic
+
+Two other things belong in this taxonomy, because both are Gateway API layers that leave Envoy as the data plane and both exist for reasons the rest of this module already explains.
+
+**GAMMA** (Gateway API for Mesh Management and Administration) is the smaller one: it is the effort that gave Gateway API's `HTTPRoute` a meaning for **east-west, mesh-internal** traffic by letting a route attach to a `Service` rather than a `Gateway`. It matters here for one reason — it is why Istio, Linkerd and the rest can express mesh routing in the same API as ingress, instead of ingress in Gateway API and mesh in vendor CRDs.
+
+**The Gateway API Inference Extension** is the significant one, and it is the clearest case in this whole module of Envoy's mechanism meeting its most important 2026 application. Ordinary load balancing is wrong for LLM inference in a way that is not a tuning problem: least-request treats a 200-token request and a 200,000-token request as one unit of work each, and round-robin sends a request to a replica that must recompute a prefix another replica already has cached. The signals that actually predict which replica should take a request live **inside the model server** — its KV/prefix-cache state, its queue depth, which LoRA adapters it has loaded.
+
+The extension's answer is an **Endpoint Picker (EPP)**: an inference router that reads those metrics from the model servers and tells the proxy which endpoint to use — wired in as an **`ext_proc` callout** (§6). That is the whole trick, and it is why this is an Envoy story: the extension needs to see the request body to route on it and needs to override endpoint selection per request, which is precisely the ext_proc contract this module already teaches. Because it is ext_proc rather than a fork, it extends **any** conforming Gateway API implementation — 25+ of them, with Envoy Gateway, kgateway and GKE Gateway among the named ones.
+
+Two CRDs, and the naming has already churned once:
+
+| Resource | API status | What it holds |
+|---|---|---|
+| `InferencePool` | **v1, stable** | a group of Pods serving one base model with the same accelerator and model-server config — the inference-shaped replacement for a plain `Service` backend |
+| `InferenceObjective` | v1 | per-request priority and criticality the EPP uses when scheduling |
+| `InferencePoolImport` | v1 | an `InferencePool` exposed from another cluster |
+
+`InferenceObjective` **replaced the alpha `InferenceModel`** in the v1.0 migration, so any tutorial or manifest naming `InferenceModel` is on `v1alpha2` and will not apply. That is the usual trap of adopting an API in the quarter it stabilises.
+
+**Where this sits against Envoy AI Gateway**, since both are "Envoy for LLM traffic" and they solve different halves: AI Gateway is about the **client-facing contract** — an OpenAI-compatible API across providers, token-aware rate limiting, credential handling, MCP routing — while the Inference Extension is about **which replica of your own self-hosted model gets the request**. Fronting a fleet of hosted-provider APIs is AI Gateway. Running vLLM on your own GPUs is the Inference Extension. Doing both is both, and they compose because underneath they are the same proxy.
+
 ---
 ## 5. Architecture Diagrams
 
@@ -1732,7 +1754,9 @@ The DIY option deserves a fair hearing rather than a reflex dismissal. If your r
 
 - **Envoy-based:** **Envoy Gateway**, **Contour**, **kgateway**, **Istio Ingress Gateway** — the mainstream successors to a retired ingress-nginx, all driving Envoy. Envoy Gateway is at 1.8.3 and bundles Gateway API CRDs v1.5.1; Contour is at 1.33.5; kgateway is the CNCF sandbox donation of Solo.io's Gloo Gateway, whose open-source predecessor reaches end of life on 31 December 2026.
 - **The API itself:** **Gateway API** — at 1.6.1, the GA successor to a feature-frozen Ingress, with 1.6.0 taking UDPRoute to GA and promoting TCPRoute to v1.
-- **LLM traffic:** **Envoy AI Gateway** — v1.0 since June 2026, additive on Envoy Gateway, giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
+- **LLM traffic, client-facing:** **Envoy AI Gateway** — v1.0 since June 2026, additive on Envoy Gateway, giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
+- **LLM traffic, backend-facing:** **Gateway API Inference Extension** — an `ext_proc` Endpoint Picker that routes on model-server state (prefix/KV-cache, queue depth, loaded LoRA adapters) rather than least-request, with an `InferencePool` (v1, stable) standing in for a plain Service backend and `InferenceObjective` carrying priority. Extends 25+ Gateway API implementations including Envoy Gateway, kgateway and GKE Gateway (§4.8).
+- **East-west routing:** **GAMMA** — the Gateway API initiative that lets an `HTTPRoute` attach to a `Service` for mesh-internal traffic, so mesh and ingress share one API instead of vendor CRDs plus Gateway API.
 - **Not Envoy, and useful to know as counterexamples:** **Traefik**, **Nginx**, **HAProxy**, **Caddy**, **Linkerd**, **Cilium Service Mesh** — genuinely different data planes, except Cilium, which runs Envoy for its L7 policy path while keeping L4 in eBPF.
 - **Cloud edges in front of it all:** **AWS ALB**, **AWS NLB**, **Amazon VPC Lattice**, **ECS Service Connect**, **MetalLB** — what terminates the internet before Envoy sees it, and the two AWS services named as the migration target for a retiring App Mesh.
 
@@ -1887,6 +1911,18 @@ Start with `/config_dump?include_eds` on the admin listener, which returns the e
 **Q: What is hot restart, and why do you not use it in Kubernetes?**
 **Short:** Hot restart hands listening sockets and shared stats memory from an old Envoy process to a new one with no dropped connections, which Kubernetes makes redundant by replacing whole pods.
 A new process starts with `--restart-epoch N+1`, connects to the old one over a Unix domain socket, inherits its listening file descriptors so not a single connection is refused, shares a memory region so stats counters continue rather than resetting, and the old process drains over `--drain-time-s` (default 600) before being killed at `--parent-shutdown-time-s` (default 900). It is genuinely elegant, and it solves a problem Kubernetes solves differently: there, the pod is the unit of deployment, so you roll the Deployment and a new pod with a new Envoy replaces the old one entirely. What you need instead is graceful draining — a `preStop` hook that POSTs to `/drain_listeners?graceful` and then sleeps past the endpoint-deregistration delay, with `terminationGracePeriodSeconds` above that. Hot restart still matters on VMs and bare metal, where the process really is the unit of deployment.
+
+**Q: You are load-balancing across eight vLLM replicas and least-request gives terrible tail latency. Why, and what routes better?**
+**Short:** Least-request counts requests as equal units when LLM requests differ by orders of magnitude; the Gateway API Inference Extension routes on model-server state instead.
+Because least-request assumes requests are comparable units of work, and for inference they are not — a 200-token request and a 200,000-token request each count as one, so the "least loaded" replica is routinely the most loaded. Round-robin is worse still: it will send a request to a replica that has to recompute a prefix another replica already holds in cache. The signals that actually predict the right replica live **inside the model server** — prefix/KV-cache state, queue depth, which LoRA adapters are loaded — and no proxy-side counter can see them. The **Gateway API Inference Extension** solves it with an **Endpoint Picker**, an inference router that reads those metrics and tells the proxy which endpoint to use, wired in as an **`ext_proc` callout**. That is why this is an Envoy story rather than a vLLM one: the mechanism is the ext_proc contract Envoy already had.
+
+**Q: `InferencePool`, `InferenceObjective`, `InferenceModel` — which of these should be in your manifests?**
+**Short:** InferencePool (v1, stable) and InferenceObjective; InferenceModel was the alpha name that v1 replaced, so a manifest using it is on v1alpha2.
+`InferencePool` and `InferenceObjective`. `InferencePool` is **v1 and stable**: a group of Pods serving one base model with the same accelerator and model-server configuration, standing in for a plain `Service` as the route backend, with `InferencePoolImport` for one exposed from another cluster. `InferenceObjective` carries the per-request priority and criticality the Endpoint Picker schedules on. **`InferenceModel` is the alpha name that the v1.0 migration replaced**, so any manifest, blog post or tutorial using it is written against `v1alpha2` and will not apply to a v1 install — the ordinary hazard of adopting an API in the quarter it stabilises. Because the extension is ext_proc rather than a fork, all of this works on any conforming Gateway API implementation, 25+ of them, with Envoy Gateway, kgateway and GKE Gateway among the named ones.
+
+**Q: Envoy AI Gateway or the Gateway API Inference Extension — which do you need?**
+**Short:** AI Gateway handles the client-facing contract across providers; the Inference Extension picks which replica of your self-hosted model serves a request.
+They solve different halves and compose, because underneath they are the same proxy. **Envoy AI Gateway** owns the **client-facing contract**: an OpenAI-compatible API across multiple providers, token-aware rate limiting (you cannot rate-limit on request count when one request is 200 tokens and the next is 200,000), credential handling per backend, MCP routing. The **Inference Extension** owns **backend selection** for models you host yourself — which vLLM replica takes this request, given cache state and queue depth. So: fronting a fleet of hosted-provider APIs is AI Gateway; running your own GPUs is the Inference Extension; a platform that does both runs both. If someone presents them as alternatives, that is the tell they have not deployed either.
 
 ---
 ## 13. Best Practices

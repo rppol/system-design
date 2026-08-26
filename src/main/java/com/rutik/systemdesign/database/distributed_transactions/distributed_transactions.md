@@ -552,6 +552,59 @@ sequenceDiagram
 
 The lock's TTL expires mid-pause, so both clients briefly believe they hold it; the storage layer — not the lock — resolves the split-brain by rejecting client A's stale token 33 and accepting client B's newer token 34.
 
+### How Real Distributed Databases Actually Commit — Percolator, Spanner, CockroachDB, Calvin
+
+Everything above is the *application-level* view: your services own separate databases and you
+choose between 2PC, a saga, and an outbox. A distributed SQL engine solves the same problem one
+layer down, inside a single logical database, and the four canonical designs are worth knowing
+because each one attacks a different weakness of textbook 2PC. This is the database-internals
+counterpart to [`../../hld/distributed_transactions/distributed_transactions.md`](../../hld/distributed_transactions/distributed_transactions.md)'s
+system-design view; product-level detail lives in
+[`newsql_and_distributed_sql`](../newsql_and_distributed_sql/newsql_and_distributed_sql.md).
+
+**Percolator (Google, 2010)** runs 2PC as a *client-side* protocol over Bigtable, with no
+dedicated coordinator process at all. Each row carries `lock`, `write` and `data` column
+families. The client picks one of its writes as the **primary**; prewrite places a lock on
+every row, then the commit point is a single atomic write of the primary's commit record.
+Every other row's lock is cleaned up lazily — a later reader that finds a secondary lock
+walks to the primary to learn whether the transaction committed. Timestamps come from a
+central **timestamp oracle (TSO)**. The weakness it removes is the coordinator as a separate
+failure domain; the weakness it keeps is the TSO as a central dependency. TiDB's transaction
+model is directly Percolator-derived.
+
+**Spanner (Google, 2012)** keeps 2PC but makes each participant a **Paxos group** rather than a
+single node. That is the whole trick: classic 2PC blocks when a participant dies holding locks,
+and a Paxos group does not die — it elects a new leader and continues. On top of that, Spanner
+uses **TrueTime commit-wait** for external consistency: after choosing commit timestamp `T`, the
+leader waits until `TT.now().earliest > T` (roughly 1–7 ms) so no later transaction can be
+assigned an earlier timestamp. So Spanner pays 2PC's round trips but not its blocking risk.
+
+**CockroachDB** has no TrueTime, so it uses hybrid logical clocks plus an **uncertainty
+interval**: a read that lands inside another transaction's uncertainty window restarts at a
+higher timestamp rather than returning a possibly-stale value. Its commit protocol is
+**Parallel Commits**, which collapses 2PC's two sequential consensus round trips into one. The
+coordinator writes the transaction record in a `STAGING` state listing every in-flight write key,
+and issues all the writes concurrently. A transaction is *implicitly committed* the moment its
+record is `STAGING` **and** every listed write has achieved consensus — no second round trip is
+needed to say so. A reader that encounters a `STAGING` record runs the recovery procedure: check
+each listed write, mark the transaction `COMMITTED` if all succeeded and `ABORTED` if any is
+missing. That slow path only runs when the original coordinator died, so the common case costs
+one consensus round trip instead of two.
+
+**Calvin (Yale, 2012)** removes 2PC entirely by making execution **deterministic**. A sequencing
+layer establishes a single global order of transactions *before* anything executes; every replica
+then runs that same order and, because execution is deterministic, arrives at the same state
+without any agreement protocol at commit time. The cost is that a transaction's full read/write
+set must be known up front, which makes interactive, multi-round transactions awkward. FaunaDB is
+the best-known Calvin-derived system.
+
+| Design | Commit mechanism | What it removes | What it costs |
+|---|---|---|---|
+| Percolator | client-driven 2PC, primary-lock commit point | the coordinator as a failure domain | a central timestamp oracle; lazy lock cleanup |
+| Spanner | 2PC where every participant is a Paxos group | 2PC's blocking on participant failure | commit-wait latency bounded by clock uncertainty |
+| CockroachDB | Parallel Commits (`STAGING` + implicit commit) | one of 2PC's two consensus round trips | read restarts from clock uncertainty; recovery path |
+| Calvin | deterministic pre-ordering, no commit-time agreement | 2PC altogether | read/write set must be known before execution |
+
 ---
 
 ## 7. Real-World Examples
@@ -721,6 +774,16 @@ The outbox table accumulates unprocessed rows. Depending on the relay implementa
 **Short:** Distributed locks block a critical section for its duration, while optimistic concurrency control checks for conflicts only at commit time.
 
 Distributed locks (Redis, ZooKeeper, PostgreSQL advisory): a lock is acquired before entering a critical section, preventing concurrent access. The lock is held for the duration of the operation and released afterward. Suitable when the critical section has side effects that cannot be easily undone (external API call, messaging). Optimistic concurrency control (OCC): no lock is acquired; the operation proceeds and, at commit time, checks whether the data was modified by another transaction since the read began. If so, the transaction is retried. Suitable for low-contention scenarios where conflicts are rare — OCC has no lock overhead on the happy path but requires retry logic. Distributed locks are preferable for high-contention resources; OCC for low-contention with retriable operations.
+
+**Q: If 2PC blocks when a participant fails, how does Spanner use 2PC in production?**
+**Short:** Spanner makes each 2PC participant a Paxos group rather than a single node, so a participant failing means a leader election, not a stuck transaction.
+
+Spanner does not fix 2PC's blocking problem, it removes the condition that causes it. Textbook 2PC blocks because a participant that votes YES and then crashes leaves its locks held and its outcome unknown until it returns — the transaction cannot commit or abort without it. Spanner makes every participant a **Paxos group** spanning multiple replicas, so an individual machine failing does not remove a participant: the group elects a new leader from the surviving majority and continues with the prepared state intact. The 2PC round trips are still paid, they simply no longer carry the risk. Layered on top is **TrueTime commit-wait** for external consistency: after choosing commit timestamp `T`, the leader waits until `TT.now().earliest > T` (roughly 1–7 ms) before releasing locks, guaranteeing no later transaction gets an earlier timestamp. The general lesson transfers to application-level design too — 2PC's real problem is a single-node participant, so the question to ask about any 2PC deployment is "what happens when a participant dies mid-transaction," not "is 2PC allowed."
+
+**Q: What does CockroachDB's Parallel Commits protocol change about two-phase commit?**
+**Short:** Parallel Commits collapses 2PC's two sequential consensus round trips into one by committing implicitly once a STAGING record's listed writes have all replicated.
+
+It removes one of 2PC's two sequential consensus round trips, roughly halving commit latency. Standard 2PC waits for all writes to replicate, and only then writes the commit record — two round trips, one after the other. Parallel Commits writes the transaction record in a **`STAGING`** state that lists every in-flight write key, and issues all the writes concurrently with it. The transaction is **implicitly committed** the instant its record is `STAGING` and every listed write has achieved consensus; no separate round trip is needed to declare it. The subtlety is that no single record says "committed" at that moment, so a reader encountering a `STAGING` record runs a recovery procedure: check each listed write, mark the transaction `COMMITTED` if all succeeded and `ABORTED` if any is missing. That slow path only executes when the original coordinator has died, so the common case pays one consensus round trip. Compare Percolator, which instead removes the coordinator process entirely by making 2PC client-driven with a primary-lock commit point, and Calvin, which removes commit-time agreement altogether by pre-ordering transactions deterministically.
 
 ---
 

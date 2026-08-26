@@ -1,6 +1,6 @@
 # Python + FastAPI — Case Studies Learning Path
 
-End-to-end system design case studies demonstrating production Python and FastAPI architecture. Each case study follows the 7-section legacy template: Problem Statement, Architecture Overview (Mermaid diagram), Key Design Decisions, Implementation (Python code), Python/FastAPI Components Used, Tradeoffs and Alternatives, Interview Discussion Points.
+End-to-end system design case studies demonstrating production Python and FastAPI architecture. Each case study follows the repo-wide 11-section principal template: Intuition, 1. Requirements Clarification, 2. Scale Estimation, 3. High-Level Architecture, 4. Component Deep Dives, 5. Design Decisions & Tradeoffs, 6. Real-World Implementations, 7. Technologies & Tools, 8. Operational Playbook, 9. Common Pitfalls & War Stories, 10. Capacity Planning, 11. Interview Discussion Points.
 
 ---
 
@@ -26,7 +26,7 @@ If you only have time for three case studies, read these in order:
 
 | Case Study | Primary Engineering Concern | What It Teaches |
 |------------|----------------------------|----------------|
-| [Design a Multi-Tenant SaaS API](design_multi_tenant_saas_api.md) | Tenant isolation, async SQLAlchemy, RBAC | Schema-per-tenant vs row-level-security vs database-per-tenant trade-offs; injecting tenant context through request-scoped `Depends`; JWT RBAC with scope claims; Alembic migrations per tenant; async SQLAlchemy 2.0 session management. |
+| [Design a Multi-Tenant SaaS API](design_multi_tenant_saas_api.md) | Tenant isolation, async SQLAlchemy, RBAC | Row-level security vs schema-per-tenant vs database-per-tenant, decided on the connection budget; setting the RLS context transaction-locally so a pooled connection cannot leak tenant state; why `FORCE ROW LEVEL SECURITY` is required when the app owns its tables; DB-fetched roles via `Depends` rather than roles baked into the JWT; a single Alembic migration covering every tenant. |
 
 ### Concern 3 — Real-Time & Streaming
 
@@ -44,6 +44,12 @@ If you only have time for three case studies, read these in order:
 
 ---
 
+### LLM and AI Serving
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [Design an LLM Gateway](design_llm_gateway_fastapi.md) | A FastAPI front door for model traffic | Streaming completions over SSE, cancellation propagated to the backend, per-tenant token budgets, provider failover, and semantic caching with its invalidation trap. |
+
 ## Cross-Cutting / Shared Primitives
 
 No `cross_cutting/` directory here — the shared primitives live as deep-dive modules in the section itself. The same primitives recur across these case studies; read the deep dive once, then recognize it everywhere:
@@ -54,7 +60,7 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 | Redis Lua atomicity (TOCTOU-free counters) | Rate-Limited API | `../caching_and_performance/caching_and_performance.md` | 3 — Production |
 | `lifespan` startup loading | ML Inference, Rate-Limited API | `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md` | 1 |
 | Async SQLAlchemy session-per-request | Multi-Tenant SaaS | `../async_database_sqlalchemy/async_database_sqlalchemy.md` | 2 — Data & Integration |
-| JWT + scope RBAC | Multi-Tenant SaaS | `../authentication_and_security/authentication_and_security.md` | 2 |
+| JWT-carried identity + DB-fetched roles | Multi-Tenant SaaS | `../authentication_and_security/authentication_and_security.md` | 2 |
 | WebSocket lifecycle + Redis pub/sub fan-out | Real-Time Chat, ML Inference (SSE) | `../websockets_sse_and_streaming/websockets_sse_and_streaming.md` | 2 |
 | Idempotency keys, retries, DLQ | Async Task Queue | `../background_jobs_and_task_queues/background_jobs_and_task_queues.md` | 2 |
 | `asyncio.Semaphore` / `asyncio.Queue` producer-consumer | Async Web Scraper | `../../python/asyncio_and_event_loop/asyncio_and_event_loop.md` (cross-section) | 2 |
@@ -108,3 +114,4 @@ flowchart LR
 | How would you handle distributed shared state in FastAPI? | [design_rate_limited_api_fastapi.md](design_rate_limited_api_fastapi.md) |
 | How would you do zero-downtime deploys? | [design_ml_inference_api_fastapi.md](design_ml_inference_api_fastapi.md) (covers `lifespan` pattern) |
 | How would you implement tenant isolation at the DB layer? | [design_multi_tenant_saas_api.md](design_multi_tenant_saas_api.md) |
+| Design an LLM gateway / proxy in front of model providers | [design_llm_gateway_fastapi](design_llm_gateway_fastapi.md) |

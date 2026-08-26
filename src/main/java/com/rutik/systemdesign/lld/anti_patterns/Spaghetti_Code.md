@@ -500,6 +500,68 @@ A team reported that a business-critical service had zero feature development fo
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What is Spaghetti Code, and why does the pasta metaphor fit?**
+**Short:** Code whose control flow is so tangled that pulling one strand moves the entire dish.
+Spaghetti Code describes code whose control flow is so tangled and unstructured that changing any single behavior in isolation is nearly impossible — like a plate of pasta where no strand has a clear start and end, and pulling one strand moves the whole dish. It emerges when code is written without architectural planning, when features are bolted on incrementally without refactoring, or when delivery pressure overrides engineering discipline. There is no separation of concerns: business logic, persistence, communication, and presentation all live in the same method or class.
+
+**Q: What specific code smells signal Spaghetti Code before you even read the logic in detail?**
+**Short:** 100+ line methods, 4+ levels of nesting, boolean flag variables, and cyclomatic complexity above 15.
+Watch for methods exceeding 100-200 lines performing multiple unrelated operations, nesting depth of 4 or more levels (if inside if inside for inside try), and boolean flag variables like `isValid`, `shouldSend`, `hasFailed` used to control flow across distant parts of a method. Cyclomatic complexity scores above 15 on individual methods, vague method names like `doEverything()` or `process()`, and comments explaining what the code does line-by-line (a sign the code cannot speak for itself) round out the list. The example `processOrder()` method scores 32 by Checkstyle's counting and has 6+ levels of nesting.
+
+**Q: Why is `processOrder()` in this file's example "untestable in isolation"?**
+**Short:** Testing any one concern requires providing valid data for all seven others, since there's no seam between them.
+To test "what happens when inventory is insufficient," you must also supply a valid payment token, a real database connection, and a working mail client, because validation, inventory, payment, persistence, email, SMS, and loyalty points are all sequential steps inside one 175-line method with no separation. There is no seam where a single concern — like the inventory check — can be exercised without also exercising the six others. The refactored `OrderProcessingService` fixes this by making each concern an injectable interface that can be mocked independently.
+
+**Q: What went wrong with transaction management in the `processOrder()` example, and how does `@Transactional` fix it?**
+**Short:** Payment could succeed while persistence failed with no rollback, stranding a charged customer; @Transactional makes atomicity declarative.
+In the violation example, Step 4 (persist order) can throw a `SQLException` after Step 3 (charge payment) has already succeeded — the code has no compensation logic, so the customer is charged but the order is never saved, requiring manual reconciliation. The refactored `OrderProcessingService.processOrder()` is annotated `@Transactional`, letting the framework handle atomicity declaratively instead of the original's ad-hoc try/catch blocks, which is one of the concrete named changes when the method dropped from 175 lines to 8.
+
+**Q: How many distinct exit points does the flawed `processOrder()` method have, and why does that matter?**
+**Short:** Twelve return statements, five of them from validation alone before any business logic runs.
+The control-flow diagram in this file shows `processOrder`'s validation step alone producing five distinct exits (`NULL_REQUEST`, `MISSING_CUSTOMER_ID`, `INVALID_CUSTOMER`, `MISSING_ITEMS`, `INVALID_ITEMS`) before any business logic even runs, out of twelve return statements total across the whole method. Each exit point is a separate path a reader must trace to understand what the method does, and each is a place where a future change could introduce a regression that only manifests on that specific path — the sheer count is itself evidence of a method doing too much.
+
+**Q: What refactoring technique turns a 175-line tangled method into an 8-line orchestrator?**
+**Short:** Extract each responsibility into its own interface-backed collaborator, leaving the method as a linear sequence of delegated calls.
+The refactored `OrderProcessingService.processOrder()` calls `validator.validate(request)`, `inventoryService.reserveStock(...)`, `pricingService.calculateTotal(...)`, `paymentService.charge(...)`, `orderRepository.save(...)`, `notificationService.notifyOrderConfirmed(...)`, and `loyaltyService.awardPoints(...)` — one line per responsibility, each delegated to a focused, independently-testable, interface-typed collaborator. This is the Extract Method refactoring applied aggressively: "any time you find yourself writing a comment above a block of code, that comment is the name of a method" — extract it.
+
+**Q: Why does Spaghetti Code make onboarding new engineers especially difficult?**
+**Short:** New engineers can't build a mental model when a method violates every principle of readable design at once.
+A new engineer presented with a 175-line method mixing seven unrelated concerns, six levels of nesting, and boolean flags controlling flow across distant parts of the method cannot build a coherent mental model of what the code does, because the method violates separation of concerns, naming clarity, and linear readability all at once. This is distinct from merely "unfamiliar code" — even an experienced engineer new to the codebase faces the same wall, which is why the anti-pattern is described as making the codebase "appear hostile and discourage contribution."
+
+**Q: What CI-enforceable limits does this file recommend to prevent Spaghetti Code, and what are typical thresholds?**
+**Short:** Cyclomatic complexity capped around 10 per method, and method length capped around 40-80 lines.
+Checkstyle's `CyclomaticComplexity` module can enforce a maximum (e.g., `max` value of 10) and fail the build on violation. Method length limits are typically set to warn at 40 lines and fail at 80, since methods longer than 30-50 lines are themselves a code smell independent of complexity score. Both checks are meant to catch the growth pattern early — before a method reaches the 175-line, complexity-32 state of the example — rather than relying on developers noticing on their own.
+
+**Q: What is "distributed spaghetti" at the HLD level?**
+**Short:** A service mesh where Service A calls B calls C calls D with no documented contracts and shared database tables.
+Service meshes without clear ownership reproduce the same tangled-dependency structure at the architecture level: tracing a bug requires following a call chain across six services with no documented API contracts, and each hop adds latency, failure surface, and on-call confusion. A related HLD symptom is the "orphaned microservice" — a legacy auth service everyone depends on but nobody owns, that handles 30% of traffic and cannot be removed because untangling its callers would itself require unwinding distributed spaghetti.
+
+**Q: How does Test-Driven Development prevent Spaghetti Code from being written in the first place?**
+**Short:** Writing the test first demands clean seams between concerns before the implementation exists to tangle them.
+If you write a test for "inventory check fails" before writing `processOrder()`, that test naturally wants to construct only an inventory-related collaborator and assert on its behavior — it cannot be written against a monolithic method that also requires a database connection, a mail client, and a payment gateway just to compile. TDD forces the seams (interfaces, focused classes) to exist from the start, because untestable spaghetti simply cannot satisfy a test written first; the test demands the decomposition before the implementation has a chance to tangle everything together.
+
+**Q: Why are boolean "flag variables" like `paymentSucceeded` a particularly dangerous form of coupling within a method?**
+**Short:** They let one branch silently influence behavior 50+ lines away, hiding the actual dependency between distant code blocks.
+A flag like `paymentSucceeded` is set in one branch (Step 3) and checked in a much later, physically distant branch (Step 4's `if (paymentSucceeded)`), meaning the connection between the two pieces of code is invisible from either location alone — you have to read the entire method sequentially to know the flag exists and what sets it. The Real-World Consequences section's "Three-Day Bug Hunt" scenario shows exactly this: a boolean flag set in two separate branches of a 300-line method caused double-charging, and finding the second assignment required reading the entire method in sequence.
+
+**Q: What does "Program to Interfaces" mean as a Spaghetti Code prevention strategy, and why does it matter for testing?**
+**Short:** Inject dependencies as interfaces so any implementation, including a mock, can be substituted at test time.
+The violation example injects concrete classes directly (`SmtpMailClient mailClient`, `StripeHttpClient stripeClient`), which means a test cannot substitute a mock — the concrete class is baked into the constructor's type. The refactored solution declares `InventoryService`, `PaymentService`, `NotificationService`, and `LoyaltyService` as interfaces, so tests can pass a Mockito mock implementing the same interface, and production code can pass the real implementation — the class itself never needs to know or care which one it received.
+
+**Q: In the "Cascading Production Failure" scenario, why did a template-format change break the database commit too?**
+**Short:** Error handling was interleaved with business logic, so a NullPointerException in email formatting caught at the wrong level failed the whole order.
+Because the method's error handling was tangled together with its business logic rather than isolated per concern, a `NullPointerException` thrown while formatting an email confirmation propagated up and was caught at a level broad enough to abort the entire `processOrder()` call — including the database commit that should have already been independent of the email step. Customers were charged but received no order, and recovery required manually reconciling 200 orders, illustrating how tangled control flow turns an unrelated formatting bug into a payment-and-persistence incident.
+
+**Q: What makes the "strangler fig" approach the recommended fix strategy for existing Spaghetti Code, rather than a rewrite?**
+**Short:** Incremental extraction and replacement lets you decompose the tangled method safely, piece by piece, without a risky big-bang rewrite.
+The Quick Reference Summary lists the effort to fix as "high — requires systematic decomposition; best approached incrementally via strangler fig pattern," meaning you extract one responsibility at a time (say, validation first) into its own tested class, redirect the original method to delegate to it, verify nothing broke, and repeat for the next responsibility — gradually starving the original tangled method rather than attempting to rewrite all seven concerns simultaneously. A full rewrite of a method with a cyclomatic complexity of 67 (as in the "Paralysis Effect" scenario) carries high risk of missing an undocumented edge case that the tangled original silently handled.
+
+**Q: Why is returning a `String` encoding both success and error states, as `processOrder()` does, its own smell on top of the tangled control flow?**
+**Short:** Encoding outcomes as strings like "OUT_OF_STOCK:sku123" is primitive obsession — callers must parse strings instead of checking typed results.
+`processOrder()` returns values like `"OUT_OF_STOCK:productId"`, `"PAYMENT_FAILED"`, or `"SUCCESS:orderId"` — every caller has to parse or prefix-match these strings to determine what happened, and nothing prevents a typo in one of these magic strings from silently producing an unrecognized outcome. The refactored solution replaces this with typed exceptions (`ValidationException`, `InsufficientStockException`) and a proper `OrderConfirmation` return type, so the compiler and IDE can verify every caller handles the possible outcomes instead of relying on runtime string comparisons that are invisible to static analysis.
+
 ## Quick Reference Summary
 
 | Dimension | Details |

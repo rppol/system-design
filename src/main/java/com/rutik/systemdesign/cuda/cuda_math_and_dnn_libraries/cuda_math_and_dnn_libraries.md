@@ -49,6 +49,8 @@ The CUDA math/DNN library ecosystem, organized by what each library actually own
 | **Thrust** | STL-like parallel algorithms (sort, reduce, scan, transform) | Rapid prototyping of a parallel algorithm using C++ iterators, without hand-writing a kernel |
 | **CUB** | Block/warp-level cooperative primitives | Building a custom kernel that needs a fast, correct block- or warp-scoped reduction/scan/sort as one component |
 | **nvJPEG / NPP** | Image and signal-processing primitives (decode, resize, color-convert, filter) | Data-loading/preprocessing pipelines feeding a model — keeping preprocessing on-GPU to avoid a host round-trip |
+| **cuBLASDx / cuFFTDx** | Device-side GEMM and FFT, callable from inside a kernel | You want a block-level matmul or FFT as one *step* of your own fused kernel rather than a separate launch |
+| **nvmath-python** | Python bindings to the host-side math libraries, cuBLASLt epilogues included | Testing whether an FP8 or fused-epilogue GEMM path exists on your hardware without setting up a C++ extension build |
 
 **Two axes to reason about, not one:**
 
@@ -72,6 +74,28 @@ quadrantChart
 ```
 
 The fixed-API libraries sit in the top-left — near-zero ramp-up, near-peak performance, but no room to customize; a custom kernel sits in the bottom-right — total control, but weeks of effort per op, which is exactly why Section 3's "fusion is the only lever" rule exists to keep engineers out of that quadrant unless fusion demands it.
+
+### Narrow precision: which library reaches FP8 and FP4, and how
+
+The precision ladder the hardware exposes (see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) §4.1b) does not reach every library at the same altitude, and this is the most common reason a team "cannot get FP8 working" — they are calling an API that has no FP8 entry point.
+
+| Precision | How you reach it | Scaling model |
+|---|---|---|
+| FP16 / BF16 | `cublasGemmEx`, `cublasLtMatmul`, or any framework op | none needed — accumulate in FP32 |
+| TF32 | automatic for FP32 GEMMs under `CUBLAS_COMPUTE_32F_FAST_TF32` | none |
+| INT8 | `cublasLtMatmul` with an INT8 epilogue scale | per-tensor scale, calibration-derived |
+| FP8 (E4M3 / E5M2) | **`cublasLtMatmul` only** — `cublasGemmEx` has no FP8 path, and there is no `nvcuda::wmma` FP8 fragment type on any architecture | **per-tensor scale factors, passed as device pointers** in the matmul descriptor |
+| FP4 / FP6 (NVFP4, MXFP4, MXFP6, MXFP8) | CUTLASS block-scaled kernels, or a framework that generates them | **block scale factor per 16 or 32 K-elements** |
+
+Three things follow from that table.
+
+**FP8 is a cuBLASLt-shaped API, not a cuBLAS-shaped one.** Because FP8's dynamic range is too narrow to survive an unscaled GEMM, the scale factors are not an optional epilogue — they are part of the operation. `cublasLtMatmul` takes `CUBLASLT_MATMUL_DESC_A_SCALE_POINTER`, `..._B_SCALE_POINTER` and `..._D_SCALE_POINTER` as *device* pointers, so the scales can be recomputed each step by the same kernel that produced the tensor, without a host round-trip. There is also an amax output pointer (`CUBLASLT_MATMUL_DESC_AMAX_D_POINTER`) so the GEMM itself reports the maximum absolute value of its output, which is exactly what the next step's scale needs. That feedback loop is what NVIDIA's Transformer Engine automates.
+
+**FP4 does not appear in cuBLAS at all — it lives in CUTLASS.** Block-scaled narrow precision needs a scale factor interleaved with the operands every 16 or 32 elements along K, which is a layout decision, not a parameter. CUTLASS encodes the whole combination in a dispatch policy name (`KernelTmaWarpSpecialized1SmNvf4Sm100`), and frameworks reach FP4 by generating or selecting one of those kernels rather than by setting a flag on a BLAS call. If you want FP4 today and you are not writing CUTLASS, the realistic path is a serving stack that already ships the kernels.
+
+**cuDNN's fused attention is the FP8 path most people actually use.** The cuDNN graph API exposes a fused scaled-dot-product-attention engine that keeps the score matrix on-chip and applies FP8 scaling inside the fusion; PyTorch's `torch.nn.functional.scaled_dot_product_attention` dispatches to it (alongside its FlashAttention and memory-efficient backends) depending on dtype, head dimension, and mask shape. Checking *which* backend a given call selected — with `torch.backends.cuda.sdp_kernel` context managers or the profiler — is the first diagnostic when attention is slower than expected, because a single unsupported argument silently drops the call onto the math fallback.
+
+Two smaller library families worth knowing exist for the same reason CUTLASS does — you want the library's kernel *inside* your own. **cuBLASDx** and **cuFFTDx** are device-side extension libraries: header-only, callable from within a kernel, so a block-level GEMM or FFT becomes a step in a fused kernel rather than its own launch. **nvmath-python** exposes the same host-side libraries (cuBLASLt epilogues included) to Python without a C++ build step, which is often the fastest way to test whether an FP8 GEMM path is even available on your hardware before committing to a full extension.
 
 ---
 
@@ -960,6 +984,18 @@ A DNN training or inference pipeline's data-loading and preprocessing stage (JPE
 **Q: How does CuPy relate to cuBLAS and cuDNN — is it a competing implementation?**
 **Short:** CuPy is a NumPy-shaped array API that dispatches its linear-algebra calls directly into cuBLAS, cuSOLVER, and cuFFT rather than competing with them.
 CuPy is a NumPy/SciPy-shaped array API that dispatches its linear-algebra and DNN-adjacent calls (`cupy.dot`, `cupy.linalg.svd`, `cupyx.scipy.signal.fftconvolve`) directly into cuBLAS, cuSOLVER, and cuFFT under the hood. It adds a familiar Python array syntax, not a competing math kernel — the performance characteristics are identical to calling the underlying library from CUDA C++ directly.
+
+**Q: Which cuBLAS entry point do you need for an FP8 GEMM, and why is it not `cublasGemmEx`?**
+**Short:** Only `cublasLtMatmul` has an FP8 path, because FP8 needs per-tensor scale factors that are part of the operation rather than an optional epilogue.
+`cublasLtMatmul` — `cublasGemmEx` has no FP8 path at all. The reason is that FP8's dynamic range is too narrow to survive an unscaled GEMM, so scale factors are not decoration on the result, they are part of the operation. cuBLASLt takes them as *device* pointers on the matmul descriptor (`CUBLASLT_MATMUL_DESC_A_SCALE_POINTER` and its B/D siblings), so a scale can be recomputed each step by the kernel that produced the tensor without a host round-trip, and it can return the output's maximum absolute value through an amax pointer so the next step's scale is available immediately. That feedback loop is precisely what NVIDIA's Transformer Engine automates for you. If you are trying to enable FP8 and nothing changes, check first that you are on the Lt API and not the legacy one.
+
+**Q: Why does FP4 appear in CUTLASS but not in cuBLAS?**
+**Short:** Block-scaled FP4 interleaves a scale factor every 16 or 32 K-elements, which is a layout decision baked into the kernel rather than a parameter a fixed BLAS API can accept.
+Because block scaling is a layout, not a flag. NVFP4 and the MX formats carry a scale factor for every 16 or 32 contiguous elements along K, interleaved with the operands, and a fixed-signature BLAS call has no way to express that — the layout has to be compiled into the kernel. CUTLASS does exactly that, encoding the whole combination in a dispatch-policy name such as `KernelTmaWarpSpecialized1SmNvf4Sm100`, and frameworks reach FP4 by selecting or generating one of those kernels. The practical consequence is that if you want FP4 today and are not writing CUTLASS yourself, your realistic path is a serving stack that already ships the kernels rather than a flag on a library call.
+
+**Q: How do you tell which backend `scaled_dot_product_attention` actually chose, and why does it matter?**
+**Short:** Check with the profiler or the SDPA backend context manager; one unsupported argument silently drops the call to the math fallback instead of the fused kernel.
+Use the profiler to see which kernel ran, or force and test a backend with PyTorch's SDPA backend context manager. It matters because `scaled_dot_product_attention` is a dispatcher over several implementations — a FlashAttention kernel, a memory-efficient kernel, cuDNN's fused attention engine, and a plain math fallback — and the selection depends on dtype, head dimension, mask shape, and whether a dropout or bias argument is present. A single unsupported argument silently routes you to the math fallback, which materializes the full score matrix in HBM and is several times slower with no error raised. When attention is slower than expected, confirming the backend is the first diagnostic, before touching shapes or precision.
 
 **Q: What is a kernel-selection heuristic, and why might the same GEMM shape dispatch to a different kernel on two different runs?**
 **Short:** cuBLAS/cuDNN keep architecture-specific tables mapping shape and dtype to a best-known kernel, which can change across library versions or under autotuning contention.

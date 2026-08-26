@@ -1,4 +1,7 @@
 # Design a Circuit Breaker (Java)
+
+## Intuition
+
 > **A circuit breaker is a polite "I give up for now" signal.**  
 > Instead of hammering a failing service with 1,000 requests that will all timeout after 5
 > seconds, the circuit breaker detects the failure pattern, trips OPEN, and returns a fallback
@@ -436,6 +439,68 @@ PaymentResult result = cb.execute(
 
 ---
 
+### 4.7 Bulkhead isolation in the virtual-thread era
+
+BROKEN — dropping the thread-pool bulkhead because "virtual threads make thread pools obsolete," with nothing replacing the isolation it provided:
+
+```java
+// BROKEN: virtual threads removed the reason to size a thread pool per
+// dependency, but the team read that as "remove the bulkhead," not
+// "replace the bulkhead's mechanism." Every caller now shares one
+// unbounded virtual-thread-per-task executor across every dependency.
+ExecutorService sharedExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+CompletableFuture<PaymentResult> charge = CompletableFuture.supplyAsync(
+    () -> circuitBreaker.execute(() -> paymentClient.charge(request), fallback),
+    sharedExecutor);
+// paymentClient degrades to 30s timeouts under a downstream incident.
+// Nothing bounds how many of those 30s calls run concurrently — every
+// caller submits, every caller gets a virtual thread, and thousands of
+// them now sit blocked on the SAME slow dependency's socket/connection
+// pool simultaneously. The connection pool, not the JVM thread count,
+// becomes the next thing to fall over.
+```
+
+FIX — a `Semaphore` bounds *concurrency into the dependency*, independent of how many threads (virtual or platform) are asking:
+
+```java
+public class SemaphoreBulkhead {
+    private final Semaphore permits;
+    private final String name;
+
+    public SemaphoreBulkhead(String name, int maxConcurrentCalls) {
+        this.name = name;
+        this.permits = new Semaphore(maxConcurrentCalls);
+    }
+
+    public <T> T execute(Supplier<T> call, Supplier<T> onSaturation) {
+        if (!permits.tryAcquire()) {
+            return onSaturation.get();      // bulkhead full: fail fast, no waiting
+        }
+        try {
+            return call.get();
+        } finally {
+            permits.release();
+        }
+    }
+}
+
+// Composition: CircuitBreaker still owns failure-rate tripping; the
+// bulkhead owns concurrency. Order matters the same way it did for
+// Retry above — bulkhead outermost, so a saturated bulkhead never even
+// asks the breaker's state:
+SemaphoreBulkhead bulkhead = new SemaphoreBulkhead("payment-service", 50);
+CircuitBreaker cb = new CircuitBreaker("payment-service", config);
+
+PaymentResult result = bulkhead.execute(
+    () -> cb.execute(() -> paymentClient.charge(request), fallback),
+    () -> PaymentResult.pending(request.orderId(), "bulkhead-saturated"));
+```
+
+The `tryAcquire()` on the `Semaphore` is the whole point: it is non-blocking, so a caller that cannot get a permit fails immediately instead of parking — even a cheap virtual-thread park is still a caller waiting behind 50 already-slow calls, which does nothing for latency. Resilience4j's own `SemaphoreBulkhead` (§6) takes the same shape.
+
+---
+
 ## 5. Design Decisions & Tradeoffs
 
 ### Decision 1: Count-based vs time-based sliding window
@@ -491,6 +556,43 @@ What matters far more is that the aggregate counters are updated incrementally i
 critical section, keeping `failureRate()` O(1); a lock-free ring buffer that then scans the
 window to compute the rate would be strictly worse.
 
+### Decision 6: Thread-pool bulkhead vs semaphore bulkhead — what virtual threads actually changed
+
+Hystrix-style isolation historically meant giving each downstream dependency its own small,
+fixed-size thread pool: if `payment-service`'s pool was exhausted by slow calls, `inventory-
+service` callers were unaffected because they queued on a different pool entirely. That design
+was solving two problems with one mechanism — bounding *concurrency* into a slow dependency,
+and reserving *thread capacity* so one dependency could not starve the platform-thread pool
+everything else shared.
+
+Virtual threads dissolve the second problem, not the first. There is no shared, size-limited
+pool of platform threads to starve — the JDK schedules virtual threads onto a carrier pool
+sized to `availableProcessors()`, and blocking one virtual thread on a slow socket read costs
+the carrier nothing (the carrier is free to run other virtual threads while this one is
+parked). So the classic argument for a thread-pool bulkhead — "reserve threads so a slow
+dependency can't starve the pool" — is no longer a reason to keep one.
+
+But the *isolation* problem it solved is untouched: without some limit, a degraded `payment-
+service` can still accept unlimited concurrent callers, each holding a connection-pool slot, a
+socket, and (eventually) a 30-second timeout, right up until the connection pool itself — not
+the thread pool — is what falls over. Virtual threads changed which resource gets exhausted
+first, not whether one gets exhausted. The fix that survives the migration is the `Semaphore`-
+based bulkhead in §4.7: it bounds concurrent calls to a dependency directly, with no
+relationship to how many threads (of either kind) are making them, so it isolates correctly
+whether the caller is a platform thread from a fixed pool or a virtual thread from an unbounded
+per-task executor.
+
+One more thing gets *more* important under virtual threads, not less: the atomicity of the
+CLOSED→OPEN transition in §4.4's `transitionTo`. A thread-pool bulkhead used to cap how many
+threads could be inside `execute()` concurrently, which incidentally capped how many threads
+could be racing the CAS in `evaluateThreshold()` at once. Remove the pool and replace it with
+cheap virtual threads and that incidental cap is gone — a degraded dependency can now have
+thousands of concurrent callers all calling `recordOutcome()` and `evaluateThreshold()` at the
+same moment. The CAS-based state machine in §4.4 was already correct under arbitrary
+concurrency, which is exactly why it does not need to change — but it is worth naming
+explicitly: this design was already paying for correctness that a pre-Loom, thread-pool-
+isolated version could have gotten away with skimping on.
+
 ---
 
 ## 6. Real-World Implementations
@@ -544,6 +646,38 @@ and no single breaker sees enough calls to reach `minimumNumberOfCalls`, so noth
 trips. Size the split so each breaker sees at least tens of calls per window at your P5
 traffic level, not your peak.
 
+### Envoy Proxy — outlier detection at the mesh layer
+
+Envoy implements circuit-breaking at two layers that are easy to conflate. Its **circuit
+breakers** proper are connection/request concurrency limits (max pending requests, max
+connections) — closer to this case study's bulkhead (§4.7) than its state machine. The
+mechanism that actually matches §4's CLOSED/OPEN/HALF_OPEN model is **outlier detection**:
+passive health checking that ejects a host from the load-balancing pool after
+`consecutive_5xx` consecutive server errors (default threshold 5), capped so no more than
+`max_ejection_percent` of the upstream cluster can be ejected at once — protection against
+ejecting an entire cluster during a correlated failure. An ejected host serves no traffic for
+a `base_ejection_time` that grows with repeated ejections, then rejoins — the mesh-layer
+analog of this case study's HALF_OPEN probe, except the "probe" is just letting the next
+health check or request try the host again. Running this at the proxy/sidecar layer means
+every service gets per-upstream-host circuit breaking for free, without each application
+needing its own `CircuitBreaker` instance — Istio's `DestinationRule` circuit-breaking
+configuration is built directly on top of this Envoy mechanism.
+
+### AWS guidance on retry storms — why the breaker sits next to retry, not inside it
+
+The Amazon Builders' Library article "Timeouts, retries, and backoff with jitter" (Marc
+Brooker) names the exact failure mode Pitfall 2 (§9) describes: a client-side retry that
+fires again the instant a call fails is a *retry storm* generator, because the added load
+lands on a backend that is already the reason the calls are failing. Its recommended defenses
+are the same three primitives this case study composes differently: a timeout on every remote
+call (bound the damage of one slow attempt), exponential backoff with **full jitter** —
+waiting a random duration between 0 and the backoff ceiling, not the ceiling itself — so
+retrying clients spread out instead of re-synchronizing on the same instant, and treating
+retries as strictly bounded (a small fixed attempt count, never "retry until success"). A
+circuit breaker is the backstop for when backoff is not enough: once `CallNotPermittedException`
+starts firing, no amount of jitter helps, because §4.6's composition rule already stopped the
+retry layer from making the call at all.
+
 ---
 
 ## 7. Technologies & Tools
@@ -553,6 +687,9 @@ traffic level, not your peak.
 | Resilience4j | Production CB for Spring/non-Spring | Count-based (`FixedSizeSlidingWindowMetrics`) + time-based (`SlidingTimeWindowMetrics`); `ReentrantLock` around an O(1) incremental aggregate; Micrometer integration |
 | `java.util.concurrent.atomic.AtomicInteger` | CAS state machine | Ordinal-based state encoding |
 | `java.util.concurrent.atomic.AtomicLong` | Lock-free counters | Failure/success counts |
+| `java.util.concurrent.Semaphore` | Bulkhead isolation (§4.7) | Non-blocking `tryAcquire()`; replaces thread-pool bulkheads under virtual threads |
+| Resilience4j `SemaphoreBulkhead` | Production bulkhead | Same shape as §4.7; also ships `ThreadPoolBulkhead` for platform-thread isolation |
+| Envoy outlier detection | Mesh-layer passive health checking | Ejects unhealthy hosts by `consecutive_5xx`; complements, does not replace, an app-level CB |
 | Micrometer | CB state + rate metrics | Export to Prometheus; alert on state gauge |
 | JFR Custom Events | Record state transitions | `@Name("CircuitBreaker.StateTransition")` |
 | Testcontainers + WireMock | Test CB under real failure conditions | Simulate downstream failures; assert CB state transitions |
@@ -631,6 +768,25 @@ the CB tripped OPEN after 2 slow calls. All subsequent calls during the 10s OPEN
 fallbacks. 800 requests were served incorrect data during the first 10 seconds of deployment.
 **Fix:** Set `minimumNumberOfCalls = 10`; add a startup warmup period where CB is disabled.
 
+### Pitfall 6 — Removing the thread-pool bulkhead during a virtual-thread migration, with nothing replacing it
+
+**Incident (2024, logistics platform):** a service migrated its dependency-calling code from
+`Executors.newFixedThreadPool(20)` per downstream to `Executors.newVirtualThreadPerTaskExecutor()`,
+correctly noting that per-dependency thread pools were no longer needed to prevent
+platform-thread starvation. The migration removed the bulkhead entirely rather than replacing
+it with the `Semaphore` form (§4.7, §5 Decision 6). A downstream carrier-tracking API degraded
+to 25-second response times during a partner outage; with no concurrency limit, every incoming
+request opened a new call to it, and concurrent in-flight calls to that one dependency peaked
+at just under 4,000 — each holding a connection from a 200-connection pool meant for every
+downstream combined. **Impact:** the connection pool exhausted in under two minutes, which
+starved calls to three *unrelated*, healthy downstream services that happened to share the
+pool; total incident window was 34 minutes, and it was misdiagnosed as a database issue for
+the first 20 because the symptom (connection pool exhaustion) pointed at persistence, not at
+the carrier-tracking dependency that actually caused it. **Fix:** a per-dependency `Semaphore`
+bulkhead sized to that dependency's own connection budget, deployed the same week; a repeat of
+the same partner outage two months later produced a clean circuit-breaker trip and zero
+cross-service impact.
+
 ---
 
 ## 10. Capacity Planning
@@ -664,6 +820,30 @@ fallbacks. 800 requests were served incorrect data during the first 10 seconds o
 # Above roughly 1,000 calls/sec, switch to TIME_BASED: it aggregates into per-second
 # buckets, so a 10 s window costs 10 buckets regardless of call rate — O(1) memory
 # in the traffic level, which is the whole reason the time-based variant exists.
+```
+
+**Sizing a semaphore bulkhead:**
+```
+# Given: payment-service dependency, its own connection pool = 50 connections
+# Each call holds exactly one connection for its duration (typical HTTP client)
+# Bulkhead permits should not exceed the resource it is protecting:
+#   maxConcurrentCalls <= connection_pool_size
+#   Set to ~80% of pool size to leave headroom for other pool consumers
+#   (health checks, admin calls): maxConcurrentCalls = 40
+
+# Verify against expected concurrency at steady state (Little's Law):
+#   Concurrency = throughput x latency
+#   At 200 req/sec to this dependency, p99 latency 150ms (healthy):
+#     Concurrency = 200 x 0.15 = 30 -> fits under 40, no false saturation
+#   During a degradation to 2s latency:
+#     Concurrency demand = 200 x 2.0 = 400 -> bulkhead saturates at 40,
+#     the other 360/sec fail fast via onSaturation() instead of queuing
+#     behind an already-overloaded dependency.
+
+# This is the number that makes the bulkhead earn its place: without it,
+# those 360 req/sec each hold a virtual thread AND a connection-pool
+# slot for up to 2 seconds; with it, they fail in microseconds and the
+# 50-connection pool never sees more than 40 borrowers from this path.
 ```
 
 ---
@@ -775,6 +955,43 @@ For `slidingWindowSize` changes: create a new `CountBasedSlidingWindow` and swap
 (`AtomicReference<CountBasedSlidingWindow>`); history is lost on resize. Subscribe to
 `@EventListener(RefreshScopeRefreshedEvent.class)` to trigger `reconfigure()` after a
 Spring Cloud Bus refresh.
+
+**Q11. Why did virtual threads not eliminate the need for a bulkhead, even though they eliminated
+the reason thread-pool bulkheads existed?**
+Because a thread-pool bulkhead was solving two problems at once — bounding concurrency into a
+slow dependency, and reserving thread capacity so that dependency couldn't starve a shared
+platform-thread pool. Virtual threads remove the second problem: there is no fixed-size thread
+pool to starve, since the JDK schedules virtual threads onto carriers sized to CPU count and a
+blocked virtual thread costs the carrier nothing. But the first problem is untouched — an
+unbounded number of virtual threads can still pile onto the same degraded dependency, and what
+falls over is whatever resource actually is finite: a connection pool, a downstream's own
+capacity, file descriptors. The fix that survives the migration is a `Semaphore`-based bulkhead
+(§4.7), which bounds concurrent calls to a dependency directly rather than bounding threads.
+
+**Q12. Why does the CLOSED→OPEN transition's atomicity matter more after a virtual-thread
+migration, not less?**
+A thread-pool bulkhead used to incidentally cap how many threads could be inside `execute()` at
+once, which capped how many threads could race the CAS in `evaluateThreshold()` simultaneously.
+Remove the pool for a cheap-to-spawn virtual-thread executor and that incidental cap disappears
+— a degraded dependency can have thousands of concurrent callers all touching the sliding
+window and the state CAS at the same instant. This case study's `AtomicInteger`-based state
+machine (§4.4) was already correct under arbitrary concurrency, so nothing needs to change —
+but it means the correctness this design paid for was not optional headroom; it is now
+load-bearing at a concurrency level a pre-Loom, thread-pool-isolated design would never have
+reached.
+
+**Q13. How does Envoy's outlier detection differ from this case study's application-level
+circuit breaker?**
+Scope and trigger, mainly. This case study's breaker sits inside application code and trips on
+a rate computed from a sliding window of outcomes the app itself recorded, for one logical
+operation. Envoy's outlier detection sits at the proxy/sidecar layer and ejects individual
+upstream *hosts* (not operations) from the load-balancing pool after consecutive 5xx responses,
+with no application code involved — every service behind the mesh gets it for free. The two are
+complementary, not competing: outlier detection handles "this one instance behind the load
+balancer is unhealthy," which an application-level breaker cannot see (it only sees the
+aggregate response through the LB); an application-level breaker handles "this operation,
+regardless of which instance served it, is failing," which the mesh cannot see because it does
+not understand the application's semantics of failure.
 
 ---
 

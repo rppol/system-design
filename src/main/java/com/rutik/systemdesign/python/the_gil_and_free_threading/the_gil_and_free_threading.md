@@ -16,7 +16,8 @@ introduced PEP 703, an optional GIL-free build (`python3.13t`) that replaces pla
 with biased reference counting and per-object locking, allowing true parallel CPU execution across
 threads at the cost of requiring explicit thread safety in all Python and extension code. Python 3.14
 promoted that build from experimental to **officially supported** (PEP 779) and cut the single-threaded
-penalty to roughly 5–10%.
+penalty to roughly 1% on macOS aarch64 and 8% on x86-64 Linux — the figure that changed the
+recommendation, down from a far larger penalty in the 3.13 preview.
 
 **Python version relevance:**
 - Python 2: GIL check every 100 bytecodes (sys.getcheckinterval)
@@ -87,7 +88,8 @@ multiple threads.
 The free-threaded binary (`python3.14t`) removes the global lock. Each object gets a per-object biased
 reference count and a thread-local reference count shard. Thread safety for mutable shared state is now
 entirely the programmer's responsibility. Since Python 3.14 this build is officially supported, not
-experimental, and its single-threaded penalty is roughly 5–10%.
+experimental, and its single-threaded penalty runs from roughly 1% on macOS aarch64 to 8% on
+x86-64 Linux.
 
 ---
 
@@ -688,7 +690,7 @@ top-left (full CPU parallelism, weak I/O overlap), and the free-threading build 
   re-enables the GIL for the whole process, so you pay the single-threaded penalty and get nothing
 - Your codebase has no thread-safety audit (shared mutable state is now genuinely dangerous)
 - The workload is already I/O-bound; asyncio or a thread pool on the standard build is simpler and
-  does not cost the 5–10% single-threaded penalty
+  does not cost the free-threaded build's single-threaded penalty
 
 ---
 
@@ -884,7 +886,7 @@ async def fixed_handler():
 | `multiprocessing.Pool` | None (separate processes) | CPU-bound tasks | ~50–100 ms startup; pickle IPC | Copy (pickle) | All |
 | `concurrent.futures.ProcessPoolExecutor` | None (separate processes) | CPU-bound with futures API | ~50–100 ms startup | Copy (pickle) | 3.2+ |
 | `asyncio` + `aiohttp` | None (single thread) | High-concurrency I/O | Near-zero per coroutine | Direct (single thread) | 3.4+ (mature 3.7+) |
-| `python3.14t` (free-threading) | Removed | CPU-bound Python threads | 5–10% single-threaded penalty | Direct (unsafe without locks) | 3.13 experimental, 3.14+ supported |
+| `python3.14t` (free-threading) | Removed | CPU-bound Python threads | ~1% (macOS aarch64) to ~8% (x86-64 Linux) single-threaded penalty | Direct (unsafe without locks) | 3.13 experimental, 3.14+ supported |
 | `concurrent.interpreters` | One GIL per interpreter | CPU-bound work without process IPC | Interpreter creation; no pickle for shareable types | Isolated (explicit queues) | 3.14+ |
 | `py-spy record --gil` | Samples only GIL holders | Finding which stacks own the lock | Negligible (out-of-process) | N/A | All |
 | `time.process_time()` vs `perf_counter()` | Exposes cpu/wall ratio | First-line GIL diagnosis, no install | Zero | N/A | All |
@@ -938,7 +940,7 @@ NumPy's heavy computational routines (matrix multiplication, FFT, sort) are impl
 
 **Q7: What is PEP 703 and what problem does it solve?**
 **Short:** PEP 703 defines CPython's optional free-threaded build, officially supported since 3.14, that removes the GIL entirely.
-PEP 703 defines an optional GIL-free build of CPython, shipped experimentally in 3.13 and made officially supported in 3.14 by PEP 779. It solves the core problem: CPU-bound multi-threaded Python programs cannot use multiple cores. The implementation replaces the plain global reference count (which required the GIL for thread safety) with biased reference counting, where each object tracks a "local" refcount owned by the creating thread and a "shared" refcount updated with atomic operations by other threads. The GIL is removed; true parallel CPU execution is possible. The cost: all shared mutable state now requires explicit synchronisation, C extensions that assumed the GIL re-enable it on import unless they declare otherwise, and single-threaded code runs roughly 5–10% slower in 3.14 — down from a far larger penalty in the 3.13 preview, which is what changed the recommendation.
+PEP 703 defines an optional GIL-free build of CPython, shipped experimentally in 3.13 and made officially supported in 3.14 by PEP 779. It solves the core problem: CPU-bound multi-threaded Python programs cannot use multiple cores. The implementation replaces the plain global reference count (which required the GIL for thread safety) with biased reference counting, where each object tracks a "local" refcount owned by the creating thread and a "shared" refcount updated with atomic operations by other threads. The GIL is removed; true parallel CPU execution is possible. The cost: all shared mutable state now requires explicit synchronisation, C extensions that assumed the GIL re-enable it on import unless they declare otherwise, and single-threaded code runs roughly 1% slower on macOS aarch64 to 8% slower on x86-64 Linux in 3.14 — down from a far larger penalty in the 3.13 preview, which is what changed the recommendation.
 
 **Q8: What is PEP 684 (sub-interpreters) and how does it differ from PEP 703?**
 **Short:** PEP 684 gives each sub-interpreter its own separate GIL, so multiple sub-interpreters can run bytecode in parallel.
@@ -982,7 +984,7 @@ Use `multiprocessing.shared_memory` (Python 3.8+) to allocate a named shared mem
 
 **Q18: What is the practical advice for a team starting a new Python microservice that needs parallelism?**
 **Short:** Default to asyncio for I/O-bound work and a process pool or task queue for CPU-bound work in a new microservice.
-Default to `asyncio` + `async def` handlers for I/O-bound work (database calls, external APIs, cache reads) — this covers the large majority of web service workloads. For CPU-bound operations (report generation, image processing, ML inference), use a dedicated task queue (Celery with prefork workers, or `ProcessPoolExecutor`) to offload work from the event loop. Avoid raw `threading.Thread` in application code except for wrapping legacy synchronous libraries. Free-threading is a supported option from 3.14, but adopt it only after auditing every C dependency for a free-threaded wheel and asserting `sys._is_gil_enabled() is False` in a startup check — otherwise you pay the 5–10% single-threaded penalty for nothing. Profile before optimising: most "slow" services are I/O-bound, not GIL-bound.
+Default to `asyncio` + `async def` handlers for I/O-bound work (database calls, external APIs, cache reads) — this covers the large majority of web service workloads. For CPU-bound operations (report generation, image processing, ML inference), use a dedicated task queue (Celery with prefork workers, or `ProcessPoolExecutor`) to offload work from the event loop. Avoid raw `threading.Thread` in application code except for wrapping legacy synchronous libraries. Free-threading is a supported option from 3.14, but adopt it only after auditing every C dependency for a free-threaded wheel and asserting `sys._is_gil_enabled() is False` in a startup check — otherwise you pay the free-threaded build's single-threaded penalty for nothing. Profile before optimising: most "slow" services are I/O-bound, not GIL-bound.
 
 ---
 

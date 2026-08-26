@@ -280,6 +280,70 @@ Look for:
 
 ---
 
+## Interview Questions and Answers
+
+**Q: Why does `a.getB().getC().doSomething()` violate the Law of Demeter but `stream.filter().map().collect()` does not, despite both being method chains?**
+**Short:** The train wreck touches different strangers at each dot; the stream chain calls the same logical pipeline object throughout.
+In the train wreck, each dot lands on a genuinely different object — `A`, then `B`, then `C` — so the caller ends up knowing about and depending on the internal structure of objects it has no direct relationship with. In a stream pipeline, every call transforms and returns the same logical pipeline, so no stranger's internal state is ever reached into. The real test is not "how many dots" but "am I reaching through an object to access another object's internal structure."
+
+**Q: Why are fluent builder chains exempt from the Law of Demeter even though they also chain many method calls?**
+**Short:** Every setter in a builder returns `this`, so the chain never leaves the same object.
+`new UserBuilder().setName("Alice").setEmail(...).setAge(30).build()` calls the identical `UserBuilder` instance at every step, because each setter returns `this` rather than a different collaborator. The Law of Demeter forbids navigating through a chain of *different* objects to reach a distant object's state — it says nothing about calling many methods on one object you already have a direct relationship with. This is the same distinction that exempts the stream pipeline example.
+
+**Q: What is "Tell, Don't Ask," and how does it operationalize the Law of Demeter?**
+**Short:** Push logic into the object that has the data instead of pulling the data out to act on it externally.
+"Ask" style code reaches into an object's internals to retrieve data and then acts on that data externally, as in `if (order.getCustomer().getMembershipLevel() == PREMIUM)`. "Tell" style code pushes the decision into the object that already has the knowledge, as in `order.isEligibleForPremiumDiscount()`, so the caller never needs to know the object graph shape at all. Tell, Don't Ask is the behavioral discipline that naturally produces Law-of-Demeter-compliant code, because it eliminates the reason to reach through an object in the first place.
+
+**Q: In the OrderService violation example, what exactly does OrderService need to know about, and why does that knowledge become a liability?**
+**Short:** OrderService must know Order has a Customer, Customer has an Address, and Address has a city field.
+`order.getCustomer().getAddress().getCity()` requires `OrderService` to understand three layers of object structure it has no direct relationship with, purely to extract one string. If `Address` is later refactored to wrap city inside a `Location` object, `OrderService` breaks even though the behavior it actually needs — get the city for an order — never changed. The liability is that a refactor deep in the object graph ripples outward to code that shouldn't have needed to know about that layer at all.
+
+**Q: How does the compliant fix in the module resolve the OrderService violation, and what does OrderService end up depending on?**
+**Short:** Order and Customer each add a delegate method, so OrderService calls only `order.getCustomerCity()`.
+`Order` gets a `getCustomerCity()` method that internally calls `customer.getCity()`, and `Customer` gets a `getCity()` method that internally calls `address.getCity()` — each class only reaches into its own immediate field. `OrderService` now calls exactly one method on exactly one immediate friend, `Order`, and has no knowledge that `Customer` or `Address` even exist. The internal structure of `Customer` and `Address` can now change freely without ever touching `OrderService`.
+
+**Q: What are the five categories of objects a method is allowed to call, under the formal statement of the Law of Demeter?**
+**Short:** Itself, its parameters, objects it creates, its own fields, and global objects — nothing reached through those.
+The formal rule permits calls on `this`, on objects passed as parameters to the method, on objects the method itself instantiates, and on the object's own direct component fields, plus (with care) global objects. What it explicitly forbids is navigating through any of those to reach a further, indirectly-known object — that indirect object is a "stranger," not a "friend." The informal summary is "only talk to your immediate friends, don't talk to strangers."
+
+**Q: What consequence of Law of Demeter violations makes unit testing specifically harder, beyond general coupling?**
+**Short:** Testing the calling class in isolation requires mocking an entire chain of intermediate objects, not just the one you care about.
+To test `OrderService.getShippingLabel()` under the violating version, you must construct or mock a `Customer` that itself returns a working `Address` that itself returns a city — three layers of setup for one assertion. Under the compliant version, you mock only `Order` and stub its single `getCustomerCity()` method, since `OrderService` never reaches past its immediate friend. Elaborate mock-chain setup in a test is itself a diagnostic signal that the production code under test is violating the Law of Demeter.
+
+**Q: Why does the module say a method name like `getCustomerAddressCity()` is itself a symptom of a Demeter violation?**
+**Short:** A method name describing what it navigates through, rather than what it does, reveals the caller is doing too much traversal.
+A well-designed delegate method describes a piece of behavior or data the object legitimately owns, like `getCustomerCity()` on `Order`. A name that spells out the traversal path — `getCustomerAddressCity` — reveals that the caller (or the class exposing this method) is thinking in terms of object-graph navigation rather than in terms of a cohesive responsibility. Spotting this naming pattern is one of the concrete detection heuristics the module lists for finding violations.
+
+**Q: How do JPA/Hibernate lazy-loading problems connect to the Law of Demeter, according to the module?**
+**Short:** Services reaching through entity relationships to satisfy N+1 queries are exhibiting Law-of-Demeter violations at the ORM layer.
+When a service reaches through `order.getCustomer().getAddress()` on lazy-loaded JPA entities, each hop can trigger a separate database query, producing the classic N+1 query problem. The module treats this as a concrete instance of the same underlying issue: the service is navigating through objects it doesn't have a direct relationship with, and the ORM's lazy-loading behavior makes the cost of that navigation immediately visible as extra queries. Applying Tell, Don't Ask (letting the entity expose the composed data directly) avoids both the coupling and the query explosion.
+
+**Q: How do Domain-Driven Design aggregate boundaries enforce the Law of Demeter?**
+**Short:** External code may only call the aggregate root; it cannot reach directly into the aggregate's child entities.
+In DDD, an aggregate's root entity is the sole entry point external code is allowed to interact with — child entities inside the aggregate are only reachable through the root's own methods. This is a direct application of "only talk to your immediate friends": the root is the friend, and the internal entities are strangers whose structure the outside world should never depend on. The module maps this directly onto service API design: expose only the root resource's endpoints, not internal sub-resource endpoints.
+
+**Q: How does the API gateway pattern reflect the Law of Demeter at the distributed-systems level?**
+**Short:** Clients talk only to the gateway; they never need to know which downstream services exist or how to reach them.
+A client that called individual downstream services directly would need to know the existence, location, and API of every one of those services — the equivalent of a train-wreck chain at the system level. Routing everything through a gateway means the client has exactly one immediate friend, and the gateway (not the client) owns the knowledge of how to reach and coordinate the downstream services. This is explicitly the Law of Demeter applied to the client-service boundary rather than to object references.
+
+**Q: Why does the module call event-driven decoupling (Order Service publishing OrderPlaced, Inventory Service reacting) a Law-of-Demeter pattern?**
+**Short:** Publishing an event avoids Order Service needing to know about or call Inventory Service directly.
+In a direct-call design, Order Service would need to know Inventory Service exists and how to invoke it — a dependency reaching past its own concerns. By publishing an `OrderPlaced` event instead, Order Service only "talks to" the event bus, its immediate collaborator, and never needs any knowledge of who reacts to the event or how. This reduces coupling between distant parts of the system exactly the way a delegate method reduces coupling between distant objects in the OrderService/Customer/Address example.
+
+**Q: What is the difference between a legitimate use of chaining and a Demeter violation, stated as a single test?**
+**Short:** Ask whether the chain accesses state through multiple layers of object ownership, or transforms one logical thing throughout.
+If each call in the chain returns a *different* object whose internal state you are progressively drilling into — Customer's Address's city — that is navigation through ownership layers and a violation. If each call returns the *same* logical thing being transformed or configured — a builder returning `this`, a stream returning a new stream stage — no stranger's internals are ever exposed, and it is not a violation. This single test replaces the informal and sometimes-misleading "count the dots" heuristic.
+
+**Q: Why does the Law of Demeter call for direct service dependencies only, rejecting a call chain like A calls B calls C calls D?**
+**Short:** Deep call chains increase latency, create distributed-transaction complexity, and propagate failures across every hop.
+A service that calls only its immediate dependencies keeps failure and latency contained to a single hop, and keeps the caller ignorant of anything beyond its direct collaborator's contract. A chain where A calls B which calls C which calls D means a failure or slowdown anywhere in that chain propagates back to A, and A implicitly depends on the existence and correctness of services it never directly talks to. This is the Law of Demeter's coupling argument transplanted to network calls instead of method calls — the same brittleness, at a larger blast radius.
+
+**Q: What does "Information Expert" from GRASP have to do with the Law of Demeter?**
+**Short:** Both principles assign responsibility to whichever object already holds the information needed to fulfill it.
+GRASP's Information Expert pattern says: give a responsibility to the class that has the data needed to carry it out, rather than pulling that data out to a class that doesn't own it. This is the same insight that motivates Tell, Don't Ask and the Law of Demeter's delegate-method fix — `Order` owning `getCustomerCity()` is Information Expert in action, since `Order` (via `Customer`) is closer to the information than `OrderService` is. The module lists Information Expert as a directly related concept because both principles push logic toward the data rather than pulling data toward the logic.
+
+---
+
 ## Quick Summary
 
 | Aspect | Summary |

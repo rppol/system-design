@@ -164,7 +164,7 @@ Training pipeline:
 
 Serving:
   Batch: Spark + model serialize (Pickle/ONNX) -> predictions to database
-  Online: FastAPI + model server (TorchServe, BentoML) -> REST API
+  Online: FastAPI + model server (Triton, BentoML) -> REST API
 
 Monitoring:
   Population Stability Index (PSI) on all features daily
@@ -888,7 +888,7 @@ A team built and trained an excellent model but did not set up monitoring. Three
 | Tabular ML | XGBoost, LightGBM, CatBoost | Structured data |
 | Feature store | Feast, Tecton, Vertex Feature Store | Training-serving consistency |
 | Experiment tracking | MLflow, Weights & Biases, Neptune | Hyperparameter and metric logging |
-| Model serving | TorchServe, BentoML, NVIDIA Triton | Production inference |
+| Model serving | BentoML, NVIDIA Triton, Ray Serve | Production inference |
 | Pipeline orchestration | Airflow, Prefect, Kubeflow | Training pipelines |
 | Monitoring | Evidently AI, Arize Phoenix, Whylogs | Drift detection |
 | A/B testing | Statsig, Optimizely, Eppo | Experiment platforms |

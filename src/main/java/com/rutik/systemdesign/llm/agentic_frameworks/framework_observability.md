@@ -7,9 +7,9 @@
 
 Observability for LLM applications means capturing what happens inside every agent run: which prompts were sent, what the model responded, which tools were called, how long each step took, how many tokens were consumed, and what the final output was. Without observability, debugging production failures means guessing; with it, every incident has a full execution trace.
 
-The LLM observability ecosystem has three layers: (1) framework-specific tools (LangSmith for LangChain/LangGraph, Langfuse as the open-source alternative), (2) OpenTelemetry with LLM semantic conventions (model-agnostic, integrates with existing APM stacks), and (3) application-level metrics via Micrometer/Prometheus.
+The LLM observability ecosystem has three layers: (1) framework-specific tools (LangSmith for LangChain/LangGraph, Langfuse as the open-source alternative), (2) OpenTelemetry with LLM semantic conventions (model-agnostic, integrates with existing APM stacks), and (3) application-level metrics via Micrometer/Prometheus. For the general mechanics of traces, spans, cost tracking, and quality monitoring that apply across every framework, see [LLM Observability & Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md) — this file focuses on what differs *per framework*: how each tool wires into LangGraph callbacks, how `run_id`/`trace_id` propagate through an agent loop, and how a framework-native span maps onto an OpenTelemetry span. For the OTel semantic-conventions story specifically (why the attributes below carry a Development badge, and the exact renames), see [OpenTelemetry for LLM Applications](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md).
 
-**Current landscape (2024)**: LangSmith is the most integrated tool for LangChain users. Langfuse is the leading open-source option and works with any framework. OpenTelemetry Semantic Conventions for GenAI are still stabilizing but gaining enterprise adoption.
+**Current landscape**: LangSmith is the most integrated tool for LangChain/LangGraph users (zero-config via env vars). Langfuse is the leading open-source, framework-agnostic option, with Braintrust as an eval-first competitor in the same space. OpenTelemetry's GenAI semantic conventions moved to their own repository (`open-telemetry/semantic-conventions-genai`, semconv v1.42.0, 2026-06-12) and every `gen_ai.*` attribute, span, metric, and event still carries a **Development** stability badge — none are Stable — though enterprise adoption keeps growing regardless, because the vocabulary is consistent even while individual names can still change.
 
 ---
 
@@ -50,6 +50,7 @@ The LLM observability ecosystem has three layers: (1) framework-specific tools (
 | OpenTelemetry standard | OpenLLMetry / OTEL GenAI | Apache 2.0 | Any (OpenTelemetry exporters) |
 | Commercial APM | Datadog LLM Observability | Commercial | Python/JS agents |
 | Commercial | Arize Phoenix | MIT / Commercial | LangChain, LlamaIndex, DSPy, custom |
+| Eval-first commercial | Braintrust | Commercial (free tier) | Any (tracing + LLM-as-judge scorers + CI gating) |
 | ML experiment tracking | Weights & Biases Weave | MIT / Commercial | LLM tracing + evaluation |
 | Commercial | Helicone | Apache 2.0 proxy | Any (HTTP proxy, no code change) |
 
@@ -135,8 +136,8 @@ flowchart TD
 Each LLM call becomes a span carrying the GenAI semantic-convention attributes, propagated through the same OTLP pipeline as the rest of your traces:
 
 ```
-Span attributes (GenAI semantic conventions):
-  gen_ai.system: "openai"
+Span attributes (GenAI semantic conventions, all still Development-status):
+  gen_ai.provider.name: "openai"          # renamed from gen_ai.system
   gen_ai.request.model: "gpt-4o"
   gen_ai.request.max_tokens: 1024
   gen_ai.usage.input_tokens: 523
@@ -540,6 +541,7 @@ Collecting traces without linking them to user outcomes (thumbs up/down, convers
 | Langfuse | OSS / SaaS | Self-hostable, universal, prompt management | Free OSS; cloud paid |
 | OpenLLMetry | OSS | OpenTelemetry auto-instrumentation for LLMs | Free (Apache 2.0) |
 | Arize Phoenix | OSS / SaaS | LlamaIndex + LangChain support, evaluation | Free OSS |
+| Braintrust | Commercial | Eval-first: tracing, LLM-as-judge scorers, CI/CD quality gates | Free: 1GB data + 10K eval scores/mo |
 | Weights & Biases Weave | OSS / SaaS | ML experiment tracking + LLM tracing | Free tier |
 | Helicone | OSS / SaaS | HTTP proxy, no code changes | Free tier |
 | Datadog LLM Obs. | Commercial | Existing Datadog integration | Datadog pricing |
@@ -576,9 +578,9 @@ LangSmith and Langfuse both support async tracing. For LangChain: async callback
 **Short:** Attach identifiers like `user_id` or `ticket_id` to every trace, then join trace data with warehouse business data on that key.
 Correlate by attaching business identifiers to traces: `user_id`, `session_id`, `order_id`, `feature_flag_variant`. Then join trace data with business data in your data warehouse. Example: LLM support agent traces with `ticket_id` → join with Zendesk data on `ticket_id` → compute resolution rate per agent version. LangSmith metadata dict and Langfuse tags both support arbitrary key-value pairs. For A/B testing: tag traces with experiment variant; compute quality metrics per variant from trace data.
 
-**Q: What is the LLM semantic conventions specification in OpenTelemetry?**
-**Short:** They are standard attribute names like `gen_ai.usage.input_tokens` that let dashboards and queries work across different observability tools.
-OpenTelemetry's GenAI semantic conventions define standard attribute names for LLM spans: `gen_ai.system` (openai, anthropic, etc.), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.prompt` (the full prompt content). These conventions enable interoperability: OpenLLMetry, Datadog, and other tools all use the same attribute names, so dashboards and queries work across implementations. Status: the spec is in "experimental" state as of 2024 but widely adopted. Using standard attributes future-proofs your observability setup.
+**Q: What is the LLM semantic conventions specification in OpenTelemetry, and how stable is it?**
+**Short:** Standard `gen_ai.*` span attribute names shared across tools, but every one still carries a Development stability badge, not Stable.
+OpenTelemetry's GenAI semantic conventions define standard attribute names for LLM spans: `gen_ai.provider.name` (openai, anthropic, etc. — renamed from `gen_ai.system`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` (a string array, since a single response can have multiple finish reasons). These conventions enable interoperability: OpenLLMetry, Datadog, and other tools all use the same attribute names, so dashboards and queries work across implementations. Status: the conventions moved out of the main OpenTelemetry spec repo into their own `open-telemetry/semantic-conventions-genai` repository (semconv v1.42.0, 2026-06-12), and every `gen_ai.*` attribute, span, metric, and event in the registry still carries a **Development** badge — none are Stable, so names can still change between releases. Using standard attributes still future-proofs your observability setup relative to a fully custom schema, but pin the semconv version you build against and expect the occasional rename (as `gen_ai.system` just underwent). See [OpenTelemetry for LLM Applications](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md) for the full attribute list and propagation mechanics.
 
 **Q: How do you debug a production agent that is returning incorrect answers?**
 **Short:** Walk the trace tree to isolate whether retrieval, prompt construction, or the model's own output caused the incorrect answer.

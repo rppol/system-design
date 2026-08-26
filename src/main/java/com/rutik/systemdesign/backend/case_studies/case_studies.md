@@ -50,6 +50,18 @@ Grouped by primary engineering concern, not product category:
 |------------|----------------|----------------|
 | [Design a Microservices Migration](design_microservices_migration/design_microservices_migration.md) | Strangler fig, traffic cutover, shared database migration | How to decompose a Java monolith without a big-bang rewrite: bounded context identification, branch-by-abstraction, feature flags for traffic routing, shared DB anti-pattern and the escape pattern. |
 
+### AI Workload Serving
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design an LLM Serving API](design_llm_serving_api/design_llm_serving_api.md) | Admission control and streaming under GPU scarcity | The HTTP boundary in front of a GPU fleet: a bounded admission queue that sheds with 429 rather than queueing unboundedly, SSE streaming with heartbeats and resume, cancellation propagated to the model backend, and per-tenant token budgets reserved on admission. |
+
+### Outbound Integration
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a Webhook Delivery Service](design_webhook_delivery_service/design_webhook_delivery_service.md) | At-least-once delivery to endpoints you do not control | Transactional outbox to per-endpoint queues, HMAC signing with a dual-secret rotation window, an exponential retry ladder with circuit breaking and auto-disable, a customer-visible delivery log, and an SSRF-safe egress path. |
+
 ---
 
 ## Cross-Cutting / Shared Primitives
@@ -58,8 +70,8 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
-| Idempotency keys | Booking, Payment, Event-Driven Order | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 — Database Engineering |
-| Transactional outbox | Payment, Event-Driven Order | `../messaging_patterns/messaging_patterns.md` | 8 — Event-Driven |
+| Idempotency keys | Booking, Payment, Event-Driven Order, Webhook Delivery | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 — Database Engineering |
+| Transactional outbox | Payment, Event-Driven Order, Webhook Delivery | `../messaging_patterns/messaging_patterns.md` | 8 — Event-Driven |
 | Saga + compensation | Payment (orchestrated), Event-Driven Order | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 |
 | Optimistic vs pessimistic locking, distributed locks | Booking | `../database_internals_and_indexing/database_internals_and_indexing.md`, `../../database/concurrency_control_and_locking/concurrency_control_and_locking.md` | 4 |
 | Kafka EOS / DLQ / consumer idempotency | Event-Driven Order | `../kafka_deep_dive/kafka_deep_dive.md`, `../messaging_patterns/messaging_patterns.md` | 8 |
@@ -86,14 +98,17 @@ flowchart LR
     payment -->|"outbox pattern reused"| eventOrder(["design_event_driven_order_system<br/>(Kafka EOS + CQRS)"])
     msFund(["microservices_fundamentals<br/>(external module)"]) -->|"decomposition theory"| migration(["design_microservices_migration<br/>(standalone: strangler fig + CDC)"])
     feed(["design_feed_service<br/>(standalone: fan-out + Redis)"])
+    llmapi(["design_llm_serving_api<br/>(standalone: admission control + SSE)"])
+    webhook(["design_webhook_delivery_service<br/>(standalone: outbox + retry ladder)"])
 
     class booking,feed base
+    class llmapi,webhook req
     class payment,migration train
     class eventOrder io
     class msFund frozen
 ```
 
-Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service` and `design_microservices_migration` share no patterns with the others and can each be read standalone.
+Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service`, `design_microservices_migration`, `design_llm_serving_api` and `design_webhook_delivery_service` share no patterns with the others and can each be read standalone.
 
 ---
 
@@ -111,6 +126,10 @@ Arrows point from the case study that originates a pattern to the one that reuse
 | Design an e-commerce checkout | [design_payment_processor](design_payment_processor/design_payment_processor.md) + [design_event_driven_order_system](design_event_driven_order_system/design_event_driven_order_system.md) |
 | Design a monolith-to-microservices migration | [design_microservices_migration](design_microservices_migration/design_microservices_migration.md) |
 | Design a strangler fig pattern | [design_microservices_migration](design_microservices_migration/design_microservices_migration.md) |
+| Design an LLM inference / completions API | [design_llm_serving_api](design_llm_serving_api/design_llm_serving_api.md) |
+| Design an inference batching system for a single GPU | [design_llm_serving_api](design_llm_serving_api/design_llm_serving_api.md) |
+| Design a webhook / event delivery system | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
+| Design a notification delivery service | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
 
 ---
 

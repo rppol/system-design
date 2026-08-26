@@ -11,7 +11,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ---
 
-## Module List — 35 Modules (9 Phases)
+## Module List — 38 modules (9 Phases)
 
 ### Phase 1 — Networking Fundamentals
 
@@ -26,10 +26,12 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 15 |
+| `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 18 |
+| `api_contracts_and_schema_governance/` | OpenAPI 3.2, AsyncAPI 3.1, Spectral/oasdiff/buf gates, compatibility modes, Deprecation/Sunset | 18 |
 | `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 |
 | `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 |
 | `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 |
+| `webhooks_and_event_delivery/` | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 18 |
 
 ### Phase 3 — Performance Engineering
 
@@ -37,8 +39,9 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 16 |
 | `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 |
-| `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 16 |
+| `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 17 |
 | `async_and_concurrency_patterns/` | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 |
+| `serving_ai_workloads/` | Streaming transport, admission control, cancellation, per-tenant token budgets, GPU queueing | 18 |
 
 ### Phase 4 — Database Engineering (overview; `database/` has the deep-dives)
 
@@ -50,22 +53,22 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `distributed_transactions_and_consistency/` | 2PC problems, Saga, outbox pattern, idempotency keys | 15 |
 | `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 15 |
 
-> For deeper coverage: see [`../database/README.md`](../database/README.md) — 31 modules, 7 phases, principal-engineer level.
+> For deeper coverage: see [`../database/README.md`](../database/README.md) — 33 modules, 7 phases, principal-engineer level.
 
 ### Phase 5 — Resilience & Reliability
 
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `fault_tolerance_patterns/` | Circuit breaker states, Resilience4j, retry with jitter, bulkhead | 15 |
-| `rate_limiting_in_depth/` | Token bucket, sliding window, Redis Lua, adaptive throttling | 16 |
-| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 16 |
+| `rate_limiting_in_depth/` | Token bucket, sliding window, Redis Lua, adaptive throttling | 17 |
+| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 17 |
 
 ### Phase 6 — Security
 
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `backend_security_owasp/` | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 |
-| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 16 |
+| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 24 |
 
 ### Phase 7 — Testing & Quality
 
@@ -79,11 +82,11 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `event_driven_fundamentals/` | Events vs commands, choreography vs orchestration, event storming | 15 |
-| `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 18 |
+| `event_driven_fundamentals/` | Events vs commands, choreography vs orchestration, event storming | 17 |
+| `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 20 |
 | `rabbitmq_deep_dive/` | AMQP object model, confirms vs transactions, quorum queues (Raft), streams, prefetch, DLX, Khepri | 42 |
 | `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 16 |
-| `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 16 |
+| `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 18 |
 
 ### Phase 9 — Microservices Architecture
 
@@ -99,22 +102,27 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 35 modules = the "9-Phase Learning Path")
+`README.md` documents the **Full Path** (all 38 modules = the "9-Phase Learning Path")
 plus two curated tiers: **Senior** (22 modules) and **Principal** (18). They are
 different cuts, not nested depths — senior is the craft (build it, debug it at 3am),
 principal is the judgment (which approach at what cost, what you tell a team *not* to
 do), so principal is usually the smaller list and much of it is material senior never
-sees. Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that
-module's own page (`<module>.md`) naming the files each tier takes; listing a tier joins it, omitting
-the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it
+sees. Membership is declared ONCE per file, in the `<!-- study-paths -->` block in this
+section's `README.md` — the single source of truth for the section's file inventory AND
+its tier membership (see the HARD RULE at the bottom of this file). Each module line is
+followed by its indented files, each tagged with the tiers that file joins; `-` means Full
+path only, and the module page must carry every tier the module is in. **A module page or
+deep-dive sub-file carries no structural metadata at all.** Order is never declared — it
 comes from `STUDY_ORDER.backend` in `game/app.js`, so a tier is an ordered subset by
 construction. **There is no path array in `app.js` to edit**: `extract.py` walks the
 markers and emits the gitignored `questions/paths.json`, which the game fetches at boot.
 The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` markers and
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
-are tiered the same way from a block in `case_studies/case_studies.md` (3 senior / 3
-principal), driving the Level filter on the game's Case Studies tab. The README also
+are tiered the same way, from the same block in `README.md` under the `case_studies`
+entry (3 senior / 3 principal) — `case_studies/case_studies.md` has no block of its own;
+it is the learning-path index only. The tiers drive the Level filter on the game's Case
+Studies tab. The README also
 carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact).
 
 ---
@@ -161,7 +169,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | Spring Boot | 4.1.x |
 | Spring Framework | 7.x |
 | Spring Cloud | 2025.1.x "Oakwood" |
-| Kafka | 4.2+ (KRaft-only) |
+| Kafka | 4.3.x (KRaft-only; share groups production-ready since 4.2, tiered storage GA since 3.9) |
 | RabbitMQ | 4.3.x (Khepri-only; Mnesia and mirrored classic queues both gone) |
 | Resilience4j | 2.4+ (`resilience4j-spring-boot4`) |
 | Micrometer | 1.17+ |

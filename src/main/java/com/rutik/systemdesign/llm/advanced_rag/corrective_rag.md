@@ -407,6 +407,52 @@ Fix: Use an LLM to reformulate the query for web search, removing internal/priva
 After combining KB context with web content, the generation LLM produces an answer but there's no way to trace which source each statement came from.
 Fix: Tag each context chunk with its source (KB document ID, URL for web results). Inject source metadata into the LLM prompt and instruct it to cite sources. Return citations alongside the answer.
 
+**7. Thresholds calibrated on one evaluator model, reused after a model swap**
+The 0.3/0.7 cuts are not universal constants — they were fit to the score distribution of one specific evaluator. Hard-coding them as globals and swapping in a different reranker silently invalidates the calibration:
+
+```python
+# BROKEN: thresholds hard-coded against ms-marco-MiniLM-L-6-v2's score distribution
+CORRECT_THRESHOLD = 0.7
+INCORRECT_THRESHOLD = 0.3
+
+def route(query: str, doc: str, evaluator) -> str:
+    score = evaluator.score(query, doc)
+    if score > CORRECT_THRESHOLD:
+        return "correct"
+    if score <= INCORRECT_THRESHOLD:
+        return "incorrect"
+    return "ambiguous"
+
+# Someone swaps evaluator = new_cross_encoder() for better accuracy. The new
+# model's raw scores cluster around 0.05-0.25 for genuinely relevant documents
+# (a different training objective, a different score scale) -- every query now
+# routes to "incorrect" and triggers the web search fallback, even on hits the
+# knowledge base answers perfectly.
+```
+
+Because the thresholds were fit to the old evaluator's score distribution, not to "relevant vs. not," swapping the model shifts every score without shifting the cut points — the bucket assignment breaks silently, with no exception and no error, just a knowledge base that appears to have stopped containing answers it actually has.
+Fix: recalibrate on a held-out labeled set whenever the evaluator changes, and assert the resulting bucket distribution is sane rather than trusting the same numeric cuts to still apply:
+
+```python
+# FIXED: thresholds are a property of (evaluator, calibration_set), not a constant
+def calibrate_thresholds(evaluator, labeled_set: list[tuple[str, str, bool]]) -> tuple[float, float]:
+    """labeled_set: (query, doc, is_relevant) triples on a held-out sample."""
+    scores = [(evaluator.score(q, d), is_rel) for q, d, is_rel in labeled_set]
+    t_correct = _threshold_for_precision(scores, target_precision=0.95)
+    t_incorrect = _threshold_for_recall(scores, target_recall=0.95)
+    assert t_incorrect < t_correct, "calibration collapsed the ambiguous band"
+    return t_incorrect, t_correct
+
+def assert_bucket_health(scores: list[float], t_inc: float, t_cor: float) -> None:
+    incorrect = sum(s <= t_inc for s in scores) / len(scores)
+    assert incorrect < 0.90, (
+        f"{incorrect:.0%} of queries routed to web search -- "
+        "thresholds are likely stale for the current evaluator"
+    )
+```
+
+Recalibrating after every evaluator swap, plus a runtime guard that fails loudly when one bucket absorbs the vast majority of queries, catches the drift at deploy time instead of as a slow, silent rise in web-search fallback rate and cost.
+
 ---
 
 ## 11. Technologies & Tools

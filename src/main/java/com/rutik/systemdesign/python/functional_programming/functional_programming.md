@@ -302,6 +302,56 @@ serialize([1, "two", datetime.now()]) # '[1, "two", "2024-01-15T10:30:00"]'
 
 Dispatch is O(1) — it looks up the type in a dictionary. Subclass resolution uses MRO; `singledispatch` picks the most specific registered type.
 
+**Inside a class: `singledispatchmethod` [3.8].** `@singledispatch` inspects the *first*
+argument, which on a method is `self` — so every call would dispatch on the class itself.
+`functools.singledispatchmethod` is the method-shaped version, dispatching on the first
+argument after `self`.
+
+```python
+from functools import singledispatchmethod
+
+
+class Formatter:
+    @singledispatchmethod
+    def render(self, value) -> str:
+        raise NotImplementedError(f"no renderer for {type(value).__name__}")
+
+    @render.register
+    def _(self, value: int) -> str:
+        return f"{value:,}"
+
+    @render.register
+    def _(self, value: datetime) -> str:
+        return value.isoformat()
+
+
+Formatter().render(1_500_000)   # '1,500,000'
+```
+
+Two things to get right. **Register by annotation**, as above, or explicitly with
+`@render.register(int)`; the annotated form is the one people misread, because the method
+name is deliberately `_` — the registry, not the name, is what makes it reachable. And when
+combining with `@classmethod` or `@staticmethod`, **`singledispatchmethod` goes on the
+outside**:
+
+```python
+class Parser:
+    @singledispatchmethod
+    @classmethod
+    def parse(cls, raw): ...       # correct order
+```
+
+**Where this beats the Visitor pattern.** Visitor exists in languages without multiple
+dispatch: you write an `accept()` method on every node class plus a visitor interface, and
+adding one operation means touching every node. `singledispatchmethod` gives you the same
+open-for-extension behaviour with none of that scaffolding, and the node classes never learn
+that the operation exists — third-party code can register a handler for a type it does not
+own. The limits are worth stating plainly: dispatch is on **one** argument only (no double
+dispatch), and it is on the runtime type, so a `Protocol` or a duck-typed object with no
+registered concrete class falls through to the base implementation. See
+[`../design_patterns_in_python/design_patterns_in_python.md`](../design_patterns_in_python/design_patterns_in_python.md)
+for the object-oriented spelling of the same problem.
+
 ### 6.5 operator Module
 
 The `operator` module exposes C-implemented equivalents of Python's operators. Use them wherever you would write a trivial lambda.
@@ -988,6 +1038,11 @@ No — `partial` inherits the trap rather than fixing it. The default value is e
 **Short:** cytoolz is a drop-in Cython reimplementation of toolz that speeds up its own combinators, not the Python callbacks passed to them.
 
 `cytoolz` is a drop-in Cython reimplementation of `toolz`, so `import cytoolz as toolz` is a free swap that needs no code changes. Its own README puts the gain at "typically 2-5x faster with a few spectacular exceptions", and the qualification that matters is *what* gets faster: Cython removes the overhead of toolz's own combinators, not of the Python functions you hand them. Measured over 10,000 records, `cytoolz.groupby` and `cytoolz.reduceby` came in about 1.2-1.3x ahead, while `pipe` over `map`/`filter` with Python callbacks was a dead heat, because the per-element Python call dominates and no amount of Cython removes it. Take `cytoolz` for free when the toolz combinators themselves are hot — `groupby`, `reduceby`, `join`, `merge_with` over large collections — and do not plan capacity around an order-of-magnitude win that will not arrive.
+
+**Q: Why does `@singledispatch` not work on a method, and what replaces it?**
+**Short:** singledispatch reads the first argument, which on a method is self, so every call dispatches on the class; use singledispatchmethod instead.
+
+Because the first argument of a method is `self`, so `@singledispatch` would dispatch on the class rather than on the value you care about — every call routes to the same implementation. `functools.singledispatchmethod` [3.8] is the method-shaped version: it skips `self` and dispatches on the first argument after it, registering implementations the same way with `@method.register` plus a type annotation. Two details cause most of the bugs. Registered implementations are conventionally named `_`, so the registry rather than the name is what makes them reachable, and a reader who renames them for "clarity" breaks nothing but confuses everyone. And when stacking with `@classmethod` or `@staticmethod`, `singledispatchmethod` must be the **outer** decorator. The pattern is the functional answer to Visitor: you get open-for-extension dispatch without an `accept()` method on every node class, and third-party code can register a handler for a type it does not own. Its limits are real though — dispatch is on exactly one argument, so there is no double dispatch, and it keys on the concrete runtime type, so a duck-typed or `Protocol`-satisfying object with no registered class falls through to the base implementation.
 
 ---
 

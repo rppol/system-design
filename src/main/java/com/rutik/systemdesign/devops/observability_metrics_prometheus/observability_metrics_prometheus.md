@@ -2,6 +2,17 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
+> **Version anchor (2026-08-25).** **Prometheus v3.14.0** (2026-08-17) is the current release;
+> **v3.13.0** (2026-07-01) is the LTS line. Two things on this page are gated rather than on by
+> default and the distinction is asked about constantly: **OTLP ingestion** needs
+> `--web.enable-otlp-receiver` and **exemplar storage** needs
+> `--enable-feature=exemplar-storage`. **Remote-Write 2.0 is still experimental** — the spec
+> sits at 2.0-rc.4 and reserves the right to break compatibility — so treat it as a negotiated
+> upgrade, not a default. Native histograms, by contrast, are stable, with scraping opt-in per
+> job. Sources: [Prometheus releases](https://github.com/prometheus/prometheus/releases),
+> [OTLP guide](https://prometheus.io/docs/guides/opentelemetry/),
+> [Remote-Write 2.0 spec](https://prometheus.io/docs/specs/prw/remote_write_spec_2_0/).
+
 Prometheus is a **pull-based, time-series monitoring system** built around a multi-dimensional data model (metric name + key/value labels), a local TSDB, and a query language (PromQL) for slicing and aggregating that data. It scrapes HTTP `/metrics` endpoints on a fixed `scrape_interval` (the built-in default is 1m; almost every real deployment sets 15s or 30s), stores samples locally in 2-hour blocks, evaluates recording and alerting rules, and pushes firing alerts to Alertmanager. It is the de-facto standard for metrics in the cloud-native ecosystem and the metrics backend behind nearly every Kubernetes deployment.
 
 ---
@@ -407,6 +418,103 @@ Define buckets to straddle your SLO threshold (e.g. for a 300ms p99 target, incl
 
 Nothing about the requests changed between those two blocks; only the boundaries did. The interpolation assumes a uniform spread inside the bucket, and real latency inside a wide bucket is anything but uniform — so a 0.9-second-wide bucket makes the "p99" an artifact of the layout. Two practical consequences: put an `le` exactly on your SLO threshold so the question "what fraction is under 300ms?" is answered by a stored count rather than a guess, and keep bucket sets identical across instances, since `sum by (le)` silently produces nonsense when one pod uses different boundaries.
 
+### OTLP ingestion — accepting OpenTelemetry metrics directly
+
+> **Boundary.** This section is the **receiver's** view: the flag, the config, and the storage
+> settings a Prometheus operator has to get right. The **sender's** view — the three ways a
+> Collector can reach Prometheus, and OTel's naming rules that force the translation — belongs to
+> [opentelemetry_deep_dive](../observability_tracing_and_otel/opentelemetry_deep_dive.md) §6.
+> Both pages name `--web.enable-otlp-receiver`; change one and check the other.
+
+Prometheus can accept OTLP push traffic without a Collector translating to remote-write first.
+It is **off by default** and turned on with a flag, not a config file entry, because Prometheus
+has no authentication of its own and an open write endpoint would be unsafe:
+
+```bash
+prometheus --web.enable-otlp-receiver --config.file=prometheus.yml
+```
+
+The receiver then listens at **`/api/v1/otlp/v1/metrics`** over HTTP. Point an OTel Collector's
+`otlphttp` exporter at it — no `prometheusremotewrite` exporter in between:
+
+```yaml
+# otel-collector-config.yaml
+exporters:
+  otlphttp/prom:
+    endpoint: http://prometheus:9090/api/v1/otlp
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/prom]
+```
+
+**The naming question is the one that bites.** OTel metric names are UTF-8 and carry units;
+classic Prometheus names are `[a-zA-Z_:][a-zA-Z0-9_:]*`. `otlp.translation_strategy` decides
+what happens at the boundary:
+
+| Strategy | What it does | Use when |
+|---|---|---|
+| `UnderscoreEscapingWithSuffixes` (default) | Escapes to classic names and appends type/unit suffixes (`http.server.duration` → `http_server_duration_seconds`) | Existing dashboards, recording rules and alerts written against classic names |
+| `NoUTF8EscapingWithSuffixes` | Keeps the original characters, still appends suffixes | You want OTel-shaped names and every consumer speaks UTF-8 |
+| `NoTranslation` | Passes names through untouched | Pure OTel pipeline, no legacy queries |
+| `UnderscoreEscapingWithoutSuffixes` | Escapes but drops suffixes | Not recommended — you lose the unit |
+
+```yaml
+# prometheus.yml
+otlp:
+  translation_strategy: UnderscoreEscapingWithSuffixes
+
+storage:
+  tsdb:
+    out_of_order_time_window: 30m
+```
+
+**Why `out_of_order_time_window` belongs in the same conversation.** A scrape pipeline is
+ordered by construction — one scraper, one clock, monotonically increasing timestamps. A push
+pipeline is not: several Collector replicas batch and retry independently, so samples for the
+same series arrive out of sequence and Prometheus's TSDB rejects them by default. Setting a
+window (30 minutes covers most Collector retry behaviour) makes those samples land instead of
+being dropped as `out-of-order sample` errors. Turning on the OTLP receiver without it is the
+classic first-day failure: metrics appear, then intermittently vanish.
+
+### Exemplars — the link from a metric to a trace
+
+An **exemplar** is a single example trace ID attached to one observation inside a histogram
+bucket or counter increment. It is what makes "p99 latency spiked" clickable: Grafana renders
+exemplars as dots on the latency graph, and clicking a dot opens the exact trace that produced
+that slow request in Tempo or Jaeger. Without exemplars, moving from a metric to a trace means
+guessing at a time range and a service and hoping the sampler kept something useful.
+
+Storage is **opt-in and in-memory**, enabled with a feature flag and sized with a config entry:
+
+```bash
+prometheus --enable-feature=exemplar-storage
+```
+
+```yaml
+# prometheus.yml
+storage:
+  exemplars:
+    max_exemplars: 100000        # circular buffer; oldest are evicted first
+```
+
+On the wire, exemplars ride the OpenMetrics exposition format as a `#` suffix on the sample:
+
+```
+http_request_duration_seconds_bucket{le="0.5"} 4711 # {trace_id="a1b2c3d4e5f60718"} 0.42 1755100800
+```
+
+Three things to know for an interview. **Exemplars are not persisted** — the buffer is
+in-memory and circular, so a Prometheus restart loses them and a small `max_exemplars` on a busy
+server evicts them within minutes; long-term exemplar retention is what Remote-Write 2.0 carries
+them for. **Scraping them requires the OpenMetrics content type**, which is why an endpoint that
+looks fine in a browser can still yield no exemplars. And **the cardinality worry does not
+apply**: a trace ID lives in the exemplar, not in the metric's label set, which is exactly the
+point — you get per-request traceability without adding a high-cardinality label that would
+multiply your series count. That distinction is the answer to "how do you correlate metrics and
+traces without exploding cardinality."
+
 ### Recording rules (precompute) and alerting rules (evaluate)
 
 ```yaml
@@ -613,7 +721,7 @@ metric_relabel_configs:
 | Grafana | Dashboards over PromQL (see [visualization_and_alerting](../visualization_and_alerting/visualization_and_alerting.md)) |
 | OpenMetrics | Exposition-format specification, now developed inside the Prometheus project |
 | Prometheus Agent mode | Scrape-and-`remote_write` only: no TSDB, no rules, no queries — for edge/forwarding tiers |
-| Remote-Write 2.0 | Protocol version carrying metadata, exemplars, created timestamps and native histograms, with string interning to shrink payloads; sender and receiver negotiate 2.0 vs 1.0 per connection |
+| Remote-Write 2.0 (**experimental**, spec 2.0-rc.4) | Protocol version carrying metadata, exemplars, created timestamps and native histograms, with string interning to shrink payloads; sender and receiver negotiate 2.0 vs 1.0 per connection via `Content-Type` and `X-Prometheus-Remote-Write-Version`, a 2.0 sender falling back on a 415 |
 
 ---
 
@@ -693,6 +801,21 @@ First identify the offenders with `topk(20, count by (__name__)({__name__=~".+"}
 **Short:** Run two identical Prometheus instances scraping the same targets so Alertmanager can dedup identical alerts, and put Thanos Querier in front to dedup queries.
 
 Run two identical Prometheus instances scraping the same targets so a single failure doesn't lose data or alerting; both send to Alertmanager, which deduplicates identical alerts by their label set so on-call gets one page, not two. For HA queries and dedup of the two replicas' data, put Thanos Querier in front (it dedupes by a configured replica label). The pattern is: redundant collection plus Alertmanager dedup for alerts and Thanos dedup for queries.
+
+**Q16: You point an OTel Collector at Prometheus's OTLP endpoint. Metrics appear, then intermittently vanish. What is wrong?**
+**Short:** Samples are being rejected as out-of-order — several Collector replicas push independently, so you must set `out_of_order_time_window`, which a scrape pipeline never needed.
+
+Prometheus is rejecting samples as out-of-order, and the reason is that you swapped an ordered pipeline for an unordered one. A scrape pipeline is monotonic by construction: one scraper, one clock, timestamps that only move forward. A push pipeline is not — several Collector replicas batch and retry on their own schedules, so two samples for the same series can arrive with the later timestamp first, and the TSDB drops the second with an `out-of-order sample` error. The fix is to give the TSDB a tolerance window, which is off by default: `storage.tsdb.out_of_order_time_window: 30m` covers most Collector retry behaviour. Confirm the diagnosis before changing anything by watching `prometheus_tsdb_out_of_order_samples_appended_total` against the out-of-order rejection counter rather than inferring it from the gaps. Also remember the receiver itself is opt-in: it only listens at `/api/v1/otlp/v1/metrics` when Prometheus was started with `--web.enable-otlp-receiver`, because Prometheus has no authentication of its own and an open write endpoint would be unsafe.
+
+**Q17: How do you let an engineer jump from a p99 latency spike to the trace that caused it, without exploding cardinality?**
+**Short:** Exemplars — a trace ID attached to an individual observation rather than added as a metric label, so it carries no series-count cost at all.
+
+Use exemplars, which attach a trace ID to an *observation* rather than to the metric's label set. This is the whole point: putting `trace_id` in a label would create one time series per request and destroy the server, whereas an exemplar rides alongside a histogram bucket increment and costs nothing in series count. Grafana renders them as clickable dots on the latency graph that open the exact slow trace in Tempo or Jaeger. Three things to get right in practice. Storage is opt-in and in-memory — start Prometheus with `--enable-feature=exemplar-storage` and size `storage.exemplars.max_exemplars` (100,000 is a reasonable start), remembering the buffer is circular so a restart loses them and a busy server evicts them within minutes. Scraping them requires the OpenMetrics content type, which is why an endpoint that looks correct in a browser can still yield none. And because they are not persisted locally, long-term exemplar retention is one of the things Remote-Write 2.0 exists to carry. Instrument the handful of histograms an on-call actually pages on rather than everything; exemplars are for the hop from symptom to trace, not a second telemetry pipeline.
+
+**Q18: Should you move your fleet to Remote-Write 2.0?**
+**Short:** Not as a default — the spec is still experimental at 2.0-rc.4 and reserves the right to break compatibility, so adopt it only where its payload savings or exemplar carriage solve a measured problem.
+
+Not as a blanket default, because it is still experimental. The specification sits at 2.0-rc.4 and explicitly reserves the right to break compatibility based on early-adopter feedback, so treat it as a negotiated upgrade on specific links rather than a fleet-wide flag day. What it buys is real: metadata, exemplars, created timestamps and native histograms travel in-band, and string interning shrinks payloads noticeably on high-label-count series — which matters most on an expensive egress path or into a backend you are billed by ingest for. The safety property that makes incremental adoption workable is content negotiation: a sender advertises `Content-Type: application/x-protobuf;proto=io.prometheus.write.v2.Request` with `X-Prometheus-Remote-Write-Version: 2.0.0`, and a receiver that does not understand it answers 415, at which point a 2.0 sender falls back to 1.0 rather than dropping data. So the practical answer is to enable it on one link where you can measure the payload reduction or where you actually need exemplars downstream, verify the negotiation is landing on 2.0 rather than silently falling back, and leave the rest on 1.0 until the spec is final.
 
 ---
 

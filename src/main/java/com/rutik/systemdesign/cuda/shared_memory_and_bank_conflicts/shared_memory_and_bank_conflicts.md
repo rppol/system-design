@@ -169,6 +169,30 @@ that padding is designed to remove.
   conflict-free simultaneously requires padding — see the transpose Q&A in §12 and the case
   study in §14.
 
+### 4.4 Thread block clusters — the scheduling unit above a block
+
+Every strategy above treats one block's `__shared__` array as an island: block 0's tile and
+block 1's tile cannot see each other, full stop. Hopper (compute capability 9.0) adds a
+scheduling unit **above** the block that removes exactly that wall. A **thread block
+cluster** is a group of thread blocks the hardware guarantees are **co-resident on the same
+GPC** (GPU Processing Cluster) for the cluster's entire lifetime — not "probably scheduled
+together," a hard guarantee enforced at launch time. A cluster is declared with
+`__cluster_dims__(X, Y, Z)` on the kernel definition (compile-time cluster shape) or,
+for a runtime-chosen shape, via the `cudaLaunchAttributeClusterDimension` attribute passed
+through `cudaLaunchKernelEx`.
+
+The portable cluster size is **8 thread blocks** — any GPU that supports clusters at all
+supports at least 8, and the CUDA runtime does not require an opt-in for that size. Larger
+clusters are possible but are not portable across every Hopper/Blackwell-class device and
+need an explicit opt-in (`cudaFuncAttributeNonPortableClusterSizeAllowed`); treat "8" as the
+number to design around unless you have already confirmed the target device supports more.
+
+Co-residency is what makes the next section possible: because every block in a cluster is
+guaranteed to be running on the same GPC at the same time, their individual shared-memory
+windows are no longer isolated islands — together they form one flat **distributed shared
+memory (DSMEM)** address space that any block in the cluster can address into, not just its
+own slice.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -659,6 +683,71 @@ the direct expense of the L1-cache share of the same physical SRAM — and, beca
 block now occupies nearly the whole SM's shared memory, at the cost of running one block per
 SM.
 
+### 6.7 Distributed shared memory (DSMEM) — reading another block's shared memory
+
+Section 4.4 established that a **thread block cluster** (Hopper, compute capability 9.0) is a
+group of up to 8 blocks the hardware guarantees are co-resident on one GPC, and that
+guarantee turns their individual shared-memory windows into one addressable **distributed
+shared memory (DSMEM)** space. This section is the API for actually using it.
+
+```cuda
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
+
+__global__ void __cluster_dims__(2, 1, 1) dsmemPairKernel(const float* __restrict__ in,
+                                                            float* __restrict__ out, int n) {
+    __shared__ float localTile[256];
+    cg::cluster_group cluster = cg::this_cluster();
+
+    int tid = threadIdx.x;
+    localTile[tid] = in[blockIdx.x * blockDim.x + tid];
+
+    unsigned myRank = cluster.block_rank();       // this block's index within the cluster (0 or 1)
+    unsigned peerRank = 1 - myRank;                // the OTHER block in this 2-block cluster
+
+    cluster.sync();                                 // REQUIRED before reading a peer's shared
+                                                     // memory -- guarantees the peer's write above
+                                                     // has landed, exactly as __syncthreads() does
+                                                     // for a single block's own tile
+
+    // map_shared_rank returns a pointer into a DIFFERENT block's shared memory --
+    // valid to load, store, or atomicAdd through, over the SM-to-SM interconnect.
+    float* peerTile = cluster.map_shared_rank(localTile, peerRank);
+
+    // A tile too large for one block's 228 KB budget: block 0 handles the first
+    // half of a combined 512-wide reduction window, block 1 the second half, and
+    // each reads the OTHER block's half directly -- no L2, no HBM round trip.
+    out[blockIdx.x * blockDim.x + tid] = localTile[tid] + peerTile[tid];
+
+    cluster.sync();   // REQUIRED again before either block may overwrite localTile for reuse --
+                       // otherwise the peer's still-in-flight read races the next iteration's write
+}
+```
+
+The point that matters is what this replaces. Without DSMEM, the only way for block 1 to see
+data block 0 produced is to spill it to global memory (an HBM round trip, or at best an L2
+hit) and have block 1 read it back — the same two-kernel or fence-and-poll pattern from
+[Synchronization & Atomics](../synchronization_and_atomics/synchronization_and_atomics.md).
+`map_shared_rank` turns that into a **direct SM-to-SM transfer over the GPC interconnect**,
+at shared-memory-class latency, never touching L2 or HBM at all. This is what lets a
+2-block cluster cooperate on a logical tile up to roughly double one block's 228 KB Hopper
+ceiling — the same class of problem padding solves for one block's bank layout, one level up
+the memory hierarchy.
+
+**The constraint list** — every one of these is a correctness requirement, not a tuning
+knob:
+- Cluster size is fixed **at launch time** (`__cluster_dims__` or the
+  `cudaLaunchKernelEx` cluster attribute), not something a kernel can change mid-flight.
+- The **portable** cluster size is **8** blocks; anything larger needs an explicit opt-in
+  and is not guaranteed to be supported on every Hopper/Blackwell-class device.
+- `cluster.sync()` is mandatory **before** reading a peer block's shared memory (so its
+  writes are guaranteed visible) and mandatory **again** before that peer block may
+  overwrite its own shared memory for the next use (so no in-flight remote read races the
+  overwrite) — exactly the two-barrier tiling pattern from §6.1, widened to cluster scope.
+- A remote shared-memory pointer obtained from `map_shared_rank` is valid **only for the
+  cluster's lifetime** — it cannot be cached, stored to global memory, or dereferenced
+  after the owning block (or the cluster) has exited.
+
 ---
 
 ## 7. Real-World Examples
@@ -1015,6 +1104,39 @@ larger than the reuse pattern actually needs can silently cap the number of resi
 (and therefore warps available to hide latency) well below what the SM could otherwise
 support, turning a "safe" choice into an occupancy regression — only allocate what the reuse
 pattern requires, and measure achieved occupancy after any tile-size change.
+
+**Q: What is a thread block cluster, and what guarantee does it add that an ordinary grid of
+blocks does not have?**
+**Short:** A cluster is a hardware-guaranteed co-resident group of up to 8 blocks on one GPC, unlike ordinary blocks which the scheduler may place anywhere with no timing relationship.
+A thread block cluster is a group of thread blocks — up to 8 for the portable size — that
+the hardware guarantees are co-resident on the same GPC for the cluster's entire lifetime,
+declared at launch with `__cluster_dims__` or a `cudaLaunchKernelEx` attribute. An ordinary
+grid gives no such guarantee: two blocks might run on different SMs at completely different
+times, with no way for one to address the other's shared memory at all. Co-residency is
+exactly what makes distributed shared memory possible — you cannot address a peer's shared
+memory unless the hardware promises that peer is actually running alongside you.
+
+**Q: How is distributed shared memory (DSMEM) different from just writing a value to global
+memory and having another block read it back?**
+**Short:** DSMEM is a direct SM-to-SM transfer over the GPC interconnect at shared-memory latency, never touching L2 or HBM the way a global-memory round trip does.
+DSMEM is a direct transfer over the SM-to-SM interconnect within a GPC, at latency close to
+a local shared-memory access, whereas a global-memory round trip goes through the memory
+controller and, at best, an L2 hit — always slower and always consuming HBM/L2 bandwidth
+that DSMEM never touches. `cluster.map_shared_rank(ptr, rank)` returns a pointer into a
+specific peer block's shared memory that you can load, store, or `atomicAdd` through
+directly; the mechanism is closer to "another block's shared memory is one hop away" than
+to any form of caching.
+
+**Q: What has to happen before a block in a cluster may safely read another block's shared
+memory through `map_shared_rank`, and why?**
+**Short:** `cluster.sync()` must complete first, exactly as `__syncthreads()` must precede a same-block shared-memory read — otherwise the peer's write may not have landed yet.
+`cluster.sync()`, the cluster-wide barrier, must complete first — it plays the same role at
+cluster scope that `__syncthreads()` plays at block scope: guaranteeing every block's prior
+shared-memory writes are visible before any block reads across the boundary. Skipping it is
+the same class of bug as skipping `__syncthreads()` before a same-block tile read (§10) —
+a data race, just one hop wider — and a second `cluster.sync()` is equally required before
+any block may overwrite its own shared memory for reuse, so an in-flight remote read from a
+peer cannot be clobbered mid-read.
 
 ---
 

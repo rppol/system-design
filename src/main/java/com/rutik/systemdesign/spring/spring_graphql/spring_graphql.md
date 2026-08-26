@@ -352,6 +352,95 @@ Unhandled exceptions become a generic `INTERNAL_ERROR` with the message hidden �
 *must* map domain exceptions to meaningful error types and extensions, or clients get
 opaque failures.
 
+### 6.7 Query depth/complexity limits — code, not a property
+
+There is no `application.yml` property for this. `MaxQueryDepthInstrumentation` and
+`MaxQueryComplexityInstrumentation` are **graphql-java** classes (`graphql.analysis`
+package), not Spring ones. Spring Boot's `GraphQlAutoConfiguration` collects every
+`Instrumentation` bean in the context (`ObjectProvider<Instrumentation>`, applied via
+`.instrumentation(instrumentations.orderedStream().toList())` on the `GraphQlSource.Builder`)
+— registering the limit is entirely on you, as a `@Bean`:
+
+```java
+@Configuration
+class QueryLimitConfig {
+
+    @Bean
+    Instrumentation maxQueryDepthInstrumentation() {
+        return new MaxQueryDepthInstrumentation(15);   // reject queries nested past 15 levels
+    }
+
+    @Bean
+    Instrumentation maxQueryComplexityInstrumentation() {
+        return new MaxQueryComplexityInstrumentation(200);  // reject queries costing over 200
+    }
+}
+```
+
+Two `@Bean` methods, picked up automatically — that is the whole mechanism. **Two feature
+requests to add `spring.graphql.instrumentation.max-query-depth` and
+`max-query-complexity` properties were closed declined / not planned**
+(`spring-projects/spring-graphql#469`, `spring-projects/spring-boot#29379`). If a blog
+post or Stack Overflow answer shows one of those property names in `application.yml`, it
+is describing what the reporter wanted, not something that ships — write the
+`Instrumentation` beans instead.
+
+### 6.8 Federation — an integration, not a built-in
+
+**Spring for GraphQL does not implement federation.** It integrates the external
+[`apollographql/federation-jvm`](https://github.com/apollographql/federation-jvm) library
+(Maven: `com.apollographql.federation:federation-graphql-java-support:5.4.0`). A reader
+who assumes federation is built in will scaffold a subgraph service and find nothing
+there to compose a supergraph from — the wiring below is required.
+
+Mark the entity type with `@key` in the schema, register a `FederationSchemaFactory` bean,
+hand its schema factory to `GraphQlSource.Builder` via a `GraphQlSourceBuilderCustomizer`,
+and resolve `_entities` lookups with `@EntityMapping`:
+
+```graphql
+# subgraph schema — @key marks the fields the gateway uses to reference this entity
+type Product @key(fields: "id") {
+    id: ID!
+    name: String!
+    price: Int!
+}
+```
+
+```java
+@Configuration
+class FederationConfig {
+
+    @Bean
+    FederationSchemaFactory schemaFactory() {
+        return new FederationSchemaFactory();
+    }
+
+    @Bean
+    GraphQlSourceBuilderCustomizer customizer(FederationSchemaFactory factory) {
+        // hands schema construction to federation-jvm instead of the default schema-first builder
+        return builder -> builder.schemaFactory(factory::createGraphQLSchema);
+    }
+}
+
+@Controller
+class ProductFederationController {
+
+    @EntityMapping                              // resolves the "_entities" field for Product
+    Product product(@Argument String id) {
+        return productRepo.findById(id).orElse(null);
+    }
+
+    @SchemaMapping
+    Review[] reviews(Product product) { return reviewRepo.findByProductId(product.id()); }
+}
+```
+
+`FederationSchemaFactory` builds the schema with the federation directives (`@key`,
+`@external`, `@requires`, ...) applied and adds the `_service` and `_entities` fields the
+Apollo gateway needs to compose subgraphs; `@EntityMapping` is what backs `_entities` for
+one type. Without both pieces the schema is a normal standalone GraphQL API, not a
+federation subgraph. Source: <https://docs.spring.io/spring-graphql/reference/federation.html>
+
 ---
 
 ## 7. Real-World Examples
@@ -543,14 +632,19 @@ Redis), response caching keyed on the normalized query, and client-side normaliz
 caches (Apollo/Relay). You must choose and build one — it is not free.
 
 **Q: How do you prevent expensive or malicious queries?**
-**Short:** Depth limits, complexity-cost analysis, pagination caps, and persisted-query allow-listing guard against expensive queries.
+**Short:** Register graphql-java's MaxQueryDepthInstrumentation and MaxQueryComplexityInstrumentation as beans; no property does this.
 
 Because the query language is open, a client can request deeply nested or cyclic
-selections that are exponentially expensive — a denial-of-service vector. You guard it
-with query *depth* limits (`maxQueryDepth`), query *complexity*/cost analysis that
-assigns a cost to fields and rejects queries over a budget, pagination limits (cap
-`first`/`limit`), timeouts, and optionally allow-listing persisted queries so only
-vetted queries run. These controls are mandatory for any public GraphQL API.
+selections that are exponentially expensive — a denial-of-service vector. There is no
+Spring Boot property for this: `MaxQueryDepthInstrumentation` and
+`MaxQueryComplexityInstrumentation` are graphql-java classes, and you register them
+yourself as `@Bean`s — Spring Boot's `GraphQlAutoConfiguration` picks up every
+`Instrumentation` bean in the context and adds it to the `GraphQlSource.Builder`
+automatically. (Feature requests to add `spring.graphql.instrumentation.max-query-depth`
+and `max-query-complexity` properties were both closed declined.) Combine that with
+pagination limits (cap `first`/`limit`), timeouts, and optionally allow-listing persisted
+queries so only vetted queries run. These controls are mandatory for any public GraphQL
+API.
 
 **Q: What is cursor-based (Relay Connection) pagination and why prefer it over offset?**
 **Short:** Cursor pagination anchors to a stable position, avoiding the slow scans and row-shift bugs offset pagination has under writes.
@@ -594,16 +688,35 @@ because it is inherently asynchronous: `loader.load(key)` returns a
 resolvers compose with batched loading without blocking. This lets you do non-blocking,
 batched resolution end to end, which matters under high concurrency.
 
-**Q: How does GraphQL relate to a backend-for-frontend (BFF) and federation?**
-**Short:** A GraphQL BFF aggregates many backends behind one query, and federation composes per-team subgraphs into one supergraph.
+**Q: How does GraphQL relate to a backend-for-frontend (BFF) and federation, and does Spring for GraphQL implement federation itself?**
+**Short:** A BFF aggregates backends behind one query; federation composes subgraphs via the external federation-jvm library, not Spring itself.
 
 A GraphQL BFF is a single graph that aggregates data from many backend services so a
 client issues one query instead of fanning out to many REST calls — the server does the
 fan-out and assembly. Federation (Apollo Federation, Netflix DGS) extends this across
 teams: each service owns a *subgraph* of the schema, and a gateway composes them into
 one supergraph, so a single query can be resolved by stitching fields from multiple
-services. This is how large organizations scale GraphQL across many teams without one
-monolithic resolver layer.
+services. **Spring for GraphQL does not implement federation itself** — it integrates the
+external `apollographql/federation-jvm` library: you add the
+`federation-graphql-java-support` dependency, register a `FederationSchemaFactory` bean,
+wire it into `GraphQlSource.Builder` via a `GraphQlSourceBuilderCustomizer`, and resolve
+`_entities` lookups with `@EntityMapping` methods on a controller. Skipping that wiring
+leaves a normal standalone schema with no `_entities`/`_service` fields for a gateway to
+compose against. This is how large organizations scale GraphQL across many teams without
+one monolithic resolver layer.
+
+**Q: What does `FederationSchemaFactory` actually add to a subgraph's schema, and what breaks if you skip the `GraphQlSourceBuilderCustomizer` wiring?**
+**Short:** It bakes in the federation directives plus `_service`/`_entities`; without the customizer the schema stays a normal, unfederated API.
+
+`FederationSchemaFactory` (from `federation-graphql-java-support`) builds the
+`GraphQLSchema` with the federation directives (`@key`, `@external`, `@requires`,
+`@provides`) applied and adds the `_service` and `_entities` root fields an Apollo
+gateway needs to introspect and query the subgraph. That schema only takes effect if you
+hand `factory::createGraphQLSchema` to `GraphQlSource.Builder` through a
+`GraphQlSourceBuilderCustomizer` bean — skip that bean and Spring builds the schema the
+ordinary schema-first way, so `_entities` never exists and a gateway composing subgraphs
+gets a query error, not a partial result. The `@EntityMapping` methods that resolve
+`_entities` for each type are a separate, second piece of wiring on top of this.
 
 **Q: What is query introspection and what is its security consideration?**
 **Short:** Introspection exposes the entire schema to any client, so production APIs often disable or gate it behind auth.

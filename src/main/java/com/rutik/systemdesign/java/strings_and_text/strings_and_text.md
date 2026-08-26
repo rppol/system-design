@@ -226,7 +226,7 @@ public final class String implements Serializable, Comparable<String>, CharSeque
 }
 ```
 
-The `@Stable` annotation on `value` tells the JIT compiler to trust it as effectively constant, enabling aggressive scalar replacement and loop optimisations.
+The `@Stable` annotation on `value` tells the JIT compiler to trust it as effectively constant, enabling aggressive scalar replacement and loop optimisations. `String` is the JDK's canonical worked example of [Effective Java Item 17: "Minimize mutability"] — final class, all fields private and final, no mutator, and no way for a caller to reach the backing array — and the payoff list in that item is exactly what this class gets: free thread safety, safe sharing via the constant pool, and a hash code that can be cached because it can never go stale.
 
 ### 6.2 String.intern() Mechanics
 
@@ -339,6 +339,158 @@ emoji.codePoints()
 emoji.length();           // 8 (6 chars for "Hello " + 2 chars for surrogate pair)
 emoji.codePointCount(0, emoji.length()); // 7 (6 + 1 emoji)
 ```
+
+### 6.8 Normalization: why two identical-looking strings are not `equals`
+
+Surrogate pairs are the Unicode trap people know about. Normalization is the one that
+actually reaches production, because the two strings render **pixel-identically** and only
+`equals()` disagrees. The character `é` has two legal encodings:
+
+```
+  NFC (composed)     e-acute  = U+00E9                       -> 1 char,  length() == 1
+  NFD (decomposed)   e        = U+0065
+                     + acute  = U+0301 (combining accent)    -> 2 chars, length() == 2
+```
+
+```java
+String composed   = "café";        // café, NFC
+String decomposed = "café";       // café, NFD
+
+composed.equals(decomposed);            // false
+composed.length();                      // 4
+decomposed.length();                    // 5
+composed.hashCode() == decomposed.hashCode();   // false -> different HashMap buckets
+```
+
+Both print `café`. Both are correct Unicode. Neither is a bug. `String.equals` compares
+`byte[]` contents, so it says they differ — which means a `HashMap` keyed on user-supplied
+text can hold **two entries that look the same in every log line and every UI**, and a
+`Set` deduplication silently keeps both.
+
+**The fix is to normalize at the trust boundary**, once, on the way in — never at
+comparison time scattered through the code:
+
+```java
+import java.text.Normalizer;
+
+String canonical = Normalizer.normalize(input, Normalizer.Form.NFC);
+```
+
+The four forms and when each is right:
+
+| Form | What it does | Use it for |
+|------|--------------|-----------|
+| **NFC** | Canonical decompose, then recompose | The default. Storage, comparison, keys, network |
+| **NFD** | Canonical decompose only | Stripping accents; text processing that inspects combining marks |
+| **NFKC** | Compatibility decompose, then recompose | Search and identifier matching — folds `ﬁ`→`fi`, `②`→`2`, full-width→ASCII |
+| **NFKD** | Compatibility decompose only | Same as NFKC where you also want marks separated |
+
+The K forms are **lossy** — `NFKC` turns `x²` into `x2` — so they are right for a search
+index and wrong for stored content you will render again. Do not reach for `NFKC` just
+because it matches more; you cannot get the superscript back.
+
+**Where this actually bites.** Text originating on macOS arrives decomposed far more often
+than text from Linux or Windows, because Apple's filesystems store filenames in a
+decomposed form. So a filename read from a Mac-authored archive does not `equals()` the
+same name typed into a form on a Linux server, and the resulting "file not found" for a
+file that is visibly right in a directory listing is a genuinely painful hour. The same
+applies to usernames and email addresses pasted from different platforms.
+
+Two more rules worth stating outright:
+
+- **Normalize before hashing, signing, or storing** — not after. A signature over
+  unnormalized text verifies only against a byte-identical copy.
+- **Normalization is not case folding, and neither is a security boundary on its own.**
+  For a username uniqueness check you want NFKC plus case folding plus an explicit
+  confusable policy; `equalsIgnoreCase` alone lets `admin` and `аdmin` (Cyrillic а,
+  U+0430) coexist.
+
+### 6.9 String intrinsics: why Latin-1 is a performance decision
+
+Compact Strings (§4.1) are usually taught as a memory optimization — a Latin-1 string
+stores one byte per character instead of two. The half that gets left out is that the
+`coder` flag also selects which **machine code** runs.
+
+`String.equals`, `String.compareTo`, `String.indexOf`, `String.hashCode`, and
+`Arrays.equals` are HotSpot **intrinsics**: the JIT replaces the Java bytecode with
+hand-written assembly stubs that use the CPU's SIMD registers to compare 16 or 32 bytes per
+instruction rather than one `char` per loop iteration. The Latin-1 (one byte per character)
+paths get the widest of these stubs, because twice as many characters fit in a vector
+register.
+
+The consequence is a cliff, not a slope:
+
+```java
+String latin1 = "user-agent";           // coder == LATIN1, 10 bytes, vectorized path
+String utf16  = "user-agentµ";     // one micro sign -> coder == UTF16, 22 bytes
+```
+
+A **single** non-Latin-1 character anywhere in the string flips `coder` for the *whole*
+string. Its footprint doubles and its `indexOf`/`equals` move to the narrower UTF-16 stub.
+Nothing warns you; the string simply costs more in both dimensions.
+
+What to do with that:
+
+- For hot-path identifiers you control — header names, enum-ish protocol tokens, cache
+  keys, log field names — **keep them ASCII**. This is not micro-optimization theatre; it
+  is the difference between the fast stub and the slow one on a string compared millions
+  of times a second.
+- `String.hashCode()` caches its result in the `hash` field, with a separate `hashIsZero`
+  flag so that a string whose hash is genuinely `0` is not recomputed forever. That makes a
+  repeatedly-hashed constant cheap after the first call — another reason interned protocol
+  constants pay off (§6.2).
+- Do not "optimize" by hand-writing a character loop. A `for` loop over `charAt()` is
+  *slower* than `indexOf`, because you have opted out of the intrinsic. The JDK method is
+  the fast path.
+
+### 6.10 Zero-copy parsing: stop allocating substrings
+
+`String.substring()` has copied since Java 7 — the shared-`char[]` version that caused the
+Java 6 leak (Pitfall 4) is gone, and with it the free substring. Every `substring()` call
+allocates a new object plus a new `byte[]`. A parser that splits a line into 8 fields
+allocates 9 objects per line; at 100,000 lines/second that is 900,000 allocations/second
+feeding straight into the young generation.
+
+The lazy fix is to not create the strings you never look at:
+
+```java
+// ALLOCATING: 9 objects per line, 8 of them thrown away immediately
+String[] parts = line.split(",");
+long id = Long.parseLong(parts[0]);
+if (!"OK".equals(parts[3])) return;
+
+// ZERO-COPY: index arithmetic, 0 objects per line
+int c1 = line.indexOf(',');
+long id = Long.parseLong(line, 0, c1, 10);          // parses in place, no substring
+int c2 = line.indexOf(',', c1 + 1);
+int c3 = line.indexOf(',', c2 + 1);
+int c4 = line.indexOf(',', c3 + 1);
+if (!line.regionMatches(c3 + 1, "OK", 0, 2)) return;
+```
+
+The two JDK methods doing the work here are worth knowing by name:
+
+- **`Long.parseLong(CharSequence, int begin, int end, int radix)`** and the matching
+  `Integer.parseInt` overload (Java 9+) parse a *range* of an existing `CharSequence`. No
+  substring, no intermediate `String`.
+- **`String.regionMatches(int, String, int, int)`** compares a range against another string
+  without extracting either. There is a `regionMatches(boolean ignoreCase, ...)` overload
+  when you need case insensitivity, which is also much cheaper than
+  `substring().equalsIgnoreCase()`.
+
+For a read-only *view* rather than an index, `CharBuffer.wrap(seq, start, end)` gives a
+`CharSequence` over the original with no copy — usable anywhere an API takes `CharSequence`,
+including `Matcher`. Note the direction of the constraint: `Pattern`/`Matcher` accept
+`CharSequence`, but `Matcher.group()` returns a fresh `String`, so a regex parser is
+zero-copy only up to the point where you ask for a group.
+
+**One thing not to fix.** `split()` is not always the regex engine: `String.split` has a
+fast path that skips `Pattern` compilation when the argument is a single character that is
+not a regex metacharacter (or a backslash-escaped non-alphanumeric). So `line.split(",")`
+does not compile a pattern, while `line.split("\\s*,\\s*")` does — and if you are calling
+the latter in a loop, hoist a `static final Pattern` and reuse it rather than recompiling
+per call. Measure before rewriting a parser into index arithmetic; do this where the
+profiler points, not everywhere.
 
 ---
 
@@ -580,11 +732,26 @@ public static String reverseCPAware(String s) {
 **Short:** Interned strings speed up class loading, Boolean.toString(), and enum name comparisons by letting == replace content equality checks.
 (1) **Class loading**: class and package names are interned during class loading. `Class.getName()` returns an interned string, allowing the class loader's internal hash maps to use `==` for key comparison. (2) **`Boolean.toString()`**: returns `"true"` or `"false"`, both compile-time literals that are already interned — no allocation occurs. The contrast is instructive: `Integer.toString(int)` has *no* such cache and allocates a fresh `byte[]` and `String` on every call, even for single digits, which is why logging an int in a hot loop allocates and logging a boolean does not. (3) **Enum name constants**: every enum's `.name()` field is initialised from a string literal interned at compile time. Two references to `Status.ACTIVE.name()` return the same `String` object, so `==` comparisons in switch expressions on enum names are safe (though `.equals()` is still safer for external input).
 
+**Q16: Two strings render identically in the UI but `equals()` returns `false`. What is going on and how do you fix it permanently?**
+**Short:** They differ in Unicode normalization form; normalize with Normalizer to NFC at the trust boundary, not at comparison time.
+
+They are the same text in two different Unicode **normalization forms** — almost always a composed (NFC) form against a decomposed (NFD) one. The character `é` is legally either the single code point U+00E9 or the pair `e` + U+0301 (a combining acute accent), so `"café"` can be 4 chars or 5. `String.equals` compares `byte[]` contents, so it reports them as different, and because `hashCode()` differs too they land in different `HashMap` buckets — which is how you end up with two "identical" entries in a `Set` and a "file not found" for a filename that is visibly right in the directory listing. Text originating on macOS arrives decomposed far more often than text from Linux or Windows, because Apple's filesystems store filenames in a decomposed form, so this reliably shows up at platform boundaries. The permanent fix is `Normalizer.normalize(input, Normalizer.Form.NFC)` applied **once at the trust boundary** — on ingestion, before storing, hashing, or signing — never scattered at each comparison site. Use NFC for storage and keys; use NFKC only for search and identifier matching, remembering it is lossy (`x²` becomes `x2`), so it is wrong for content you will render again. And do not mistake normalization for a security control: username uniqueness needs NFKC plus case folding plus an explicit confusable policy, since `admin` and `аdmin` with a Cyrillic а are distinct under every normalization form.
+
+**Q17: Why is a single non-ASCII character in a hot-path string a performance problem, not just a memory one?**
+**Short:** One non-Latin-1 char flips the whole string's coder to UTF-16, doubling its size and moving it off the widest SIMD intrinsic paths.
+
+Because the Compact Strings `coder` flag selects the machine code, not just the storage width. `String.equals`, `compareTo`, `indexOf`, and `hashCode` are HotSpot intrinsics — the JIT replaces the bytecode with hand-written assembly that compares 16 or 32 bytes per instruction using SIMD registers — and the Latin-1 (one byte per character) paths get the widest of those stubs, because twice as many characters fit in a vector register. A `coder` is a property of the whole string, so **one** non-Latin-1 character anywhere flips it: `"user-agent"` is 10 bytes on the wide path, and `"user-agentµ"` is 22 bytes on the narrower one. Nothing warns you; the string just costs more in both dimensions. The practical rule is to keep identifiers you control and compare millions of times a second — header names, protocol tokens, cache keys, log field names — ASCII. The corollary matters just as much: do not hand-write a `charAt()` loop to "optimize" a search, because that opts out of the intrinsic and is slower than `indexOf` [Effective Java Item 67: "Optimize judiciously"]. The JDK method is the fast path.
+
+**Q18: A CSV parser allocates 900,000 objects/second. How do you cut that without changing what it parses?**
+**Short:** Parse in place with indexOf, regionMatches, and the range-taking parseLong overloads instead of materializing substrings.
+
+Stop creating the strings you never look at. `String.substring()` has copied since Java 7 — the shared-`char[]` version is gone — so splitting a line into 8 fields allocates 9 objects, and at 100,000 lines/second that is 900,000 allocations feeding the young generation. The fix is index arithmetic over the original line: `indexOf(',', from)` to walk the delimiters, `Long.parseLong(CharSequence, begin, end, radix)` (and the matching `Integer.parseInt` overload, both Java 9+) to parse a *range* without materializing a substring, and `String.regionMatches(int, String, int, int)` to compare a field against a constant without extracting either. That takes the per-line allocation to zero for the fields you only test. Where you need a read-only view rather than an index, `CharBuffer.wrap(seq, start, end)` gives a `CharSequence` over the original with no copy, usable anywhere an API takes `CharSequence` including `Matcher` — though `Matcher.group()` returns a fresh `String`, so a regex parser is zero-copy only up to the point you ask for a group. One thing not to "fix": `String.split` has a fast path that skips `Pattern` compilation when the argument is a single non-metacharacter, so `split(",")` compiles nothing while `split("\\s*,\\s*")` does — hoist a `static final Pattern` for the latter. Measure first and rewrite where the profiler points [Effective Java Item 67: "Optimize judiciously"]; index arithmetic is harder to read than `split`, and that cost is real everywhere it does not buy anything.
+
 ---
 
 ## 13. Best Practices
 
-1. **Prefer `+` for ≤5 fixed parts; use `StringBuilder` for loops** — the JIT optimises small fixed-arity concatenation but cannot hoist loop-body `String` allocations.
+1. **Prefer `+` for ≤5 fixed parts; use `StringBuilder` for loops** — the JIT optimises small fixed-arity concatenation but cannot hoist loop-body `String` allocations [Effective Java Item 63: "Beware the performance of string concatenation"].
 2. **Use `"literal".equals(variable)` pattern** — avoids `NullPointerException`; `null.equals(...)` would throw, `"literal".equals(null)` returns `false`.
 3. **`String.strip()` over `String.trim()`** in Java 11+ — Unicode-correct whitespace removal.
 4. **`String.isBlank()` over `.isEmpty()`** when whitespace-only strings count as "empty" for your use case.

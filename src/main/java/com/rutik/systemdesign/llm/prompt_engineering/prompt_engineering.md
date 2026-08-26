@@ -285,6 +285,16 @@ prefer `client.responses.parse(...)`, which takes the same Pydantic model via `t
 returns it on `response.output_parsed`. Both paths enforce the schema identically; the choice is
 which endpoint the rest of your application already speaks.
 
+**What `strict: true` is actually doing, and what it is not.** The guarantee is structural, not
+semantic: the decoder masks the logits at every step so only tokens the schema still permits can be
+sampled, which makes malformed JSON impossible by construction. It does not make the *values*
+correct — a schema-valid response can still put a person in `organizations`. Treat schema
+enforcement as replacing your parser, never as replacing your eval. For how the masking is computed
+fast enough to be free at 128K vocabulary — FSM/CFG compilation, XGrammar's adaptive token-mask
+cache, llguidance's token-trie lexer, jump-forward decoding, and the quality cost of over-constraining
+— see
+[Constrained Decoding & Structured Outputs](../inference_and_decoding/constrained_decoding_and_structured_outputs.md).
+
 ### 4.7 System Prompts
 
 Persistent instructions that set the model's role, persona, and constraints:
@@ -544,6 +554,56 @@ Mitigations:
   4. Input validation: detect injection patterns before sending to LLM
 ```
 
+### Cross-Model Prompt Portability
+
+A prompt is not a program. It is a set of instructions tuned against one model's habits, and the
+tuning does not travel. Swapping the model behind a well-tested prompt is the single most common
+way a working system silently regresses, and it happens on every routing change, every provider
+failover, and every version bump.
+
+Four layers move independently, and only the first is visible in your code:
+
+```
+  1. Your prompt text                  <- what you wrote and version-controlled
+  2. The chat template                 <- how roles are serialised into tokens
+  3. Role semantics                    <- what "system" actually means to this model
+  4. Tokenization + formatting habits  <- what the model copies from your examples
+```
+
+**The chat template is the layer people forget.** Open-weight models ship a Jinja
+`chat_template` in `tokenizer_config.json` that turns your `[{role, content}, ...]` list into one
+token string — the special tokens, the turn delimiters, whether a trailing generation prompt is
+appended. Two models can accept identical messages and see completely different token sequences.
+Serve a model with the wrong template and quality collapses in a way that looks like a bad prompt,
+because nothing errors: you get fluent, confidently worse output. Always take the template from the
+model's own tokenizer rather than hard-coding one that worked for the previous model.
+
+**Role semantics are not uniform.** Some models treat the system prompt as strongly privileged and
+hard to override; others weight it barely above a user turn. A prompt whose safety rules live only
+in the system message can be well-defended on one model and trivially bypassed on another, with no
+change to your text. The same applies to multi-turn: models differ in whether they honour a system
+message that appears anywhere other than first.
+
+**Formatting habits are copied, not understood.** Few-shot examples teach format by imitation, so a
+delimiter or JSON style that one model reproduces perfectly may be approximated by another. This is
+why schema-enforced structured output (§4.6) is the portable choice and few-shot format-teaching is
+not — a schema is enforced by the decoder identically everywhere; an example is a suggestion.
+
+**What actually survives a model swap**, roughly in order:
+
+| Portable | Fragile |
+|---|---|
+| Schema-enforced structured output | Few-shot examples used to teach output *format* |
+| Explicit, positive instructions ("return only the JSON object") | Negative instructions ("do not add commentary") |
+| Task decomposition into separate calls | One prompt asking for three things at once |
+| Retrieved context passed as data | Rules whose only home is the system message |
+| Anything your eval set covers | Anything tuned by eyeballing a handful of outputs |
+
+**The operational rule.** Treat a model change as a code change: pin the model version, keep a
+per-model prompt variant when the eval says you need one, and gate the swap on the same eval suite
+you gate a prompt edit on. A model id in a config file that nobody re-evaluates is a silent
+regression waiting for a provider deprecation to trigger it.
+
 ---
 
 ## 7. Real-World Examples
@@ -606,6 +666,7 @@ The few-shot and CoT gain ranges above are rough rules of thumb, not measured be
 4. **Not specifying output length**: Model may generate 50 words or 5000 words with no guidance.
 5. **Position of important instructions**: Instructions buried in the middle of a long prompt are the ones most likely to be ignored ("lost in the middle" — Liu et al., 2023). Put critical rules at the START and repeat them at the END.
 6. **Assuming temperature=0 means deterministic**: Different hardware/batch configurations can produce different outputs even at temp=0.
+7. **Carrying a prompt to a new model without re-evaluating it**: the prompt text is only one of four layers — the chat template, the model's role semantics, and its formatting habits all change underneath you, and none of them raises an error when they do. A model swap is a code change; gate it on the same eval suite you gate a prompt edit on.
 
 ---
 
@@ -694,6 +755,14 @@ A: Automatic prompt optimization treats the prompt as parameters to be searched 
 **Q: What is meta-prompting, and how is it different from automatic prompt optimization?**
 **Short:** Meta-prompting is a single LLM call rewriting a prompt with generic hygiene and no metric, while automatic prompt optimization is a scored search needing a dev set.
 Meta-prompting is using an LLM to write or rewrite the prompt itself — one call, no metric, no dev set, and the output is a candidate prompt you still have to evaluate. Automatic prompt optimization (DSPy, MIPROv2, GEPA) is a search: it needs a scored metric and a labelled dev set, and it iterates over instructions and example selections keeping whatever measures better. The difference in practice is where the judgement lives. A meta-prompt encodes generic prompting hygiene — state the role, specify the schema, wrap variable content in delimiters, add worked examples, define out-of-scope behavior — so it improves a bad prompt reliably and improves an already-good prompt unpredictably, because nothing in the loop knows your task. Vendor tooling ships the pattern directly: Anthropic's Console prompt improver rewrites a prompt by adding a chain-of-thought section, normalizing examples into consistent XML and enriching them with matching reasoning, and Anthropic reports a 30% accuracy gain on a multilabel Wikipedia matching task with Claude 3 Haiku plus 100% word-count adherence on a length-constrained summarization task; OpenAI exposes an equivalent prompt optimizer in its dashboard. Use meta-prompting to get the first draft and to escape a prompt you have been staring at too long, then switch to optimization once you have an eval set — and never ship either output without measuring it, since both can raise the average while regressing the cases you actually care about.
+
+**Q: Why does a well-tuned prompt often regress when you swap the model behind it?**
+**Short:** Because the prompt text is only one of four layers, and the chat template, role semantics, and formatting habits all change underneath you without raising an error.
+Four layers sit between your messages and the model's tokens, and only the first is in your source control: the prompt text, the chat template that serialises roles into a token string, the model's role semantics, and its formatting habits. The chat template is the one teams forget — open-weight models ship a Jinja `chat_template` in `tokenizer_config.json` that decides the special tokens, the turn delimiters and whether a generation prompt is appended, so two models can accept identical `messages` lists and see completely different token sequences. Serve a model with the wrong template and quality collapses silently: nothing errors, you just get fluent, confidently worse output that reads like a bad prompt. Role semantics differ too — some models treat the system message as strongly privileged and others weight it barely above a user turn, so safety rules that live only in the system prompt can be well-defended on one model and trivially bypassed on another with no change to your text. And few-shot examples teach format by imitation, so a delimiter style one model reproduces exactly is only approximated by the next. Always take the chat template from the model's own tokenizer rather than carrying over the previous model's, and treat a model change as a code change: pin the version and gate the swap on the same eval suite you gate a prompt edit on.
+
+**Q: Which parts of a prompt survive a model swap, and which should you expect to break?**
+**Short:** Schema-enforced output, explicit positive instructions, and decomposed tasks port well, while few-shot format-teaching, negative instructions, and system-message-only rules are fragile.
+What ports is anything enforced outside the model or stated unambiguously inside it: schema-enforced structured output, because the decoder mask is applied identically everywhere; explicit positive instructions such as "return only the JSON object"; task decomposition into separate calls; retrieved context passed as data rather than as instruction; and anything your eval set actually covers. What breaks is anything the model has to infer from your style: few-shot examples used to teach output *format* (an example is a suggestion, a schema is a guarantee — which is the real argument for structured outputs over format demonstrations); negative instructions like "do not add commentary", which models honour inconsistently; a single prompt asking for three things at once, since the failure mode is model-specific; and rules whose only home is the system message. The practical consequence is that portability is a design choice made before the swap, not a debugging exercise after it — move enforcement out of prose and into schemas and separate calls, keep a per-model prompt variant when your eval says you need one, and never leave a model id sitting in a config file that nobody re-evaluates, because a provider deprecation will eventually change it for you.
 
 ---
 

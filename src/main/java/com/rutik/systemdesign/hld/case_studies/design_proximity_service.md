@@ -732,13 +732,33 @@ public class PersonalizationReRanker {
 | Component | Representative Technologies | Notes |
 |---|---|---|
 | Geo-index (Phase 1) | Redis (`GEOADD`/`GEOSEARCH`), or a custom in-memory geohash-bucketed map | §4.1, §4.2 — ~1.2GB for 50M businesses at precision 6 |
-| Search/attributes index (Phase 2) | Elasticsearch / OpenSearch with `geo_point` fields | §4.2 — primary production choice; ~100GB sharded (§2, §10) |
+| Search/attributes index (Phase 2) | Elasticsearch **or** OpenSearch with `geo_point` fields | §4.2 — primary production choice; ~100GB sharded (§2, §10). These are two different products now, not interchangeable names — see "Elasticsearch vs. OpenSearch" below |
 | System of record | PostgreSQL + PostGIS | §4.6 — strong-consistency store for listing writes; PostGIS used for admin tooling and as the CDC source |
 | CDC / event propagation | Debezium-style CDC, or outbox table + poller | §4.6 — feeds Kafka |
 | Message queue | Kafka (`listing_updates` topic) | §3, §4.6 — cross-ref [`../message_queues/message_queues.md`](../message_queues/message_queues.md) |
 | Attributes cache (long TTL) | Redis / Memcached, TTL hours | §4.5 — cross-ref [`../caching/caching.md`](../caching/caching.md) |
 | Status cache (short TTL) | Redis, TTL 30-60s, pub/sub invalidation | §4.5 |
 | Status override store | Small key-value table (DynamoDB-style or a small Postgres table) | §4.5, §10 — ~2.5M entries |
+
+### Elasticsearch vs. OpenSearch — Not Interchangeable Names
+
+This design says "Elasticsearch / OpenSearch" throughout, and that shorthand needs one
+qualification, because the two forked in 2021 and have diverged since. Elastic relicensed
+Elasticsearch from Apache 2.0 to a dual **SSPL / Elastic License v2** in January 2021; AWS forked
+the last Apache-2.0 release as **OpenSearch**, now under the Linux Foundation. Elastic added
+back an AGPLv3 option in 2024, so Elasticsearch is open source again in the OSI sense — but
+AGPL is copyleft and has different obligations from OpenSearch's Apache 2.0.
+
+For the geo-plus-attribute query this design depends on, the two are still close enough to be
+substitutable: `geo_point`, `geo_distance`, `geo_bounding_box`, `bool` filters, and
+`function_score`-style ranking all work on both, so §4.2's two-phase pipeline is unaffected by
+the choice. Where they diverge is everything around that core — plugin ecosystems, vector-search
+implementations and their APIs, security and alerting features (packaged differently in each),
+managed-service availability (AWS OpenSearch Service versus Elastic Cloud), and client-library
+compatibility, where Elastic's newer clients deliberately reject an OpenSearch cluster. Pick one
+deliberately, pin the client library that matches it, and stop writing them with a slash in your
+own design documents — the interview answer is "OpenSearch on AWS because it is Apache-2.0 and
+managed there" or "Elasticsearch because we need feature X", not "Elasticsearch/OpenSearch".
 
 ### Build vs. Buy Considerations
 

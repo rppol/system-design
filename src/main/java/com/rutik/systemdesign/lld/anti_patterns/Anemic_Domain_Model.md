@@ -392,6 +392,68 @@ sequenceDiagram
 
 ---
 
+## Interview Questions with Answers
+
+**Q: Fowler called the Anemic Domain Model an anti-pattern in 2003 — what exactly is his argument?**
+**Short:** You pay the full cost of a domain model, chiefly the O/R mapping layer, while collecting none of its benefits.
+Fowler's bliki entry (25 November 2003) argues the objects "look right" — they have the correct fields and relationships — but have "hardly any behavior on these objects, making them little more than bags of getters and setters," so the design is "really just a procedural style design." His sharper claim is not merely "no behavior is bad style" — it's that an anemic model incurs all the costs of a domain model (chiefly the awkwardness of mapping objects to a database, which buys you a whole O/R mapping layer) without yielding any of the benefits that layer is supposed to justify. He credits Eric Evans as a co-observer of the pattern, citing *Domain-Driven Design* in support, and does not claim to have coined the term himself.
+
+**Q: What is the counter-argument to Fowler's position — when might an anemic model be the right call?**
+**Short:** Simple CRUD applications with little business logic get away with anemic models because there's little behavior to lose.
+For genuinely simple CRUD applications — where the operations really are just create, read, update, delete with minimal business rules — the overhead of designing rich behavioral entities may not be worth it, since there is little domain logic to encapsulate in the first place. The pattern becomes harmful specifically as business logic grows and invariants accumulate; a small admin tool with three fields and no state machine is a different situation than an `Order` entity with cancellation rules, status transitions, and total calculations. The practical guidance is to recognize when you've crossed from "simple CRUD" into "real domain logic" and refactor toward a rich model at that point.
+
+**Q: What is the Tell, Don't Ask principle, and how does the Anemic Domain Model violate it?**
+**Short:** Tell Don't Ask means commanding an object to act, not querying its state and deciding externally what to do.
+Tell, Don't Ask says you should tell an object what to do (`order.cancel()`) rather than asking it for its state, deciding externally, and then commanding a low-level mutation (`if (order.getStatus() == SHIPPED) ... else order.setStatus(CANCELLED)`). The anemic `OrderService.cancelOrder()` example does exactly the latter: it calls `order.getStatus()`, runs an if/else outside the entity to decide legality, then calls the raw setter — the object never participates in the decision about its own state transition. The rich model's `order.cancel()` inverts this: the entity checks its own status and throws if the transition is illegal, so the service simply tells it what to do.
+
+**Q: How would you design an Order entity to be a rich domain model instead of anemic?**
+**Short:** Replace public setters with named operations (cancel, confirm, markShipped) that enforce their own invariants.
+Give `Order` a static factory method (`Order.place(...)`) that validates creation invariants like a non-empty item list, instead of a public no-arg constructor plus setters. Replace `setStatus(CANCELLED)` with a named operation `cancel()` that internally checks `status == SHIPPED || status == DELIVERED` and throws `IllegalStateException` if the transition is illegal. Add `calculateTotal()` as a method on the entity itself rather than duplicating the summation logic in every service method that needs it, and remove `setStatus()` entirely so state transitions can only happen through the entity's own named, invariant-checking methods.
+
+**Q: What is the difference between a domain object and a DTO, and why does conflating them cause problems?**
+**Short:** A DTO carries data across a boundary with no behavior by design; a domain object should enforce its own rules.
+A DTO (Data Transfer Object) is meant to be a pure data carrier for crossing a serialization boundary — having no behavior is correct and intentional for a DTO. A domain object, by contrast, is meant to combine data and behavior and enforce its own invariants. When developers use DTOs as their domain model because it's simpler, they get an anemic model by construction: the class was never designed to protect itself, because protecting itself was never its job. The fix is to keep DTOs at the boundary (API request/response shapes) and build a separate, richer domain model behind them.
+
+**Q: Why is duplicated total-calculation logic a direct symptom of an anemic model, not a separate bug?**
+**Short:** Without a home in the entity, every service method that needs a derived value has to recompute it independently.
+In the anemic `OrderService`, the same `items.stream().map(...).reduce(...)` total calculation appears twice — once in `placeOrder()` and again in `addItem()` — because there is no single place, like `Order.calculateTotal()`, that owns the computation. Every service method that needs the total has to reimplement it, and the two copies can drift (exactly the mechanism described in the Copy-Paste Programming anti-pattern). Moving `calculateTotal()` onto the entity means it's computed once, in one place, and any service or caller that needs the value simply calls the method rather than reimplementing the arithmetic.
+
+**Q: What happens to unit testing when business logic lives in the entity instead of the service?**
+**Short:** Domain logic becomes testable with zero infrastructure — no repository, no mocks, no service dependencies.
+Testing `OrderService.cancelOrder()` in the anemic design requires standing up the full service with its `OrderRepository`, `InventoryService`, and other dependencies, because the cancellation rule lives inside the service method alongside repository calls. Testing `order.cancel()` on the rich entity requires only an `Order` object — as shown in the file's `OrderTest.cancel_throwsIfOrderAlreadyShipped()` example, which constructs an order, confirms and ships it, then asserts that `cancel()` throws, with no mocks or infrastructure involved at all.
+
+**Q: Why do ORM frameworks like JPA/Hibernate tend to push developers toward anemic models?**
+**Short:** JPA entities need a no-arg constructor and getter/setter pairs, which developers then treat as the whole design.
+JPA/Hibernate entities are required to expose a no-arg constructor and typically use getter/setter pairs so the persistence framework can construct and populate them via reflection — this is a mechanical requirement of the mapping layer, not a design statement. The problem is that developers often mistake this persistence-layer requirement for the entire design of the class, adding no further behavior beyond what JPA needs, and the entity ends up looking exactly like a database row mapped to Java rather than a behavioral domain object. A rich model can still satisfy JPA's mechanical requirements (e.g., a protected no-arg constructor for Hibernate's use) while keeping public factory methods and named operations as the real API.
+
+**Q: What does an "Anemic Microservice" look like at the HLD level, and why is it a problem?**
+**Short:** A service exposing only raw CRUD endpoints with no domain logic, forcing rule-enforcement into callers.
+A service that exposes only `GET /orders`, `POST /orders`, `PUT /orders/{id}` with no domain logic pushes all the "what are the rules for placing an order?" logic into the API layer or, worse, into each client that calls the service — scattered and duplicated across every consumer instead of centralized where the data lives. Consuming services end up needing to understand `Order`'s invariants themselves to work correctly with the raw data, creating tight coupling that a properly modeled domain service (one that enforces its own rules server-side) would have eliminated by exposing meaningful operations instead of raw field mutation.
+
+**Q: Why does event sourcing expose anemic entities as a correctness problem, not just a style problem?**
+**Short:** Anemic entities can't validate transitions before emitting events, so invalid state changes leak into the permanent event log.
+Event sourcing requires entities that know how to apply events and validate transitions before they are recorded — the entity is the gatekeeper that decides whether a proposed state change is legal. Anemic entities, having no behavior, cannot perform that validation; whatever service code produces the event does so externally, and if that external logic has a gap (exactly the kind of gap that duplicated, scattered validation logic tends to have), an invalid state change is written permanently into the event log, where it cannot simply be "fixed" the way a mutable database row could be. This makes the Anemic Domain Model considerably more dangerous in an event-sourced system than in a simple CRUD one.
+
+**Q: How does an anemic model turn into a God Service over time?**
+**Short:** With no behavior in the entities, all logic must live somewhere, and it concentrates into one orchestration service.
+Once entities are stripped of behavior, every piece of business logic — validation, calculation, state-transition rules — has to be implemented somewhere, and it typically accumulates in service classes. As more entities stay anemic and more logic needs a home, one "orchestration service" that calls every other service and implements most business rules tends to emerge, becoming the same kind of bottleneck and deployment hazard described in the God Object anti-pattern, but arrived at through under-designed entities rather than a single class that just grew too large.
+
+**Q: In the refactored example, why does the service class become thinner without losing functionality?**
+**Short:** The service now coordinates infrastructure (payment, inventory) while Order.place() and order.cancel() own the business rules.
+`OrderService.placeOrder()` still calls `paymentService.authorize()` and `inventoryService.reserve()` — coordinating external systems is legitimately the service's job — but the validation and total calculation that used to live inline in the service now happen inside `Order.place()`. Similarly, `cancelOrder()` still calls `inventoryService.release()` and `orderRepository.save()`, but the legality check that used to be an if/else in the service is now just `order.cancel()`. No functionality is lost — it moved to a more appropriate owner, and the service's remaining code is coordination logic, which is exactly what a service should contain.
+
+**Q: What is a factory method like `Order.place(...)` protecting against that a public constructor cannot?**
+**Short:** A public constructor lets any caller build an Order in an invalid state; a factory method enforces invariants at creation.
+`new Order()` followed by a series of setter calls, as in the anemic example, allows any code path to construct an `Order` with an empty items list or a missing shipping address, because nothing forces the invariant checks to run before the object exists. `Order.place(customerId, items, shippingAddress)` validates those invariants inside the factory method itself and only returns a fully-valid `Order`, or throws before construction completes — there is no window where an invalid `Order` instance exists in memory that some other code could accidentally get hold of and persist.
+
+**Q: How would you spot an Anemic Domain Model by looking only at class and method names, without reading implementations?**
+**Short:** Domain classes named after nouns with only getters/setters, paired with services named after verbs holding all the logic.
+The naming pattern is distinctive: entity classes (`Order`, `User`, `Invoice`) expose only `getX()`/`setX()` pairs with no domain-specific method names, while separate classes suffixed `Service` (`OrderService`, `UserService`, `InvoiceService`) contain verb-named methods (`cancelOrder`, `calculateTotal`, `validateInvoice`) that take the entity as a parameter and manipulate it from outside. This split — nouns hold data, separately-named verb classes hold all the logic — is visible from an IDE's class list alone, before opening a single method body, which is why it's one of the fastest anti-patterns to spot in an unfamiliar codebase.
+
+**Q: What is the "Transaction Script" pattern, and why does it naturally produce anemic models?**
+**Short:** One method per use case, operating on plain data, is the default shape many tutorials teach and it yields anemic entities by construction.
+Transaction Script organizes business logic as one procedure per use case — `placeOrder()`, `cancelOrder()` — each of which reads data, applies logic, and writes it back, treating the entities it touches as plain data holders rather than behavioral objects. Many introductory tutorials teach this shape first because it maps directly onto a single request handler, which is why developers with that background naturally reach for services-with-getters/setters rather than rich entities. It isn't wrong for genuinely simple CRUD, but as a default habit it produces the exact anemic split this anti-pattern describes once business rules accumulate.
+
 ## Interview Relevance
 
 **Common interview questions:**

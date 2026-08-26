@@ -550,7 +550,7 @@ Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% an
 | Deep Learning RecSys | PyTorch, TensorFlow Recommenders (TFRS), RecBole |
 | ANN / Vector Search | FAISS, ScaNN (Google), Annoy, Hnswlib, Weaviate, Pinecone |
 | Feature Stores | Feast, Tecton, Hopsworks |
-| Serving / Inference | TorchServe, TF Serving, Triton Inference Server |
+| Serving / Inference | TF Serving, Triton Inference Server, BentoML |
 | Data Pipeline | Apache Spark, Apache Flink, Kafka |
 | Experiment Tracking | MLflow, Weights & Biases |
 | A/B Testing | Optimizely, statsig, custom split infrastructure |

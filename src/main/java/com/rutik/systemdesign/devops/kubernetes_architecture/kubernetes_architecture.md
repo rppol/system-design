@@ -2,6 +2,8 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
+> **Version anchor (2026-08-25).** **Kubernetes v1.36 "Haru"** (2026-04-22) is current; **v1.35 "Timbernetes"** (2025-12-17) is the prior minor. `flowcontrol.apiserver.k8s.io/v1beta3` (API Priority and Fairness) **stopped being served in v1.32** — `flowcontrol.apiserver.k8s.io/v1` has been stable since v1.29, so every FlowSchema/PriorityLevelConfiguration example below uses `v1`. **etcd 3.7** is the current release line (3.7.0 shipped 2026); 3.5 and 3.6 remain in support, 3.4 reached end of support 2026-06-01. Every version-tagged claim on this page is checked against these anchors.
+
 Kubernetes is the de-facto container orchestrator and the single most-tested DevOps interview topic. Its genius is one idea applied everywhere: **declare desired state; controllers continuously reconcile reality toward it.** Understanding the control plane (API server, etcd, scheduler, controller-manager) and node components (kubelet, kube-proxy) — and how they communicate only through the API server — explains nearly every Kubernetes behavior and failure mode.
 
 ---
@@ -255,7 +257,88 @@ flowchart LR
 
 Admission webhooks (mutating, then validating) are where policy engines (OPA Gatekeeper, Kyverno) and sidecar injectors hook in — see [kubernetes_security](../kubernetes_security/kubernetes_security.md) and [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md).
 
-### Watches, not polling
+### API Priority and Fairness — protecting the hub from its own clients
+
+The diagram above starts at authentication, but the very first thing a request meets after that is **API Priority and Fairness (APF)**: every request is classified into a **PriorityLevelConfiguration** by a matching **FlowSchema**, so one badly-behaved client — the label-sync operator in §14, or any hot-looping controller from Pitfall 2 — gets throttled and queued on its own slice of the API server's concurrency instead of starving `kubectl`, the scheduler, and every other controller sharing the same hub.
+
+```yaml
+# apiVersion v1 has been stable since v1.29; v1beta3 stopped being served in v1.32 — use v1.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata: {name: label-sync-operator}
+spec:
+  priorityLevelConfiguration: {name: workload-low}
+  matchingPrecedence: 900              # lower number wins when a request matches >1 FlowSchema
+  distinguisherMethod: {type: ByUser}
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount: {name: label-sync, namespace: ops}
+      resourceRules:
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["list", "watch", "patch"]
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata: {name: workload-low}
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 10       # this level's slice of total apiserver concurrency
+    limitResponse:
+      type: Queue
+      queuing: {queues: 64, handSize: 6, queueLengthLimit: 50}
+```
+
+**Read the mechanism, not just the YAML.** The API server's total concurrency budget (`--max-requests-inflight` / `--max-mutating-requests-inflight`) is divided across every `Limited` priority level by `nominalConcurrencyShares` — so a level with a small share is throttled even when nothing else on the cluster is busy; the ceiling is proportional to the share, not to idle capacity. A request that can't get a seat within its level either waits in a bounded queue (`queueLengthLimit`) or is rejected outright with **HTTP 429**, and 429s are cheap for the server to produce compared to letting the request run unbounded. Built-in `system` and `leader-election` levels are pre-provisioned precisely so a flooding workload level can never starve the control loops that keep the cluster alive.
+
+Applied to §14: the label-sync operator's unconditional `List`+`Patch` loop would have hit its own `workload-low` queue limit and started drawing 429s long before `apiserver_request_duration` P99 reached 8 seconds cluster-wide — APF turns a cluster-wide outage into one operator's own back-pressure.
+
+```bash
+kubectl get flowschemas
+kubectl get prioritylevelconfigurations
+# per-level health, not per-request:
+#   apiserver_flowcontrol_rejected_requests_total{flow_schema="label-sync-operator"}
+#   apiserver_flowcontrol_current_inqueue_requests
+```
+
+### etcd defrag/compaction runbook
+
+etcd's MVCC store keeps every historical revision of every key until **compaction** removes the old ones, and even after compaction the on-disk B-tree pages those revisions occupied are not returned to the filesystem until a **defrag** — which is exactly how a cluster can walk toward the `--quota-backend-bytes` NOSPACE alarm (2 GiB default, above) with a keyspace that is mostly dead history rather than live data.
+
+**1. Compaction — drop revisions older than the retention window.**
+
+```bash
+# kubeadm-managed clusters set periodic auto-compaction by default:
+#   --auto-compaction-mode=periodic  --auto-compaction-retention=1h
+# (etcd itself does not auto-compact unless one of the --auto-compaction-* flags is set —
+# a self-managed cluster that drops these flags is the most common cause of unbounded growth.)
+etcdctl compact "$(etcdctl endpoint status --write-out=json | jq -r '.[0].Status.header.revision')"
+```
+
+**2. Defrag — reclaim the file space compaction only freed internally.**
+
+```bash
+# One member at a time: defrag blocks that member's reads/writes while it rebuilds its file.
+etcdctl defrag --endpoints=https://10.0.1.11:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=... --key=...
+# Never defrag every member concurrently — a leader defragging alongside its followers
+# can lose quorum for the duration of the rebuild.
+```
+
+**3. The read-only-on-quota trap.** Once `etcd_mvcc_db_total_size_in_bytes` crosses `--quota-backend-bytes`, etcd raises a cluster-wide **NOSPACE alarm** and drops into a mode that accepts only reads and key deletes — ordinary writes, including the self-healing writes controllers depend on, are refused. Compaction is still permitted (it is the sanctioned way out), but the file will not shrink from compaction alone, so the alarm persists until you also defrag and then explicitly clear it:
+
+```bash
+etcdctl alarm list                 # confirm NOSPACE is set, and on which member
+etcdctl compact <revision>         # permitted even while NOSPACE is raised
+etcdctl defrag --endpoints=...     # per member; reclaims the file space
+etcdctl alarm disarm               # required — the alarm does not clear itself
+```
+
+The pitfall to avoid: raising `--quota-backend-bytes` without compacting or defragging first just buys a larger window before the same unbounded-growth cause fills it again.
+
+### Why the scheduler is separate
 
 ```bash
 # Controllers and kubelets use long-lived watch streams (HTTP/2) on the API server,
@@ -437,6 +520,22 @@ The node lifecycle controller stops receiving heartbeats, marks the node `NotRea
 **Q15: Why might a cluster be "slow" even though apps have spare CPU/memory?**
 **Short:** The bottleneck is usually the control plane itself — an overloaded API server, etcd near its size quota, or saturated CoreDNS — not the workloads.
 The bottleneck is usually the control plane, not the workloads: an overloaded API server (heavy list-watch traffic, slow/failing admission webhooks), etcd under disk pressure or near its size quota (slow writes, defrag pauses), or DNS (CoreDNS) saturation. Symptoms are slow `kubectl`, laggy rollouts, and delayed self-healing. You diagnose via API server/etcd latency metrics and request rates, not app dashboards.
+
+**Q16: A single client is flooding the API server. How does Kubernetes contain that without an admin intervening?**
+**Short:** API Priority and Fairness classifies every request into a FlowSchema-selected priority level with its own concurrency share, so a flooding client queues or gets 429s instead of starving everyone else.
+**API Priority and Fairness (APF)** assigns every request to a `PriorityLevelConfiguration` via a matching `FlowSchema`, and each `Limited` level gets a fixed slice (`nominalConcurrencyShares`) of the API server's total concurrency budget. A client that exceeds its level's share either waits in a bounded queue or is rejected with HTTP 429 — it cannot borrow capacity from the `system` or `leader-election` levels, which is exactly what keeps a hot-looping operator (§14) from starving the scheduler and `kubectl`. Diagnose it with `apiserver_flowcontrol_rejected_requests_total` and `apiserver_flowcontrol_current_inqueue_requests` per FlowSchema, not with generic API server latency alone.
+
+**Q17: etcd hit its NOSPACE alarm. Why doesn't raising `--quota-backend-bytes` fix it?**
+**Short:** Raising the quota just delays the same alarm, because the fix is compacting old revisions and defragmenting the file, not giving the same unbounded growth more room.
+Raising the quota buys a bigger window but does not address why the DB filled up — if the cause was unconditional writes or a disabled compaction retention, the larger quota fills again on the same trajectory. The actual fix is `etcdctl compact <revision>` (permitted even while NOSPACE is set, since it's the sanctioned recovery path), then `etcdctl defrag` per member to reclaim the file space compaction only freed internally, then `etcdctl alarm disarm` — compaction alone does not shrink the file, and the alarm does not clear itself. Prevent recurrence with `--auto-compaction-mode=periodic --auto-compaction-retention=1h` (kubeadm's default) and alerts on `etcd_mvcc_db_total_size_in_bytes` well before the quota.
+
+**Q18: How do leader election and quorum interact for the controller-manager and scheduler in an HA control plane?**
+**Short:** Every replica runs, but only the Lease-holding leader is active; losing quorum blocks the Lease renewal itself, so the whole control loop stalls, not just fails over.
+kube-controller-manager and kube-scheduler run active-passive in HA: every replica starts, but only the one holding a `Lease` object (via `--leader-elect`) does work, defaulting to a 15-second lease duration and a 10-second renew deadline before a standby takes over. Because the Lease itself is an etcd-backed object, losing etcd quorum doesn't just stall reconciliation — it also blocks lease renewal, so a stuck leader can't be replaced until quorum returns; there is no failover path that bypasses etcd. This is why HA control-plane resilience is really etcd resilience wearing a different hat.
+
+**Q19: What's the Kubernetes version-skew policy, and what does it constrain during an upgrade?**
+**Short:** kube-apiserver leads the upgrade; kubelet may trail it by up to three minor versions, and every HA apiserver instance must stay within one minor version of the others.
+kube-apiserver is upgraded first and is the ceiling every other component tracks: kube-controller-manager, kube-scheduler, and cloud-controller-manager may be up to one minor version older; kubelet may be up to three minor versions older (two, for kubelet versions before 1.25); and kubectl may be one minor version older or newer. In an HA cluster the newest and oldest kube-apiserver replicas must themselves stay within one minor version during a rolling upgrade, which is what makes "upgrade the whole control plane, then the nodes, oldest kubelets last" the only supported order — skipping straight from N to N+2 anywhere in the chain is unsupported and can desync RBAC/API behavior mid-rollout.
 
 ---
 

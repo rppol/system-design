@@ -336,4 +336,74 @@ A: SRP is the formal articulation of high cohesion. High cohesion means the meth
 
 ---
 
+**Q: SRP says a class should have "one reason to change" — one reason according to whom?**
+**Short:** According to a single actor — the stakeholder group whose requirements drive changes to it.
+
+A: According to a single actor: a group of stakeholders whose requirements drive changes to the module. It is not "one reason" in the sense of any conceivable code diff — it is one *stakeholder group*. A `UserService` that changes both when HR wants a new report format and when the auth team changes the login flow answers to two actors, so it has two reasons to change even though both changes touch "user" code. The actor framing is what separates SRP from a vague "keep classes small" rule.
+
+---
+
+**Q: Give an example where splitting a class to satisfy SRP would make the design worse.**
+**Short:** Extracting a three-line Address.validate() used only by one actor adds ceremony with no benefit.
+
+A: If `Address` has a `validate()` method that is three lines long and is only ever called by one actor, extracting it into its own class is needless ceremony. SRP is about isolating concerns that actually change independently for different stakeholders — a tiny, single-caller method has no independent reason to change at all. Applying SRP mechanically here adds an extra file and an extra hop to read, for zero decoupling benefit. Reserve the extraction for methods that genuinely serve a different actor than the rest of the class.
+
+---
+
+**Q: What two questions help you spot an SRP violation during code review?**
+**Short:** Whether describing the class needs the word "and," and whether multiple teams would ask to change it.
+
+A: Ask "if I describe what this class does, do I need the word 'and'?" — needing "and" signals more than one responsibility. Then ask "who would ask me to change this class?" — if multiple departments or teams come to mind, SRP is violated. A third check: "can I unit test one responsibility without pulling in the other?" — if the responsibilities are entangled in setup, they were never actually separate. Use all three together rather than relying on any single heuristic.
+
+---
+
+**Q: Why is a `Utils` class with `formatDate`, `sendEmail`, `calculateTax`, and `isValidCreditCard` an SRP violation?**
+**Short:** It bundles unrelated concerns from different actors into one class with no unifying purpose.
+
+A: Each static method answers to a completely different actor — date formatting serves presentation, email serves notifications, tax calculation serves finance, and card validation serves payments. The class has no cohesive purpose beyond "things that didn't have an obvious home," so any of the four teams touching their method risks an unrelated merge conflict or accidental regression in the other three. The fix is extracting each into its own focused class named for its actual concern, not a shared grab-bag.
+
+---
+
+**Q: How does a checkout controller that validates, calculates, persists, and emails in one method violate SRP?**
+**Short:** It handles four separate actors' concerns in one handler, so any team's change risks the other three.
+
+A: The controller mixes validation logic, pricing/business rules, persistence, and notification — four actors (API contract owners, finance, DBAs, and the messaging team) all have a legitimate reason to change that same method. A change to the email template now sits in the same diff, and the same test run, as a change to the discount calculation. The fix is to keep the controller thin and delegate each concern to its own service, so the controller's only reason to change is the shape of the HTTP request/response.
+
+---
+
+**Q: What is the Active Record pattern's tension with SRP, and when is it acceptable to bend the rule?**
+**Short:** Active Record bundles persistence with the domain model, which SRP forbids in general but is pragmatic for simple CRUD.
+
+A: Active Record — a domain object that also knows how to `save()` itself — bundles a persistence reason to change into what should be a pure domain class, which is exactly the pattern SRP's `Employee.saveToDatabase()` violation warns against. For apps where the persistence concern genuinely *is* the only concern — simple CRUD screens with no independent business logic — this bundling is pragmatic rather than harmful, because there is no second actor to conflict with the first. The rule to bend is proportional to how much real business logic sits alongside the persistence code; the more logic, the more the bundling costs.
+
+---
+
+**Q: Walk through the process for refactoring a class that violates SRP.**
+**Short:** List its reasons to change, group methods by reason, extract each group, then wire and test them.
+
+A: First, list every reason the class might change as comments at the top — this makes the hidden actors visible. Second, group its methods by which reason/actor they serve; each group is a candidate class. Third, extract each group into its own focused, clearly named class. Fourth, wire the extracted classes together through a thin coordinator or facade if the caller still needs one entry point, keeping that coordinator itself free of logic. Finally, write focused unit tests for each extracted class now that it can be tested in isolation.
+
+---
+
+**Q: How does SRP show up at the microservices level in distributed systems?**
+**Short:** Each service should own exactly one bounded context; a service serving two actors is a "God Service."
+
+A: SRP at system scale means each microservice owns exactly one bounded context — a User Service, an Order Service, a Payment Service — rather than one service handling both user authentication and order management. A service handling two unrelated concerns is the distributed-systems equivalent of an SRP-violating class: a God Service. A useful diagnostic is deployment frequency — if a service's releases are driven by unrelated teams' changes, it likely has too many responsibilities at the service level, same as a class with too many actors.
+
+---
+
+**Q: What's the practical cost of applying SRP too aggressively?**
+**Short:** Class count balloons and one feature can span three to five classes, adding indirection to follow.
+
+A: Over-splitting produces "class explosion" — many tiny classes, often one method each, that add file-navigation overhead without real decoupling benefit. A single feature that used to live in one class can now span three to five classes, so understanding a change means jumping through several files instead of reading one. Premature SRP application to a domain you don't yet understand well can also produce the wrong split, since the real actor boundaries aren't clear yet. The fix is treating SRP as a judgment call guided by "who changes this, for what reason," not a rule to apply mechanically to every class.
+
+---
+
+**Q: How does SRP relate to the Interface Segregation Principle?**
+**Short:** ISP is SRP applied to interfaces — one interface per actor instead of one class per actor.
+
+A: SRP applied to interfaces produces ISP naturally: just as a class should serve one actor, an interface should serve one client role. A fat interface bundling methods for multiple unrelated clients is the interface-level version of a class with multiple reasons to change. Splitting responsibilities at the class level (SRP) and splitting contracts at the interface level (ISP) are the same underlying discipline applied at two different granularities.
+
+---
+
 **Interview Tip:** When answering SRP questions, always anchor your answer in the "actor" framing (not just "does one thing"). Interviewers who know SRP well look for the actor/stakeholder framing — it signals you have read the source, not just a surface-level summary.

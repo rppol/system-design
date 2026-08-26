@@ -2,6 +2,11 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
+> **Pricing anchor (checked 2026-08-25).** **AWS Secrets Manager is $0.40 per secret per
+> month (prorated hourly) plus $0.05 per 10,000 API calls**, with no free tier. The secret-count
+> cost table in §6 derives entirely from that rate. Source:
+> [AWS Secrets Manager pricing](https://aws.amazon.com/secrets-manager/pricing/).
+
 A secret is any credential that grants access — database passwords, API keys, TLS private keys, cloud access keys, signing keys. Secrets management is the discipline of **storing them encrypted, distributing them to workloads without exposing them, rotating them regularly, and auditing every access** — instead of the default failure mode of hardcoding them in source, env files, or Kubernetes manifests. The dominant tools are **HashiCorp Vault** (with its killer feature, *dynamic secrets*), the cloud-native managers (**AWS Secrets Manager**, **GCP Secret Manager**, **Azure Key Vault**), and the Kubernetes glue that delivers them — **External Secrets Operator (ESO)**, **Sealed Secrets**, and **SOPS**.
 
 ---

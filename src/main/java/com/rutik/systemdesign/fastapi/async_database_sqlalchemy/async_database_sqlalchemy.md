@@ -271,7 +271,9 @@ the moment you move from a 2-core dev box to a 4-core production one.
 The fix is to size the pool *from* the worker count, not independently of it: with 90 usable
 connections (100 minus superuser and monitoring reservations) and 9 workers, the budget is
 `90 / 9 = 10` per worker, so `pool_size=5, max_overflow=5` is the largest safe setting. Above
-that, put PgBouncer in transaction mode between the app and the server and let it multiplex.
+that, put PgBouncer in transaction mode between the app and the server and let it multiplex —
+but not before reading Pitfall 6, because asyncpg and transaction-mode pooling do not work
+together out of the box.
 
 ---
 
@@ -776,6 +778,82 @@ async def safe_concurrent_reads(ids: list[int]) -> list[User | None]:
     return await asyncio.gather(*[fetch_one(uid) for uid in ids])
 ```
 
+### Pitfall 6: asyncpg behind PgBouncer in transaction mode, unconfigured
+
+Transaction-mode pooling is the standard answer to connection exhaustion, and it is the one
+change that breaks asyncpg silently until it breaks loudly. SQLAlchemy's asyncpg dialect uses
+`asyncpg.connection.prepare()` for **every** statement and caches the prepared statement
+objects per DBAPI connection (default 100). Prepared statements live on a *server* connection.
+In transaction mode PgBouncer hands you a different server connection per transaction, so the
+statement your driver believes is prepared may not exist there — and asyncpg names its
+prepared statements in numeric order, so two clients will both ask for `__asyncpg_stmt_1__`
+on the same server connection.
+
+```python
+# BROKEN: the default engine, pointed at PgBouncer in transaction mode
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@pgbouncer:6432/app",
+    pool_size=20, max_overflow=10,
+)
+# Fails intermittently and under load only:
+#   asyncpg.exceptions.DuplicatePreparedStatementError:
+#       prepared statement "__asyncpg_stmt_1__" already exists
+#   asyncpg.exceptions.InvalidSQLStatementNameError:
+#       prepared statement "__asyncpg_stmt_3__" does not exist
+# Dev has one connection and never reproduces it. Staging with two workers
+# is fine. Production trips it the first time two requests overlap on one
+# PgBouncer server connection.
+```
+
+**Check PgBouncer's own version before writing any Python.** Since 1.21.0 PgBouncer tracks
+protocol-level named prepared statements itself in transaction and statement pooling mode,
+rewriting each client's statement onto an internal name held per server connection — and since
+1.24.0 that is on by default:
+
+```ini
+; pgbouncer.ini -- the fix, on a supported PgBouncer
+[pgbouncer]
+pool_mode = transaction
+max_prepared_statements = 200   ; default since 1.24.0; 0 disables tracking
+```
+
+On 1.24+ with the default intact, the engine above needs no `connect_args` at all — verify with
+`SHOW CONFIG;` on the PgBouncer admin console rather than assuming, because a config inherited
+from an older deployment may still carry an explicit `0`.
+
+```python
+# FIX for PgBouncer < 1.21, or one pinned to max_prepared_statements = 0:
+# disable the driver's prepared statements instead.
+from uuid import uuid4
+
+from sqlalchemy import NullPool
+from sqlalchemy.ext.asyncio import create_async_engine
+
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@pgbouncer:6432/app",
+    # PgBouncer IS the pool. A second pool in the app defeats it and is
+    # what lets useless prepared statements accumulate.
+    poolclass=NullPool,
+    connect_args={
+        # Unique name per prepare, so two clients never collide on one
+        # server connection.
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+        # And stop the driver caching them, so they do not accumulate.
+        "statement_cache_size": 0,
+    },
+)
+```
+
+Both `connect_args` entries are needed together on that path: unique names alone leave
+statements accumulating on server connections until memory becomes the problem instead, and a
+zeroed cache alone still collides on the numeric names asyncpg generates. It costs roughly the
+10% the statement cache buys — a fair trade against an intermittent production error, and a
+reason to upgrade PgBouncer rather than live on this branch.
+
+The wider lesson: "add PgBouncer in transaction mode" is repeated as a self-contained fix for
+connection exhaustion, and with asyncpg the answer depends on a version number in a file owned
+by a different team.
+
 ---
 
 ## 11. Technologies & Tools
@@ -789,7 +867,7 @@ async def safe_concurrent_reads(ids: list[int]) -> list[User | None]:
 | **Alembic** | Schema migration | Autogenerate, version control | Requires `run_sync` wrapper for async |
 | **SQLModel** | Pydantic+SA bridge | One class = schema + table | Lags SA releases; limited Mapped[] support |
 | **greenlet** | Enables sync-in-async | Powers SA's `run_sync` and the whole async layer | Hard dependency; its absence raises at first connect |
-| **PgBouncer** | Connection pooling proxy | Transaction-mode pooling reduces PG connections | Adds infrastructure complexity |
+| **PgBouncer** | Connection pooling proxy | Transaction-mode pooling reduces PG connections; tracks prepared statements itself since 1.21, on by default since 1.24 | Below 1.21, or with `max_prepared_statements = 0`, asyncpg needs `NullPool` + `prepared_statement_name_func` + `statement_cache_size=0` (Pitfall 6) |
 
 ---
 
@@ -959,6 +1037,36 @@ Note: do not retry within a failed transaction — roll back first, then retry. 
 **Short:** lazy="raise" fails immediately on an un-eager-loaded relationship, forcing explicit query options instead of silent N+1 queries.
 
 `lazy="raise"` configures a relationship so that accessing it without eager loading raises `InvalidRequestError` immediately, with the message `'User.posts' is not available due to lazy='raise'`. This is used as a defensive default in large teams: setting `lazy="raise"` on all relationships forces developers to explicitly list every relationship they need in query options, preventing accidental N+1 queries from being silently introduced. Use it in production code where strict access patterns are required; revert to `lazy="select"` in data exploration or admin tools where flexibility is more important.
+
+**Q17: You put PgBouncer in transaction mode in front of asyncpg and now see `DuplicatePreparedStatementError` under load. Why, and what fixes it?**
+**Short:** Prepared statements are server-connection state PgBouncer keeps swapping; on 1.24+ set `max_prepared_statements`, below that disable them in the driver.
+
+SQLAlchemy's asyncpg dialect calls `asyncpg.connection.prepare()` for every statement and
+caches the objects per DBAPI connection. Prepared statements are server-connection state, and
+in transaction mode PgBouncer gives you a different server connection per transaction — so a
+statement the driver believes exists may not be there, and because asyncpg names them in
+numeric order two clients both ask for `__asyncpg_stmt_1__` on the same server connection. It
+never reproduces on a single-connection dev box; it appears the first time two requests
+overlap in production. Fix it on PgBouncer's side first: since 1.21.0 it tracks protocol-level
+prepared statements itself and rewrites them onto per-server-connection names, and since 1.24.0
+`max_prepared_statements` defaults to 200, so on a current PgBouncer the correct answer is to
+confirm that value is not pinned to 0. Only below that do you disable prepared statements
+client-side — `poolclass=NullPool` because PgBouncer is already the pool, plus
+`prepared_statement_name_func` and `statement_cache_size=0` in `connect_args` — which costs
+roughly 10% statement throughput. Naming the version dependency is the answer's real content.
+
+**Q18: Your SQLAlchemy upgrade succeeded but `AsyncSession` now fails to import. What changed?**
+**Short:** SQLAlchemy 2.1 moves greenlet into the [asyncio] extra, so a plain `pip install -U sqlalchemy` will stop pulling in async support.
+
+SQLAlchemy's async layer is built on greenlet, and 2.1 keeps greenlet entirely inside the
+`[asyncio]` extra rather than installing it by default. A plain `pip install -U sqlalchemy`
+therefore upgrades the package and silently drops the dependency the async engine needs. Install
+`sqlalchemy[asyncio]` instead; the extra is already valid on 2.0 — which is still the current
+stable line, with 2.1 in beta — so pin it now and the upgrade becomes a non-event. The same dependency has a second consequence worth knowing: greenlet
+enabled free-threaded support in 3.3.0 and expanded it in 3.4.0, so async SQLAlchemy does run on
+`3.14t` — but greenlet calls that support "limited testing", with known memory leaks and forking
+hazards, so it is not a production data layer yet — see
+[`../production_deployment_and_scaling/production_deployment_and_scaling.md`](../production_deployment_and_scaling/production_deployment_and_scaling.md).
 
 ---
 

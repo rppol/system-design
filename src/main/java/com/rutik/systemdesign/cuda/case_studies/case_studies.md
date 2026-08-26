@@ -1,6 +1,6 @@
 # CUDA / GPGPU Case Studies — Learning Path
 
-6 principal-grade case studies + 5 cross-cutting kernel-engineering deep-dives. Every case study uses the **11-section principal template** (Intuition + §1–11); reference file: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md). These are *kernel-optimization* walkthroughs — the "optimize X" counterpart to the module READMEs' "understand X".
+8 principal-grade case studies + 5 cross-cutting kernel-engineering deep-dives. Every case study uses the **11-section principal template** (Intuition + §1–11); reference file: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md). These are *kernel-optimization* walkthroughs — the "optimize X" counterpart to the module READMEs' "understand X".
 
 > **Build status:** COMPLETE (2026-07-07) — all 6 case studies and 5 cross-cutting primitives authored. Case-study Q&As are intentionally excluded from the game quiz bank (the `case_studies/` path is skipped by `extract.py`), but every file is reachable in the reader via relative links.
 
@@ -42,6 +42,13 @@ Grouped by the engineering concern each case study centers on. Read the paired m
 | `port_a_cpu_pipeline_to_gpu.md` | End-to-end acceleration methodology | Profile → Amdahl budget → incremental port → transfer overlap → verify numerics |
 
 ---
+
+### Phase D — Modern Architecture & Multi-GPU
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [Write a Blackwell GEMM with the CuTe DSL](write_a_blackwell_gemm_with_cute_dsl.md) | Writing for an architecture whose fast path is asynchronous and warp-specialized | TMA descriptors, `tcgen05` and TMEM, the producer/consumer warp split, and why the naive port of a Hopper kernel leaves most of the machine idle. |
+| [Optimize MoE Expert-Parallel Dispatch](optimize_moe_expert_parallel_dispatch.md) | Data-dependent communication as the algorithm | Why all-to-all is the bottleneck once routing is dynamic: token permutation kernels, capacity-factor padding waste, and overlapping dispatch with expert compute. |
 
 ## Cross-Cutting Infrastructure Files
 
@@ -94,5 +101,7 @@ Map a likely interview prompt to the case study that rehearses it.
 | "Speed up this image filter / stencil / convolution." | `accelerate_2d_convolution_and_stencil.md` |
 | "How would you accelerate this CPU pipeline on a GPU?" | `port_a_cpu_pipeline_to_gpu.md` |
 | "Optimize the kernels behind LLM inference (GEMV, KV-cache, quantized matmul)." | `optimize_llm_inference_kernels.md` |
+| Write a GEMM for Blackwell / what changed with tcgen05 and TMA? | [Write a Blackwell GEMM with the CuTe DSL](write_a_blackwell_gemm_with_cute_dsl.md) |
+| How do MoE dispatch/combine kernels work, and why is all-to-all the bottleneck? | [Optimize MoE Expert-Parallel Dispatch](optimize_moe_expert_parallel_dispatch.md) |
 
 **Maintenance rule:** update this file every time a case study is added — flip its marker, place it in the correct phase group, update the Dependency Map, and add an Interview Prep Shortcut row. Same commit, no exceptions.

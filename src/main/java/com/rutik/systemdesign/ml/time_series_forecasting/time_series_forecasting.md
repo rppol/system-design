@@ -8,6 +8,8 @@ Time series forecasting predicts future values of a sequentially ordered, time-i
 
 Applications: demand planning, financial price prediction, energy load forecasting, anomaly detection in metrics, product sales attribution, capacity planning.
 
+The field acquired pretrained foundation models between 2024 and 2026, and it changed the first question you ask in a design round. Historically every series got its own fitted model — an ARIMA per SKU, a Prophet per metric — because there was nothing to transfer. Time-series foundation models (TSFMs) are pretrained on millions of series drawn from synthetic generators and public corpora, then forecast a series they have never seen with **no fitting step at all**. So the opening architectural decision is no longer "ARIMA or LSTM"; it is **whether you train per-series at all**, and the honest answer depends almost entirely on how much history each series has. A TSFM is transformative on a catalogue of 40,000 SKUs where 30,000 are cold-start, and it is beaten by a well-tuned LightGBM on the 200 head SKUs with five years of history and rich promotional covariates. Sections 4.4, 8 and 9 make that tradeoff concrete; the classical material below remains the baseline you are obliged to beat.
+
 ---
 
 ## 2. Intuition
@@ -28,7 +30,11 @@ Key insight: The best forecasting model is not the most complex one — it is th
 2. Respect temporal order in all cross-validation — never shuffle time series data. Use walk-forward (expanding window) or sliding window validation.
 3. Lag features encode temporal memory — the value at t-1, t-7, t-365 is often the strongest predictor of t.
 4. Seasonal patterns have multiple periods — retail demand has daily, weekly, and yearly cycles simultaneously. Models must handle multiple seasonal periods.
-5. Uncertainty quantification matters — a point estimate without confidence interval is misleading for planning. Use probabilistic forecasting (DeepAR, quantile regression) for inventory and capacity decisions.
+5. Uncertainty quantification matters — a point estimate without confidence interval is misleading for planning. Use probabilistic forecasting (DeepAR, quantile regression, TSFM quantile heads) for inventory and capacity decisions.
+6. History per series decides the model class, not series count. This is the principle that arbitrates the whole 2026 debate. A pretrained TSFM's edge is entirely on the **cold-start and long-tail** series where there is nothing to fit; it erodes as history accumulates and reverses once you have years of one series plus rich exogenous features, where a tuned GBDT with lag features wins. Count history per series before choosing, not the number of series.
+7. A global model is not the same thing as a pretrained model. DeepAR and LightGBM-with-lags are *global* — one model across all your series, learning shared structure from **your** data, which already solves much of the cold-start problem. A TSFM is *pretrained* — it arrives knowing nothing about your business and everything about time series in general. Confusing the two makes people reach for a foundation model when a global model on their own data would have been better and cheaper.
+8. The baseline is not optional and it is not ARIMA. Seasonal-naive (predict last season's value) is the floor. A model that does not beat seasonal-naive on your backtest is not a result regardless of how sophisticated it is, and published TSFM benchmarks are scaled against exactly this kind of reference.
+9. Backtest integrity is harder with a pretrained model. With a fitted model you control what it saw. With a TSFM you do not — if your series is public, it may be inside the pretraining corpus, and your "out-of-sample" backtest is then partly in-sample. See Pitfall 8.
 
 ---
 
@@ -64,7 +70,22 @@ Key insight: The best forecasting model is not the most complex one — it is th
 | Temporal Fusion Transformer | Attention + LSTM + static covariates | Long | Yes |
 | PatchTST | Patched transformer, channel independence | Long | No |
 
-### 4.4 Feature Engineering for Time Series
+### 4.4 Time-Series Foundation Models
+
+A TSFM is pretrained on a large corpus of time series -- typically a mixture of synthetic series from
+random generative processes and real public series -- and then forecasts an unseen series with **no
+fitting step**. The transfer works because the *shapes* of time series (trend, multiple seasonalities,
+level shifts, bursty counts) recur across wildly different domains, so a model that has seen millions
+of them has priors a per-series ARIMA fitted on 60 points cannot acquire. The current family --
+Chronos-2, TimesFM, Moirai-2, Lag-Llama, TimeGPT -- emits quantiles natively, accepts past-only and
+known-future covariates, and in the 2026 generation attends *across* series as well as across time.
+
+The full treatment -- how they are built, the model-by-model comparison with licences and covariate
+support, the zero-shot API, the decision table against GBDT-with-lags, and the three failure modes
+unique to a model you did not train -- is in
+**[Time-Series Foundation Models](time_series_foundation_models.md)**.
+
+### 4.5 Feature Engineering for Time Series
 
 | Feature Type | Examples | Notes |
 |-------------|---------|-------|
@@ -415,6 +436,47 @@ That bottom row is the honest caveat: when both plots decay, visual identificati
 
 ---
 
+### Choosing the Model Class — Decision Flow
+
+The one diagram worth memorizing before a forecasting design round. Note that every branch reads
+history **per series**, never the number of series, and that seasonal-naive gates the whole thing.
+
+```mermaid
+flowchart LR
+    problem(["Forecasting problem"]) --> base(["Fit seasonal-naive<br/>baseline first"])
+    base --> hist{"History per<br/>series?"}
+    hist -->|"under 2 seasonal cycles"| cold(["Cold start<br/>or long tail"])
+    hist -->|"years of data"| rich{"Rich exogenous<br/>covariates?"}
+    cold --> tsfm(["Zero-shot TSFM<br/>Chronos-2 / TimesFM"])
+    rich -->|"yes"| gbdt(["LightGBM<br/>with lag features"])
+    rich -->|"no"| few{"Many related<br/>series?"}
+    few -->|"yes"| glob(["Global model<br/>DeepAR / GBDT"])
+    few -->|"no"| clas(["ARIMA / ETS<br/>or Prophet"])
+    tsfm --> ft{"Beats the<br/>baseline?"}
+    ft -->|"no"| clas
+    ft -->|"yes, but tail only"| hyb(["Hybrid: TSFM tail<br/>+ GBDT head"])
+    ft -->|"yes"| ship(["Ship it"])
+
+    classDef entry  fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef gate   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef modern fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef legacy fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef out    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a,font-weight:bold
+    classDef warn   fill:#e06c75,stroke:#c0392b,color:#fff
+
+    class problem,base entry
+    class hist,rich,few,ft gate
+    class tsfm,glob modern
+    class clas,gbdt legacy
+    class ship,hyb out
+    class cold warn
+```
+
+The hybrid terminal state is where large catalogues actually land: a TSFM serving the cold-start tail
+and a tuned GBDT serving the head, because neither wins across the whole distribution.
+
+---
+
 ## 6. How It Works — Detailed Mechanics
 
 ### Stationarity Check and ARIMA with pmdarima
@@ -690,6 +752,20 @@ def create_lag_features(
 
 ---
 
+### Zero-Shot Forecasting with Chronos-2
+
+The whole point is that there is no `fit()` call: you hand the model history and a horizon, past-only
+covariates go in the context frame and known-future covariates in a separate future frame, and the
+model returns quantiles rather than a point estimate. Whatever the result, keep a `statsforecast`
+`SeasonalNaive` baseline in the same code path -- a foundation model that cannot beat seasonal-naive
+on your own rolling-origin backtest is not a result.
+
+The runnable pipeline call, the baseline comparison, the volume-weighted backtest harness and the
+zero-shot-vs-fine-tune decision are in
+**[Time-Series Foundation Models](time_series_foundation_models.md)**, Section 6.
+
+---
+
 ## 7. Real-World Examples
 
 **Amazon demand forecasting:** Uses DeepAR across millions of product-region-warehouse combinations simultaneously. Each series shares a global model while having item-specific embeddings. Outputs a probability distribution over future demand, enabling inventory optimization at specific service levels (e.g., stock enough for 95th-percentile demand). Reduces stockouts by 15% versus per-series ARIMA models.
@@ -698,21 +774,36 @@ def create_lag_features(
 
 **Electricity load forecasting (ENTSO-E):** National transmission operators use SARIMA and Gradient Boosting with weather covariates (temperature is the dominant feature — a 1C deviation causes ~1% load change in winter). Hierarchical forecasting reconciles national-level and regional-level forecasts to ensure they add up consistently.
 
+**Amazon Chronos-2 as a shipped model family:** Amazon Science released Chronos-2 in October 2025 with the univariate-to-universal jump described in Section 4.4 — group attention for jointly forecasting coevolving series, plus past-only, known-future and categorical covariates. Amazon reports it outperforming all existing pretrained models on fev-bench and ranking first among pretrained models on GIFT-Eval, with a head-to-head win rate above 90% against its own Chronos-Bolt predecessor. The weights are Apache-2.0 on Hugging Face, which is what made zero-shot forecasting a default option rather than a research demo. ([Amazon Science](https://www.amazon.science/blog/introducing-chronos-2-from-univariate-to-universal-forecasting), [repository](https://github.com/amazon-science/chronos-forecasting))
+
+**Google TimesFM:** a decoder-only forecasting foundation model that Google reports running in production, and the checkpoint most often chosen where operational stability rather than benchmark position is the priority. Its existence matters strategically more than technically: two of the largest operators of forecasting workloads independently concluded that pretrain-once-forecast-anything beat per-series fitting at their scale.
+
 **Meta (Facebook) Prophet in production:** Originally developed for business metric forecasting at scale (KPIs, ad revenue, engagement). Key design goal: non-statisticians can tune it via interpretable hyperparameters (changepoint_prior_scale, seasonality_mode). Handles multiple seasonalities and holiday effects out of the box. Scales to 1M rows in under 30 seconds on a single core.
 
 ---
 
 ## 8. Tradeoffs
 
-| Dimension | ARIMA | Prophet | LSTM | LightGBM + lags | DeepAR |
-|-----------|-------|---------|------|-----------------|--------|
-| Training time | Seconds | <1 min | Hours | Minutes | Hours |
-| Data required | 50+ points | 100+ points | 1K+ points | 500+ points | 1K+ per series |
-| Multivariate | No (VAR) | Yes (regressors) | Yes | Yes | Yes |
-| Probabilistic | Via ARCH | No (CI via Bootstrap) | No (quantile loss) | No | Yes (native) |
-| Seasonality handling | SARIMA | Automatic | Manual encoding | Lag features | Learned |
-| Interpretability | High | High | None | Medium | None |
-| OOV series | No | No | No | No | Yes (global model) |
+| Dimension | ARIMA | Prophet | LSTM | LightGBM + lags | DeepAR | TSFM (zero-shot) |
+|-----------|-------|---------|------|-----------------|--------|------------------|
+| Training time | Seconds | <1 min | Hours | Minutes | Hours | **None** |
+| Data required | 50+ points | 100+ points | 1K+ points | 500+ points | 1K+ per series | **Anything; works at 0 history for a new series** |
+| Multivariate | No (VAR) | Yes (regressors) | Yes | Yes | Yes | Yes (group attention, Chronos-2 / Moirai-2) |
+| Probabilistic | Via ARCH | No (CI via Bootstrap) | No (quantile loss) | No | Yes (native) | Yes (native quantiles) |
+| Seasonality handling | SARIMA | Automatic | Manual encoding | Lag features | Learned | Pretrained prior |
+| Interpretability | High | High | None | Medium | None | **None** |
+| OOV series | No | No | No | No | Yes (global model) | Yes (the core strength) |
+| Inference cost | Negligible | Negligible | Low | Negligible | Low | **Highest — a 120M-param forward pass per batch** |
+
+### TSFM vs GBDT-with-lags vs Classical
+
+The rightmost column of the table above is the summary; the full nine-row decision table -- cold start,
+sparse series, covariates, probabilistic output, inference cost, interpretability, operational burden
+and backtest trustworthiness -- is in
+**[Time-Series Foundation Models](time_series_foundation_models.md)**, Section 8. Two rows decide most
+real cases and both are skipped by candidates: **interpretability** is often the binding constraint
+rather than accuracy, and **operational burden** is where the TSFM's economics actually live -- the
+saving is usually not accuracy, it is deleting a per-series retraining pipeline.
 
 ### Evaluation Metrics Comparison
 
@@ -830,6 +921,17 @@ SMAPE was designed to fix this and overcorrects: at the extremes it charges `66.
 - When clear causal interpretation is required
 - When series undergo structural breaks (LSTM cannot extrapolate beyond training distribution)
 
+### When to Use a Zero-Shot Foundation Model
+
+Reach for one on **cold start** (a new SKU, sensor or tenant with no history, where ARIMA cannot fit
+and a GBDT's lag features are all zeros), on a **long tail of sparse series**, and when the
+operational saving of deleting a per-series pipeline outweighs the accuracy difference. Do **not**
+reach for one when you have millions of rows of one series with rich exogenous features (a tuned
+LightGBM wins, cheaply), when the forecast must be explainable to a planner or regulator, or when it
+does not beat seasonal-naive on your own backtest. The full lists, including the pretraining-leakage
+constraint on your evaluation data, are in
+**[Time-Series Foundation Models](time_series_foundation_models.md)**, Section 9.
+
 ---
 
 ## 10. Common Pitfalls
@@ -876,12 +978,26 @@ ARIMA assumes a fixed data-generating process. During COVID-19, retail series un
 
 Training an LSTM with seq_len=30, horizon=1 and then iterating predictions to forecast 30 steps ahead (multi-step with recursive strategy) causes error accumulation. Each prediction is fed back as input; errors compound multiplicatively. Fix: train with the exact forecast horizon you need at inference time (direct multi-output strategy), accepting that you need separate models for different horizons.
 
+### Pitfalls specific to foundation models
+
+Three failure modes have no analogue in a model you fitted yourself: declaring a win on a **scale-free
+metric** over a skewed catalogue (the tail carries the improvement, the head carries the revenue),
+**silent context-window truncation** dropping a seasonality the model was supposed to capture, and
+**backtesting on data inside the checkpoint's pretraining corpus**, which measures memorization. Each
+is written up with its incident and fix in
+**[Time-Series Foundation Models](time_series_foundation_models.md)**, Section 10.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Use Case | Notes |
 |------|---------|-------|
+| chronos-forecasting (Amazon) | Zero-shot and fine-tuned TSFM inference | `Chronos2Pipeline.from_pretrained("amazon/chronos-2")`; Apache-2.0; 120M params runs on CPU |
+| transformers (Hugging Face) | Loading TSFM checkpoints generally | The distribution channel for TimesFM, Moirai and the Chronos family |
+| statsforecast (Nixtla) | SeasonalNaive, AutoETS, AutoARIMA baselines | The fast baseline you are obliged to beat; keep it in the same code path as the TSFM |
+| GIFT-Eval | Benchmarking pretrained forecasters | Designed post-leakage; the M-competition sets are inside most pretraining corpora and no longer discriminate |
+| fev-bench | Benchmarking pretrained forecasters | The other current leaderboard; Chronos-2 reports state-of-the-art results here |
 | pmdarima | auto_arima, SARIMA fitting | Wraps statsmodels with sklearn API |
 | statsmodels | ARIMA, VAR, STL, ADF test | Full statistical testing suite |
 | Prophet (Meta) | Business time series | pip install prophet; Stan backend |
@@ -1001,6 +1117,11 @@ An expanding window keeps all history and grows the training set each fold, whil
 8. When evaluating across multiple series with different scales, use scale-independent metrics (SMAPE, MASE) rather than MAE/RMSE. A low RMSE on a high-volume product can mask catastrophic errors on low-volume products.
 9. Log-transform right-skewed series (e.g., sales counts, web traffic) before fitting ARIMA. Log transform stabilizes variance and often induces stationarity without differencing.
 10. For production systems, implement automatic retraining triggers based on rolling metric monitoring. Batch-retrain monthly at minimum; event-driven retraining (on detected drift) is preferable.
+11. Always run the classical baseline alongside a foundation model, in the same code path. Seasonal-naive is the floor: a TSFM that cannot beat it on your own rolling-origin backtest is not a result, no matter its leaderboard position. Keeping `statsforecast` in the same evaluation harness makes the comparison one function call instead of a project.
+12. Try zero-shot before fine-tuning, and fine-tune only when zero-shot is close but systematically biased. A fine-tuned checkpoint is a model you now own, version, monitor and retrain — which is exactly the operational burden the zero-shot path existed to avoid.
+13. Segment every model comparison by volume. Report head and tail separately, and score the decision on a volume- or cost-weighted error. A single scale-free aggregate over a skewed catalogue reliably shows wins that do not exist in revenue (Pitfall 6).
+14. Check the context window against your seasonal period before choosing a data frequency. Aggregating daily to weekly is usually the right fix for a yearly cycle that will not fit, and weekly is often the decision granularity anyway.
+15. Backtest a pretrained model only on your own private series. A published benchmark tells you a model class is worth trying; it does not estimate the accuracy you will get, because your evaluation data may be inside its pretraining corpus (Pitfall 8).
 
 ---
 

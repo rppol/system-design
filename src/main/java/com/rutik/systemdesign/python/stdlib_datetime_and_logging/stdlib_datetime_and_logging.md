@@ -186,7 +186,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     naive(["datetime.now<br/>naive, no tzinfo"]) -.->|"DANGEROUS"| danger("unsafe in production")
-    awareutc(["datetime.now tz=utc<br/>aware UTC, safe baseline"]) --> local("astimezone ZoneInfo NY<br/>aware local, display only")
+    awareutc(["datetime.now UTC<br/>aware UTC, safe baseline"]) --> local("astimezone ZoneInfo NY<br/>aware local, display only")
     local --> iso(["isoformat<br/>2024-03-10T14:30:00-04:00"])
     iso --> parsed("fromisoformat<br/>round-trip parse, 3.7+")
 
@@ -230,7 +230,7 @@ interprets metacharacters in the command string — the source of command inject
 ### 6.1 datetime and zoneinfo
 
 ```python
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, UTC, timedelta
 from zoneinfo import ZoneInfo  # [3.9] replaces pytz
 
 # Naive — do not use in production
@@ -238,7 +238,7 @@ naive = datetime.now()
 print(naive.tzinfo)  # None
 
 # UTC-aware — always use this as the storage format
-utc_now: datetime = datetime.now(tz=timezone.utc)
+utc_now: datetime = datetime.now(UTC)   # UTC [3.11] is the modern spelling of timezone.utc
 print(utc_now)  # 2024-06-04 09:15:42.123456+00:00
 
 # Named timezone — use for display or user-facing output only
@@ -251,7 +251,7 @@ parsed: datetime = datetime.fromisoformat("2024-01-15T10:30:00+00:00")
 
 # Unix epoch
 epoch: float = utc_now.timestamp()   # seconds since 1970-01-01T00:00:00Z
-back: datetime = datetime.fromtimestamp(epoch, tz=timezone.utc)
+back: datetime = datetime.fromtimestamp(epoch, UTC)
 
 # DST gap example: 2024-03-10 02:30 does not exist in US/Eastern
 # The clock jumps from 02:00 to 03:00 on spring-forward Sunday
@@ -399,7 +399,7 @@ logger.info("Service started", extra={"pid": __import__("os").getpid()})
 import json
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 
@@ -408,7 +408,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -576,6 +576,62 @@ shutil.copy2("/tmp/report.pdf", "/var/reports/report.pdf")
 shutil.rmtree("/tmp/build_artifacts", ignore_errors=True)
 ```
 
+### 6.7 `QueueHandler` / `QueueListener` — Taking Slow I/O Off the Request Path
+
+The §14 case study below computes 5.76M log records/day (66.67 records/sec at the 4,000
+requests/minute peak) and attaches `RotatingFileHandler` and `StreamHandler` directly to the
+`app` logger — every one of those `logger.info()` calls does its file write or network send on
+the calling thread, adding that write's latency to the request that triggered it. This is
+exactly the scenario `QueueHandler` and `QueueListener` [stdlib, 3.2] exist for: split "record
+the event" from "get it to a sink" into two threads.
+
+```python
+import logging
+import logging.handlers
+import queue
+
+# Bounded queue: forces a deliberate choice about backpressure (see below)
+log_queue: queue.Queue = queue.Queue(maxsize=10_000)
+
+# The request-facing logger gets ONLY the queue handler. emit() does one
+# queue.put() — no filesystem, no socket, no fsync — and returns immediately.
+queue_handler = logging.handlers.QueueHandler(log_queue)
+app_logger = logging.getLogger("app")
+app_logger.addHandler(queue_handler)
+app_logger.setLevel(logging.INFO)
+
+# The slow handlers move to the listener side, off the request thread entirely.
+file_handler = logging.handlers.RotatingFileHandler(
+    "/var/log/app/app.log", maxBytes=10_485_760, backupCount=5,
+)
+console_handler = logging.StreamHandler()
+
+listener = logging.handlers.QueueListener(
+    log_queue, file_handler, console_handler, respect_handler_level=True,
+)
+listener.start()   # spawns the background thread that drains the queue
+
+# ... service runs; every app_logger.info() call is now a bounded enqueue ...
+
+# MUST stop the listener for a clean shutdown — see Pitfall/Q&A below for
+# what is lost if this is skipped.
+listener.stop()
+
+# [3.14] QueueListener is also a context manager, which calls stop() for you
+with logging.handlers.QueueListener(log_queue, file_handler) as listener:
+    ...  # listener.stop() runs automatically on exit, even on exception
+```
+
+**Backpressure is a decision, not a default.** `QueueHandler.emit()` calls `self.enqueue(record)`,
+which by default calls the queue's blocking `put()`. Once a bounded queue like `maxsize=10_000`
+above is full, that `put()` blocks the calling (request) thread — silently reintroducing the
+exact latency the queue was added to remove. Two ways to make backpressure explicit instead:
+override `enqueue()` to `put_nowait()` inside a `try/except queue.Full` and drop (or count) the
+record when the queue is saturated, or use an unbounded `queue.Queue()` and accept that a
+listener which permanently falls behind grows memory without limit instead of dropping records.
+Which one is correct depends on whether the service can tolerate losing a log line more than it
+can tolerate a request stalling on a full queue.
+
 ---
 
 ## 7. Real-World Examples
@@ -640,7 +696,7 @@ if __name__ == "__main__":
 
 | Decision | Option A | Option B | Guidance |
 |----------|----------|----------|----------|
-| Timezone storage | `datetime.now(tz=timezone.utc)` — no extra dep | Unix epoch `int` — unambiguous | Use UTC-aware datetime; epoch loses microseconds and readability |
+| Timezone storage | `datetime.now(UTC)` — no extra dep | Unix epoch `int` — unambiguous | Use UTC-aware datetime; epoch loses microseconds and readability |
 | Named zones | `zoneinfo.ZoneInfo` [3.9] — stdlib, DST-correct | `pytz` — pre-3.9 compatible | Prefer `zoneinfo`; add `tzdata` as dependency for Windows/Alpine |
 | Logging config | `basicConfig` — one line | `dictConfig` — full control | `dictConfig` for production; `basicConfig` only for scripts |
 | Log format | Plain text — human-readable | JSON — machine-parseable | JSON in production (ELK/Datadog); ~5 µs/record overhead is acceptable |
@@ -661,6 +717,9 @@ if __name__ == "__main__":
   response, or cross-service message.
 - **Do NOT** use `pytz.localize()` in new code; use `replace(tzinfo=ZoneInfo(...))` or
   `astimezone()` instead.
+- **Do NOT** use `datetime.utcnow()` or `datetime.utcfromtimestamp()`; use
+  `datetime.now(UTC)` [3.11] or `datetime.fromtimestamp(ts, UTC)` — both return an aware
+  datetime instead of a naive one that only looks like local time.
 
 ### logging
 
@@ -695,13 +754,13 @@ if __name__ == "__main__":
 
 ```python
 # BROKEN
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 def record_event() -> datetime:
     return datetime.now()   # naive — no tzinfo
 
 event_time = record_event()
-now_utc = datetime.now(tz=timezone.utc)
+now_utc = datetime.now(UTC)
 
 # Raises: TypeError: can't compare offset-naive and offset-aware datetimes
 if event_time < now_utc:
@@ -710,13 +769,13 @@ if event_time < now_utc:
 
 ```python
 # FIX — always produce aware datetimes
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 def record_event() -> datetime:
-    return datetime.now(tz=timezone.utc)   # aware UTC
+    return datetime.now(UTC)   # aware UTC [3.11]
 
 event_time = record_event()
-now_utc = datetime.now(tz=timezone.utc)
+now_utc = datetime.now(UTC)
 
 if event_time < now_utc:   # works correctly
     print("event is in the past")
@@ -851,6 +910,48 @@ use `proc.communicate()` which reads stdout/stderr concurrently.
 
 ---
 
+### Pitfall 6 — BROKEN: `datetime.utcnow()` returns a naive datetime holding UTC wall-clock
+
+```python
+# BROKEN — utcnow() (deprecated since 3.12) returns a naive datetime whose
+# VALUES are UTC but whose tzinfo is None, so it looks exactly like a naive
+# local-time datetime to any later code that inspects it
+from datetime import datetime
+
+def log_event_time() -> datetime:
+    return datetime.utcnow()   # e.g. 2024-06-04 09:15:42 — the numbers are UTC, tzinfo is None
+
+event_time = log_event_time()
+# astimezone() with no argument assumes its input is LOCAL time and converts
+# to the system's local timezone — but event_time is secretly already UTC,
+# so this silently applies the wrong offset a second time
+displayed = event_time.astimezone()
+```
+
+```python
+# FIX — datetime.now(UTC) [3.11] returns an AWARE datetime, so downstream
+# code that reads tzinfo (astimezone, comparisons, serialization) treats it
+# as UTC correctly instead of guessing
+from datetime import datetime, UTC
+
+def log_event_time() -> datetime:
+    return datetime.now(UTC)   # aware; tzinfo is UTC
+
+event_time = log_event_time()
+displayed = event_time.astimezone()   # correct: aware UTC -> aware local
+```
+
+`datetime.utcnow()` and `datetime.utcfromtimestamp()` do not raise anything and do not look
+wrong in a debugger — the value prints as a perfectly normal-looking datetime. The bug only
+surfaces later, whenever something needs to know *which* timezone those numbers are in:
+`.astimezone()` guesses "local" and shifts an already-UTC value by the local offset, and
+`.timestamp()` does the same conversion for the reverse direction. Replace `utcnow()` with
+`datetime.now(UTC)` and `utcfromtimestamp(ts)` with `datetime.fromtimestamp(ts, UTC)` — both
+return aware datetimes that carry their own timezone instead of relying on the caller to
+remember it.
+
+---
+
 ## 11. Technologies & Tools
 
 | Tool / Library | Purpose | Notes |
@@ -866,6 +967,8 @@ use `proc.communicate()` which reads stdout/stderr concurrently.
 | `click` (third-party) | Decorator-based CLI, richer UX | Better for complex CLIs with many subcommands |
 | `subprocess` (stdlib) | External process management | Core; use `shell=False` always |
 | `asyncio.create_subprocess_exec` (stdlib) | Async external processes | Native async; preferred in FastAPI routes |
+| `logging.handlers.QueueHandler` (stdlib, 3.2) | Non-blocking enqueue of log records from the request thread | Pairs with `QueueListener`; the only handler that belongs on a hot path |
+| `logging.handlers.QueueListener` (stdlib, 3.2) | Runs the slow handlers (file, network) on a dedicated background thread | Must call `.stop()` for clean shutdown; context-manager support added in [3.14] |
 
 ---
 
@@ -950,6 +1053,22 @@ Choose `structlog` when you need a processor-chain API that composes context bin
 **Short:** Formatting a log record as JSON instead of plain text costs roughly 5 microseconds extra per record, negligible next to its parseability.
 
 Formatting a log record as JSON instead of plain text costs roughly 5 microseconds of extra CPU time per record. That overhead comes from constructing a dict of fields and calling `json.dumps()` for every record, rather than a single `%`-style string interpolation. At typical application log volumes this adds well under a millisecond to total request latency, negligible compared to the value of having every log line machine-parseable by ELK, Datadog, or another log aggregator. Reserve plain-text formatting for local development, where terminal readability outweighs the parsing benefit.
+
+**Q17: Why is `datetime.utcnow()` a trap, and what replaces it?**
+**Short:** `utcnow()` returns a naive datetime holding UTC values, so later code silently treats it as local time.
+`datetime.utcnow()` returns a `datetime` whose numeric fields are correct UTC values but whose `tzinfo` is `None` — nothing distinguishes it, by inspection, from an ordinary naive local-time datetime. The bug is invisible at the call site and only surfaces later: `.astimezone()` with no argument assumes its input is local time and shifts an already-UTC value by the local offset a second time, and comparisons against an aware datetime raise `TypeError` instead of just working. It has been deprecated since 3.12 for exactly this reason. Replace `datetime.utcnow()` with `datetime.now(UTC)` [3.11] and `datetime.utcfromtimestamp(ts)` with `datetime.fromtimestamp(ts, UTC)` — both return an aware datetime that carries its own timezone instead of relying on the caller to remember it.
+
+**Q18: What do `QueueHandler` and `QueueListener` buy on a hot request path?**
+**Short:** `QueueHandler` turns a logging call into a bounded in-memory enqueue, moving slow I/O to a background thread.
+Without them, every `logger.info()` call runs its attached handlers — a `RotatingFileHandler` write or a `SocketHandler` send — synchronously on the calling thread, so that I/O latency is added directly to the request that logged it. `QueueHandler.emit()` instead does one `queue.put()`, a bounded in-memory operation, and returns; a `QueueListener` running on its own background thread pulls records off the queue and runs the real (slow) handlers there. Attach `QueueHandler` to the request-facing logger and move `RotatingFileHandler`/`SocketHandler` onto the `QueueListener`'s handler list — the calling thread never touches the filesystem or network directly.
+
+**Q19: What happens to buffered log records if a `QueueListener` is not stopped before the process exits?**
+**Short:** Records still sitting in the queue when the process exits are lost — nothing drains them without an explicit `.stop()`.
+`QueueListener.start()` spawns a background thread that loops, pulling records off the queue and dispatching them to the real handlers, until `.stop()` signals it to exit. If the process terminates — a crash, an unhandled `SystemExit`, a container being killed — before `.stop()` runs, any record still sitting in the queue was never drained and is simply lost, along with whatever it would have told you about the shutdown itself. Call `listener.stop()` in a `finally` block or an application shutdown hook, or use the [3.14] context-manager form (`with QueueListener(...) as listener:`) so `.stop()` runs even when the `with` block exits via an exception.
+
+**Q20: Why does comparing a naive datetime to an aware one sometimes raise and sometimes silently return the wrong answer?**
+**Short:** Ordering operators raise TypeError on naive-vs-aware, but == silently returns False even for the same instant.
+`<`, `>`, `<=`, and `>=` between a naive and an aware datetime raise `TypeError: can't compare offset-naive and offset-aware datetimes` — an immediate, loud failure. `==` does not raise: naive and aware datetimes are simply never equal to each other under `__eq__`, so `naive_dt == aware_dt` returns `False` even when they represent the exact same instant, with no exception to catch and no traceback pointing at the mismatch. A deduplication check, a cache-key comparison, or an `in` test against a set of datetimes can pass code review and CI and still be silently wrong in production. The fix is the same as everywhere else in this module: never let a naive datetime enter a comparison — construct every datetime with `datetime.now(UTC)` or an explicit `tzinfo` from creation.
 
 ---
 
@@ -1082,7 +1201,7 @@ is constructed with timezone awareness in application code.
 
 ```python
 # FIX — always UTC-aware; PostgreSQL TIMESTAMPTZ column
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from sqlalchemy import DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -1101,7 +1220,7 @@ class AuditEvent(Base):
     # The default lambda always produces an aware UTC datetime.
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(tz=timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -1121,7 +1240,7 @@ class AuditEvent(Base):
 # app/logging_config.py
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 
@@ -1130,7 +1249,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),

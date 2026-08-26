@@ -367,6 +367,68 @@ Each service now:
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What is a God Object and why is the name apt?**
+**Short:** A God Object is a single class that accumulates so many responsibilities it becomes the omniscient hub everything depends on.
+It is a class that "knows too much" or "does too much" — it becomes the central hub of an application, with most other classes depending on it or delegating work to it. The name comes from the idea of an omniscient, omnipotent entity, since the class ends up touching nearly every concern in the system. `UserManager` in the example holds seven collaborators (`Database`, `EmailService`, `AuditLogger`, `PasswordEncoder`, `SessionStore`, `PaymentGateway`, `NotificationService`) and methods spanning auth, registration, profile, payments, and admin. It is also known as Blob, All-Knowing Object, or Master Class.
+
+**Q: How do you tell a God Object from a legitimately large orchestrator class?**
+**Short:** A God Object mixes unrelated responsibilities in one class; a large orchestrator delegates each responsibility to a focused collaborator.
+A legitimate orchestrator can be long because it coordinates many steps of a single workflow, but each step is delegated to a focused collaborator it depends on — the orchestrator itself has one reason to change (the workflow's shape). A God Object is long because it directly implements many unrelated concerns itself: `UserManager` doesn't delegate to an `AuthenticationService`, it *is* the authentication logic, the registration logic, and the payment logic all at once. The test is Single Responsibility: does the class have one reason to change, or does a payment bug force you to touch the same file as an authentication bug? If touching one concern risks breaking an unrelated one, it's a God Object regardless of how "central" its role sounds.
+
+**Q: What are the concrete code smells that flag a God Object?**
+**Short:** Hundreds of lines, 10-15+ methods, vague names like Manager/Handler, and near-universal dependence on the class.
+Watch for: hundreds or thousands of lines of code; more than 10-15 methods; a vague class name like `Manager`, `Handler`, `Controller`, `Processor`, `Utils`, or `Helper`; nearly every other class in the codebase depending on this one; fields that are only used by a subset of the class's own methods; and unit testing the class requiring an enormous setup. In the example, `UserManager` needed all seven collaborators stood up before any single method could be exercised, even though most methods only touch two or three of them.
+
+**Q: Why does a God Object make unit testing so painful?**
+**Short:** Testing any one method forces you to construct every collaborator, even ones that method never touches.
+Setting up a unit test for `login()` in the God Object example requires standing up all seven collaborators — `Database`, `EmailService`, `AuditLogger`, `PasswordEncoder`, `SessionStore`, `PaymentGateway`, `NotificationService` — even though `login()` itself only touches four of them. After decomposition, `AuthenticationService` needs only `UserRepository`, `PasswordEncoder`, `SessionStore`, and `AuditLogger`, and can be tested in complete isolation from payments or registration. The mismatch between "what a method needs" and "what the class forces you to provide" is the direct cost of poor cohesion.
+
+**Q: Walk through how you would decompose a God Object using SRP.**
+**Short:** Identify cohesive method-and-field groups by responsibility, then extract each into its own focused class.
+Apply the Single Responsibility Principle: each class should have one reason to change. Look at the God Object's methods and group them by the collaborators and fields they actually touch — `login()`/`logout()` cluster around `SessionStore` and `AuditLogger`, so they become `AuthenticationService`; `register()` clusters around `EmailService`, so it becomes `UserRegistrationService`; `subscribe()`/`cancelSubscription()` cluster around `PaymentGateway`, so they become `SubscriptionService`. Each new service takes only the collaborators its own methods need, and the classes are then wired together at a composition root.
+
+**Q: What is the practical cost of a God Object during code review and team collaboration?**
+**Short:** Multiple developers editing the same large file create constant merge conflicts.
+When authentication, registration, and payment logic all live in one file, any two developers working on unrelated features are statistically likely to touch the same file, producing frequent merge conflicts. After decomposition into `AuthenticationService`, `UserRegistrationService`, and `SubscriptionService`, developers working on different concerns touch different files, and conflicts become rare. This is a purely mechanical consequence of coupling unrelated logic into one file — it has nothing to do with code quality within any single method.
+
+**Q: How do vague class names like Manager or Handler contribute to God Objects?**
+**Short:** A name you can't pin down usually means the class has no single, nameable responsibility.
+If you can't name a class without reaching for "Manager" or "Handler," that's a signal the class doesn't have one clear job — a precise name like `AuthenticationService` or `SubscriptionService` is only possible once the responsibility is actually singular. Vague names also invite vague growth: because "Manager" doesn't rule anything out, every new feature has an excuse to land there ("it's user-related, so it goes in `UserManager`"). Precise naming is therefore both a diagnostic and a prevention strategy for God Objects.
+
+**Q: Why do God Objects usually emerge gradually rather than being designed that way?**
+**Short:** They start small and grow through repeated "just add it here" shortcuts under deadline pressure.
+Five causes compound over time: incremental growth where each new feature seems easier to bolt onto the existing class than to create a new one; lack of upfront design establishing responsibility boundaries; fear of creating new files; a single developer owning everything and keeping it all in one place for convenience; and deadline pressure where "we'll refactor later" never actually happens. No one sits down and designs a 2000-line `Manager` class on day one — it accumulates one shortcut at a time until it is unrecognizable.
+
+**Q: In the fixed design, why can SubscriptionService be tested without touching AuthenticationService at all?**
+**Short:** After decomposition each service holds only the collaborators its own methods need, so their dependency graphs don't overlap.
+`SubscriptionService` depends only on `UserRepository`, `PaymentGateway`, and `NotificationService` — none of which overlap with `AuthenticationService`'s `SessionStore` and `PasswordEncoder` dependencies except for the shared `UserRepository`. Because the class no longer holds `PasswordEncoder`, `SessionStore`, or `EmailService` as fields, a test for `subscribe()` never has to construct or mock them. This is the direct, testable payoff of SRP-based decomposition: each class's construction cost equals only what its own logic actually requires.
+
+**Q: What HLD-level anti-pattern mirrors the God Object at the system-design scale?**
+**Short:** The monolith and the "God service" are the same failure pattern one scale larger.
+A monolith is the system-level God Object: one codebase and one deployment unit handling every concern, growing until changes in one area routinely break unrelated areas. In a nominally microservice system, a "God service" emerges when every other service depends on one central service for most operations, making it a single point of failure and a deployment bottleneck. A "fat API gateway" that absorbs business logic and orchestration beyond routing is the same pattern applied to a gateway. The diagnostic signal at any scale is the same: if one component sits in the critical path of every request, decompose it along single-responsibility boundaries.
+
+**Q: Give two real-world examples of God Objects outside of a hand-written service class.**
+**Short:** Early Android Activity classes and static Utils/Helper classes are classic real-world God Objects.
+Early Android `Activity` classes commonly manage UI rendering, network calls, database access, and business rules all in one class, which was a widespread anti-pattern before architectural guidance like MVVM became standard. `Utils` or `Helper` static utility classes are another common instance — they start with a couple of unrelated helper methods and grow to contain hundreds of methods with no cohesive theme, because "utility" is vague enough to justify adding almost anything. Legacy Spring MVC controllers that embed business logic, database queries, and email sending directly in a controller method are a third common case.
+
+**Q: What's a practical, enforceable prevention strategy against God Objects besides "write better code"?**
+**Short:** Set a soft line-count limit per class and flag any class over it in code review.
+Setting a soft limit — for example, 200-300 lines — that triggers a mandatory review when a class exceeds it turns "this class is getting too big" from a vague feeling into an enforced checkpoint. Combined with domain-driven decomposition (aligning classes with domain concepts like `AuthenticationService` rather than technical layers) and packaging by feature rather than by layer, this keeps classes naturally cohesive as the codebase grows. Code review should specifically flag new methods being added to an already-large class, since that is the exact moment a God Object typically forms.
+
+**Q: In the refactored design, is the total amount of code less, or is it just redistributed?**
+**Short:** Roughly the same collaborators and logic, redistributed into focused classes with smaller individual dependency graphs.
+The fix does not delete functionality — `AuthenticationService`, `UserRegistrationService`, and `SubscriptionService` collectively still depend on all the same collaborators (`UserRepository`, `PasswordEncoder`, `SessionStore`, `AuditLogger`, `EmailService`, `PaymentGateway`, `NotificationService`) that `UserManager` did. What changes is that no single class holds all seven anymore; each service owns only the slice its own responsibility needs. This is the essential nature of the God Object fix: it is a redistribution of existing logic along responsibility boundaries, not a reduction in what the system does.
+
+**Q: Why is "it holds 7 collaborators as fields" a stronger smell than "it has one collaborator field used everywhere"?**
+**Short:** A high collaborator count with disjoint usage per method signals unrelated responsibilities crammed together.
+A class can legitimately hold several collaborators if every method uses most of them for one cohesive purpose — that's a normal, well-designed orchestrator. The God Object smell is specifically when the collaborator set is large *and* each method only touches a small, non-overlapping subset of it, which is exactly what `UserManager` shows: `login()` uses four of the seven, `subscribe()` uses three different ones. That pattern of disjoint subsets is what class diagrams like the one in this file make visible — a hub with many spokes, no spoke connected to the whole.
+
+**Q: How would you defend, in an interview, the claim that decomposing a God Object improves reusability?**
+**Short:** A God Object's logic is too intertwined to extract a subset; focused classes can be reused independently.
+Because the God Object's methods and fields are entangled — payment logic sits next to authentication logic in the same file, sharing no clean boundary — you cannot pull out just the payment behavior for reuse in another context without dragging along unrelated code. Once decomposed, `SubscriptionService` can be reused, mocked, or even extracted into a separate microservice on its own, because its dependency graph is self-contained. This is a direct consequence of SRP: a class with one reason to change is also a class you can lift out and reuse without collateral entanglement.
+
 ## Interview Relevance
 
 **Common interview questions:**

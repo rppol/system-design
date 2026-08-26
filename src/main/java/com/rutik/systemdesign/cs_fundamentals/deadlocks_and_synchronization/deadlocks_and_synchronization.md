@@ -10,7 +10,7 @@
 
 **Deadlock** is the state where a set of threads are each waiting for a resource held by another thread in the set — a circular wait with no exit. The system makes no progress. Deadlock is distinct from starvation (a thread is indefinitely delayed but could theoretically proceed) and livelock (threads are running but making no progress because they keep reacting to each other).
 
-This module covers: mutex/semaphore/monitor as OS-level concepts (for applied Java depth, see [`java/concurrency`](../../java/concurrency/concurrency.md)); the four Coffman conditions for deadlock; deadlock prevention, avoidance (Banker's algorithm), detection, and recovery; and classic synchronization problems (dining philosophers, readers-writers, producer-consumer).
+This module covers: mutex/semaphore/monitor as OS-level concepts; the four Coffman conditions for deadlock; deadlock prevention, avoidance (Banker's algorithm), and detection/recovery; classic synchronization problems (dining philosophers, readers-writers, producer-consumer); and the classic synchronization problems (dining philosophers, readers-writers, producer-consumer). It stops at the boundary where the topic becomes *theory about ordering*: happens-before, DRF-SC, the SC/TSO/weak hardware hierarchy, acquire/release/seq_cst, linearizability vs. sequential consistency vs. serializability, and the wait-free/lock-free/obstruction-free progress hierarchy all live in [memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md), which this module leans on throughout. For the applied Java spelling of that model (`volatile`, `ReentrantLock`, AQS, virtual threads), see [`java/concurrency`](../../java/concurrency/concurrency.md).
 
 ---
 
@@ -85,6 +85,21 @@ This is why the list has exactly four entries and why the prevention table below
 
 **Condition variable**: Always used with a mutex. `wait(cond, mutex)`: atomically releases mutex and blocks. `signal(cond)`: wakes one blocked thread. `broadcast(cond)`: wakes all blocked threads. A woken thread re-acquires the mutex before proceeding. Always re-check the condition after waking (spurious wakeups; POSIX allows them).
 
+### Correctness Conditions and Progress Guarantees
+
+"Correct" is not one thing for concurrent code. **Linearizability**, **sequential
+consistency** and **serializability** are three different promises about time and about how
+many objects are involved, and interviews use them interchangeably when they should not.
+Orthogonal to all three is **progress** — the wait-free / lock-free / obstruction-free /
+blocking hierarchy — which asks not whether an execution is correct but whether anyone is
+guaranteed to finish.
+
+Both are defined, tabulated and worked through in
+[memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md),
+which owns the theory layer this module's primitives sit on. The one fact worth carrying
+here: a mutex gives you **blocking** progress — a lock holder that stalls or dies stops
+everyone, which is precisely why deadlock is a mutex problem and not a CAS problem.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -106,6 +121,20 @@ This is why the list has exactly four entries and why the prevention table below
 | Hold and wait | Request all resources at once before starting (conservative). Or: release all before requesting new ones. |
 | No preemption | Allow OS to forcibly take a resource (save state and retry). Used in DBMS (transaction rollback). |
 | Circular wait | **Impose a total ordering on locks; always acquire in order.** Practical and widely used. |
+
+### Memory Models and Ordering
+
+Every primitive above rests on a promise nobody wrote down in the code: which of the
+compiler's and the CPU's reorderings are allowed to become visible to another thread. That
+promise is the **memory model**, and an unlock/lock pair on a mutex is only useful because
+the model says it creates a happens-before edge.
+
+Happens-before, DRF-SC, the SC/TSO/weak hardware hierarchy, the relaxed/acquire-release/
+seq_cst language strengths, and why the Java Memory Model and the C++11 model are two
+spellings of one idea are all in
+[memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md).
+The applied Java spelling — `volatile`, `AtomicInteger`, AQS — is in
+[`java/concurrency`](../../java/concurrency/concurrency.md).
 
 ---
 
@@ -244,6 +273,14 @@ flowchart LR
     class Rollback,Wait lossN
 ```
 The Banker's algorithm never grants a request outright: it tentatively applies the request, then re-runs the same safety check traced numerically above; only a request that still leaves a safe sequence (like `<P1, P3, P4, P2, P0>`) is committed, otherwise the tentative grant is rolled back and the process blocks.
+
+### Memory Ordering Diagrams
+
+The store-buffer (SB) litmus test — the smallest program that separates sequential
+consistency from x86's TSO, with all six SC interleavings enumerated against the TSO trace
+that produces the "impossible" `r1 == 0 && r2 == 0` — is in
+[memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md),
+along with the reordering-permission grid across SC, TSO and weak models.
 
 ---
 
@@ -644,6 +681,16 @@ def fixed_cache_get(key):
         return val
 ```
 
+### Pitfall 6 — The ABA problem in a lock-free stack with node reuse
+
+A CAS-based lock-free stack looks correct because `compare_and_swap` really is atomic — the
+bug is that CAS only compares *identity*, and identity can repeat when an allocator hands
+back a freed address. The worked, measured broken-and-fixed pair (a forced interleaving that
+makes a stale CAS succeed and silently drop a pushed value, plus the version-tag fix that
+rejects it) is in
+[memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md)
+§10, which owns lock-free correctness. Q13 below has the short form.
+
 ---
 
 ## 11. Technologies & Tools
@@ -716,7 +763,7 @@ Deadlock: threads are permanently blocked, making no progress. Livelock: threads
 
 **Q13: How does the ABA problem affect lock-free CAS-based algorithms?**
 **Short:** A value changing A to B and back to A between a CAS read and write can make CAS wrongly succeed; version-tagged CAS or hazard pointers fix it.
-Compare-And-Swap (CAS) checks if a value equals "expected" before swapping. ABA problem: a value changes A→B→A between a CAS read and write. The CAS sees A (same as expected) and succeeds, but the underlying state has changed and been changed back — the algorithm may be incorrect. Example: a lock-free stack pop: read head→A, CPU is preempted; another thread pops A, pushes B, pops B, pushes A back; current thread's CAS(A, new) succeeds incorrectly. Solutions: ABA counter (tag with version number; CAS(A:version, new:version+1)); hazard pointers (defer reclamation until no thread holds a pointer to the node); epoch-based reclamation.
+Compare-And-Swap (CAS) checks if a value equals "expected" before swapping. ABA problem: a value changes A→B→A between a CAS read and write. The CAS sees A (same as expected) and succeeds, but the underlying state has changed and been changed back — the algorithm may be incorrect. Example: a lock-free stack pop: read head→A, CPU is preempted; another thread pops A, pushes B, pops B, pushes A back; current thread's CAS(A, new) succeeds incorrectly. Solutions: ABA counter (tag with version number; CAS(A:version, new:version+1)); hazard pointers (defer reclamation until no thread holds a pointer to the node); epoch-based reclamation. The forced-interleaving demonstration and the measured version-tag fix are worked out in [memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md).
 
 **Q14: What is the difference between optimistic and pessimistic locking?**
 **Short:** Pessimistic locking blocks other threads by holding a lock up front, while optimistic locking reads freely and only checks for conflicts, retrying, at write time.
@@ -874,8 +921,10 @@ The last two rows are the reason a distributed lock is a *liveness* tool, not a 
 
 ## See Also
 
-- [`java/concurrency`](../../java/concurrency/concurrency.md) — ReentrantLock, AQS, CAS, volatile, happens-before, virtual threads — deep applied depth
+- [memory_models_and_concurrency_theory](../memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) — the theory layer under every primitive here: happens-before, DRF-SC, SC/TSO/weak hardware models, acquire/release/seq_cst, linearizability, the progress hierarchy, and the ABA/lock-free material
+- [`java/concurrency`](../../java/concurrency/concurrency.md) — the Java spelling of that model (`volatile`, AQS, `ReentrantLock`) plus virtual threads and other applied Java depth
 - [`database/concurrency_control_and_locking`](../../database/concurrency_control_and_locking/concurrency_control_and_locking.md) — MVCC, row-level locking, deadlock detection in PostgreSQL/MySQL
+- [`database/consistency_models_and_consensus`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md) — the distributed-systems side of linearizability and serializability; the same correctness conditions, applied across nodes instead of across threads
 - [`lld/concurrency_patterns`](../../lld/concurrency_patterns/concurrency_patterns.md) — ReadWriteLock, ThreadPool, Circuit Breaker patterns
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — thread model, context switch cost
 - [cpu_scheduling_algorithms](../cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) — priority inversion and scheduling interaction

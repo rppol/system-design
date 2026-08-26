@@ -257,6 +257,55 @@ FQN is silently ignored: the auto-configuration you meant to exclude quietly sta
 `exclude` attribute of `@SpringBootApplication` takes a `Class<?>`, which is why it is the
 safer of the two.
 
+#### Modular starters — the change your `pom.xml` sees first
+
+The jar split has a second face: **starters are modular now**. Boot 3's
+`spring-boot-starter-web` was one dependency that dragged in the servlet stack; Boot 4
+names starters per technology, each with a `-test` companion.
+
+```xml
+<!-- Boot 3 -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+
+<!-- Boot 4 -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-webmvc</artifactId>
+</dependency>
+```
+
+The rule that catches people is the **transitive dependency you were relying on by
+accident**. Under Boot 3 a database migration tool arrived as a plain third-party
+dependency and auto-configured itself; under Boot 4 it needs its own starter:
+`spring-boot-starter-flyway` and `spring-boot-starter-liquibase` are the two named
+verbatim in the migration guide. If migrations silently stop running after an upgrade,
+that is why — the library is still on the classpath, the auto-configuration is not.
+
+Other Boot 4 removals and additions worth knowing before you plan an upgrade:
+
+| Change | Consequence |
+|---|---|
+| Jackson 3 default (`tools.jackson`, was `com.fasterxml.jackson`) | Group id changes, except `jackson-annotations`, which keeps `com.fasterxml.jackson.core` and its `com.fasterxml.jackson.annotation` package; `@JsonComponent` becomes `@JacksonComponent`, `@JsonMixin` becomes `@JacksonMixin` |
+| `spring.jackson.read.*` / `.write.*` changed meaning | JSON-specific features now live under `spring.jackson.json.read.*` / `.json.write.*`, while `spring.jackson.read.*` / `.write.*` carry format-agnostic features shared by CBOR, JSON and XML. **A config file left untouched still parses and configures something else** — the one change here where doing nothing is wrong rather than merely stale |
+| JSpecify nullability annotations added throughout | Existing code can **fail to compile** under a strict null-checker — this is the wall most upgrades hit first |
+| GraalVM native-image 25 or later required | An older GraalVM is unsupported, not merely slower |
+| Undertow support removed | Servlet 6.1 is the Boot 4 baseline and Undertow is not compatible with it — move to Tomcat 11 or Jetty before you start |
+| Spock support requires Boot 4.1 | Dropped in 4.0 for lack of a Groovy 5 build, restored in 4.1 on Spock 2.4 — a Spock test suite is a reason to target 4.1 directly and skip 4.0 |
+| Spring Session Hazelcast and MongoDB support removed | Migrate the session store to Redis or JDBC, or hand-wire the repository |
+| `@MockBean` / `@SpyBean` removed | `@MockitoBean` / `@MockitoSpyBean` |
+| `@SpringBootTest` no longer provides MockMvc | Add `@AutoConfigureMockMvc` explicitly — see [Spring Testing](../spring_testing/spring_testing.md) |
+
+**Two tools do most of the mechanical work.** `spring-boot-properties-migrator` is a
+module you add temporarily: it analyses your properties at runtime and reports (and
+temporarily migrates) renamed keys, which is how you find the ones no compiler will
+catch. And the package relocations are exactly the shape an **OpenRewrite** recipe
+handles well — a mass, mechanical, unambiguous rename — so run the recipe first and
+spend your own attention on the JSpecify compile errors and the starters you did not
+know you needed, which are the parts that require judgement.
+
 ---
 
 ## 7. Real-World Examples
@@ -450,6 +499,16 @@ Spring Boot runs an AOT (Ahead-of-Time) processing phase at build time that reso
 **Short:** @ConfigurationProperties binds a whole prefix to a validated typed POJO, while @Value injects a single raw property.
 
 `@Value` injects one property at a time, while `@ConfigurationProperties` binds a whole prefix to a typed POJO. `@Value("${my.property}")` is simple but has downsides: a typo in the property name fails silently (evaluates to the literal `${...}` or throws on startup), no type conversion for complex types, no IDE autocompletion, and no validation. `@ConfigurationProperties(prefix="my")` binds an entire prefix hierarchy to a typed POJO with: relaxed binding (camelCase, kebab-case, snake_case, env var all work), JSR-303 validation with `@Validated`, IDE autocompletion via `spring-configuration-metadata.json`, and structured documentation. Choose `@ConfigurationProperties` for any group of related properties (two or more); reserve `@Value` for single simple values that don't logically belong to a group or for SpEL expressions.
+
+**Q: What breaks in your `pom.xml` when you upgrade to Spring Boot 4?**
+**Short:** Starters went modular — spring-boot-starter-web became spring-boot-starter-webmvc, and things you got transitively now need their own starter.
+
+Boot 4 split the monolithic starters into per-technology ones, each with a `-test` companion, so `spring-boot-starter-web` becomes `spring-boot-starter-webmvc`. The nastier half is the dependency you were relying on **by accident**: under Boot 3 a library like Flyway or Liquibase arrived as a plain third-party jar and auto-configured itself, and under Boot 4 it needs `spring-boot-starter-flyway` or `spring-boot-starter-liquibase` explicitly. That failure is silent in the worst way — the library is still on the classpath, so nothing fails to start; the auto-configuration simply is not there, and your migrations quietly stop running. The related change is the jar split behind it: `spring-boot-autoconfigure` became per-technology `spring-boot-<tech>` modules and every auto-configuration class moved package, which matters because `spring.autoconfigure.exclude` is an unchecked string property, so a stale fully-qualified name is ignored in silence and the auto-configuration you meant to exclude stays on.
+
+**Q: Which part of a Boot 3 to 4 migration is worth a human, and which should a tool do?**
+**Short:** Give the package relocations to OpenRewrite and property renames to spring-boot-properties-migrator; spend your attention on JSpecify errors and missing starters.
+
+Automate everything mechanical and unambiguous. The package relocations are a mass rename with a single correct answer, which is exactly what an OpenRewrite recipe is for, and the renamed configuration properties are what `spring-boot-properties-migrator` finds — you add it temporarily and it reports and temporarily migrates the keys at runtime, which is the only practical way to catch renames no compiler can see. What needs judgement is the rest: the **JSpecify nullability annotations** added throughout Boot 4 can fail an existing build outright under a strict null-checker, and every one of those errors is a real question about whether that value can be null; the **modular starters** you did not know you were getting transitively; the removals you have to design around, since Undertow and Spring Session's Hazelcast and MongoDB support are gone and GraalVM must be 25 or later; and the Jackson 3 move from `com.fasterxml.jackson` to `tools.jackson`, which renames `@JsonComponent` to `@JacksonComponent` and leaves `jackson-annotations` where it was. Target **4.1 rather than 4.0**, which restores Spock support on Spock 2.4. The one item no tool and no checklist will catch for you is `spring.jackson.read.*`: 4.1 reuses that prefix for format-agnostic features while the JSON-specific ones moved to `spring.jackson.json.read.*`, so an untouched config file parses cleanly and means something different. Run the tools first so the diff you actually read is the part that needed you.
 
 ---
 

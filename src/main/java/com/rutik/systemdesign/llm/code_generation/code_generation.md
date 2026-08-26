@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Code generation is one of the most commercially successful LLM applications, powering tools like GitHub Copilot, Cursor, Replit Ghostwriter, and Amazon CodeWhisperer. LLMs have become exceptional at generating, completing, editing, explaining, and debugging code — often surpassing junior developers on well-specified tasks.
+Code generation is one of the most commercially successful LLM applications, powering tools like GitHub Copilot, Cursor, Replit Ghostwriter, and AWS Kiro (the agentic successor to Amazon CodeWhisperer / Amazon Q Developer). LLMs have become exceptional at generating, completing, editing, explaining, and debugging code — often surpassing junior developers on well-specified tasks.
 
 Code is an ideal domain for LLMs because: (1) it has enormous training data (billions of lines on GitHub); (2) it's verifiable — code either runs and passes tests or it doesn't; (3) it follows predictable patterns — syntax, idioms, and APIs are relatively consistent. This verifiability enables unique training approaches (execution feedback) and evaluation methods unavailable for open-ended text.
 
@@ -99,6 +99,46 @@ This "context window" may be assembled from 10+ files
 Prioritized by: proximity to cursor, recency, relevance
 ```
 
+**Three retrieval mechanisms feed that list, and they are not interchangeable.**
+
+**1. Symbol-graph / LSP lookup.** The IDE already runs a language server for jump-to-definition
+and autocomplete; a completion system reuses it instead of re-deriving structure from text. Given
+a symbol at the cursor (a function call, a type name), the LSP resolves it to a definition
+location in O(1) — no search, no ranking, just a graph edge walk (`import` -> module ->
+`class`/`def`). This is exact and near-zero latency (<5ms, it's already indexed in memory), but it
+only finds what the cursor is *explicitly referencing* — it cannot surface a similar pattern
+written elsewhere in the repo that nothing currently imports.
+
+**2. Recently-edited-file and open-tab ranking.** A cheap recency/proximity heuristic: rank the
+open tabs and the last N edited files by (a) how recently touched, (b) directory distance from
+the current file, (c) import-graph distance. No embedding, no search index — just metadata already
+sitting in the editor's session state. This is the workhorse for everyday completion because it is
+essentially free (a sort over a few dozen file handles) and captures the common case well: the
+code you are actively working on is usually related to the code you just edited.
+
+**3. Embedding retrieval.** Embed the ~50 lines around the cursor, and the candidate corpus
+(function/class-level chunks across the repo), then retrieve by cosine similarity. This is the
+only one of the three that finds *semantically* similar code with no naming or import relationship
+to the cursor — the copy-pasted-and-renamed helper three directories away. It is also the slowest
+and most expensive: an embedding call plus a vector search round-trip.
+
+**Why the ~100ms keystroke latency budget rules embedding retrieval out of the completion
+path.** Section 4.1 already sets the completion feel-latency target at under 100ms end to end —
+network RTT, prompt assembly, model inference, and streaming the first token all have to fit
+inside that window, or the ghost text feels laggy and users stop trusting it. An embedding
+round-trip (encode the query, hit a vector index, get results back) costs 30-80ms **on top of**
+everything else — see the Tradeoffs table in Section 8 — which alone can consume the entire
+budget before the LLM has generated a single token. Chat and codebase-Q&A tools (Cursor's
+"Codebase chat", Copilot Enterprise's repository search) don't have this constraint: a chat
+response is expected to take 1-3 seconds regardless, so spending 50ms on retrieval is free. The
+practical split production systems converge on: **completion uses mechanisms 1 and 2 only** (LSP
+resolution + recency ranking, both sub-10ms), rebuilding a lightweight index on file save so it's
+always warm; **embedding retrieval runs asynchronously** — on file save or on a debounce timer,
+never synchronously in the keystroke path — and its results get folded into the *next*
+completion's context, not the one that triggered the index update. Copilot Enterprise's
+repository-indexed search follows exactly this pattern: index build is async and out-of-band, only
+lookup against the already-built index sits anywhere near a completion request.
+
 ### 4.5 Code Agents
 
 Autonomous agents that write, execute, debug, and iterate on code:
@@ -117,6 +157,58 @@ Agent loop:
 ```
 
 Full agent architectures (SWE-agent, Claude Code, OpenHands) are covered in [Coding Agents](../coding_agents/coding_agents.md); the sandbox layer that makes step 3 safe is covered in [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md).
+
+### 4.6 FIM Completion vs. Agent Loop — The Decision Boundary
+
+These two architectures (4.2 and 4.5) are not two strengths of the same tool — they sit on
+opposite sides of a boundary defined by four axes, and picking the wrong one for a task produces
+either an infuriatingly slow autocomplete or an agent given far more authority than the task
+warrants.
+
+```
+                     FIM COMPLETION                    AGENT LOOP
+                     ────────────────                   ──────────
+  Latency         <100ms, one forward pass        seconds to hours, N iterations
+  Blast radius     one hole in one file            any file, any command, any tool call
+  Verified by      a human reading it before Tab   the test suite / exit code, unattended
+  Cost per change  ~$0.0001 (one short completion) ~$0.10-$5+ (many turns, tool calls, retries)
+```
+
+**Latency.** A FIM model runs once per keystroke pause and returns a bounded span — a line, a
+function body. An agent loop is a while-loop: plan, edit, execute, read the result, decide whether
+to continue. Each iteration alone can cost as much as an entire completion request, and a
+non-trivial task needs many of them. This is why an agent is never invoked on every keystroke —
+it is invoked on a task boundary ("fix this failing test", "implement this endpoint"), not a
+cursor position.
+
+**Blast radius.** A FIM completion is contained by construction: it fills one hole between a fixed
+prefix and suffix in one file, and nothing happens until the developer explicitly accepts it with
+Tab. An agent with file-edit and shell-execution tools can touch any file in the repository, run
+arbitrary commands, install packages, or call external APIs — the sandbox layer (see
+[Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)) exists precisely
+because that authority needs a containment boundary the way a completion never does.
+
+**Verifiability.** A completion is verified the cheap, immediate way: a human glances at it before
+pressing Tab, and a wrong one costs one keystroke to reject. An agent's patch is verified the
+expensive, delayed way: the test suite has to actually run, which means the change has already
+been applied to real files before anyone finds out whether it was right — verification is a step
+in the loop, not a gate in front of it, and a weak test suite lets a wrong patch through with a
+green light.
+
+**Cost per accepted change.** A rejected FIM completion costs one short generation, essentially
+free. An agent task that fails after 15 tool-call iterations before a human intervenes has spent
+15 iterations of tokens and wall-clock time for nothing — cost scales with how many attempts the
+task actually needed, not with the size of the eventual diff, which is why an agent loop needs a
+retry budget and a stop condition (Section 6, "Common Pitfalls" 4.5) rather than running until it
+succeeds.
+
+**The rule of thumb:** reach for FIM when the task is "complete this specific, bounded gap I am
+looking at right now" — the developer is present, reviewing in real time, and the cost of being
+wrong is a keystroke. Reach for an agent loop when the task is "make this outcome true across the
+codebase" — decomposition, multi-file edits, and iteration are unavoidable, and a test suite (not
+a human glance) is the thing that has to certify the result. A tool that tries to be both — an
+agent invoked on every keystroke, or a FIM model expected to fix a failing CI run — picks the wrong
+side of every one of these four axes.
 
 ---
 
@@ -138,7 +230,7 @@ flowchart TD
     IDE([IDE — VSCode, JetBrains]) --> CtxExtract
     CtxExtract["Local Context Extractor\n– Current file (cursor position)\n– Open tabs (prioritized by relevance)\n– Language Server: imports, symbols"] --> PromptBuild
     PromptBuild["Prompt Constructor\n– file header + imports + nearby code\n– neighbor file snippets (embedding similarity)\n– FIM format: prefix + suffix markers"] --> Backend
-    Backend["Copilot Backend\nModel: GPT-4o-based Copilot\nN=3–5 completions, streaming"] --> Rank
+    Backend["Copilot Backend\nModel picker: Claude, GPT, Gemini\nN=3–5 completions, streaming"] --> Rank
     Rank["Ranking + Filtering\n– Filter: syntax validity, security patterns\n– Rank: by model confidence"] --> Display
     Display["IDE Display\nGhost text for top suggestion\nCmd+→ to cycle alternatives"]
 
@@ -211,11 +303,15 @@ Example:
       """Check if any two numbers in the list are closer to each other than threshold."""
       # Model generates the body
 
-GPT-4: 88% pass@1
-o1: 95%+
+Frontier models (2026): 96-98% pass@1
 Human programmers: ~95%
 
-Note: HumanEval is considered largely "solved"; harder benchmarks needed
+Note: HumanEval is saturated and no longer discriminates between current models; its one
+legitimate remaining use is a sanity floor for a new small or open-weight model. The
+benchmarks that now discriminate: SWE-bench Verified (real, multi-file GitHub issues),
+SWE-bench Pro (1,865 tasks across 41 actively maintained repos, copyleft-licensed to
+resist training-set leakage), LiveCodeBench (continuously refreshed with post-cutoff
+contest problems), and Terminal-Bench (autonomous shell tasks)
 ```
 
 **Read it like this.** "Let the model try `k` times and count the problem solved if *any* attempt
@@ -249,8 +345,8 @@ must always travel with the number.
 ```
 
 A model at 20% per attempt reports ~90% at pass@10. Both numbers describe the identical model. This
-is why a bare "88% on HumanEval" is uninterpretable without its `k`, and why the benchmark's
-"largely solved" status deserves a caveat: solved *at some k*, on 164 problems that have been public
+is why a bare "97% on HumanEval" is uninterpretable without its `k`, and why the benchmark's
+"saturated" status deserves a caveat: solved *at some k*, on 164 problems that have been public
 since 2021 and reproduced across GitHub thousands of times.
 
 **Why pass@k is the right metric for code and the wrong one for prose.** Code has a free, exact
@@ -271,12 +367,12 @@ Metric: % resolved
 ```mermaid
 xychart-beta
     title "SWE-bench resolve rate progression"
-    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 + tools", "o3 + scaffolding"]
-    y-axis "% issues resolved" 0 --> 80
-    bar [1.7, 12, 13.8, 49, 71.7]
+    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 (2024)", "o3 (2025)", "Claude Fable 5 (2026)"]
+    y-axis "% issues resolved" 0 --> 100
+    bar [1.7, 12, 13.8, 49, 71.7, 95.0]
 ```
 
-From 1.7% (raw GPT-4, 2023) to 71.7% (o3 + scaffolding, on the SWE-bench Verified subset) in two years — the jumps come from agent scaffolding and tool use, not just base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim.
+From 1.7% (raw GPT-4, 2023) to 95.0% (Claude Fable 5, 2026, on SWE-bench Verified) in three years — the jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. Today's frontier models (95.0% Claude Fable 5, 88.6% Opus 4.8, 85.2% Sonnet 5) have pushed SWE-bench Verified itself toward saturation, which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, best public-set score around 60% — is now the benchmark that actually discriminates between them.
 
 **MBPP** (Mostly Basic Python Problems):
 - 500 simple Python functions from crowdsourcing
@@ -314,12 +410,12 @@ Copilot's approach:
 ## 7. Real-World Examples
 
 ### GitHub Copilot
-- 1M+ paid subscribers; 30%+ of code written with Copilot in some projects
-- Codex (2021) → GPT-4 Copilot (2023) → custom models
+- History: Codex (2021) → a GPT-4-class Copilot (2023) → today's multi-provider model picker plus agent mode (2025-2026)
+- Current product: a model picker spans Pro, Pro+, Business and Enterprise plans, plus an Auto mode that picks a model for speed/availability. Mid-2026 GA options include Anthropic's Claude Sonnet 5 and Claude Opus 4.8, OpenAI's GPT-5.4/GPT-5.5 and GPT-5.3-Codex, and Google's Gemini 3.1 Pro; the catalog changes often as older models retire
+- Agent mode (autonomous multi-file work, running tests, opening PRs) is the headline capability now, not ghost-text completion
 - FIM training on 159GB of public GitHub code
 - Latency target: ghost text appears within 100ms
 - Acceptance rate: ~30-40% of suggestions accepted
-- Measured productivity impact: 55% faster task completion (GitHub study)
 
 ### Cursor IDE
 - Built entirely around LLM-first code editing
@@ -327,37 +423,59 @@ Copilot's approach:
 - Codebase chat: embed entire repository; ask questions about it
 - Composer: autonomous multi-step code generation with file creation
 
-### Amazon CodeWhisperer
-- Integrated into AWS environments
-- Security scanning: built-in vulnerability detection
-- Reference tracker: flags suggestions that match open-source code (copyright)
-- Optimized for AWS SDK usage
+### AWS Kiro (formerly Amazon CodeWhisperer / Amazon Q Developer)
+- History: Amazon CodeWhisperer (IDE completion) → rebranded Amazon Q Developer (2024) → superseded by Kiro (2026), an agentic, spec-driven IDE and CLI that plans, implements, and verifies changes across a whole codebase
+- Amazon Q Developer's IDE plugins and paid subscriptions are in end-of-support (new signups closed May 2026, full retirement April 2027); Kiro is the product AWS now ships to developers
+- Security scanning (built-in vulnerability detection) and the reference tracker (flags suggestions matching open-source code, for copyright review) carry forward from CodeWhisperer
+- Optimized for AWS SDK and infrastructure-as-code usage
 
-### DeepSeek-Coder
-- 33B model trained on 2T code tokens + 400B text tokens
-- State-of-the-art open-source code model (before o1)
-- Strong on HumanEval, MBPP, DS-1000 (data science)
-- FIM training for completion scenarios
+### Open-Weight Coding Models
+- The open tier splits three ways: DeepSeek V4 Pro leads raw SWE-bench Verified among open models at 80.6% (DeepSeek V4 Flash close behind at 79.0%, much cheaper to run); GLM-5.2 tops the open-weights Intelligence Index and is the pick for long-running engineering agents; Kimi K3 leads the Frontend Code Arena
+- Qwen3-Coder is the standard local/self-hosted pick; the Qwen 3.6-27B variant scores 77.2% on SWE-bench Verified for smaller self-hosted deployments. MiniMax M3 is the choice for low-cost, high-throughput serving
+- FIM training remains standard across this tier for completion scenarios — the recipe DeepSeek-Coder popularized (2T code tokens + 400B text tokens) is still how these models learn to fill a hole in a file, not just append to it
 
 ---
 
 ## 8. Tradeoffs
 
-| Model | HumanEval | Latency | Cost | Context |
+| Model | SWE-bench Verified | Latency | Cost (in/out per 1M tokens) | Context |
 |-------|-----------|---------|------|---------|
-| Codestral 7B (Mistral) | 81% | <1s | Free | 32K |
-| DeepSeek-Coder 33B | 79% | 1-2s | Free/self-host | 16K |
-| GPT-4o | 90% | 2-4s | API cost | 128K |
-| Claude 3.5 Sonnet | 93% | 2-5s | API cost | 200K |
-| o1 | 95%+ | 10-60s | 10× GPT-4o | 128K |
+| Claude Fable 5 | 95.0% | 2-5s | $10/$50 | 1M |
+| Claude Opus 5 | — | 2-5s | $5/$25 | 1M |
+| Claude Opus 4.8 | 88.6% | 2-5s | $5/$25 | previous Opus generation |
+| Claude Sonnet 5 | 85.2% | 1-3s | $3/$15 | 1M |
+| DeepSeek V4 Pro (open) | 80.6% | 1-2s | Free/self-host | Self-hosted (deployment-dependent) |
+| Qwen 3.6-27B (self-hosted) | 77.2% | <1s | Free/self-host | Self-hosted (deployment-dependent) |
+
+A `—` means no published SWE-bench Verified figure is being cited here, not a weak score: **88.6% belongs to Opus 4.8, not to Opus 5**, and the two are kept as separate rows rather than collapsed so the benchmark number stays attached to the model that actually earned it. Opus 4.8 bills at the same $5/$25 standard rate as Opus 5. Check the current model card before quoting any of these in an interview — attaching last generation's benchmark to this generation's model is the single most common way a candidate gets caught.
+
+HumanEval no longer appears in this table: frontier models score 96-98% pass@1, which no longer discriminates between them. SWE-bench Verified is itself approaching saturation at the top of this list — SWE-bench Pro (harder, contamination-resistant) is the benchmark to reach for once every candidate model clears ~85% here.
 
 | Task | Best Approach |
 |------|---------------|
-| Single-line completion | Small fast model (Codestral, StarCoder2 3B) |
-| Function generation | Mid-size model (GPT-4o, DeepSeek-Coder) |
-| Complex algorithms | Reasoning model (o1, R1) |
-| Bug fixing | Agent loop (Claude + tools) |
+| Single-line completion | Small fast model (Qwen3-Coder, a local FIM-tuned model) |
+| Function generation | Mid-size model (Claude Sonnet 5, Qwen 3.6-27B) |
+| Complex algorithms | Reasoning-heavy frontier model (Claude Opus 5, Claude Fable 5, DeepSeek V4 Pro) |
+| Bug fixing | Agent loop (Claude Code, SWE-agent) |
 | Full feature implementation | Agent (Cursor, Claude Code) |
+
+### Repository Context Retrieval: Latency vs. Recall
+
+| Mechanism | Added latency | Finds | Fits in the <100ms completion path? |
+|---|---|---|---|
+| LSP / symbol-graph lookup | <5ms | Exact — only what the cursor explicitly references | Yes — always |
+| Recently-edited / open-tab ranking | ~0ms (in-memory sort) | Related-by-proximity, not semantic | Yes — always |
+| Embedding retrieval | 30-80ms | Semantically similar code with no naming/import link | No — must run async, out of the keystroke path |
+
+### FIM Completion vs. Agent Loop
+
+| Axis | FIM completion | Agent loop |
+|---|---|---|
+| Latency | <100ms, single pass | Seconds to hours, N iterations |
+| Blast radius | One hole, one file, gated by Tab | Any file, any shell command, unattended |
+| Verified by | Human glance before accept | Test suite / exit code, after the fact |
+| Cost per accepted change | ~$0.0001 | ~$0.10-$5+, scales with retries |
+| Right for | A bounded gap, developer present | An outcome across the codebase |
 
 ---
 
@@ -400,8 +518,8 @@ Copilot's approach:
 | **Tabby** | Self-hosted Copilot | Open source; privacy; multiple models |
 | **Claude Code (Anthropic)** | Terminal agent | Autonomous coding; file editing |
 | **StarCoder2** | Open code model | HuggingFace; strong base model |
-| **DeepSeek-Coder** | Open code model | Best open quality; 7B-33B |
-| **Codestral** | Open code model | Mistral; 32K context; fast |
+| **DeepSeek V4 Pro/Flash** | Open code model | Leads open-model SWE-bench Verified: Pro 80.6%, Flash 79.0% cheaper |
+| **Qwen3-Coder** | Open code model | Standard local/self-hosted pick; Qwen 3.6-27B scores 77.2% SWE-bench Verified |
 | **SWE-agent** | Autonomous bug fixing | Princeton; SWE-bench |
 | **aider** | Terminal AI coding | Open source; Claude/GPT backend |
 
@@ -413,13 +531,17 @@ Copilot's approach:
 **Short:** FIM trains on shuffled [suffix][prefix][middle] order so the model predicts a coherent middle span from both surrounding code, not just a suffix.
 A: FIM trains the model to predict a middle section given both the prefix (code before cursor) and suffix (code after cursor). Standard autoregressive training only predicts suffixes. For IDE completion, the cursor is often mid-function, surrounded by existing code — FIM enables the model to complete this middle portion coherently. Training format: shuffle documents into [suffix][prefix][middle] order; the model learns the mapping.
 
+**Q: How do you decide whether a coding task should be handled by a FIM completion model or an agent loop?**
+**Short:** Choose FIM for a bounded, human-reviewed gap and an agent loop for a multi-file outcome verified by tests, not a human glance.
+A: The two architectures sit on opposite sides of four axes, and picking the wrong one is a common design mistake. Latency: FIM returns in under 100ms from a single forward pass; an agent loop runs seconds to hours across many plan-edit-execute-evaluate iterations, so it is never invoked per keystroke. Blast radius: a FIM completion fills one hole in one file and only takes effect when a human presses Tab; an agent with file-edit and shell tools can touch any file or run any command, which is why it needs a sandbox. Verifiability: a completion is checked cheaply and immediately by a human glancing at it before accepting; an agent's patch is checked expensively and after the fact by running the test suite, so a weak test suite lets a wrong patch through. Cost per accepted change: a rejected completion costs one short generation, essentially free; a failed agent task can burn many tool-call iterations of tokens and wall-clock time before a human intervenes. The rule of thumb: use FIM when the developer is present, reviewing in real time, and the task is "complete this specific gap"; use an agent loop when the task is "make this outcome true across the codebase" and a test suite, not a person, has to certify the result.
+
 **Q: How does GitHub Copilot gather context for a completion?**
 **Short:** Copilot assembles a FIM prompt from the current file, ranked open tabs, import-resolved symbols, and recently viewed files within a limited token budget.
 A: Copilot collects: (1) current file with cursor position; (2) other open tabs, ranked by recency and relevance; (3) import statements and symbol definitions from the language server; (4) recently viewed files; (5) optionally, repository-indexed snippets similar to current code (enterprise). It assembles this into a FIM-formatted prompt, sending prefix + suffix + adjacent code snippets. The challenge is fitting everything into the context window while prioritizing the most relevant code.
 
 **Q: What is SWE-bench and why is it a better benchmark than HumanEval?**
-**Short:** SWE-bench uses 2,294 real multi-file GitHub issues scored by test suites, unlike HumanEval's near-solved single-function toy problems.
-A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is essentially "solved" (~90%+); SWE-bench is still challenging (71% with o3 + scaffolding as of 2025).
+**Short:** SWE-bench uses 2,294 real multi-file GitHub issues scored by test suites, unlike HumanEval's saturated single-function toy problems.
+A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is saturated (96-98% pass@1 across frontier models, so it no longer discriminates between them); SWE-bench Verified is itself now close to saturated (85-95% for frontier models — Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, copyleft-licensed to resist training-set leakage, best public-set score around 60% — is the benchmark that now actually discriminates between top models.
 
 **Q: How is pass@k actually computed, and what is the common mistake?**
 **Short:** pass@k is an unbiased estimator over n>k samples per problem, and the common mistake of generating only k samples overestimates the score.
@@ -435,7 +557,7 @@ A: (1) Injection vulnerabilities: LLMs learn SQL injection, XSS, command injecti
 
 **Q: How does SWE-bench scoring work and what does a 20% pass rate mean in practice?**
 **Short:** A SWE-bench resolve rate is the share of real GitHub issues whose generated patch passes the full test suite, with 20% meaning 1 in 5 fixed unaided.
-A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; Claude 3.5 Sonnet with tools reached ~49%; o3 with scaffolding reached 71.7% on the verified subset. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
+A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; by 2026, frontier models clear 85-95% on SWE-bench Verified (Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), close enough to saturation that SWE-bench Pro is now used to separate top models. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
 
 **Q: What are hallucinated APIs in code generation and how do you detect them?**
 **Short:** Hallucinated APIs are syntactically plausible but nonexistent calls, caught by import resolution, AST analysis, or sandboxed execution errors.
@@ -444,6 +566,14 @@ A: Hallucinated APIs are function calls, class names, or parameter names that lo
 **Q: How do tools like GitHub Copilot decide what repository-level context to include?**
 **Short:** Copilot ranks context by current file, tab recency and embedding similarity, resolved imports, and language-server symbol data within an 8K-token budget.
 A: The context budget is limited (~8K tokens for inline completion), requiring prioritization. Copilot uses a retrieval pipeline: (1) Current file with cursor position — highest priority; (2) Open editor tabs ranked by recency and embedding similarity to the current code; (3) Imports: follow import statements to retrieve type definitions and function signatures; (4) Language server data: symbol tables, class hierarchies; (5) Semantic search: embed the ~50 lines around the cursor and retrieve similar snippets from indexed open tabs. The final prompt is assembled by a context assembler that packs as many relevant snippets as fit in the token budget, ordered by computed relevance score. Copilot Enterprise adds repository-level vector search across the full codebase.
+
+**Q: What retrieval mechanisms feed repository-level code completion, and how do they differ in cost and recall?**
+**Short:** LSP lookup and open-tab ranking are near-free and exact-or-proximate; embedding retrieval is slower but finds semantically similar code with no naming link.
+A: Three distinct mechanisms feed the context list, and they are not interchangeable. LSP / symbol-graph lookup reuses the IDE's language server: given a symbol at the cursor, it resolves to a definition in under 5ms via a graph-edge walk — exact and essentially free, but it only finds what the cursor explicitly references, not an unrelated similar pattern elsewhere. Recently-edited-file and open-tab ranking sorts already-open editor state by recency and directory/import distance — no search index needed, effectively 0ms, and it captures the common case that the code you're working on relates to what you just touched. Embedding retrieval embeds the code around the cursor and the candidate corpus, then retrieves by cosine similarity — the only one of the three that finds semantically similar code with no import or naming relationship to the cursor, at a cost of 30-80ms per lookup. Production systems use the first two synchronously in the completion path and run embedding retrieval asynchronously (on save or a debounce timer), folding its results into the next request rather than the one that triggered reindexing.
+
+**Q: Why can't a code completion system run embedding retrieval synchronously inside the keystroke path?**
+**Short:** A 30-80ms embedding round-trip alone can exhaust the completion feature's under-100ms latency budget before the model generates a token.
+A: Inline completion targets under 100ms end to end — network RTT, prompt assembly, model inference, and streaming the first token all have to fit inside that window or the ghost text feels laggy and users stop trusting it. An embedding round-trip (encode the query, hit a vector index, return results) costs 30-80ms on top of everything else, which by itself can consume the entire budget before the LLM has produced a single token. Chat and codebase-Q&A features (Cursor's codebase chat, Copilot Enterprise's repository search) don't have this constraint — a chat reply is already expected to take 1-3 seconds, so spending 50ms on retrieval is free there. The fix production systems converge on: keep completion on the sub-10ms mechanisms (LSP resolution, recency ranking) exclusively, and move embedding retrieval out of the request path entirely — index builds run on file save or a timer, and a completion request only ever reads an already-built index, never triggers one.
 
 **Q: What CWE categories are most common in LLM-generated code?**
 **Short:** SQL injection, path traversal, hard-coded credentials, broken cryptography, and XSS are the CWE categories most common in LLM-generated code.
@@ -454,8 +584,8 @@ A: Studies on GitHub Copilot and similar tools show: CWE-89 (SQL injection) — 
 A: The integration point is between generation and delivery: generate code → run static analysis → filter or annotate → present to developer. (1) Semgrep rules: define rules for your organization's security policies (no eval, no raw SQL, specific library usage); run on generated code synchronously; surface violations as inline annotations; (2) CodeQL: deeper semantic analysis; catches data flow vulnerabilities (tainted input reaching a dangerous sink); too slow for real-time but appropriate in CI/CD gates; (3) Bandit (Python), ESLint, Checkstyle: language-specific; fast; rule-based; (4) Secret detection: GitLeaks or TruffleHog patterns catch credentials in generated code. Architecture: wrap the LLM call with a post-processing step; annotate the response with violations rather than silently blocking — developers need to see what was flagged and why.
 
 **Q: How do GitHub Copilot and others address copyright and license contamination?**
-**Short:** Copyright risk is reduced by training only on permissively licensed code, near-duplicate fingerprinting at generation time, and a reference tracker for matches.
-A: Verbatim reproduction risk: models trained on public code may reproduce licensed code snippets; GPL/AGPL code would require derivative works to be open-sourced. Approaches: (1) License filtering at training time: Copilot was trained only on permissive-license code (MIT, Apache, BSD, Unlicense) — The Stack dataset by HuggingFace uses this approach; (2) Near-duplicate detection: at generation time, compare generated code to training corpus using n-gram or MinHash fingerprinting; flag if cosine similarity exceeds a threshold (~0.8); (3) Reference tracker: GitHub Copilot shows when a suggestion matches code from a specific public repository, letting users decide whether to use it; (4) Training-time deduplication: remove near-duplicate files to reduce memorization of specific code blocks. The legal risk remains unsettled as of 2025; class actions against GitHub are ongoing.
+**Short:** They train only on permissively licensed code, fingerprint near-duplicates at generation time, and flag matches with a reference tracker — the live legal exposure is license-compliance, not copyright.
+A: Verbatim reproduction risk: models trained on public code may reproduce licensed code snippets; GPL/AGPL code would require derivative works to be open-sourced. Approaches: (1) License filtering at training time: Copilot was trained only on permissive-license code (MIT, Apache, BSD, Unlicense) — The Stack dataset by HuggingFace uses this approach; (2) Near-duplicate detection: at generation time, compare generated code to training corpus using n-gram or MinHash fingerprinting; flag if cosine similarity exceeds a threshold (~0.8); (3) Reference tracker: GitHub Copilot shows when a suggestion matches code from a specific public repository, letting users decide whether to use it; (4) Training-time deduplication: remove near-duplicate files to reduce memorization of specific code blocks. In *Doe v. GitHub, Microsoft & OpenAI*, the court dismissed most claims against Copilot, including the DMCA §1202(b) copyright-management-information claim — the plaintiffs could not show output identical or near-identical to their protected code, which §1202(b) requires. What survives is the contract side: breach of the open-source licenses themselves. So the live engineering risk in 2026 is license-compliance as a contract question, not copyright infringement — which is exactly why license filtering, training-set deduplication, and the reference tracker are the controls that matter; the underlying fair-use question for training on public code remains undecided by any appellate court.
 
 **Q: What makes a code agent's execution loop different from a standard ReAct loop?**
 **Short:** A code agent's loop is execution-driven with structured feedback like stack traces and a programmatic pass/fail termination, unlike a semantic ReAct loop.
@@ -507,7 +637,7 @@ Query pipeline:
     Context: [5 retrieved code examples showing existing patterns]
     Request: [user's task]
 
-  Step 3: Generate with Claude 3.5 Sonnet (200K context)
+  Step 3: Generate with Claude Sonnet 5 (1M context)
     Model generates: route handler, model query, schema, test
 
   Step 4: Validation

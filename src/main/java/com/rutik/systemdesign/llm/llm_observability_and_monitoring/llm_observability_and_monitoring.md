@@ -84,7 +84,7 @@ Token-based pricing requires granular cost tracking:
 | **Per-user** | How much does this user cost per month? | Aggregate by user_id |
 | **Per-team** | Which team is consuming the most budget? | Aggregate by team/department tag |
 | **Per-feature** | Is the summarization feature or the chat feature more expensive? | Aggregate by feature/endpoint tag |
-| **Per-model** | What would it cost to switch from GPT-4o to Claude Sonnet? | Track model per request, compare costs |
+| **Per-model** | What would it cost to switch from GPT-4o to Claude Sonnet 5? | Track model per request, compare costs |
 
 Cost calculation at the gateway layer:
 
@@ -92,10 +92,14 @@ Cost calculation at the gateway layer:
 # Per-model pricing table, per 1M tokens (list prices as of July 2026 --
 # treat this table as configuration, not a constant: providers reprice often)
 PRICING = {
-    "gpt-4o":         {"input": 2.50, "output": 10.00},
-    "gpt-4o-mini":    {"input": 0.15, "output": 0.60},
-    "claude-sonnet-5": {"input": 2.00, "output": 10.00},  # introductory through 2026-08-31, then 3.00 / 15.00
-    "claude-haiku-4.5": {"input": 1.00, "output": 5.00},
+    "gpt-5.6-sol":         {"input": 5.00, "output": 30.00},
+    "gpt-5.6-terra":       {"input": 2.50, "output": 15.00},
+    "gpt-5.6-luna":        {"input": 1.00, "output": 6.00},
+    "gpt-4o":              {"input": 2.50, "output": 10.00},   # legacy, still served
+    "gpt-4o-mini":         {"input": 0.15, "output": 0.60},    # legacy, still served
+    "claude-opus-5":       {"input": 5.00, "output": 25.00},
+    "claude-sonnet-5":     {"input": 2.00, "output": 10.00},  # introductory through 2026-08-31, then 3.00 / 15.00
+    "claude-haiku-4.5":    {"input": 1.00, "output": 5.00},
 }
 
 def calculate_cost(model, input_tokens, output_tokens):
@@ -569,6 +573,18 @@ sampling them at 10% means a 1-in-10,000 failure mode produces one log per milli
 will never accumulate enough to characterize it. Sampling is safe only for events that are common
 enough that a fraction still adds up; for rare events, the fraction *is* the whole signal.
 
+**Tail-based sampling solves this exemption structurally instead of by hand.** The tiers above are
+a decision made per-event, at write time, by application code — which is exactly why errors and
+safety triggers need a manual carve-out to Tier 1. Tail-based sampling moves the decision to the
+OTel Collector: the collector buffers a complete trace (all spans, ~30 seconds) and decides what to
+keep only after seeing the whole thing, so a rule like "keep every trace with ERROR status or
+TTFT > 2s; sample 5-10% of the rest" needs no per-event carve-out — the interesting traces are kept
+by construction, because the decision is made after their outcome is already known. This is a
+complementary layer to the metadata/text tiers above, not a replacement: tiered sampling governs
+what payload detail you log, tail-based sampling governs which whole traces survive collection at
+all. See [OpenTelemetry for LLM Apps](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md)
+for the full head-based-vs-tail-based tradeoff table and a working `tail_sampling` collector config.
+
 ---
 
 ## 7. Real-World Examples
@@ -672,7 +688,7 @@ Enterprise APM vendor's LLM offering (now surfaced as "Agent Observability"). Au
 
 **3. Not attributing costs to features, leading to invisible budget overruns.** A mid-size SaaS company shared a single OpenAI API key across 6 product features. Monthly bill: $45K. After instrumenting per-feature cost attribution, they discovered that an internal document summarization tool used by 12 people was consuming 60% ($27K) of the budget because it sent entire 50-page documents as context for every query. The fix: implement chunking for the summarization tool (reduced its cost to $4K/month) and set per-feature budget caps with alerts at 80% of cap.
 
-**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-4 as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with a small, cheap judge model, calibrated against the large judge on a held-out set before rollout, sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
+**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-5.6 sol as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with a small, cheap judge model, calibrated against the large judge on a held-out set before rollout, sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
 
 **5. Dashboard overload -- 50 metrics, nobody looks at any of them.** A platform team built a comprehensive Grafana dashboard with 50+ panels covering every conceivable LLM metric. Usage analytics showed the dashboard had 3 views per week, all from the person who built it. Nobody else could find the signal in the noise. The fix: create two focused dashboards. Ops dashboard: 6 panels (request volume, error rate, P95 latency, cost burn rate, active alerts, provider status). Product dashboard: 6 panels (quality score trend, user satisfaction, top failure modes, feature usage, cost per conversation, prompt version comparison). Total views jumped to 40+ per week.
 
@@ -724,6 +740,14 @@ Are you already on Datadog?
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: How does tail-based sampling at the OTel Collector differ from the tiered log-sampling strategy, and why do you need both?**
+**Short:** Tail-based sampling keeps whole traces by outcome at the collector after the fact, while tiered log sampling decides per-event payload detail at write time — they solve different problems.
+Tiered log sampling is a write-time, per-event decision made by application code: it governs how much *payload detail* (full text vs. metadata only) gets logged for a given request, and it needs a manual carve-out to always-log errors and safety triggers because otherwise a rare failure mode would almost never appear in the sample. Tail-based sampling is a read-time, whole-trace decision made by the OTel Collector: it buffers a complete trace for roughly 30 seconds, waits to see every span including the final status and latency, and only then decides whether to keep or drop the entire trace — so a rule like "keep every ERROR trace and every trace with TTFT > 2s, sample 5-10% of the rest" needs no manual carve-out, because the outcome is already known when the decision is made. Run both: tiered sampling controls storage cost for the traces you keep, tail-based sampling controls which traces you keep in the first place. The tradeoff is collector memory — buffering enough concurrent traces to make tail-based decisions costs real RAM at high throughput, which is why head-based sampling remains the simpler default for very high-volume, low-value paths.
+
+**Q: Your dashboards are green — zero errors, stable P95 latency — but a customer just reported the model inventing product details. What went wrong with your observability setup, and what's the fix?**
+**Short:** Latency and error-rate dashboards cannot see quality degradation, since a hallucinated response is fast and returns HTTP 200; the fix is a dedicated async groundedness-scoring pipeline with its own alerts.
+A: Nothing in a standard ops dashboard (latency, error rate, uptime) can detect a hallucination, because a fabricated response is a fast, successful, well-formed HTTP 200 — it fails on a dimension neither metric measures. This is the same gap pitfall #2 in this module describes: three weeks of green latency dashboards while hallucination rate silently doubled from 4% to 8%. The fix is a separate quality-monitoring pipeline, not a better latency dashboard: run async groundedness scoring on a sampled fraction of responses (an NLI classifier or a cheap LLM judge comparing claims against retrieved context for RAG, or a rubric judge otherwise), aggregate into a rolling daily rate, and alert independently when it moves — e.g. more than 2 percentage points above a 7-day rolling mean sustained for several hours. Ops and quality are orthogonal signals; treating "the dashboard is green" as "the system is healthy" is the pitfall itself.
 
 **Q: How would you design an observability system for a production LLM application?**
 **Short:** A production LLM observability system layers synchronous request-path metadata capture, async sampled quality evaluation, and separate ops versus product dashboards.

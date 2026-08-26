@@ -1,5 +1,15 @@
 # Graph Databases
 
+> **Version anchor — August 2026.** Neo4j **2026.07** (calendar versioning since 2025.01;
+> 5.26 is the last of the old LTS line, and a new LTS lands every 18–24 months with a
+> three-year support window). Neo4j's default query language is **Cypher 25** —
+> `db.query.default_language=CYPHER_25` is set in the shipped `neo4j.conf` from 2026.02
+> onward, so a new database gets it unless you say otherwise. The query language *standard*
+> is **GQL — ISO/IEC 39075:2024**, published April 2024. PostgreSQL **19** (beta 2 July 2026,
+> GA expected Sept/Oct 2026) adds **SQL/PGQ** (ISO SQL:2023 Part 16) for property-graph
+> pattern matching over ordinary relational tables. Behaviour that depends on a version is
+> tagged inline like `[Cypher 25]`.
+
 ## 1. Concept Overview
 
 Graph databases model data as nodes (entities), relationships (connections), and properties (key-value pairs on nodes and relationships). They excel at traversing highly connected data where relationships are first-class citizens rather than foreign-key JOIN operations. Neo4j is the dominant native graph database; Amazon Neptune, TigerGraph, and JanusGraph are notable alternatives.
@@ -229,6 +239,60 @@ MERGE (u:User {email: "alice@example.com"})
 ON CREATE SET u.created_at = datetime(), u.name = "Alice"
 ON MATCH SET u.last_seen = datetime()
 ```
+
+### GQL — the ISO standard (ISO/IEC 39075:2024)
+
+Cypher was a vendor language for a decade. **GQL is now the ISO standard graph query
+language** — published as **ISO/IEC 39075:2024** in April 2024, and the first entirely new
+ISO database query language since SQL in 1987. That single fact reframes the whole
+"which query language" question: the answer is no longer "Cypher, Gremlin, or SPARQL and
+hope", it is "how close is this engine to GQL".
+
+Where each engine stands:
+
+| Engine | Language surface | GQL position |
+|---|---|---|
+| Neo4j | Cypher 25 (default from 2026.02) | Supports the majority of mandatory GQL features and a substantial share of the optional ones; Neo4j documents the remaining gaps as a conformance appendix and is closing them |
+| openCypher | Cypher dialect, multi-vendor | Its stated mission is now to help implementors converge on GQL rather than to be a rival standard |
+| Amazon Neptune, TigerGraph, Oracle | openCypher / GSQL / PGQL | Conformance work under way; treat GQL support as directional, not guaranteed |
+| PostgreSQL 19 | **SQL/PGQ** — a *different* standard (ISO SQL:2023 Part 16) | Not GQL. Property graphs are declared as views over existing tables and matched with `GRAPH_TABLE`, read-only, fixed-depth traversal in the first release |
+
+The two standards are complementary, not competing, and the distinction is the one that
+gets asked in interviews. **GQL is a standalone language for a native graph database.**
+**SQL/PGQ is a clause inside SQL** that lets a relational database answer graph-shaped
+questions over tables it already stores — no new engine, no ETL, no second copy of the data:
+
+```sql
+-- PostgreSQL 19 SQL/PGQ: declare a property graph over ordinary tables
+CREATE PROPERTY GRAPH social_graph
+  VERTEX TABLES (
+    users        KEY (id) LABEL person PROPERTIES (id, name),
+    companies    KEY (id) LABEL company PROPERTIES (id, name, industry)
+  )
+  EDGE TABLES (
+    follows  SOURCE KEY (follower_id) REFERENCES users (id)
+             DESTINATION KEY (followee_id) REFERENCES users (id)
+             LABEL follows,
+    employment SOURCE KEY (user_id)    REFERENCES users (id)
+             DESTINATION KEY (company_id) REFERENCES companies (id)
+             LABEL works_at
+  );
+
+-- Then match graph patterns from ordinary SQL
+SELECT * FROM GRAPH_TABLE (social_graph
+  MATCH (a IS person WHERE a.name = 'Alice')
+        -[IS follows]-> (u IS person) -[IS works_at]-> (c IS company)
+  WHERE c.industry = 'Technology'
+  COLUMNS (u.name AS follower, c.name AS company)
+);
+```
+
+**The practical rule.** If the graph is a *view* onto data that already lives in your
+relational database and the traversals are shallow and fixed-depth, SQL/PGQ removes the
+entire argument for a second database. If you need variable-length traversal, shortest
+path, or the graph-algorithm library, you still need a native graph engine — and there you
+should be writing GQL-conformant Cypher, because that is the dialect the standard is
+pulling every vendor toward.
 
 ### Graph Algorithms (GDS — Graph Data Science Library)
 
@@ -542,7 +606,9 @@ Neo4j without indexes on node properties is equivalent to a full graph scan for 
 | Memgraph | In-memory graph database |
 | ArangoDB | Multi-model (graph + document + KV) |
 | Apache AGE | PostgreSQL extension for graph queries |
+| PostgreSQL 19 SQL/PGQ | In-core property-graph pattern matching over existing tables — no extension |
 | APOC | Neo4j procedures library (utility functions) |
+| GQL (ISO/IEC 39075:2024) | The ISO standard graph query language every engine is converging on |
 
 ---
 
@@ -651,6 +717,16 @@ A causal cluster elects one leader that accepts all writes and replicates them v
 **Short:** Apache AGE adds Cypher-style graph queries inside PostgreSQL, trading Neo4j's index-free adjacency performance for a single operational database.
 
 Apache AGE adds a graph query layer (openCypher support) on top of a regular PostgreSQL table, letting graph and relational data live in the same database and be queried in the same transaction. This is the right choice when the graph portion of the workload is modest in scale and connectivity — org charts, small permission graphs, lightweight recommendation joins — and the operational cost of running a second database (Neo4j) outweighs the traversal performance it would provide. AGE inherits PostgreSQL's ACID guarantees, backup tooling, and connection pooling for free, which is a meaningful operational win over standing up a separate Neo4j cluster with its own HA, backup, and monitoring stack. The tradeoff is traversal performance: AGE does not have Neo4j's index-free adjacency, so multi-hop traversals on large or highly connected graphs are meaningfully slower than on a native graph engine. Reach for AGE when the team wants some graph query ergonomics without adding a new database to operate, and migrate to standalone Neo4j once traversal-heavy queries against a large graph become the dominant workload.
+
+**Q: What is GQL and why does an ISO standard for graph queries matter?**
+**Short:** GQL is ISO/IEC 39075:2024, the first new ISO query-language standard since SQL in 1987, and it ends the vendor-lock-in argument against graph databases.
+
+GQL is the ISO standard graph query language, published as ISO/IEC 39075:2024 in April 2024 — the first entirely new ISO database query language since SQL was standardized in 1987. It matters because "which query language" was for a decade the strongest argument *against* adopting a graph database: Cypher was Neo4j's, Gremlin was TinkerPop's, SPARQL was the RDF world's, GSQL was TigerGraph's, and picking one was picking a vendor. GQL collapses that into the situation SQL created for relational: a standard core that every engine targets, with dialect differences at the edges rather than at the centre. Practically, Neo4j's Cypher already implements the majority of GQL's mandatory features and a substantial share of the optional ones, and publishes a conformance appendix listing what is still missing; openCypher's stated mission has shifted from being a rival specification to helping implementors converge on GQL; and Neptune, TigerGraph and Oracle have conformance work in flight. The guidance for a new project is to write GQL-conformant Cypher — avoid the vendor-specific procedures where a standard construct exists — so the query layer is portable even if the engine is not.
+
+**Q: PostgreSQL 19 adds SQL/PGQ. Does that mean you no longer need a graph database?**
+**Short:** SQL/PGQ removes the case for a second database when graph patterns are shallow and read-only over tables you already have, but not when you need variable-length traversal or graph algorithms.
+
+Sometimes, and the boundary is sharp. SQL/PGQ (ISO SQL:2023 Part 16, shipping in PostgreSQL 19) lets you declare a property graph as a *view* over existing relational tables with `CREATE PROPERTY GRAPH`, then pattern-match it from ordinary SQL through `GRAPH_TABLE`. There is no new storage engine, no extension, no ETL and no second copy of the data — which eliminates the single biggest real cost of adopting a graph database, namely keeping two systems in sync. For shallow, fixed-depth patterns over data that already lives in Postgres — a permission graph, an org chart, "customers who bought this also bought", a two-hop fraud check — that is the whole answer, and adding Neo4j would be pure operational overhead. The first release is deliberately limited: read-only, fixed-depth traversals, and no in-memory graph-algorithm library. So the moment the workload needs variable-length paths (`[:KNOWS*1..6]`), shortest path, PageRank, community detection, or traversals deep enough that index-free adjacency's O(1)-per-hop actually beats a join per hop, you still need a native engine. Note also that SQL/PGQ is *not* GQL — they are two different ISO standards addressing the same shape of problem from opposite directions, one as a clause inside SQL and one as a standalone language.
 
 ---
 

@@ -715,7 +715,7 @@ modulo 3 — for "noise" values appearing 3x, their contribution to every bit
 position's count is a multiple of 3 and vanishes mod 3, leaving only the
 unique element's bits. This generalizes to "appears `k` times" via mod `k`.
 
-**What does `n & (n-1)` do, and what is it used for?**
+**Q: What does `n & (n-1)` do, and what is it used for?**
 **Short:** It clears `n`'s lowest set bit, which tests for a power of two (`n & (n-1) == 0`) and lets Brian Kernighan's algorithm count set bits in O(popcount(n)).
 It clears the LOWEST
 set bit of `n`. Subtracting 1 flips that bit to 0 and flips all lower bits to
@@ -785,7 +785,7 @@ modern CPUs it's not even faster — register-based swaps with a temp are
 typically just as fast or faster due to instruction-level parallelism. Know it
 for interviews; don't write it in production.
 
-**How does Maximum XOR of Two Numbers (LC 421) use a trie?**
+**Q: How does Maximum XOR of Two Numbers (LC 421) use a trie?**
 **Short:** Insert every number's bits into a binary trie, then greedily walk toward the opposite bit at each level to maximize XOR — O(32n) instead of O(n^2).
 Insert every
 number into a binary trie, one bit at a time from the most-significant bit

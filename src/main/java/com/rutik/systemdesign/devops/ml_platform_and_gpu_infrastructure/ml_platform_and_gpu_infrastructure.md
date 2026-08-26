@@ -1,6 +1,27 @@
 # ML Platform & GPU Infrastructure
 
-> Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A target: 15
+> Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced
+
+> **Pricing anchor (checked 2026-08-25).** Every dollar figure on this page derives from one
+> base rate: **`p4de.24xlarge` (8x A100 80GB) at $27.4471/hour On-Demand in `us-east-1`**,
+> which is **$3.43 per GPU-hour** and **~$20,036/month** at 730 hours. The §10 pitfall, the
+> §14 fleet bill, and the checkpoint-interval arithmetic are all computed from that number
+> and nothing else — if you update the base rate, recompute them rather than editing them
+> individually. Verified against the AWS EC2 price list via
+> [instances.vantage.sh](https://instances.vantage.sh/aws/ec2/p4de.24xlarge). A100 pricing is
+> used deliberately: it is the generation most fleets are still depreciating, and it keeps the
+> MIG arithmetic in §6 concrete. Current-generation accelerator families are named in §11.
+
+> **Version anchor (2026-08-25).** **Kubernetes 1.36 "Haru"** (2026-04-22) is the current
+> release; **1.35** (2025-12-17) is the prior minor. **Dynamic Resource Allocation (DRA) went
+> GA in Kubernetes 1.34** with the stable `resource.k8s.io/v1` API enabled by default — a GPU
+> is now requested as a **`ResourceClaim` against a `DeviceClass`**, not as an integer count of
+> the `nvidia.com/gpu` extended resource, and the device-plugin path is the compatibility model
+> rather than the current one. **NVIDIA GPU Operator 26.7.0** manages the NVIDIA DRA driver
+> directly (Multi-Node NVLink, allocation via `ResourceClaim`) and requires **Kubernetes
+> v1.34.2 or later** for that path. The scheduling mechanics of DRA are owned by
+> [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md);
+> this page owns what they cost and how the fleet is operated.
 
 Running GPUs on Kubernetes for training and inference: the NVIDIA GPU Operator, the device plugin, MIG and time-slicing for fractional sharing, Karpenter GPU NodePools, and orchestrating Kubeflow / Ray workloads on a multi-tenant cluster. This module owns the **operate-it** angle — how the platform team keeps expensive accelerators busy, isolated, and observable. For the *modeling* side (training loops, serving frameworks, model design) cross-reference [`../../ml/`](../../ml/README.md) and [`../../llm/inference_engines/`](../../llm/inference_engines/inference_engines.md); for the *application architecture* of an inference service see [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md).
 
@@ -8,7 +29,7 @@ Running GPUs on Kubernetes for training and inference: the NVIDIA GPU Operator, 
 
 ## 1. Concept Overview
 
-An **ML platform** is the internal product that lets data scientists and ML engineers train, tune, and serve models without each team reinventing GPU provisioning, scheduling, and observability. **GPU infrastructure** is its hardest substrate: GPUs are expensive (an 8×A100-80GB `p4de.24xlarge` lists at ~$27.45/hour on-demand, ~$20k/month if left running), scarce (regional capacity is frequently exhausted), and awkward for Kubernetes because the scheduler models them as opaque, integer-countable **extended resources** rather than divisible CPU/memory.
+An **ML platform** is the internal product that lets data scientists and ML engineers train, tune, and serve models without each team reinventing GPU provisioning, scheduling, and observability. **GPU infrastructure** is its hardest substrate: GPUs are expensive (an 8×A100-80GB `p4de.24xlarge` lists at ~$27.45/hour on-demand, ~$20k/month if left running), scarce (regional capacity is frequently exhausted), and awkward for Kubernetes because for most of the project's history the scheduler modelled them as opaque, integer-countable **extended resources** rather than divisible CPU/memory. **Dynamic Resource Allocation (DRA), GA since Kubernetes 1.34, replaces that model**: a workload declares a `ResourceClaim` against a `DeviceClass` describing the device it needs — a MIG profile, an NVLink domain, a shared slice — and the scheduler allocates a concrete device from a `ResourceSlice` the driver published. Counting integers could not express heterogeneity, partitioning, or topology; a claim can. Most production fleets still run the device-plugin path, which is why both appear throughout this page — but the direction of travel is claims, not counts.
 
 The platform must solve four problems the default Kubernetes install does not:
 
@@ -625,6 +646,14 @@ MPS (Multi-Process Service) lets multiple processes share a single GPU context w
 **Short:** DCGM GPU utilization is the headline exec metric because it exposes the allocation-versus-utilization gap that determines dollar efficiency.
 The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-busy percentage averaged across the fleet — because it's the direct measure of dollar efficiency, and it's the number that exposes the allocation-vs-utilization gap finance cares about. Below it: framebuffer memory used (`DCGM_FI_DEV_FB_USED`) to spot over- or under-sized slices, ECC/XID error counts and throttle reasons for health, power draw and temperature, and per-team GPU-hours allocated vs utilized for chargeback. You feed DCGM into Prometheus/Thanos and build per-team Grafana dashboards, but watch cardinality: per-MIG-slice metrics across hundreds of GPUs can explode series counts and OOM Prometheus (use recording rules and drop high-cardinality labels). Allocation goes on the capacity dashboard; *utilization* goes on the exec one, because that's the metric a platform's success is judged by.
 
+**Q: A GPU is `nvidia.com/gpu: 1` in every manifest you own. What does DRA change, and is it worth migrating?**
+**Short:** DRA replaces an integer count with a ResourceClaim against a DeviceClass, which is what lets you ask for a specific MIG profile, NVLink domain or shared slice instead of "one card".
+DRA changes *what you can ask for*. `nvidia.com/gpu: 1` is an opaque integer: the scheduler knows a node advertises N of something and nothing about which card, how much memory it has, which NVLink domain it sits in, or whether it can be shared — so heterogeneous fleets get expressed as a sprawl of node labels and taints, and partitioning gets expressed as a lie (a time-sliced GPU advertising 4 "GPUs" that are really one). Under DRA the driver publishes a `ResourceSlice` describing the real devices, you write a `ResourceClaim` (usually via a `ResourceClaimTemplate` so it is pod-scoped) selecting against a `DeviceClass`, and the scheduler allocates a concrete device before binding. It went GA in Kubernetes 1.34 with `resource.k8s.io/v1` on by default, and GPU Operator 26.7.0 manages the NVIDIA DRA driver for you. Whether to migrate is a fleet question, not a version question: if every pod takes one whole identical card, DRA buys you almost nothing and costs you a driver upgrade. Migrate when the fleet is heterogeneous, when you are partitioning with MIG, or when topology matters for multi-node training — and migrate one NodePool at a time, because the two models coexist on a cluster but not on a single device.
+
+**Q: Your DRA migration works in staging, then a GPU sits idle in production with nothing scheduled on it. What happened?**
+**Short:** Almost certainly a leaked ResourceClaim — a standalone claim outlives the pod that used it and keeps its device allocated until something deletes the claim.
+Almost certainly a leaked `ResourceClaim`. A claim created as a standalone object has its own lifecycle: it is allocated to a pod, the pod finishes or is deleted, and the claim stays `Allocated` — pinning a device nothing is using. `kubectl get resourceclaims -A` shows the allocation and `kubectl get resourceslices` shows what the driver believes is free, and the two disagreeing is the tell. The fix is to stop creating standalone claims for pod-scoped work: use a `ResourceClaimTemplate` referenced from the pod spec, which makes the generated claim owned by the pod so garbage collection reclaims the device when the pod goes away. The reason this survives staging is that staging churns pods fast enough that a leaked card is noticed as a scheduling failure within minutes, whereas a production fleet with spare capacity simply absorbs it — at roughly $3.43 per GPU-hour, one leaked A100 is about $2,500 a year of nothing. Use `ResourceClaimTemplate` for anything pod-scoped and reserve standalone claims for genuinely shared, long-lived devices you intend to manage by hand.
+
 ---
 
 ## 13. Best Practices
@@ -633,6 +662,7 @@ The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-
 - **Separate training and serving NodePools**, priced differently (Spot vs On-Demand), with different consolidation policies.
 - **Match the sharing model to the workload**: exclusive for training, MIG for multi-tenant prod inference, time-slicing only for dev/bursty/trusted.
 - **Always run DCGM** and alert on *utilization*, ECC errors, and throttling — not just allocation.
+- **Use `ResourceClaimTemplate`, never a standalone `ResourceClaim`, for pod-scoped DRA work** — a template-less claim outlives its pod and pins a card nobody is using.
 - **Gang-schedule all multi-GPU jobs** with Kueue/Volcano; never let the default scheduler place distributed training.
 - **Checkpoint anything on Spot**; never put a latency-SLA endpoint on Spot or on time-slicing.
 - **Pin driver/CUDA versions** in the GPU Operator and gate node-image upgrades on a GPU smoke test.

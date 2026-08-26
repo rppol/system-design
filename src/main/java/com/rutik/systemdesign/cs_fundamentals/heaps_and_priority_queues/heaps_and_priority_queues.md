@@ -8,7 +8,7 @@ A **priority queue** is the abstract data type; a binary heap is its canonical i
 
 ---
 
-## Intuition
+## 2. Intuition
 
 A heap is like a company org-chart where the CEO is always the most (or least) important person — you can fire the CEO instantly and promote the next best candidate in O(log n) reorganizations, but you never bother sorting the entire org chart.
 
@@ -20,7 +20,7 @@ A heap is like a company org-chart where the CEO is always the most (or least) i
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 **Complete binary tree:** Every level is full except possibly the last, which is filled left-to-right. This lets you store the tree in a flat array with zero pointer overhead.
 
@@ -41,7 +41,7 @@ right_child(i)= 2 * i + 1
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
 **Choosing a variant** — start from the requirement, not the data structure; the six subsections below cover each leaf:
 
@@ -99,7 +99,7 @@ Maintain a max-heap of the lower half and a min-heap of the upper half, kept bal
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Binary Min-Heap — Array Layout
 
@@ -132,7 +132,7 @@ That framing matters because it is *why* heaps are fast in a way balanced BSTs a
 | `n//2` | Index of the first leaf. Everything at or past it has no children |
 | `h` | Levels below a node. A leaf has `h = 0`; the root has `h = floor(log2 n)` |
 
-**Walk one example.** The same 7 elements, 0-indexed (this is the layout the code in Section 5 uses):
+**Walk one example.** The same 7 elements, 0-indexed (this is the layout the code in Section 6 uses):
 
 ```
   array:   [ 1,  3,  2,  7,  5,  9,  4 ]
@@ -155,9 +155,9 @@ That framing matters because it is *why* heaps are fast in a way balanced BSTs a
   6    4       2         2        -      -     yes
 ```
 
-Read the `parent` column against the picture: indices 3 and 4 both report parent 1, and index 1 holds `3` — exactly the node drawn above them. Indices 5 and 6 both report parent 2, holding `2`. The arithmetic reproduces every edge in the drawing without a single pointer being stored. `n//2 = 3` marks the first leaf, which is why `build` in Section 5 starts its loop at `n//2 - 1`.
+Read the `parent` column against the picture: indices 3 and 4 both report parent 1, and index 1 holds `3` — exactly the node drawn above them. Indices 5 and 6 both report parent 2, holding `2`. The arithmetic reproduces every edge in the drawing without a single pointer being stored. `n//2 = 3` marks the first leaf, which is why `build` in Section 6 starts its loop at `n//2 - 1`.
 
-**Why this addressing scheme, and what breaks without it.** The arithmetic only works if the tree is *complete* — every level full except the last, which fills left to right. Break that invariant (delete from the middle and leave a hole) and index `2i+1` no longer points at a child; it points at garbage, and every subsequent sift silently corrupts the heap rather than raising. That is the failure mode: a heap with a hole does not crash, it just starts returning the wrong minimum. This is exactly why the `pop` in Section 5 moves the *last* element to the root instead of shifting elements down — shifting would be O(n) and holes are not allowed.
+**Why this addressing scheme, and what breaks without it.** The arithmetic only works if the tree is *complete* — every level full except the last, which fills left to right. Break that invariant (delete from the middle and leave a hole) and index `2i+1` no longer points at a child; it points at garbage, and every subsequent sift silently corrupts the heap rather than raising. That is the failure mode: a heap with a hole does not crash, it just starts returning the wrong minimum. This is exactly why the `pop` in Section 6 moves the *last* element to the root instead of shifting elements down — shifting would be O(n) and holes are not allowed.
 
 ### Sift-Down after removing root (replace with last leaf):
 
@@ -338,7 +338,7 @@ Nine hundred ninety-nine thousand nine hundred eighty-seven, against a million e
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ```python
 import heapq
@@ -513,7 +513,7 @@ def heap_sort(arr: List[int]) -> List[int]:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Dijkstra's shortest path:** A min-heap over `(distance, node)` makes greedy expansion O((V+E) log V) vs O(V²) with a naive array. Every GPS navigation system runs this.
 
@@ -531,7 +531,7 @@ def heap_sort(arr: List[int]) -> List[int]:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Property | Binary Heap | Sorted Array | BST (balanced) | Fibonacci Heap |
 |----------|-------------|--------------|----------------|----------------|
@@ -559,7 +559,7 @@ xychart-beta
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 **Use a heap when:**
 - You need repeated min/max extraction (Top-K, k-way merge, Dijkstra, Prim)
@@ -574,9 +574,7 @@ xychart-beta
 - You need the full sorted order → sort once with O(n log n)
 - You need rank queries (k-th element for arbitrary k) → order statistics tree or quickselect O(n)
 
----
-
-## 9. When to Use / When NOT (Interview Cheatsheet)
+### Interview Cheatsheet
 
 **Common heap interview patterns:**
 

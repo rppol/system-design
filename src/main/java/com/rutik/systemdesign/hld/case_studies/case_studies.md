@@ -90,7 +90,32 @@ Grouped by primary engineering concern:
 | [Design an Ad Click Event Aggregation System](design_ad_click_aggregation.md) | Real-time + batch aggregation of high-volume event streams | Lambda vs. Kappa streaming architecture; tumbling-window aggregation with watermarks for late events; HyperLogLog mergeable sketches for approximate unique counts; multi-region ingestion with regional rollups merged into global numbers; exact (billing-path) vs. approximate (dashboard-path) counting tradeoffs. |
 | [Design a Metrics Monitoring System](design_metrics_monitoring.md) | Time-series ingestion, storage, and alerting at massive label cardinality | Metric+labels+timestamp+value data model; cardinality = product of label cardinalities (the `user_id`-label trap); pull (Prometheus) vs. push (Datadog/StatsD) ingestion; Gorilla/TSM columnar compression; 3-tier downsampling/retention (15s/15d -> 5m/90d -> 1h/2y); PromQL-style query fan-out; OK -> PENDING -> FIRING -> RESOLVED alert state machine with a "for" duration to suppress flapping. |
 
+### AI-Backed Systems
+
+Roughly half of 2026 general-engineering design loops now include an AI or LLM-backed prompt,
+and none of these live in `hld/` — writing another copy here would duplicate a stronger
+sibling. The `llm/` section already ships 29 case studies at the same 11-section principal
+depth. These four are the ones a general system-design interview actually reaches for; read
+them the same way you read the studies above.
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design ChatGPT / an LLM chat product](../../llm/case_studies/design_chatgpt.md) | Conversational serving at consumer scale | Streaming token delivery over SSE, conversation state and context-window budgeting, multi-turn memory, moderation in the request path, and the cost-per-conversation arithmetic that shapes every other decision. |
+| [Design a RAG-backed Q&A system](../../llm/case_studies/design_rag_pipeline.md) | Retrieval-augmented generation end to end | Chunking and embedding pipelines, vector plus keyword hybrid retrieval, reranking, grounding and citation, and evaluating retrieval quality separately from generation quality. |
+| [Design an LLM inference platform](../../llm/case_studies/design_gpu_inference_platform.md) | GPU fleet economics and serving throughput | Continuous batching, KV-cache memory as the real capacity limit, prefill/decode split, queueing and admission control under a fixed GPU budget, and multi-tenant fairness. |
+| [Design an AI API gateway](../../llm/case_studies/design_llm_gateway.md) | Fronting many models behind one contract | Provider routing and fallback, token-based rate limiting and quota accounting, semantic caching, prompt/response logging with PII handling, and per-tenant cost attribution. |
+
+The transfer from this section is direct: an LLM gateway is [rate limiting](../rate_limiting/rate_limiting.md) plus [resilience patterns](../resilience_patterns/resilience_patterns.md) with tokens as the unit instead of requests; RAG is a [search](../../database/search_engines/search_engines.md) and [caching](../caching/caching.md) problem with an expensive tail; and an inference platform is a queueing and capacity problem where the scarce resource is GPU memory rather than CPU or IOPS.
+
 ---
+
+### Media Pipelines & Scheduled Work
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [Design a YouTube Upload Pipeline](design_youtube_upload_pipeline.md) | Resumable ingest and fan-out transcoding | Chunked resumable upload, a transcode DAG fanned across renditions, why the pipeline is queue-bound not CPU-bound, and how publish-visibility lags the last rendition. |
+| [Design a Distributed Job Scheduler](design_distributed_job_scheduler.md) | Exactly-once triggering under clock skew and restarts | Lease-based ownership, the difference between at-least-once firing and exactly-once effect, catch-up storms after an outage, and why a missed-run policy is a product decision. |
+| [Design Flash-Sale Ticketing](design_flash_sale_ticketing.md) | Extreme contention on a tiny hot key | Why a single inventory row serializes the whole sale, admission control and virtual queueing ahead of the write path, reservation-then-confirm, and the oversell/undersell tradeoff. |
 
 ## Cross-Cutting / Shared Primitives
 
@@ -99,8 +124,8 @@ Each case study's `## Cross-References` footer points to deep-dive modules in `b
 | Primitive | Used By | Role |
 |-----------|---------|------|
 | [Wide-Column Databases](../../database/wide_column_databases/wide_column_databases.md) | Twitter, Netflix, Uber, URL Shortener, WhatsApp, Distributed Key-Value Store | Primary store for high-write-throughput data: tweets, watch history, trip records, URL mappings, messages, KV-store rows |
-| [Kafka Deep Dive](../../backend/kafka_deep_dive/kafka_deep_dive.md) | Twitter, Netflix, Uber, URL Shortener, WhatsApp, Notification System, Distributed Message Queue | Async pipelines: fan-out delivery, analytics ingestion, location-update streams, offline message queues, per-channel delivery topics, partition/ISR internals |
-| [Key-Value Stores (Redis / Wide-Column)](../../database/key_value_stores/key_value_stores.md) | Twitter, Uber, URL Shortener, WhatsApp, Search Autocomplete, Web Crawler, Distributed Key-Value Store, Distributed Unique ID, Ad Click Aggregation, Leaderboard, Metrics Monitoring, Google Drive | Hot-path cache: timelines, redirect cache, driver-location index, presence, hot-prefix suggestions, crawl metadata + DNS cache, KV-store persistence model, ID-segment reservation, real-time OLAP rollup storage, write-behind leaderboard durability, time-series rollup storage (Metrics Monitoring), chunk/metadata lookups (Google Drive) |
+| [Kafka Deep Dive](../../backend/kafka_deep_dive/kafka_deep_dive.md) | Twitter, Netflix, Uber, URL Shortener, WhatsApp, Notification System, Distributed Message Queue, YouTube Upload Pipeline, Distributed Job Scheduler | Async pipelines: fan-out delivery, analytics ingestion, location-update streams, offline message queues, per-channel delivery topics, partition/ISR internals |
+| [Key-Value Stores (Redis / Wide-Column)](../../database/key_value_stores/key_value_stores.md) | Twitter, Uber, URL Shortener, WhatsApp, Search Autocomplete, Web Crawler, Distributed Key-Value Store, Distributed Unique ID, Ad Click Aggregation, Leaderboard, Metrics Monitoring, Google Drive, Flash-Sale Ticketing | Hot-path cache: timelines, redirect cache, driver-location index, presence, hot-prefix suggestions, crawl metadata + DNS cache, KV-store persistence model, ID-segment reservation, real-time OLAP rollup storage, write-behind leaderboard durability, time-series rollup storage (Metrics Monitoring), chunk/metadata lookups (Google Drive) |
 | [Sharding & Partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) | Twitter, Uber, URL Shortener, WhatsApp, Distributed Key-Value Store, Distributed Unique ID, Object Storage, Digital Wallet, Hotel Reservation, Metrics Monitoring, Google Drive | Horizontal scaling strategy for the primary datastore; ID-as-shard-key hotspotting; metadata-index sharding for object storage; account-ID sharding for wallet ledgers (Digital Wallet); `hotel_id`/region sharding for room inventory (Hotel Reservation); shard-by-metric-name for time-series writes (Metrics Monitoring); file-tree metadata sharding (Google Drive) |
 | [Caching Strategies Deep Dive](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) + [Database Caching Patterns](../../database/database_caching_patterns/database_caching_patterns.md) + [Caching (HLD)](../caching/caching.md) | Twitter, Netflix, Uber, URL Shortener, Search Autocomplete, Proximity Service, Leaderboard, Hotel Reservation, Google Drive | Cache-aside vs. read-through, stampede prevention, TTL design; split-TTL freshness tiers (Proximity Service) and Top-N cache refresh (Leaderboard); search-result caching with staleness tradeoffs during flash sales (Hotel Reservation) and metadata/folder-tree caching (Google Drive) |
 | [Consistency Models & Consensus](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md) | Netflix, Uber, WhatsApp, Stock Exchange, Hotel Reservation | Cross-region replication trade-offs, LOCAL_QUORUM vs. strict ordering; strict single-writer ordering for exchange order books (Stock Exchange) and inventory holds (Hotel Reservation) |
@@ -122,6 +147,7 @@ Each case study's `## Cross-References` footer points to deep-dive modules in `b
 | [CAP Theorem](../cap_theorem/cap_theorem.md) | Distributed Key-Value Store | AP-vs-CP framing for tunable-consistency stores |
 | [Consensus Algorithms](../consensus_algorithms/consensus_algorithms.md) | Distributed Key-Value Store, Distributed Unique ID, Stock Exchange | ZooKeeper/etcd-style coordination for CP metadata and worker-ID allocation; sequencer/leader election for deterministic per-symbol order processing (Stock Exchange) |
 | [Storage Engines Internals](../../database/storage_engines_internals/storage_engines_internals.md) | Distributed Key-Value Store, Object Storage, Metrics Monitoring | LSM-tree vs. B-tree tradeoffs for the per-node storage engine, applied here to both the KV store and the object-storage metadata index; columnar TSM/Gorilla-style compression for time-series data points (Metrics Monitoring) |
+| [Vector Databases](../../database/vector_databases/vector_databases.md) | RAG Pipeline, AI Search, any retrieval-backed design (AI-Backed Systems above) | Embedding storage and approximate nearest-neighbour search — HNSW/IVF index tradeoffs, recall vs. latency, filtered ANN, and when `pgvector` inside the existing Postgres beats a dedicated store |
 | [Scalability](../scalability/scalability.md) | Object Storage, Ad Click Aggregation, Leaderboard, Metrics Monitoring | Horizontal scaling and stateless-tier principles applied to the metadata-index gateway tier, stream-processor parallelism, and the global top-K merger fleet; stateless query-fan-out tier for federated PromQL-style queries (Metrics Monitoring) |
 
 ---
@@ -180,6 +206,12 @@ flowchart LR
         MM("Metrics<br/>Monitoring")
     end
 
+    subgraph MP["Media and Scheduled Work"]
+        YT(["YouTube<br/>Upload Pipeline"])
+        JOBS(["Distributed<br/>Job Scheduler"])
+        FLASH(["Flash-Sale<br/>Ticketing"])
+    end
+
     SE("Stock<br/>Exchange")
     WC("Web<br/>Crawler")
     SNOW("Snowflake<br/>Java Impl")
@@ -193,6 +225,12 @@ flowchart LR
     TW -->|"fan-out<br/>model"| NF
     TW -->|"fan-out<br/>model"| NS
     TW -->|"Redis<br/>timeline"| WA
+
+    %% media and scheduled-work thread
+    OBJ -->|"chunked upload<br/>+ multipart"| YT
+    NF -->|"transcode ladder<br/>and CDN delivery"| YT
+    MQ -->|"queue-bound<br/>fan-out"| JOBS
+    HR -->|"inventory hold<br/>under contention"| FLASH
 
     %% real-time / geo thread
     UB -->|"WebSocket<br/>pattern"| WA
@@ -248,6 +286,7 @@ flowchart LR
     class UB,GM,PROX,WC,ADCLK,MM,GDOC,GD mathOp
     class TW,WA,NS,SNOW frozen
     class SE lossN
+    class YT,JOBS,FLASH io
 ```
 
 Solid arrows point from the case study that originates a pattern to the one that reuses it; dotted arrows mark a contrast, or an independently-arrived-at echo of the same idea, rather than direct reuse. Key-Value Store and Distributed Message Queue (gold, Core Infrastructure) are the busiest hubs, together feeding their hash-ring, ring-placement, and partitioned-log primitives out to nine other case studies; Stock Exchange (red) sits at the end of two of those chains — it consumes the ordered log and the monotonic-ID need but feeds no pattern back out.
@@ -286,6 +325,13 @@ Solid arrows point from the case study that originates a pattern to the one that
 | Design a stock exchange / trading platform / order matching engine | [design_stock_exchange](design_stock_exchange.md) — price-time priority matching, single-writer-per-symbol determinism |
 | Design Booking.com / Expedia / a hotel (or flight/event-ticket) reservation system | [design_hotel_reservation](design_hotel_reservation.md) — hold-with-TTL inventory model prevents overbooking |
 | Design Datadog / Prometheus / a metrics monitoring and alerting system | [design_metrics_monitoring](design_metrics_monitoring.md) — cardinality control, downsampling tiers, alert state machine |
+| Design ChatGPT / an LLM chat product | [llm/design_chatgpt](../../llm/case_studies/design_chatgpt.md) — streaming delivery, context-window budgeting, cost per conversation |
+| Design a RAG-backed Q&A system / "chat with your docs" | [llm/design_rag_pipeline](../../llm/case_studies/design_rag_pipeline.md) — chunking, hybrid retrieval, reranking, grounding and citation; storage layer in [database/vector_databases](../../database/vector_databases/vector_databases.md) |
+| Design an LLM inference platform / a GPU serving fleet | [llm/design_gpu_inference_platform](../../llm/case_studies/design_gpu_inference_platform.md) — continuous batching, KV-cache as the capacity limit, admission control |
+| Design an AI API gateway / an LLM proxy | [llm/design_llm_gateway](../../llm/case_studies/design_llm_gateway.md) — provider routing and fallback, token-based quotas, semantic caching, cost attribution |
+| Design a video upload / transcoding pipeline | [Design a YouTube Upload Pipeline](design_youtube_upload_pipeline.md) |
+| Design a distributed cron / job scheduler | [Design a Distributed Job Scheduler](design_distributed_job_scheduler.md) |
+| Design a flash sale / ticket booking system | [Design Flash-Sale Ticketing](design_flash_sale_ticketing.md) |
 
 ---
 

@@ -1,4 +1,7 @@
 # Design: Snowflake ID Generator (Java)
+
+## Intuition
+
 > **"A timestamp on a highway lane."**
 > A snowflake ID is a 64-bit integer whose leftmost bits are a millisecond timestamp and whose
 > rightmost bits encode the lane (node) and sequence position. Two generators on different nodes
@@ -370,6 +373,31 @@ NTP can move the clock backward by a few milliseconds during clock correction. O
 
 Twitter's 41+10+12 split is the industry default; it balances cluster size and throughput.
 
+### Decision 6: bit-packed time (Snowflake) vs segment allocation (Leaf segment mode, DB sequences)
+
+Not every "unique, roughly-ordered, no-central-call-on-the-hot-path" ID scheme trusts
+the wall clock. Meituan's Leaf (already in §7) ships two independent modes, and the
+choice between them is really this section's Decision 1 and Decision 4 in disguise —
+trade clock dependence for database dependence, or the reverse:
+
+| | Snowflake mode (this design) | Segment mode (Leaf, DB sequences) |
+|--|------------------------------|-----------------------------------|
+| Source of uniqueness | Bit-packed clock + node + counter | A row range (`[max_id, max_id + step)`) claimed from a DB table |
+| Clock dependency | Full — `nextId()` reads the wall clock every call | None — the wall clock never appears in an ID |
+| Coordination | None on the hot path; node ID assigned once at startup | A DB round-trip per *segment* (e.g., every 1,000 IDs), not per ID — a background thread pre-fetches the next segment before the current one drains |
+| Failure mode | Clock skew (§9), worker ID collision | DB unavailable when both the current and pre-fetched segment are exhausted — a segment-mode outage, unlike a Snowflake node, can stall every consumer of that table |
+| ID density | Sparse, timestamp-shaped, self-describing (§4.4 decodes one) | Dense small integers; opaque — decoding "when was this issued" needs the DB's own audit log |
+| Best fit | Systems that want K-ordering *and* a decodable timestamp with zero external calls | Systems that already have a reliable DB in the write path and want simple, small, gap-free-ish integers |
+
+Neither is strictly better: Snowflake mode trusts every node's clock to be
+approximately right; segment mode trusts the segment-allocation DB to be available.
+Leaf's own answer is to ship both and let each service pick per its actual constraint —
+a service with an unreliable NTP fleet but a solid Postgres primary should lean segment
+mode; a service that cannot tolerate a DB round-trip anywhere near the hot path, even
+amortized over 1,000 IDs, should lean Snowflake mode. This design chose Snowflake mode
+because the stated non-functional requirement in §1 rules out any external dependency,
+including an amortized one.
+
 ---
 
 ## 6. Real-World Implementations
@@ -405,6 +433,29 @@ faster than the filler refills it degrades to waiting.
 Twitter's tradeoff: coarser time and a far smaller per-node rate in exchange for 64× the
 cluster size — the right shape when you have very many nodes each generating very few IDs,
 such as edge or IoT fleets.
+
+**MongoDB `ObjectId`:** a 12-byte (96-bit) identifier, not 64-bit, so it is a different
+family from everything above — but it solves the identical "no central coordinator"
+problem with a different bit budget: a 4-byte seconds-since-epoch timestamp, a 5-byte
+value that is random per process (so two processes essentially never collide without any
+worker-ID assignment step at all), and a 3-byte counter that starts from a random offset
+and increments per document within that process. Coarser time resolution (seconds, not
+milliseconds) is tolerable because the 5-byte random field, not the timestamp, is doing
+most of the uniqueness work — the opposite division of labor from Snowflake, where the
+node ID is assigned and the sequence field is what a single caller burns through.
+
+**Hybrid Logical Clocks (HLC):** used by CockroachDB (and, in spirit, Google Spanner's
+TrueTime) for transaction-ordering timestamps rather than row IDs, HLCs are worth
+knowing as the answer to a question this design's clock-skew handling in §9 raises:
+what if you did not want to *tolerate* clock skew but wanted an ordering that a small
+skew cannot violate at all? An HLC timestamp pairs a physical-clock component with a
+logical counter that advances on every message exchange, so causally related events
+stay ordered even when physical clocks disagree by a bounded amount — the coordination
+that Snowflake avoids by trusting NTP, HLC avoids needing by tracking causality
+explicitly. The tradeoff is that an HLC is a *causality* tool embedded in a distributed
+protocol (every RPC carries and updates the clock), not a drop-in replacement for a
+standalone `nextId()` call — adopting one is a much larger design decision than swapping
+an ID generator.
 
 ---
 
@@ -497,6 +548,34 @@ four concurrent threads calling `nextId()`.
 
 ---
 
+### Runbook 5: Worker ID Pool Exhaustion During an Autoscaling Burst
+
+**Symptom:** New pods fail to start (or start but refuse to serve traffic) with
+`NoAvailableWorkerIdException` from the leasing service (§10's worker-ID budget
+example); autoscaling metrics show desired replica count above what actually came up.
+
+**Diagnosis:**
+1. Query the leasing service for current lease count vs the 32-worker-per-datacenter
+   ceiling: is the pool actually full, or is a crashed pod holding a stale lease?
+2. Check for crash-looping pods: `kubectl get pods --field-selector=status.phase=Failed`
+   — a pod that dies without releasing its lease holds the worker ID until the lease
+   TTL expires.
+3. Compare the lease TTL to the autoscaling scale-out cadence — a TTL longer than the
+   time between scale-out steps means legitimately-idle-but-not-yet-expired leases can
+   starve a genuine burst.
+
+**Mitigation:** Force-expire leases held by pods no longer present in the cluster
+(cross-reference lease holder IDs against live pod names). Temporarily raise
+`STRIPE_COUNT`-equivalent headroom by shifting some load to a datacenter ID with spare
+worker capacity, if the topology allows it.
+
+**Resolution:** Shorten the lease TTL to the smallest value that survives normal pod
+startup latency, and add an alert on worker-ID pool utilization crossing 80% per
+datacenter — the same kind of early-warning threshold as `cache.hit_rate` or clock-skew
+alerting elsewhere in this playbook.
+
+---
+
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Epoch Hardcoded in Two Places (Real incident, e-commerce SaaS, 2022)**
@@ -575,6 +654,25 @@ periodically. K-ordered IDs only help if insertion order respects the sort.
 
 ---
 
+**Pitfall 6: VM snapshot restore jumps the clock back by minutes, not milliseconds**
+Runbook 1 (§8) assumes NTP-scale drift — single-digit to tens of milliseconds. A
+hypervisor-level event is a different animal: restoring a VM from a snapshot, or
+resuming one after a host live-migration pause, can present the guest clock with a
+backward jump of seconds to minutes the instant the guest resumes, because the guest's
+clock was frozen at snapshot time while wall-clock time kept moving during migration.
+`MAX_CLOCK_SKEW_MS = 5` is not a "widen the threshold" situation here — a jump of that
+size means the generator should not wait, it should refuse to issue IDs until an
+operator (or an automated clock-sanity check) confirms the guest clock has resynced,
+because waiting out a multi-minute backward jump would itself stall every caller for
+minutes. **Fix:** treat any backward jump beyond a small multiple of
+`MAX_CLOCK_SKEW_MS` as a distinct alarm from ordinary NTP drift — page on it rather than
+looping in `waitForNextMs`, and gate the instance out of the load balancer until
+`chronyc tracking` reports sync. Cloud providers that support live VM migration
+(evacuation before host maintenance) are the common trigger; a generator that only
+tested against NTP-scale skew in staging will not have exercised this path.
+
+---
+
 ## 10. Capacity Planning
 
 ### Primary Bottleneck: Sequence Counter per Node
@@ -631,6 +729,35 @@ K-ordered (Snowflake) key:
 Net: the reduction is in buffer misses, index size and WAL volume — not split count.
 Quantify it on your own schema with pg_stat_statements and pg_relation_size before
 promising a number.
+```
+
+### Worked example: worker-ID budget across a multi-datacenter rollout
+
+```
+Layout budget: 5-bit datacenter field (32 DCs), 5-bit worker field (32 workers/DC) — see §2.
+
+Scenario: a service runs in 3 AWS regions (treated as 3 datacenter IDs: 0, 1, 2),
+autoscaling each region's pod count between 4 and 20 during business hours.
+
+Naive allocation: reserve worker IDs 0-19 per region statically for the max pod count.
+  Cost: 20 worker IDs reserved per DC × 3 DCs = 60 of the 96 available (32 × 3) worker
+  IDs permanently spoken for, even though the median pod count is ~6 — most reserved
+  IDs sit idle most of the day.
+
+Leased allocation (recommended): a small coordination service (a Kubernetes Lease
+object per worker ID, or a ZooKeeper ephemeral node) hands out worker IDs from a
+per-DC pool of 32 on pod startup and releases them on graceful shutdown.
+  Steady state: ~6 worker IDs in use per DC, 26 free for scale-out headroom.
+  Peak: 20 worker IDs in use per DC, 12 free — enough margin for one more autoscaling
+  step without exhausting the 32-worker budget.
+  Failure mode to guard against: a pod that crashes without releasing its lease holds
+  its worker ID until the lease's TTL expires — size the TTL well below the time it
+  takes autoscaling to need that ID back (e.g., a 60 s TTL against a 5-minute scale-out
+  cadence), or a crash-looping pod can starve the DC's worker-ID pool.
+
+This is the same tradeoff as Decision 6 in miniature: static reservation trades worker-
+ID headroom for zero coordination; a lease service trades a small amount of startup
+coordination for using the 32-worker budget efficiently across autoscaling.
 ```
 
 ---
@@ -723,6 +850,54 @@ appends amortise it across the ~80 rows that share a page. The correct interview
 "buffer-pool misses, index bloat and WAL volume", not "fewer splits" — and the magnitude is
 schema-dependent, so measure with `pg_relation_size` and `pg_stat_statements` rather than
 quoting a multiplier.
+
+---
+
+**Q: When would you choose a segment-based generator (Leaf segment mode, DB sequences) over a Snowflake-style generator?**
+When the clock is the resource you trust the least and the database is the one you
+trust the most. Segment mode claims a range of IDs from a DB table (e.g., `[max_id,
+max_id + 1000)`) with a background thread pre-fetching the next range before the
+current one drains, so no wall clock ever appears in an ID and there is no clock-skew
+failure mode at all — the tradeoff is that a DB outage which empties both the current
+and pre-fetched segment stalls every consumer of that table, and IDs are dense small
+integers with no self-describing timestamp, so debugging "when was this issued" needs
+the database's own audit trail rather than `IdInfo.parse()`. Choose Snowflake mode when
+the non-functional requirement is zero external calls anywhere near the hot path (as in
+§1 here); choose segment mode when the service already has a highly-available DB in its
+write path and wants simpler, gap-free-ish integers without a clock dependency.
+
+**Q: How does MongoDB's `ObjectId` solve the same uniqueness problem with a completely different bit budget?**
+It is 12 bytes, not 8, and splits the work differently: a 4-byte seconds-resolution
+timestamp, a 5-byte value that is random per process, and a 3-byte per-process counter.
+Because the 5-byte random field does most of the uniqueness work, two processes need no
+worker-ID coordination step at all — contrast with Snowflake, where uniqueness comes
+from an *assigned* node ID and the sequence field is what a single caller burns through
+in one millisecond. The cost is a coarser timestamp (seconds, not milliseconds) and 4
+extra bytes per ID versus this design's 8-byte long — a reasonable trade when IDs are
+stored as opaque BSON values rather than compared as raw 64-bit integers in a hot index.
+
+**Q: Why doesn't a Hybrid Logical Clock (HLC) just replace this generator's clock-skew handling?**
+Because it solves a different-shaped problem. This design tolerates clock skew by
+waiting or throwing on a single node's local clock; an HLC (used by CockroachDB, and in
+spirit by Spanner's TrueTime) instead tracks *causality* across an entire distributed
+protocol — every RPC carries and updates a logical counter alongside the physical clock,
+so causally related events stay ordered even when physical clocks disagree by a bounded
+amount. Adopting an HLC means embedding clock state in every message exchange across
+the system, not swapping one class's `waitForNextMs` method; it is the right tool when
+you need distributed transaction ordering (CockroachDB's actual use case), not a
+drop-in upgrade for a standalone `nextId()` call.
+
+**Q: The generator waits out clock skew up to 5 ms — what happens if a VM snapshot restore jumps the clock back by 90 seconds?**
+The 5 ms tolerance is sized for NTP-scale correction, not for a hypervisor event, so the
+generator correctly throws `ClockMovedBackwardException` rather than looping in
+`waitForNextMs` for 90 seconds — which is the right behavior, because silently waiting
+out a multi-minute jump would stall every caller on that node for the same 90 seconds.
+The operational response is different from ordinary NTP drift too: rather than widening
+`MAX_CLOCK_SKEW_MS`, treat a jump of that magnitude as a distinct page — pull the
+instance from the load balancer and wait for `chronyc tracking` (or the platform's clock
+sync signal) to confirm resync before returning it to service. This is common on cloud
+platforms that live-migrate VMs ahead of host maintenance, and it is a path worth
+testing explicitly rather than assuming NTP-scale test coverage exercises it.
 
 ---
 

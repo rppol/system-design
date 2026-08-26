@@ -254,6 +254,43 @@ def test_no_user_leakage(db: Connection) -> None:
     assert count == 0  # rollback from previous test guarantees isolation
 ```
 
+**Spinning up the database itself with `testcontainers`.** The `db_connection` fixture above
+assumes a Postgres instance is already listening on `localhost:5432` — something outside
+pytest (a hand-maintained `docker-compose` file, a CI service container) has to start it
+first. `testcontainers` [4.15.0] removes that assumption: the fixture launches its own
+throwaway Postgres container, waits for it to accept connections, and tears it down when
+the session ends, so no external setup step is required at all.
+
+```python
+# conftest.py — same fixture, backed by a throwaway container instead of a fixed host
+from collections.abc import Iterator
+
+import pytest
+import psycopg
+from psycopg import Connection
+from testcontainers.postgres import PostgresContainer
+
+@pytest.fixture(scope="session")
+def db_connection() -> Iterator[Connection]:
+    with PostgresContainer("postgres:16") as pg:
+        conn = psycopg.connect(
+            host=pg.get_container_host_ip(),
+            port=pg.get_exposed_port(5432),
+            user=pg.username,
+            password=pg.password,
+            dbname=pg.dbname,
+        )
+        yield conn
+        conn.close()
+```
+
+This is the "pytest + real DB (Docker)" integration-testing strategy from Section 4, and the
+tradeoff is worth stating honestly: a real Postgres container catches constraint violations,
+transaction semantics, and SQL-dialect behavior that a mock cannot fake, at the cost of
+requiring Docker and running slower than an in-memory fake. Keep it in the integration tier —
+a handful of tests exercising the database boundary — not the unit tier, where a container
+per test run would make developers stop running the suite locally.
+
 ### 6.2 @pytest.mark.parametrize
 
 ```python
@@ -567,6 +604,60 @@ def test_log_capture(caplog: pytest.LogCaptureFixture) -> None:
     assert caplog.records[0].levelname == "INFO"
 ```
 
+### 6.8 Deterministic time with `time-machine`
+
+A test that asserts on `datetime.now()` or `time.time()` directly is flaky by construction —
+it depends on the wall clock at the instant the test happens to run, so it can fail near a
+day or month boundary, on a slow CI runner, or under a different timezone, for reasons that
+have nothing to do with the code under test. `time-machine` [3.4.0] fixes this by travelling
+the process's notion of the current time to a fixed point for the duration of the test:
+
+```python
+import datetime as dt
+import time
+
+import time_machine
+
+@time_machine.travel("2026-01-01 12:00:00", tick=False)
+def test_subscription_expiry() -> None:
+    assert dt.datetime.now().year == 2026     # frozen, not the real wall clock
+    assert time.time() == dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC).timestamp()
+```
+
+`time-machine` patches at the C level — it swaps CPython's notion of the current time
+directly rather than monkeypatching `datetime`/`time` attributes module by module — which is
+why it measures faster than `freezegun` on the same test suite. `tick=False` freezes the
+clock completely; the default `tick=True` still lets time advance normally from the
+travelled point, which matters when a test needs elapsed-time behavior (a timeout, a TTL) to
+keep working relative to a known, fixed start.
+
+### 6.9 Mutation testing with `mutmut`
+
+Coverage answers "did this line run?"; it says nothing about whether the test that ran it
+would actually notice if the line were wrong. `mutmut` answers that question directly: it
+mutates the source — flips a comparison operator, changes a constant, deletes a line — one
+mutation at a time, reruns the test suite against each mutant, and records whether any test
+failed. A mutant the suite catches is **killed**; a mutant the suite lets through is a
+**survivor**, and a surviving mutant is a test gap that 100% line coverage cannot see,
+because the original line still executed — it was just never checked closely enough for the
+change to matter.
+
+```
+$ mutmut run
+- mutant: price *= 0.9   ->  price *= 1.1       SURVIVED   (no test asserts the exact value)
+- mutant: if is_member   ->  if not is_member    KILLED     (test_apply_discount caught it)
+
+Mutation score: 1/2 killed = 50%
+```
+
+This is the direct answer to "100% coverage that asserts nothing" — a suite that executes
+every line but never asserts anything precise about the result reaches 100% line coverage
+while killing zero mutants. The cost is real: `mutmut` reruns the entire test suite once per
+mutation, so a suite that runs in 2 minutes and produces 500 mutants takes on the order of
+hours to finish a full run. Schedule it as a nightly or weekly CI job judged on mutation
+score, not as a gate on every commit — running it like a fast unit-test check makes the
+pipeline too slow to use.
+
 ---
 
 ## 7. Real-World Examples
@@ -786,6 +877,10 @@ def test_send(mock_send): ...
 | `freezegun` | Freeze / travel time in tests | `pip install freezegun` |
 | `factory_boy` | Test object factories (replaces hand-rolled fixtures) | `pip install factory-boy` |
 | `pytest-mock` | Thin wrapper around `unittest.mock` — adds `mocker` fixture | `pip install pytest-mock` |
+| `--cov-branch` | Enables branch coverage in `pytest-cov`, so an untested `if`/`else` arm is caught, not just an untested line | Flag on `pytest-cov`, or `branch = true` under `[tool.coverage.run]` |
+| `testcontainers` | Spins up throwaway Docker containers (Postgres, Redis, Kafka) for real-dependency integration tests | `pip install testcontainers` |
+| `time-machine` | Deterministic time mocking; faster than `freezegun` because it patches at the C level | `pip install time-machine` |
+| `mutmut` | Mutation testing — mutates an operator or constant and asserts the suite fails | `pip install mutmut` |
 
 ### pyproject.toml Configuration
 
@@ -842,6 +937,19 @@ fail_under = 80
 An entirely untested 200-line feature lands with the build green, and there is room for 112 more such lines before anyone notices. The absolute floor is doing almost nothing at this codebase size, and the larger the repo grows the less it does — that is the arithmetic behind gating on **coverage delta** rather than absolute coverage. A `diff-cover` rule requiring 80 % on *changed lines only* would have rejected this PR at `0 %`, because its denominator is 200 rather than 5,200.
 
 **One more caution on `omit`.** Every path added to `omit` removes statements from `total`, so the reported percentage rises with no test written. Adding a large untested module to `omit` is the fastest way to "fix" a failing coverage gate and the fastest way to make the gate meaningless. Treat edits to `omit` as changes to the gate itself, and review them accordingly.
+
+#### Branch coverage: what `--cov-branch` catches that line coverage does not
+
+`fail_under = 80` above measures **line** coverage: whether the interpreter executed a statement at least once, never whether every branch out of it was tested. Add `--cov-branch` to `addopts` (or `branch = true` under `[tool.coverage.run]`) and `pytest-cov` starts counting **branches** too — for an `if`, that means the True arm and the False arm each need at least one test before it reports 100%, not just one of them.
+
+```python
+def apply_discount(price: float, is_member: bool) -> float:
+    if is_member:
+        price *= 0.9
+    return price
+```
+
+A single test — `apply_discount(100.0, True)` — executes every *line* in this function, so line coverage reports **100%**. It never executes the `False` path, so a bug where `is_member=False` should also apply a smaller discount, or should raise on a negative price, would ship with the coverage report showing the function fully covered. Branch coverage catches this directly: the `coverage.py` report marks that `if` a **partial** branch — shown as one of two arms taken — instead of the fully-covered green a line-only run gives it. Turning `--cov-branch` on is one flag; the value is that an untested `if`/`else` arm becomes visible in the same report you were already reading, instead of requiring a second tool.
 
 ---
 
@@ -926,6 +1034,16 @@ Setting `filterwarnings = ["error"]` in `pyproject.toml` converts every Python w
 **Short:** monkeypatch.setattr changes a module attribute for one test only, automatically restoring the original value after.
 
 `test_limit_five_broken` sets `limiter.LIMIT = 5` directly on the module object, and because Python modules are singletons shared across the test session, that change persists for every later test. This silently corrupts tests such as `test_rate_limit_boundary`, which then checks against the wrong limit with no indication of why. `monkeypatch.setattr("app.limiter.LIMIT", 5)` makes the same change but records the original value first, and pytest automatically restores it when the test function returns, regardless of whether the test passed or failed. This is the same automatic-teardown guarantee that makes `monkeypatch.setenv` and `monkeypatch.setattr` on object methods safe to use freely. Never mutate a module-level constant or global directly in a test; always route the change through `monkeypatch` so cleanup is guaranteed.
+
+**Q: What is the difference between line coverage and branch coverage, and what does branch coverage catch that line coverage misses?**
+**Short:** Line coverage checks a statement ran once; branch coverage checks every branch, like both arms of an if, ran.
+
+Line coverage — the `pytest-cov` default — checks whether each statement executed at least once during the run. Branch coverage, enabled with `--cov-branch` (or `branch = true` under `[tool.coverage.run]`), additionally checks whether every branch out of a decision point was taken: for an `if` without an `else`, that means both the True arm and the implicit "skip the block" False arm need a test before it counts as fully covered. A function like `if is_member: price *= 0.9` can reach 100% line coverage from a single test that only ever passes `is_member=True` — the False path never runs, and line coverage has no way to flag that, because every line it can see did execute. Branch coverage reports that same `if` as a partial branch until a second test exercises the False arm, which is exactly the gap a line-only coverage gate lets through silently.
+
+**Q: When does testing against a real containerized dependency beat mocking it?**
+**Short:** A real containerized dependency beats a mock whenever the bug lives in the dependency's own behavior, not in how your code calls it.
+
+Use a real dependency, via `testcontainers`, when the behavior under test lives in the dependency itself rather than in how your code calls it — a unique-constraint violation, a foreign-key cascade, a transaction isolation level, or a database-specific SQL dialect quirk. A mock can only return what you told it to return, so it cannot catch a case where your code's SQL is syntactically valid against a mock or an in-memory fake but violates a constraint, or behaves differently, against the real Postgres running in production. The tradeoff is real: Docker must be available, and a container per test session runs slower than an in-memory mock. That cost is why this belongs in the integration tier — a handful of tests exercising the database boundary — rather than the unit tier, where hundreds of fast, mock-based tests should still dominate.
 
 ---
 

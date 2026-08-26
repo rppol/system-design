@@ -376,6 +376,7 @@ fine_tuning
 alignment_and_rlhf
   alignment_and_rlhf.md  senior, principal
   grpo_and_rlvr.md       senior
+  rl_environments_and_agentic_rl.md  principal
 constitutional_ai
   constitutional_ai.md  -
 prompt_engineering
@@ -417,6 +418,7 @@ agents_and_tool_use
   computer_use_and_browser_agents.md    -
   reflexion_and_self_correction.md      -
   tree_of_thoughts_for_agents.md        -
+  agent_skills_and_progressive_disclosure.md  senior, principal
 agentic_workflow_patterns
   agentic_workflow_patterns.md  senior, principal
 agentic_frameworks
@@ -439,6 +441,7 @@ agentic_frameworks
   smolagents.md                         -
   strands_aws.md                        -
   structured_outputs_and_instructor.md  -
+  microsoft_agent_framework.md  -
 multi_agent_systems
   multi_agent_systems.md              senior, principal
   orchestrator_worker_pattern.md      senior, principal
@@ -560,6 +563,7 @@ case_studies
   design_image_generation_platform.md   -
   design_video_generation_platform.md   -
   design_voice_cloning_tts_platform.md  -
+  design_agent_platform.md  principal
 -->
 ## Learning Paths
 
@@ -592,7 +596,7 @@ specialized agent type. Nothing is dropped.
 | 13 | [advanced_rag](advanced_rag/advanced_rag.md) | 5 files |
 | 14 | [context_engineering](context_engineering/context_engineering.md) | module page only |
 | 15 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
-| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 11 files |
+| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 12 files |
 | 18 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
 | 20 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 3 files |
 | 21 | [mcp_model_context_protocol](mcp_model_context_protocol/mcp_model_context_protocol.md) | 4 files |
@@ -645,12 +649,12 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 |---|--------|-------|
 | 1 | [foundations_and_architecture](foundations_and_architecture/foundations_and_architecture.md) | module page only |
 | 8 | [fine_tuning](fine_tuning/fine_tuning.md) | 3 files |
-| 9 | [alignment_and_rlhf](alignment_and_rlhf/alignment_and_rlhf.md) | module page only |
+| 9 | [alignment_and_rlhf](alignment_and_rlhf/alignment_and_rlhf.md) | 2 files |
 | 12 | [rag_fundamentals](rag_fundamentals/rag_fundamentals.md) | 4 files |
 | 13 | [advanced_rag](advanced_rag/advanced_rag.md) | 3 files |
 | 14 | [context_engineering](context_engineering/context_engineering.md) | module page only |
 | 15 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
-| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 7 files |
+| 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 8 files |
 | 18 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
 | 19 | [agentic_frameworks](agentic_frameworks/agentic_frameworks.md) | module page only |
 | 20 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 4 files |

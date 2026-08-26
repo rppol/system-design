@@ -92,6 +92,28 @@ Total: ~240 bytes per live key (round to 250 B for planning)
 The `ReentrantLock` is a third of that and exists only for blocking `acquire()`. If a key
 only ever calls `tryAcquire()`, a lock-free-only variant drops to ~160 B/key.
 
+### Blocking `acquire()` waiter memory (virtual threads)
+
+```
+Per-waiter cost (Java 21+, parked on Condition.awaitNanos()):
+  Virtual thread object + stack chunk (idle, parked): ~200-500 B
+  AbstractQueuedSynchronizer wait-node:                ~48-64 B
+  Total per waiter:                                    ~600 B (rounded)
+
+10,000 waiters:   10,000 x 600 B  ~=  6 MB   — a rounding error
+100,000 waiters: 100,000 x 600 B  ~= 60 MB   — still cheap in isolation
+
+Compare to the platform-thread equivalent this replaces:
+  10,000 platform threads x ~1 MB stack           ~= 10 GB
+  -> ~1,700x cheaper per waiter, which is exactly why blocking acquire()
+     went from "never in production" to "fine, with a bound" post-Loom.
+
+The number that matters is not per-waiter cost — it is UNBOUNDED count.
+War story 4 (§9) is 50,000 waiters costing ~30 MB, which is cheap, but
+the backlog was still growing without limit because nothing capped it.
+Cheap-per-unit does not mean safe-unbounded.
+```
+
 ---
 
 ## 3. High-Level Architecture
@@ -364,6 +386,47 @@ public class MultiKeyRateLimiter {
 }
 ```
 
+### 4.5 Broken: refilling from a wall clock instead of a monotonic one
+
+The implementation above deliberately uses `System.nanoTime()`, not `System.currentTimeMillis()`. The difference looks cosmetic until an NTP step-correction happens on the host.
+
+BROKEN — wall-clock time can jump, both forward and backward:
+
+```java
+// BROKEN: currentTimeMillis() is wall-clock time — NTP can step it,
+// a hypervisor time-sync after a live migration can step it, and a
+// manual clock change can step it. None of that is "elapsed time."
+private void refillBroken() {
+    long now = System.currentTimeMillis();
+    long last = lastRefillMillis.get();
+    long elapsed = now - last;              // NEGATIVE if the clock stepped back
+    if (elapsed <= 0) return;                // silently stops refilling — not just
+                                              // for one interval, but for however
+                                              // long "now" stays behind "last"
+    long tokensToAdd = elapsed * refillRatePerMilli;
+    // ...
+}
+// A 1.2-second NTP step-back leaves lastRefillMillis 1.2s in the "future".
+// Every refill() call computes elapsed <= 0 and returns immediately until
+// wall-clock time catches back up — the bucket stops refilling for 1.2s
+// of real time, and every request in that window is wrongly rejected.
+// A step FORWARD is worse: elapsed is inflated, tokensToAdd overshoots,
+// and the bucket over-grants — the opposite failure, silent over-limiting.
+```
+
+FIX — `System.nanoTime()` is guaranteed monotonic non-decreasing within a single JVM (the JDK's own contract, independent of NTP or wall-clock adjustments):
+
+```java
+private void refill() {
+    long now = System.nanoTime();            // monotonic: unaffected by NTP steps,
+    long last = lastRefillNanos.get();        // DST, leap seconds, or manual clock changes
+    long elapsed = now - last;                // always >= 0 in practice
+    // ...
+}
+```
+
+`nanoTime()` trades wall-clock meaning for the monotonic guarantee — its absolute value is meaningless and must never be logged as a timestamp or sent across a process boundary (that is precisely why the distributed war story in §9 fixes its bug differently: there the fix is "use one shared clock," here it is "use the one clock that cannot be stepped"). Any duration/elapsed-time computation on a single JVM should default to `nanoTime()`; `currentTimeMillis()` is for telling humans what time it is, not for measuring intervals.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -377,6 +440,47 @@ public class MultiKeyRateLimiter {
 | Concurrent refill guard | CAS on `lastRefillNanos` | `synchronized` on refill | Exactly one thread refills per interval without locking the decrement path |
 
 **ABA problem analysis**: The CAS in `tryAcquire()` checks `tokens.compareAndSet(current, current - SCALE)`. If `current` was 100×SCALE, dropped to 99×SCALE, then refilled back to 100×SCALE by another thread, and our stale CAS fires — we consume a token that was just refilled. This is acceptable: the bucket semantics hold (we consume exactly one token that exists). The ABA problem is harmful only when you care about *which specific* transition occurred; here only the existence of a token matters.
+
+### Decision 6 — Virtual threads reopen a tradeoff that used to be closed
+
+Before Java 21, this file's blocking `acquire()` was in practice a trap: parking a caller on `Condition.awaitNanos()` holds whatever thread called it, and if that thread is a platform thread (~1 MB stack, one per OS thread), 10,000 blocked callers cost ~10 GB of stack space and 10,000 OS threads the scheduler has to context-switch between. That is why every production rate limiter defaults to `tryAcquire()` + HTTP 429: shedding was not really a choice, it was the only option that did not risk an OOM or a starved thread pool under load.
+
+Virtual threads change the arithmetic, not the correctness. `acquire()`'s logic is byte-for-byte the same — a token bucket still bounds *requests*, not threads, and nothing about its refill correctness depends on what kind of thread called it. What changes is the cost of waiting: a virtual thread parked on `Condition.awaitNanos()` unmounts from its carrier and costs only its stack chunk (starting at a few hundred bytes, growing as needed) plus the `AbstractQueuedSynchronizer` wait-node — low hundreds of bytes, not a megabyte. 10,000 callers blocked on the same bucket is now a rounding error in heap, not an incident. Worth noting precisely why: `ReentrantLock` and its `Condition` are `java.util.concurrent` locks, built on `LockSupport.park()`, and virtual threads have unmounted cleanly from those since JEP 444 landed in Java 21 — this was never a pinning case. Pinning applied to `synchronized` blocks and `Object.wait()`, fixed separately by JEP 491 in Java 24; the remaining pinning cause today is a native frame — JNI or an FFM downcall — on the carrier's stack, not a `java.util.concurrent` wait. So this code did not need to change to become virtual-thread-safe; only the cost model of calling it changed.
+
+That reopens a design choice that looked settled: queue (block until a token is free, up to a deadline) versus shed (reject now with a 429). Queueing is no longer dangerous, but it is not free of tradeoffs either — it raises tail latency for the caller (a request that would have failed fast now waits, possibly past its own SLA budget) and it hides overload from anyone watching requests-per-second dashboards instead of latency percentiles, because the requests are still "succeeding," just slowly. Shedding stays the more honest signal — the caller finds out immediately and can retry, back off, or surface an error to a human — at the cost of a visible failure. The right call is still workload-dependent: an internal batch job with no user waiting on it is a good candidate for `acquire()` with a generous timeout; a synchronous user-facing request should keep shedding, because a virtual thread being cheap to park does not make the human waiting behind it any more patient. Either way, an unbounded `acquire()` with no timeout is still wrong under virtual threads for the same reason it always was: it trades one kind of resource exhaustion (thread stacks) for another (unbounded queue depth) — see War story 4 in §9, and §10 for the arithmetic on bounding it.
+
+The same limiter instance can legitimately serve both answers, chosen per call site rather than globally:
+
+```java
+// Synchronous, user-facing: shed. The human is waiting; give them an answer.
+public Response handleCheckout(Request req) {
+    if (!limiter.tryAcquire()) {
+        return Response.status(429).header("Retry-After", "1").build();
+    }
+    return process(req);
+}
+
+// Internal batch job, no human waiting: queue — but with BOUNDED admission,
+// which is the fix War story 4 (§9) is named after. Unbounded acquire()
+// calls fired as fast as a source queue can produce them is a different
+// bug from a bounded one; this caps concurrent waiters explicitly.
+public void reconcileBatch(List<Record> records) throws InterruptedException {
+    Semaphore admission = new Semaphore(500);   // cap concurrent waiters, not just threads
+    for (Record r : records) {
+        admission.acquire();
+        Thread.startVirtualThread(() -> {
+            try {
+                limiter.acquire();              // safe to block: cheap on a virtual thread
+                process(r);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } finally {
+                admission.release();
+            }
+        });
+    }
+}
+```
 
 ---
 
@@ -392,6 +496,10 @@ public class MultiKeyRateLimiter {
 
 **Stripe API rate limiter**: their engineering post "Scaling your API with rate limiters" describes *four* cooperating limiters, all backed by Redis, which is a more useful decomposition than a single bucket. (1) A **request rate limiter** — a token bucket per user, the algorithm in this case study. (2) A **concurrent requests limiter**, which bounds how many of a user's requests may be in flight simultaneously rather than how fast they arrive; it uses a Redis sorted set of in-flight request IDs scored by timestamp, so stalled requests age out. This catches the caller who sends few but very expensive requests — a rate limit alone will not. (3) A **fleet usage load shedder**, the same mechanism keyed globally instead of per-user, reserving capacity for critical traffic when the fleet as a whole is saturated. (4) A **worker utilization load shedder**, which sheds by request importance based on how loaded the workers are. The lesson to take: "rate limiting" is not one control. Arrival rate, concurrency, and global saturation are three distinct failure modes and each needs its own limiter.
 
+**GitHub REST API rate limiting**: exposes state through response headers rather than forcing clients to guess — `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset` (a Unix timestamp) on every response, so a well-behaved client can self-throttle before it is rejected rather than after. GitHub separates two distinct limiters the same way this case study separates concerns: a **primary** rate limit (the published per-hour quota, `x-ratelimit-remaining` reaches 0) and a **secondary** rate limit (an abuse detector for request bursts, concurrent requests, or expensive endpoints hit too quickly) — exceeding either returns 403 or 429, but only the secondary-limit response reliably carries a `retry-after` header telling the client exactly how many seconds to wait, which GitHub's own guidance says to obey literally rather than computing your own backoff. The lesson mirrors Stripe's: a single "requests per hour" number is not the whole rate-limiting surface, and a real API needs a documented contract for what a client should do when throttled, not just a number to stay under.
+
+**Envoy Proxy rate limiting**: two mechanisms at two different scopes. The **local rate limit filter** runs a token bucket inside each Envoy instance — no network hop, sub-microsecond, but the limit is per-instance and does not coordinate across the fleet, the same tradeoff this case study's in-process tier has in §3's two-tier design. The **global rate limit service** integration calls out over gRPC to a shared rate-limiting service (Envoy's reference implementation, `envoyproxy/ratelimit`, is itself Redis-backed) for a cluster-wide decision, trading a network round trip for one authoritative counter — architecturally the same shape as the Redis Lua tier in §3, just pushed to the proxy layer instead of application code. Running local-then-global in front of a service is the mesh-layer version of this case study's two-tier design: cheap local shedding of obvious abuse, precise global enforcement of the contractual quota.
+
 ---
 
 ## 7. Technologies & Tools
@@ -404,6 +512,8 @@ public class MultiKeyRateLimiter {
 | Redis Lua token bucket | Token bucket | ~2K checks/sec/key | Cluster-wide | Atomic, clock from Redis | > 2K checks/sec per key |
 | NGINX `limit_req` | Leaky bucket | Millions (kernel) | Per-instance | No app code | Need burst tolerance |
 | Kong/API Gateway plugin | Sliding window counter | Millions (kernel) | Cluster-wide | Per-endpoint policies | Custom auth needed |
+| Envoy local rate limit filter | Token bucket | Sub-microsecond | Per-instance | Mesh sidecar, no app code | Need cluster-wide enforcement |
+| Envoy global rate limit service | Sliding window / bucket (impl-defined) | Network-bound (gRPC hop) | Cluster-wide | One authoritative decision per key | Simpler in-app Redis call suffices |
 
 Measured, single hot key, 8-core machine (absolute numbers are machine-specific; the shape
 is the point — re-run it on your own hardware before quoting any of these):
@@ -435,12 +545,16 @@ Counter.builder("rate_limiter.rejected")
     .tag("key", keyName).register(registry);
 Timer.builder("rate_limiter.acquire.wait")
     .tag("key", keyName).register(registry);  // only non-zero on blocking acquire
+Gauge.builder("rate_limiter.acquire.waiting", waiterCount, AtomicInteger::get)
+    .tag("key", keyName).register(registry);  // in-flight blocking acquire() callers —
+                                               // the metric Runbook 4 (§8) keys on
 ```
 
 Alert thresholds:
 - `rate_limiter.rejected` > 5% of total requests for > 60 s → investigate traffic surge or misconfiguration
 - `rate_limiter.tokens.available < 10%` of max for > 120 s → sustained overload; may need capacity review
 - Redis Lua `rate_limiter.acquire.wait p99 > 5 ms` → Redis latency degraded; check cluster health
+- `rate_limiter.acquire.waiting` growing monotonically for > 5 min → unbounded blocking backlog (see Runbook 4); deploy admission-control cap
 
 ### b) Distributed trace span
 
@@ -449,6 +563,14 @@ HTTP handler span (15 ms total)
   ├── rate_limiter.tryAcquire (0.1 ms)   ← tag: allowed/rejected, key type
   ├── auth.verify (1 ms)
   └── downstream.call (12 ms)
+```
+
+For a call site using blocking `acquire()` instead (§5, Decision 6), the wait itself should be its own span rather than folded into the handler total — the two failure modes ("slow because rate-limited" vs "slow because downstream is slow") look identical on an undifferentiated timeline and identical to on-call unless the trace names the wait explicitly:
+
+```
+Batch worker span (2,400 ms total)
+  ├── rate_limiter.acquire (2,100 ms)    ← tag: waited=true, tokens_available_at_start
+  └── downstream.call (300 ms)
 ```
 
 ### c) Incident Runbooks
@@ -495,6 +617,21 @@ Diagnosis: inactive keys are never evicted; e.g., each unique IP address gets it
 Mitigation:
 1. Deploy eviction task: `limiters.entrySet().removeIf(e -> e.getValue().lastUsed() < cutoff)`.
 2. Use `CaffeineCache` with `expireAfterAccess(1 hour)` as the backing map for automatic eviction.
+
+---
+
+**Runbook 4 — Virtual-thread waiter backlog growing on blocking `acquire()`**
+
+Symptom: heap usage climbing steadily under a batch or backfill workload that uses blocking `acquire()`; no `OutOfMemoryError` yet, but trending toward the container memory limit.
+
+Diagnosis:
+1. Add a gauge for waiters: `AtomicInteger` incremented before `acquire()` blocks, decremented after it returns — export as `rate_limiter.acquire.waiting`.
+2. If `rate_limiter.acquire.waiting` grows without bound while `tokens.available` stays near 0, the submission rate is outrunning the configured `tokensPerSecond` with no admission cap — the exact shape of War story 4 (§9).
+3. Confirm via thread dump: a large, growing count of virtual threads parked in `Condition.awaitNanos()` for this limiter.
+
+Mitigation: deploy a `Semaphore`-bounded admission gate in front of the submission loop (see the `reconcileBatch` example in §5, Decision 6) sized to a small multiple of `burstCapacity`. This does not change the limiter's enforced rate — it only bounds how many callers may be waiting for a token at once.
+
+Resolution: add the waiter gauge to standard dashboards for any service using blocking `acquire()`; alert on sustained growth, not just on OOM.
 
 ---
 
@@ -563,6 +700,37 @@ boolean ok = limiter.tryAcquire(principal);
 
 ---
 
+### War story 3 — An NTP step-back froze refill for 90 seconds
+
+**Scenario**: internal rate limiter guarding a third-party payments API with a hard contractual quota (fail-closed by policy — see the fail-open/fail-closed Q&A in §11). Implemented against `System.currentTimeMillis()`, before this case study's `nanoTime()` fix (§4.5) was adopted.
+
+**Symptom**: every request across one availability zone returned 429 for roughly 90 seconds, with `rate_limiter.tokens.available` flat-lined mid-value — neither draining nor refilling — which ruled out the "just busy" explanation the on-call started with.
+
+BROKEN, same root cause as §4.5, at incident scale:
+
+```java
+long elapsed = System.currentTimeMillis() - lastRefillMillis;
+if (elapsed <= 0) return;   // no refill happens while wall-clock is "behind"
+```
+
+**Root cause**: the host's NTP daemon applied a step correction (not a gradual slew) after a virtualization host migration, moving the wall clock backward by 1.4 seconds in one jump. `elapsed` went negative on every subsequent call until real time caught back up to the pre-step value — 90 seconds later. For that entire window, `refill()` returned immediately every time, tokens were never added, and the bucket rejected everything once the existing burst capacity drained (about 4 seconds in, at this service's 25-token burst and 100 req/sec inbound rate).
+
+**Impact**: 86 seconds of full outage to that AZ (429 on every request, not a degraded rate), an estimated 8,600 rejected checkout calls at the service's peak traffic, and a page that took 40 minutes to root-cause because the metrics looked like "stuck," not "wrong clock." The fix was the `nanoTime()` change now baked into §4.4 — after it shipped, three subsequent step corrections on the same fleet produced zero rate-limiter impact.
+
+---
+
+### War story 4 — Unbounded blocking `acquire()` under virtual threads still ran the process out of memory
+
+**Scenario**: a batch reconciliation job migrated its worker loop from a fixed platform-thread pool to `Executors.newVirtualThreadPerTaskExecutor()`, and the team took the opportunity to switch from `tryAcquire()` + a manual retry loop to a plain blocking `acquire()` against a shared rate limiter, reasoning (correctly, per §5 Decision 6) that virtual threads made blocking cheap.
+
+**Symptom**: the job's heap grew steadily over a multi-hour run and was killed by the container's memory limit before finishing, despite the `acquire()` call itself being correct and the rate limiter enforcing its configured rate exactly as intended.
+
+**Root cause**: the submission loop had no concurrency cap — it fired one virtual thread per unit of work as fast as the source queue could produce them, each immediately calling `acquire()` and parking. At a limiter rate of 50 tokens/sec against a queue producing 50,000 units/sec, the steady state was roughly 50,000 waiting virtual threads at any moment. Each waiter is cheap individually (§5 puts it at low hundreds of bytes for the parked continuation plus its `AbstractQueuedSynchronizer` node), but cheap times unbounded is still unbounded: at ~600 bytes/waiter the backlog alone cost ~30 MB per 50,000 queued callers, and the backlog grew without limit because production outran consumption by three orders of magnitude — virtual threads had removed the thread-count ceiling that used to cap this mistake by accident.
+
+**Impact**: three OOM-kills over one release before the pattern was diagnosed; the job never completed a full run. **Fix**: cap in-flight submissions with a `Semaphore` sized to a small multiple of the limiter's burst capacity, so the number of *waiting* virtual threads is bounded regardless of how fast the source can produce work — the rate limiter was never the problem, the missing admission control in front of it was. This is the same lesson §5 closes on: virtual threads make `acquire()` safe to call, they do not make an unbounded queue of callers safe to have.
+
+---
+
 ### Failure scenarios summary
 
 | Failure | Symptom | Recovery Strategy | Time-to-Recovery |
@@ -571,6 +739,8 @@ boolean ok = limiter.tryAcquire(principal);
 | Clock skew across app servers | Rate inconsistent per server | Use Redis `TIME` in Lua | Config deploy |
 | Hot key on single Redis shard | Latency spike on one key | Shard/partition key space | Minutes |
 | Memory growth from inactive keys | OOM in `MultiKeyRateLimiter` | Evict keys inactive > threshold | On next eviction cycle |
+| NTP step-back on wall-clock refill | Refill frozen; false 429s despite available capacity | Use `System.nanoTime()` for elapsed-time math | Immediate (once deployed) |
+| Unbounded virtual-thread backlog on blocking `acquire()` | Heap growth / OOM despite correct rate enforcement | Cap in-flight callers with a `Semaphore` | Immediate (once deployed) |
 
 ---
 
@@ -625,6 +795,65 @@ For a blocking acquire() call:
   Example: SLA 50 ms, downstream 30 ms → allow up to 15 ms wait.
 ```
 
+### Sliding-window-log vs sliding-window-counter: the memory number that kills naive designs
+
+§11 compares these two algorithmically; the choice is actually decided by memory once real numbers are written down — "store every timestamp" sounds cheap for one key and is not cheap for a million.
+
+```
+Inputs:
+  Active keys (e.g., authenticated users hitting the API in a rolling hour): 1,000,000
+  Per-key limit: 100 requests / 60-second window
+  Interesting case: keys near their limit, since that is exactly when memory peaks —
+    a mostly-idle key stores almost nothing either way.
+
+Sliding window LOG (Redis sorted set, one ZADD per request, score = timestamp):
+  Per-entry cost: 8 B score + ~16 B member (request ID or timestamp-as-string)
+                  + ~40-56 B Redis object/skiplist-node overhead
+                  ~= 70-80 B per stored request
+  A key at its limit holds up to 100 entries (one window's worth):
+    100 x 75 B ~= 7.5 KB per saturated key
+  At 1,000,000 saturated keys:
+    1,000,000 x 7.5 KB ~= 7.5 GB
+  This is the number that kills the naive design: memory scales with
+  (limit x active keys), not with active keys alone. Doubling the
+  per-key limit doubles total memory even if traffic never changes —
+  raise the limit to 10,000 req/window and the same fleet costs ~750 GB.
+
+Sliding window COUNTER (two integer counters + one timestamp per key):
+  current_window_count (8 B) + previous_window_count (8 B) + window_start_ts (8 B)
+  + Redis hash overhead (~40 B)
+  ~= 64 B per key, regardless of the limit
+  At 1,000,000 keys:
+    1,000,000 x 64 B ~= 64 MB
+```
+
+Ratio at these inputs: roughly 117x. And the counter's memory is **constant** in the per-key limit — raising the limit from 100 to 10,000 req/window changes the log's cost by 100x (~750 GB) and changes the counter's cost by exactly 0. That asymmetry is the real argument for sliding-window-counter over sliding-window-log in production: the log is more accurate (no overlap-weighting approximation), but its memory is a function of traffic volume, and an attacker or a bug that spikes one key's request rate spikes that key's Redis memory in lockstep — the counter is not just cheaper, it is memory-safe under abuse in a way the log structurally cannot be.
+
+The `TokenBucketRateLimiter` in this case study is already shaped like the counter, not the log — it stores two `AtomicLong`s per key (~240 B, per §2), not one entry per request — which is why its in-process 1M-key memory (~250 MB) lands in the same order of magnitude as the Redis sliding-window-counter's 1M-key number: no network-object overhead, no window-boundary bookkeeping at all, just a running total.
+
+### Admission-control sizing for blocking `acquire()`
+
+```
+Given: batch job submitting work at up to 50,000 units/sec (source rate)
+       limiter enforces 50 tokens/sec (target sustained rate)
+       burstCapacity = 200 tokens
+
+Admission cap should bound WAITING callers, not attempt to match source
+rate to limiter rate (that is the limiter's own job):
+  admission_permits = k x burstCapacity,  k in [2, 5]
+  Example: k = 3 -> admission_permits = 600
+
+At steady state with the cap in place:
+  600 callers waiting at any moment x ~600 B/waiter (see §2)  ~= 360 KB
+  -> negligible, and now BOUNDED regardless of how far source rate
+     outruns the limiter's 50/sec (the gap just makes callers wait
+     longer for a permit, not consume more memory).
+
+Without the cap (War story 4's actual incident):
+  Backlog growth rate = source_rate - limiter_rate = 50,000 - 50 = 49,950/sec
+  -> unbounded within the observation window; the only ceiling is OOM.
+```
+
 ---
 
 ## 11. Interview Discussion Points
@@ -661,3 +890,15 @@ Fixed window is the cheapest (two counters: this window + last window key, incre
 
 **Q: How would you extend this to a leaky bucket (smooth output rate) instead?**
 The token bucket allows bursts (fill up, then consume at any rate up to burst capacity). The leaky bucket enforces a smooth output rate by queuing requests and draining them at exactly R/sec. Implementation: instead of returning immediately when a token is available, schedule the request to execute at `last_scheduled + 1/R` seconds, accumulating a queue. `Guava RateLimiter` implements this with `acquire()` returning the wait time rather than blocking — callers can sleep their allocated slot. Use leaky bucket when smooth, even output matters (e.g., outbound API calls to avoid spiking a partner's backend); use token bucket when burst tolerance matters (e.g., inbound API traffic from real user sessions).
+
+**Q: How do virtual threads change the tryAcquire()-vs-acquire() design decision?**
+They change the *cost* of blocking, not the *correctness* of either option. Pre-Loom, a blocking `acquire()` parked whatever thread called it — a platform thread costs about 1 MB of stack, so 10,000 blocked callers meant roughly 10 GB of stacks and 10,000 OS threads to schedule, which is why production rate limiters defaulted to `tryAcquire()` + HTTP 429 almost universally. A virtual thread parked on the same `Condition.awaitNanos()` unmounts from its carrier and costs low hundreds of bytes, so the same 10,000 waiters become a rounding error. That reopens queueing as a real option for workloads that can tolerate the added tail latency (internal jobs, async pipelines) — but user-facing synchronous paths should usually keep shedding, because the tradeoff was never really about thread cost; it is about whether hiding overload behind added latency is acceptable for that caller. And an unbounded `acquire()` is still wrong: cap the waiters with a `Semaphore`, or you trade thread-stack exhaustion for queue-depth exhaustion (see War story 4 in §9).
+
+**Q: Does this rate limiter's `ReentrantLock`/`Condition` pinning risk change with JEP 491?**
+No, because it was never at risk. JEP 491 (Java 24) stopped `synchronized` blocks and `Object.wait()` from pinning a virtual thread's carrier — neither of which this implementation uses. `ReentrantLock` and its `Condition` are `java.util.concurrent` primitives built on `LockSupport.park()`, and virtual threads have unmounted cleanly from those since virtual threads themselves shipped in JEP 444 (Java 21). The remaining pinning cause today, on any JDK from 24 onward, is a native frame on the carrier's stack — a JNI call or a Foreign Function & Memory downcall — which has nothing to do with this code path.
+
+**Q: Why does sliding-window-counter beat sliding-window-log at scale, in concrete numbers?**
+Because the log's memory scales with `limit × active keys` while the counter's scales with `active keys` alone. At 1,000,000 active keys and a 100-requests/60s limit, a Redis sorted-set log costs roughly 75 bytes per stored request and a saturated key holds up to 100 of them — about 7.5 GB fleet-wide. The counter stores two integers and a timestamp per key regardless of the limit — about 64 MB for the same million keys, roughly two orders of magnitude less. Raise the per-key limit to 10,000 and the log's memory grows 100x in lockstep (~750 GB) while the counter's does not move at all, which is also why the log is not just more expensive but less safe under abuse — a spike in one key's request rate is a spike in that key's memory footprint. The counter trades a small amount of accuracy (weighted-overlap approximation instead of an exact request list) for memory that is bounded independent of traffic.
+
+**Q: How does GitHub's primary/secondary rate-limit split compare to Stripe's four-limiter decomposition?**
+Both reject the idea of "one number, one limiter," but they split the problem along different axes. Stripe separates by *failure mode* — arrival rate, in-flight concurrency, and fleet-wide saturation are each a distinct way a client can hurt the backend, so each gets its own limiter. GitHub separates by *intent* — the primary limit is a published, predictable quota a well-behaved client can plan around using the `x-ratelimit-*` headers, while the secondary limit is an undisclosed-threshold abuse detector meant to catch patterns (bursts, expensive-endpoint hammering) that a fixed hourly quota would miss or would have to be set uncomfortably low to catch. The common thread with this case study's own two-tier design (§3): a single token bucket is a good primitive, but a production rate-limiting *system* is usually several of them, each answering a different question about the traffic.

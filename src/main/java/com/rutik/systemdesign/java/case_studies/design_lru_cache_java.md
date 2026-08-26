@@ -111,6 +111,44 @@ them lengthens GC reference-processing. Soft references also keep objects alive
 until the heap is nearly full, so they trade a hard failure for a slow one.
 ```
 
+### Compact object headers (JEP 519, Java 25)
+
+JEP 519 turned compact object headers into a supported product feature
+(`-XX:+UseCompactObjectHeaders`, the default from JEP 534): every object header drops
+from 12 bytes to 8. Objects stay 8-byte aligned, so the saving survives only if the
+freed 4 bytes were not already absorbed by an alignment gap — check the layout, don't
+assume it.
+
+Reworking the `LinkedHashMap.Entry` layout from above with an 8-byte header:
+
+```
+header (compact):              8 bytes   (was 12)
+int hash:                      4 bytes
+key, value, next:              4 bytes each = 12
+before, after (access-order):  4 bytes each =  8
+alignment gap:                 0 bytes   (32 is already 8-byte aligned; was 4)
+Instance size:                32 bytes   (was 40)
+```
+
+The 4-byte header saving and the 4-byte gap it eliminates compound here — this entry
+gets the full 8-byte win, not a partial one. That is not guaranteed in general: an
+object whose non-header fields already land on an 8-byte boundary keeps its alignment
+gap and the saving is smaller, or zero.
+
+Applied to the 10M-entry cache above:
+
+```
+Overhead: 10M × 32 B + 67 MB (table, unaffected by header size) = 387 MB   (was 467 MB)
+Live heap: 5.0 GB + 0.39 GB = 5.39 GB                                     (was 5.47 GB)
+Saved: ~80 MB, ~1.5% of total live heap
+```
+
+Modest here because payload (5.0 GB of `value` objects) dominates entry overhead, so
+the saving does not move the `-Xmx9g` sizing decision. It matters more for a cache of
+many small values — short strings, boxed primitives, small records — where per-entry
+overhead is a much larger fraction of the total, and it applies to every
+collection-heavy JVM service, not only this one.
+
 ---
 
 ## 3. High-Level Architecture
@@ -443,6 +481,47 @@ and replays it later.
 
 **When LRU is the wrong algorithm**: production access is Zipfian — a few keys very hot, a long cold tail. A sequential scan over a large dataset touches many cold keys, each briefly becoming "recently used" and evicting hot keys. Caffeine's W-TinyLFU maintains a Count-Min frequency sketch and only admits a new key if it is estimated to be accessed more often than its candidate victim — scan-resistant by construction. Use LRU for short-window recency bias (CDN, session caches); use W-TinyLFU for general application caches.
 
+**Virtual threads change the contention story, not the throughput ceiling (Java 21+).**
+The single `synchronized` lock in §4.1–4.3 was always the bottleneck behind §2's
+throughput numbers — a global monitor caps `get()`/`put()` at whatever one core can
+enter and exit the lock at, roughly 15M ops/sec at 32 platform threads versus 53M at
+one. Virtual threads do not raise that ceiling; if anything they make it more likely to
+be hit, because a virtual-thread-per-request service can put orders of magnitude more
+concurrent callers in front of the same cache than a platform-thread pool of ~200 ever
+could. What virtual threads change is what happens when callers pile up on the lock.
+
+Before JEP 491 (Java 21–23): a virtual thread blocked on `synchronized` pinned its
+carrier — it could not be unmounted while waiting for the monitor. Enough concurrent
+`get()` calls queuing on the single cache lock could occupy every carrier in the
+`ForkJoinPool` simultaneously, and unrelated virtual-thread work elsewhere in the same
+JVM stalled even though the cache itself was not the workload's real bottleneck. It is
+the same carrier-starvation shape as the busy-spin pitfall in
+`design_snowflake_id_generator_java.md` §9 — a monitor and a busy-spin defeat unmounting
+by different mechanisms but with the same JVM-wide consequence.
+
+Since JEP 491 (Java 24+): blocking on `synchronized` releases the carrier normally, so
+the failure mode degrades from "carriers starve and the whole service stalls" to
+ordinary lock contention — callers queue for the cache lock, `get()` latency rises, but
+other virtual-thread work on the same carriers keeps proceeding. Better, but still a
+queue: the lock is still one monitor serialising every reader, which is exactly why the
+production answer is the striped `ConcurrentHashMap` design in §4.5, or Caffeine's
+lock-free ring buffer in §6 — both remove the shared monitor rather than merely
+surviving contention on it better.
+
+**Decision 6: on-heap `SoftReference` vs off-heap storage.** `SoftReference` (chosen
+above) keeps every entry inside the Java heap, so it bounds the *risk* of OOM but does
+nothing for GC *pause time* — a 10M-entry cache is still 10M live objects the collector
+must trace on every major cycle, soft-reference-wrapped or not. When GC pause time, not
+heap capacity, is the binding constraint, the alternative is off-heap storage: a library
+like Chronicle Map serializes entries into memory outside the Java heap (backed by a
+memory-mapped file), so the collector sees zero live objects for the cache regardless of
+entry count — at the cost of a serialize/deserialize step on every `get()`/`put()`,
+roughly 100 ns–1 µs depending on value size and serializer versus single-digit ns for an
+in-heap reference. `SoftReference` answers "the cache might cause an OOM"; off-heap
+answers "the cache's own liveness is inflating every GC pause," a question
+`SoftReference` cannot touch, because the heap stays full of cache objects right up
+until the collector decides to reclaim them.
+
 ---
 
 ## 6. Real-World Implementations
@@ -453,9 +532,31 @@ and replays it later.
 
 **Redis** (L2 tier): sorted set (`ZADD key score member`) with score = `System.currentTimeMillis()` gives distributed LRU. More commonly, Redis uses its own LRU approximation (samples N random keys and evicts the oldest) — `maxmemory-policy allkeys-lru`. Not true O(1) LRU but approaches it at large sample sizes with much less memory overhead (no per-key timestamp stored in a list).
 
+**Chronicle Map** (off-heap): a Java `Map` implementation backed by a memory-mapped
+file outside the Java heap, so entries are never scanned or moved by GC — the design
+point discussed as Decision 6 above. Access requires serializing keys/values in and out
+of the off-heap region, which trades single-digit-nanosecond in-heap access for
+sub-microsecond serialization overhead. Used when a cache must hold tens of gigabytes
+without contributing to GC pause time, or must be shared across JVM processes on the
+same host via the same memory-mapped file.
+
 **Memcached**: true LRU per slab class (memory-size bucketed). The "slab calcification" problem occurs when the working set shifts size distribution — a slab full of large items will not shrink to accommodate many small items. Memcached 1.5+ introduced slab automover, but this remains an operational concern that Redis avoids with its unified allocator.
 
 **CPU hardware cache** (reference point): uses pseudo-LRU (approximated from tree bits per cache set) because true LRU hardware would require one timestamp per cache line. This is the same engineering tradeoff as probabilistic LRU in software — exact ordering is expensive; approximate ordering is good enough.
+
+**Linux page cache** (reference point, kernel-level): the kernel's own page cache —
+the one every `read()` on a regular file consults before touching disk — does not
+implement single-list LRU either, for the same "one global list, one global lock"
+reason this case study's Level 2 design does not scale. Since the 2.6 kernel it splits
+pages into *active* and *inactive* lists (further split by anonymous vs file-backed, so
+several lists per NUMA node): a page lands on the inactive list and is promoted to
+active only after a second access, and reclaim (`kswapd` / direct reclaim) scans the
+inactive list first. List mutations are batched through per-CPU `pagevec` structures so
+a single access does not take the global list lock every time — the same idea as this
+case study's `ConcurrentLruCache` moving reorder work off the hot path, just batched
+per-CPU instead of per-thread. It is the same lesson at a different layer of the stack:
+true LRU does not survive contact with real concurrency anywhere, not only in
+user-space caches.
 
 ---
 
@@ -467,6 +568,7 @@ and replays it later.
 | Guava Cache | Segmented LRU | ~200k ops/sec | Medium | Built-in stats | Legacy codebases |
 | **Caffeine** | W-TinyLFU | Lock-free reads; scales with cores | Medium | Lock-free reads, scan-resistant | In-process production standard |
 | Redis `allkeys-lru` | Approximate LRU | Millions/sec (cluster) | Distributed | Multi-JVM, TTL built-in | Shared cache across services |
+| Chronicle Map | Configurable | Sub-µs (serialization-bound) | Off-heap | Zero GC scan cost | GC-pause-sensitive SLA, huge caches |
 | Memcached | True LRU per slab | Millions/sec | Distributed | Simple protocol | Read-heavy, object store |
 | Hazelcast near-cache | LRU / LFU | ~500k ops/sec | Distributed | Cross-JVM invalidation | Need consistency guarantees |
 
@@ -549,6 +651,27 @@ Mitigation: instrument: `assert cache.get(k) != null` immediately after `cache.p
 
 ---
 
+### d) Enabling compact object headers in production
+
+```
+Flag: -XX:+UseCompactObjectHeaders (opt-in through Java 25, JEP 519; default from
+Java 27, JEP 534)
+
+Rollout checklist:
+  1. Enable on one canary instance; compare heap histograms
+     (jcmd <pid> GC.class_histogram) before/after — Entry instance size should drop
+     from 40 to 32 bytes exactly as computed in §2.
+  2. Watch any dashboard that estimates "cache heap used" as entry count times a
+     hardcoded per-entry byte constant: that constant is now wrong by 8 bytes/entry.
+     Update the constant, don't just trust the flag silently.
+  3. No application code change needed — the flag changes object layout, not the
+     LinkedHashMap or ConcurrentLruCache API surface.
+  4. Cross-check with -Xlog:gc that pause times track the smaller live set (fewer
+     bytes to scan/copy per collection), not only a smaller reported heap number.
+```
+
+---
+
 ## 9. Common Pitfalls & War Stories
 
 ### War story 1 — LRU eviction thrashing (working set exceeds cache)
@@ -623,6 +746,35 @@ cache.get(new CacheKey("acme", 7));  // same hashCode → same bucket → HIT
 
 ---
 
+### War story 3 — cache lock contention masked a service-wide stall under virtual threads
+
+**Scenario**: an order-lookup service on Java 21 migrated its request handling to
+`Executors.newVirtualThreadPerTaskExecutor()` without touching the
+`ThreadSafeLruCache` underneath it. Load testing at 20,000 concurrent requests showed
+p99 latency climbing from 15 ms to over 4 seconds — on endpoints that never touched the
+cache at all.
+
+Diagnosis: `jstack` showed thousands of virtual threads `BLOCKED` on
+`ThreadSafeLruCache.lock`, and — because this was still Java 21, pre-JEP 491 — every
+one of them had pinned its carrier while waiting. With a default carrier pool sized to
+available cores (8), 8 carriers were fully occupied by virtual threads parked on one
+`synchronized` block, starving every other virtual thread scheduled onto those same
+carriers, cache-touching or not.
+
+**Root cause**: a single global lock is a bounded resource; a virtual-thread-per-request
+model can present far more concurrent demand for it than a platform-thread pool ever
+would, and pre-JEP-491 pinning turned that into a JVM-wide stall instead of a
+localised slowdown.
+**Impact**: p99 latency 15 ms → 4.1 s during the load test (270×); the on-call team
+initially suspected GC, since no code path but the cache actually touched the lock, and
+correlating `jstack` carrier occupancy back to the cache class took 5 hours.
+**Fix**: two independent changes, either alone would have prevented the stall — upgrade
+to Java 24+ (JEP 491 removes the pinning), and replace `ThreadSafeLruCache` with the
+striped `ConcurrentLruCache` from §4.5 so contention on the lock itself drops by roughly
+the stripe count.
+
+---
+
 ### Failure scenarios summary
 
 | Failure | Symptom | Recovery | TTR |
@@ -632,6 +784,7 @@ cache.get(new CacheKey("acme", 7));  // same hashCode → same bucket → HIT
 | `hashCode` contract violation | Hit rate ~0%, cache effectively disabled | Switch to `record` or fix `hashCode` | On deploy |
 | GC pressure (large cache) | GC pauses > 200ms | Use `SoftReference` or off-heap cache | Tune / redeploy |
 | TTL too short | Unnecessary DB churn, high miss rate | Tune TTL to match data freshness SLA | Config change |
+| Virtual-thread carrier starvation (pre-Java 24) | Service-wide p99 spike unrelated to cache load | Java 24+ (JEP 491) or striped cache | On deploy |
 
 ---
 
@@ -673,6 +826,25 @@ Mitigations:
 
 See [JVM Tuning & GC for Services](cross_cutting/jvm_tuning_and_gc_for_services.md)
 for the full G1/ZGC tuning checklist.
+```
+
+### When to move the cache off-heap
+
+```
+On-heap, 10M entries (§2 baseline): 5.47 GB live heap, all of it scanned by every
+major GC cycle. At a G1 marking rate of roughly 1-2 GB/ms for live-object scanning
+(hardware-dependent — measure with -Xlog:gc+phases), a 5.47 GB live set contributes
+on the order of several ms of a concurrent-mark cycle, on top of the STW pause itself.
+
+Off-heap (Chronicle Map), same 10M entries: live heap contribution ~0 — the cache
+is invisible to GC. Cost moves from GC pause time to per-access serialization:
+10M ops/day at 500 ns serialization overhead = 5 seconds/day of added CPU time,
+spread across the workload rather than concentrated in STW pauses.
+
+Decision rule: if p99 latency SLA is dominated by GC pause time and the cache is
+a large fraction of the live heap, move it off-heap even though on-heap access is
+faster per-call — the STW tail matters more than the steady-state average for a
+latency SLA.
 ```
 
 ### Two-tier cache architecture
@@ -724,6 +896,12 @@ The contract: if `a.equals(b)` is true, then `a.hashCode() == b.hashCode()` must
 
 **Q: How do you size a thread pool for a cache's async loader?**
 Async loading with `getOrLoad()` makes a DB call per miss. Model it as a queue: `threads = (miss_rate × avg_load_latency)`. At 100 misses/sec × 50 ms each: 100 × 0.05 s = 5 thread-seconds/s → 5 threads at 100% utilization. Apply 2× headroom → 10 threads, bounded queue at 100 tasks (10 seconds of slack), `CallerRunsPolicy` as backpressure to avoid unbounded queue growth. With virtual threads you can use `newVirtualThreadPerTaskExecutor()` and stop sizing the *thread* pool — but not stop doing the math. The 5-thread figure was really telling you the DB can expect 5 concurrent queries; drop the bound and you get one query per miss with no ceiling, which moves the failure from a bounded queue to the connection pool. Keep a `Semaphore` (or the DB pool itself) as the explicit limit.
+
+**Q: Does migrating to virtual threads make the `synchronized` LRU cache in this design faster?**
+No. The single monitor caps `get()`/`put()` throughput at whatever one core can enter and exit the lock at, and virtual threads don't raise that ceiling — they typically put more concurrent callers in front of it. What changes is the failure mode when threads pile up on the lock: before JEP 491 (Java 21–23) a blocked virtual thread pinned its carrier, so enough waiters could starve every carrier in the pool and stall unrelated work JVM-wide; since JEP 491 (Java 24+) a blocked virtual thread releases its carrier, so the same pileup degrades to ordinary lock contention instead of a service-wide stall. Either way, the fix for throughput is removing the shared monitor — the striped `ConcurrentLruCache` (§4.5) or Caffeine's lock-free reads (§6) — not switching thread models.
+
+**Q: How much heap does JEP 519's compact object headers save for a 10M-entry cache, and why isn't it larger?**
+About 80 MB out of 5.47 GB (~1.5%) for the 10M-entry example in §2/§10. Each `LinkedHashMap.Entry` drops from 40 bytes to 32 bytes: the 8-byte header shrinks by 4 bytes, and the entry's remaining fields already round to that same 4-byte-smaller alignment boundary, so no leftover padding eats the saving. The percentage is small because the cache's memory is dominated by payload (5.0 GB of actual values), not per-entry bookkeeping; the same feature saves a much larger fraction of heap for a cache of many small values, where entry overhead is a bigger share of the total.
 
 **Q: How do you evolve the LRU cache to support multi-level invalidation across services?**
 Add a write-through path: every `put()` also writes to Redis (L2); every write to the canonical DB publishes an invalidation message to a Redis pub/sub channel. Each app instance subscribes to that channel and calls `cache.invalidate(key)` on receipt. For eventual consistency: short L1 TTL (bound staleness, simple); for stronger consistency: pub/sub invalidation (fresher, but pub/sub delivery is best-effort — combine with short TTL as fallback). This is the near-cache invalidation pattern used by Hazelcast, Coherence, and Redis enterprise.

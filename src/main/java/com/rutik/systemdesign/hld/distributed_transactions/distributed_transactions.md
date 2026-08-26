@@ -90,6 +90,65 @@ A client generates a unique key (a UUID) for a logical operation ("charge this c
 - **Guarantee**: "at most once" *effect* on top of "at-least-once" *delivery* — the combination that 2PC tries to achieve structurally, achieved here at the application layer.
 - **Cost**: a key-value store with TTL (Redis, DynamoDB), and a race condition to handle (two concurrent requests with the same new key — §6.5).
 
+### 4.7 Coordination and Contention — When Many Writers Want the Same Row
+
+Everything above coordinates writes that span *different* resources. The mirror-image problem
+is many writers converging on **one** resource: 50,000 buyers on the last 200 concert seats,
+every checkout decrementing the same SKU, two schedulers noticing the same job is due. The
+transaction patterns do not solve this; a contention strategy does, and it is the whole
+flash-sale / ticketing class of interview question.
+
+**Pessimistic vs. optimistic — the choice is set by the collision rate, not by taste.**
+
+| | Pessimistic (`SELECT ... FOR UPDATE`, advisory lock) | Optimistic (version column, compare-and-set) |
+|---|---|---|
+| Mechanism | Take the lock first, then do the work | Read a version, do the work, write only if the version is unchanged |
+| Cost when uncontended | A held lock and a round trip, always paid | Nothing |
+| Cost when contended | Waiting, and a queue that forms behind the lock | Wasted work plus a retry, and retries add load exactly when load is the problem |
+| Fails as | Timeouts and deadlocks | A retry storm — a livelock where everyone keeps losing |
+| Right when | Collisions are common (single-row inventory), or the work is expensive to redo | Collisions are rare (a user editing their own profile), or the transaction is short |
+
+The rule of thumb: **optimistic below roughly 10% collision, pessimistic above it.** Under real
+contention, optimistic concurrency degrades worse than pessimistic, because failed attempts
+generate more load rather than waiting quietly.
+
+**Push the decision into the storage layer, not the application.** The single most common
+contention bug is check-then-act:
+
+```sql
+-- BROKEN: two requests both read 1, both decide "yes", both decrement.
+SELECT available FROM inventory WHERE sku = 'X';   -- returns 1
+-- application decides it is safe
+UPDATE inventory SET available = 0 WHERE sku = 'X';  -- oversold
+
+-- FIXED: the check and the decrement are one atomic statement.
+UPDATE inventory SET available = available - 1
+ WHERE sku = 'X' AND available >= 1;
+-- 0 rows updated means "sold out" -- the database, not the application, decided
+```
+
+The same shape in DynamoDB is a conditional write (`ConditionExpression:
+attribute_exists(...) AND available >= :n`), and in object storage it is
+`If-None-Match: *` on a `PUT`. Whenever a resource is contended, the enforcement point must be
+the thing that owns the data — anything decided in application memory can be decided twice.
+
+**The toolkit, cheapest first.**
+
+- **Atomic conditional update** (above). No lock, no coordination, and correct by construction. Reach for this first; most "we need a distributed lock" problems are this in disguise.
+- **Optimistic version column.** `UPDATE ... SET v = v + 1 WHERE id = ? AND v = ?`, retry on zero rows. Good for entity edits with occasional collisions.
+- **Pessimistic row lock.** `SELECT ... FOR UPDATE`, ideally with `NOWAIT` or a short `lock_timeout` so a wait fails fast instead of piling up. Always lock rows in a consistent order to avoid deadlocks, and **never hold a lock across a network call** — see §10.
+- **Hold-with-TTL reservation.** Convert contention into a two-phase claim: `Try` marks the seat held for 10 minutes, `Confirm` makes it permanent, `Cancel` or expiry releases it. This is exactly TCC (§4.4), and it is why booking systems show a countdown timer.
+- **Idempotency key** (§4.6). Does not reduce contention but makes the retries that contention causes safe.
+- **Single-flight / request coalescing.** N concurrent requests for the same expensive computation collapse into one in-flight call whose result is shared. This is the cache-stampede fix, applied to any duplicated work.
+- **Lease with a fencing token.** When you genuinely need mutual exclusion across processes, a lock alone is not enough — a holder can pause past its TTL and resume. The lock service issues a monotonically increasing token and the *storage layer* rejects writes carrying a stale one. Derived in full in [Consensus Algorithms](../consensus_algorithms/consensus_algorithms.md) §6, which also walks the GC-pause split-brain that motivates it.
+- **Queue as the lock.** Serialize by construction: partition the work by the contended key and give each partition a single consumer. Now there is exactly one writer per key and no lock exists at all. This is how a matching engine and a per-account ledger avoid the problem rather than managing it.
+- **Virtual waiting room.** For a scheduled onsale, admission control *in front of* the system: issue queue tokens at the edge, admit at the rate the inventory tier can actually serve, and show everyone else a position. It converts an unbounded stampede into a known arrival rate, which is the only variable that makes the rest of the design sizable.
+
+**The best contention fix is usually to remove the contention.** A global counter that every
+request increments is one row; shard it into 100 counters and sum on read, and contention drops
+by 100x. Seats, unlike a counter, are naturally partitionable by seat id. Ask "why is this one
+row" before asking "which lock".
+
 ### Summary Table
 
 | Pattern | Coordinator? | Participants Block? | Consistency | Typical Use |
@@ -662,6 +721,16 @@ The reason this bug survived review is that the per-customer gap looks negligibl
 
 Thirty-six thousand customers each told "Refunded" while being out $1.50 is what turned an accounting detail into a regulatory complaint. The generalizable check: for every compensation, compute `shortfall x expected firing rate` before shipping it.
 
+**Contention pitfalls (§4.7)**
+
+These four are the recurring ways a contended resource goes wrong, and every one of them
+passes code review:
+
+- **Check-then-act.** `SELECT available`, decide in application code, then `UPDATE ... SET available = 0`. Two requests both read 1, both decide yes, and you have oversold. The fix is to make the check part of the write: `UPDATE ... WHERE available >= 1`, and treat "0 rows updated" as the rejection. Anything decided in application memory can be decided twice.
+- **A lock held across a network call.** Acquire the lock, call a payment provider that takes 400 ms (or times out at 30 s), then release. The lock's hold time is now the p99 of somebody else's service, and throughput on that key collapses to `1 / hold_time`. Do the remote call outside the lock and reconcile with an idempotency key.
+- **A TTL shorter than the work.** A 10-second lock lease on an operation that occasionally takes 15 seconds means the lease expires mid-work, a second holder starts, and both write. This is invisible until it is a data-corruption incident, and no amount of lock-service reliability prevents it — only a fencing token enforced at the storage layer does.
+- **Retry storms amplifying contention.** Optimistic concurrency under heavy collision generates *more* traffic per failure, so load rises exactly when the system is struggling. Cap attempts, back off with full jitter, and switch to a pessimistic lock or a queue-per-key when the measured collision rate goes past roughly 10%.
+
 ---
 
 ## 11. Technologies & Tools
@@ -675,6 +744,9 @@ Thirty-six thousand customers each told "Refunded" while being out $1.50 is what
 | Idempotency key stores | Redis (`SET key val NX EX ttl`), DynamoDB (with TTL attribute) | Sub-millisecond claim-and-check; TTL handles automatic key expiry |
 | Distributed SQL with built-in 2PC | Google Spanner, CockroachDB, YugabyteDB | 2PC + a global clock (TrueTime / hybrid logical clocks) used internally — application code doesn't implement 2PC itself |
 | Local transaction frameworks | Spring `@Transactional` (see [Spring Transactions](../../spring/spring_transactions/spring_transactions.md)) | The "local transaction" half of every pattern in this module |
+| Distributed locks / leases (§4.7) | etcd (lease + `mod_revision` as the fencing token), ZooKeeper (znode version), Postgres advisory locks, Redlock on Valkey/Redis | Redlock's safety is disputed for correctness-critical use — Kleppmann's critique is that it assumes bounded clock drift and bounded pauses. Use it for efficiency (avoiding duplicate work), not for correctness, unless a fencing token is enforced downstream |
+| Atomic conditional writes (§4.7) | DynamoDB `ConditionExpression`, S3 `If-None-Match` / `If-Match`, Postgres `UPDATE ... WHERE`, Valkey/Redis `SET NX` and Lua scripts | The cheapest contention primitive: no lock, no coordination, enforcement inside the store that owns the data |
+| Admission control / waiting rooms (§4.7) | Queue-It, Cloudflare Waiting Room, AWS WAF rate-based rules plus a token-issuing edge worker | Converts an unbounded onsale stampede into a known arrival rate, which is what makes the inventory tier sizable at all |
 
 ---
 
@@ -759,6 +831,21 @@ A: 2PC-style blocking cost grows with both the number of participants and the ne
 **Short:** PaySwift's external payment call runs outside the database transaction since a WAN round-trip cannot hold local locks.
 
 A: A third-party network call can take 200-400ms and fail for reasons unrelated to PaySwift's own databases, so wrapping it inside a transaction would hold wallet or ledger locks for that entire round trip. Key Design Decision #3 isolates it as its own retryable step specifically so it can be retried with exponential backoff on transient failure without blocking anything else — made safe to retry via the payment processor's own idempotency-key support (the same mechanism Stripe uses, per Section 7), not by any database mechanism. This is also why 2PC never could have covered this call in the original architecture: you cannot ask an external payment network to participate in your prepare/commit protocol and hold a lock on your behalf, so the original design's "call the external network after the 2PC commits" gap was structural, not a bug — 2PC was the wrong shape for a step involving a party outside your trust domain. Any step that crosses an organizational boundary belongs outside the local transaction, coordinated instead through an idempotent, retryable call plus a saga step that reacts to its outcome.
+
+**Q17: Under heavy contention, would you use optimistic or pessimistic concurrency control?**
+**Short:** Pessimistic under heavy contention, because optimistic control turns every collision into extra load exactly when the system is already struggling.
+
+A: Pessimistic, and the reason is that the two degrade in opposite directions. Optimistic control reads a version, does the work, and writes only if the version is unchanged — so when collisions are rare it costs nothing at all, which is why it is right for a user editing their own profile. But every collision means the work was wasted and must be retried, so at high contention the failure mode is a retry storm: N writers all lose, all retry, and generate more load than the original attempt. Pessimistic control takes the lock first, so the losers wait quietly instead of amplifying; the cost is a lock held on every operation whether or not anyone else wanted it, plus timeout and deadlock handling. The practical threshold is around a 10% collision rate — below it optimistic wins, above it pessimistic. The better answer in an interview, though, is to reject the premise: the highest-contention cases usually have a third option, either collapsing the check and the write into one atomic conditional statement so no lock exists, or partitioning the resource so the writers stop colliding at all (§4.7).
+
+**Q18: 50,000 people hit "buy" on 200 concert seats at the same instant — how do you prevent overselling?**
+**Short:** Make the inventory decrement an atomic conditional write, hold seats with a TTL, and put a waiting room in front so arrivals are rate-limited.
+
+A: Three layers, and the first one is the correctness fix while the other two make it survivable. **Correctness:** never read inventory, decide in application code, then write — that check-then-act race is exactly how systems oversell. Make the decrement conditional and atomic, `UPDATE seats SET state = 'held' WHERE seat_id = ? AND state = 'available'`, and treat zero affected rows as "someone beat you". The database decides, not the application. **Reservation:** a buyer needs minutes to enter payment details, so the seat moves to a `held` state with a TTL rather than being sold instantly — TCC's Try/Confirm/Cancel (§4.4), with a sweeper releasing expired holds. This is why every ticketing site shows a countdown. **Admission:** 50,000 simultaneous arrivals against 200 seats means 99.6% of the traffic exists only to be told no, so put a virtual waiting room at the edge that issues queue tokens and admits at the rate the inventory tier can actually serve. That converts an unbounded stampede into a known arrival rate — the only variable that makes the rest sizable. Two supporting details worth volunteering: partition by seat id so contention spreads across rows rather than one, and give the whole onsale its own isolated capacity so it cannot take down the rest of the site.
+
+**Q19: Why is a distributed lock without a fencing token unsafe, even with a perfectly reliable lock service?**
+**Short:** A holder can pause past its lease expiry and resume writing, so only a fencing token checked by the storage layer can stop it.
+
+A: Because the lock service can be perfectly correct and still not prevent two writers. Client A acquires the lock with a 10-second lease, then stalls — a GC pause, a hypervisor steal, a slow disk — for 15 seconds. The lease expires, the service correctly grants the lock to client B, and B starts working. Then A wakes up, still believing it holds the lock, and writes. Nothing the lock service does can stop that write, because the write does not go to the lock service; it goes to the storage layer, which has no idea a lock exists. The fix is a **fencing token**: every grant carries a monotonically increasing number, the client passes it with every write, and the storage layer records the highest token it has seen and rejects anything lower. A's stale write arrives with token 33 against a stored high-water mark of 34 and is refused. The general lesson is the one that matters in a design review — the enforcement point must be the component that owns the data, and a lock outside that component is advisory whatever it is called. It is also why Redlock is defensible for efficiency (avoiding duplicate work) and contested for correctness: without fencing, its safety rests on assumptions about clock drift and pause bounds that a real machine does not honour.
 
 ---
 

@@ -474,6 +474,68 @@ A team decided to consolidate duplicated business logic across 8 services into a
 
 ---
 
+## Interview Questions with Answers
+
+**Q: When is copy-paste actually the right call?**
+**Short:** For a genuinely one-off, first occurrence of logic, before a second use case reveals what should actually be shared.
+The first time a piece of logic is written, writing it directly — even if you copy a similar block as a starting point and adapt it — is reasonable, since abstracting shared behavior prematurely can produce a wrong abstraction that doesn't fit the eventual real requirements. The Rule of Three heuristic captures this: the first occurrence, write it; the second, note the duplication but don't necessarily act yet; the third, refactor. Copy-paste is the wrong call specifically once a third near-identical copy appears, at which point the duplication is a confirmed pattern rather than a coincidence.
+
+**Q: What is the WET principle, and how does it contrast with DRY?**
+**Short:** WET ("Write Everything Twice"/"We Enjoy Typing") is the direct opposite of DRY, tolerating duplicated logic across the codebase.
+DRY (Don't Repeat Yourself) says every piece of knowledge should have a single, authoritative representation in a system. WET code is the opposite: the same logic — like email and phone validation — is independently reimplemented in `UserRegistrationService`, `CheckoutService`, and `SupportTicketService` in this file's example, each with slightly different regex patterns that have silently diverged. The name is a deliberately ironic backronym, since "We Enjoy Typing" is obviously not actually a goal — it names the failure mode people fall into, not an endorsed practice.
+
+**Q: In the example, why did the same phone-validation bug persist in two of three services after being fixed in one?**
+**Short:** The fix was applied where the bug was reported, and the engineer had no way of knowing (or forgot) the logic was duplicated elsewhere.
+The phone regex bug was fixed in `UserRegistrationService` v2.3, but `CheckoutService` had copied the validation block six months earlier from an IDE cache that predated the fix, and `SupportTicketService` copied from `CheckoutService` three months after that — carrying the bug forward a second time. Because there was no single source of truth for "what does phone validation mean," nobody could confirm the fix had propagated everywhere it needed to, and the bug silently persisted in two of the three services for the full duration until the next audit.
+
+**Q: How did the email validation regex "diverge" across the three service classes even though all three started from the same copy?**
+**Short:** A well-intentioned edge-case fix in one copy, made independently, produced a third distinct validation behavior nobody decided on.
+`SupportTicketService`'s email regex was modified by an engineer trying to fix a slightly different edge case, producing a validation pattern that is now different from both `UserRegistrationService`'s and `CheckoutService`'s — three classes now enforce three different definitions of "valid email," none of which was a deliberate, reviewed decision. This illustrates that duplication doesn't stay static; each copy evolves independently over time as engineers make locally reasonable changes that create divergence nobody explicitly chose.
+
+**Q: How does the maintenance cost of copy-pasted logic scale with the number of copies?**
+**Short:** Cost is linear in copies, but reliability of applying every fix everywhere degrades faster than linearly as copies grow.
+With N copies of logic, every change costs roughly N times the effort just to make the edits — that alone is already bad. What's worse is reliability: each copy represents an independent chance to be missed during a change, so with 3 copies a change is usually applied everywhere, but with 30 copies scattered through a large codebase it is very unlikely to be applied everywhere, and teams often give up and leave duplicates permanently inconsistent. The practical cost isn't just multiplied effort — it's the near-certainty that large numbers of copies will eventually disagree with each other.
+
+**Q: What is the fix for the three-service duplicated-validation example, concretely?**
+**Short:** Extract a single ContactValidator utility class that all three services depend on for email and phone rules.
+`ContactValidator` becomes the single authoritative definition of valid email and phone formats, with static `validateEmail()` and `validatePhone()` methods backed by one `Pattern` each — updating the regex here affects all consumers uniformly. Each service then gets a focused `*Validator` class (`UserRegistrationValidator`, `CheckoutValidator`, `SupportTicketValidator`) that delegates the shared contact checks to `ContactValidator` and only implements its own service-specific rules (password length, billing address, cart non-emptiness), so a single fix now reaches all three request paths simultaneously.
+
+**Q: What is Template Method offering as an alternative fix, beyond what a shared utility class provides?**
+**Short:** It eliminates a duplicated processing workflow's skeleton, not just a shared validation rule, while still allowing per-service steps.
+Where `ContactValidator` deduplicates one shared validation rule, `ContactFormProcessor<T, R>`'s Template Method deduplicates an entire shared *workflow shape* — validate contact info, then validate business rules, then execute — while letting each subclass (`UserRegistrationProcessor`) override only the steps that genuinely differ (`validateBusinessRules()`, `execute()`). This is the right tool when multiple services share not just one piece of logic but an entire multi-step sequence with only some steps varying, which a single utility method can't capture on its own.
+
+**Q: How do IntelliJ's duplicate detector and SonarQube's CPD differ from linting for style violations?**
+**Short:** They detect structural/token-level duplication across files, not style violations — finding copies a linter would miss entirely.
+IntelliJ's built-in Analyze > Locate Duplicates and SonarQube's Copy-Paste Detector (CPD) work by comparing token sequences across the codebase to find blocks of code that are identical or near-identical in structure, even if variable names differ — this is a fundamentally different check than style linting, which only flags formatting or naming convention violations within a single file. PMD's CPD tool (`pmd cpd --minimum-tokens 50`) works the same way and can be run in CI to fail a build when duplication exceeds a token threshold, catching exactly the kind of three-way validation duplication in this file's example before it ships.
+
+**Q: Why does copy-pasted test setup code create "false confidence"?**
+**Short:** A bug in the shared logic under test will fail all the duplicated test copies simultaneously, without adding any real coverage confidence.
+If the implementation is duplicated across three services, the corresponding tests are typically duplicated too — three near-identical test classes verifying near-identical logic. This inflates the test count and gives the impression of thorough coverage, but a bug in the shared underlying logic (like the phone regex bug) fails all three test copies at once rather than being caught by any single one in isolation before the others ship the same defect. Testing the shared `ContactValidator` abstraction once, instead of testing three copies of the logic it replaces, gives equivalent or better real coverage with far less test code.
+
+**Q: What is the "Regulatory Compliance Failure" scenario in this file, and what does it illustrate about copy-paste risk?**
+**Short:** Deletion logic copy-pasted across nine classes meant an update reached only seven, leaving two in violation of a regulator's retention policy.
+A financial firm's data retention policy update required changing deletion logic that had been copy-pasted across nine data management classes; engineers updated seven, and two classes continued retaining data beyond the legal limit, resulting in a regulatory fine and a full codebase audit. This illustrates that copy-paste risk isn't purely a maintainability inconvenience — when the duplicated logic is compliance-critical, a missed copy has direct legal and financial consequences, not just engineering overhead.
+
+**Q: Why did consolidating 8 years of duplicated business logic into a shared library cost 4x the original estimate in the "Failed Refactor" scenario?**
+**Short:** Three years of independent drift meant the eight copies disagreed in 47 cases, each requiring investigation to determine correct behavior.
+Because the 8 copies had silently diverged over 3 years of independent, uncoordinated edits, "consolidation" wasn't simply "delete 7 copies and keep 1" — it required a 6-week investigation to determine, for 47 cases where the copies disagreed, which behavior was actually correct. This shows why prevention (extracting shared logic before divergence accumulates) is far cheaper than remediation: the cost of consolidating N drifted copies grows with how long they've been allowed to diverge, not just with how many copies exist.
+
+**Q: How does copy-pasted infrastructure code (Terraform, Dockerfiles) mirror application-level copy-paste at the HLD level?**
+**Short:** Duplicated Terraform modules or Dockerfile layers across environments mean a security fix must be applied in every copy, and one is inevitably missed.
+Infrastructure configuration duplicated across dev, staging, and prod (rather than parameterized modules) means a security group rule fix must be applied in a dozen places, with the same "at least one gets missed" dynamic as application code. Copy-pasted Dockerfile layers instead of a shared base image mean OS-level CVEs require patching each service's Dockerfile individually rather than updating one base image — the exact same DRY-violation shape, just at the infrastructure-as-code layer instead of the application layer.
+
+**Q: What review-culture change does this file recommend to normalize catching copy-paste before merge?**
+**Short:** Make "I recognize this logic from another class — it should be extracted" a normal, expected code review comment.
+Rather than relying solely on automated CPD tooling, the file recommends normalizing a specific reviewer question during code review: "Is this the first time this logic is written?" Treating recognition of duplicated logic as a legitimate and expected review comment — on par with flagging a bug — catches copies at the moment they're introduced, before they've had time to diverge into three separately-buggy versions the way the file's motivating example did.
+
+**Q: How does "Duplicated API error handling" across microservices create a client-facing problem, not just an internal one?**
+**Short:** Each service independently formats errors, retry headers, and rate-limit codes, producing inconsistent behavior clients must handle case-by-case.
+When each microservice independently implements its own error response formatting, retry headers, and rate-limit response codes instead of sharing a common library, the API surface as a whole becomes inconsistent — a client integrating with five services may need five different error-parsing code paths instead of one. This is copy-paste's cost surfacing externally: the duplication isn't just an internal maintenance burden, it directly degrades the experience of everyone consuming the API, since inconsistent behavior across services is a symptom clients feel directly rather than one confined to the codebase.
+
+**Q: Why is "the same logic reimplemented with different method names" harder to catch than exact copy-paste?**
+**Short:** validateUserEmail(), checkEmailFormat(), and isEmailValid() doing the same thing hide their duplication behind different names.
+When three service classes each write their own email-checking method under a different name, neither a simple text search nor a casual code review reveals that they're duplicates — you have to actually read and compare the implementations to notice the overlap. Token-based clone detectors like SonarQube's CPD or PMD's CPD still catch this, because they compare the structure of the logic itself rather than relying on identical names, which is exactly why running clone detection in CI matters more than trusting reviewers to spot renamed duplicates by eye.
+
 ## Quick Reference Summary
 
 | Dimension | Details |

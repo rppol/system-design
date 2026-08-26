@@ -696,6 +696,92 @@ Both dispatch CUB's work-efficient multi-block scan — a hand-rolled Hillis-Ste
 kernel is the right thing to *understand*, but rarely the right thing to *ship* for
 a standalone scan over more than one block's worth of data.
 
+### 6.5b Multi-Block Scan: Decoupled Look-Back
+
+Blelloch solves the scan *inside* one block. The moment the array exceeds one block's
+worth of data the hard part is different: a scan is inherently sequential **across**
+blocks, because block `k` cannot emit a single correct output until it knows the sum of
+everything in blocks `0..k-1`.
+
+The obvious fix is to make three passes — reduce each block to an aggregate, scan the
+small array of aggregates, then re-read the input and add each block's exclusive prefix.
+It is correct, and it reads the input **twice**. For a primitive that does one addition
+per element, scan is entirely memory-bound, so a second read of the input is not a
+constant-factor detail: it is most of the runtime.
+
+**Decoupled look-back** collapses those three passes into one. Every block, in one pass:
+
+1. computes its **local aggregate** and immediately publishes it to a global descriptor
+   array with the flag `A` — "my own sum is ready, but I do not yet know what comes
+   before me";
+2. walks **backward** through its predecessors' descriptors, accumulating their
+   aggregates;
+3. stops the walk the instant it finds a predecessor flagged `P` — "my *inclusive*
+   prefix is ready" — because that one value already sums everything before it;
+4. publishes its own `P` (its resolved exclusive prefix plus its local aggregate) so its
+   successors can stop at *it*, then adds the prefix to its local scan and writes out.
+
+The third flag is `X`: nothing published yet, so spin.
+
+```
+  Block:      B0        B1        B2        B3        B4  <- resolving its prefix
+  flag:       P         A         A         P         X
+  value:      12        5         7         31        --
+                                            ^
+                                            |
+              B4 walks back and stops HERE: B3 published an INCLUSIVE prefix,
+              so B4's exclusive prefix is 31 outright. The walk never reaches
+              B2, B1 or B0 -- each resolved P is a checkpoint that truncates
+              every later block's search.
+
+  Had B3 still been flagged A, B4 would accumulate 31 and keep walking left.
+```
+
+*The `P` flags are what keep the look-back short. Without them every block would walk all
+the way to block 0 and the scan would be `O(blocks)` per block; with them a block usually
+reads one or two descriptors, so the whole scan runs in a single pass at close to copy
+bandwidth.*
+
+**The memory-model requirement is the correctness crux, and it is easy to get wrong.**
+A descriptor is a *pair* — a flag and a value — and a successor that sees the flag must be
+guaranteed to see the matching value. Two separate stores let a predecessor's flag become
+visible before its value, so the successor reads `A` and then reads garbage, producing a
+scan that is wrong only under load. The two standard fixes are to pack flag and value into
+a single 64-bit word written with one aligned store, or to publish with
+`cuda::atomic_ref` using `memory_order_release` and read with `memory_order_acquire`. This
+is the same acquire/release discipline as §6.4 of
+[Synchronization & Atomics](../synchronization_and_atomics/synchronization_and_atomics.md),
+applied across blocks instead of within one.
+
+**It also requires forward progress.** Block `k` spins waiting on block `k-1`, so if the
+scheduler could run `k` while `k-1` never becomes resident, the kernel deadlocks. The
+portable guard is not to trust `blockIdx.x`: each block claims a **dynamic** index with an
+`atomicAdd` on a global ticket counter, so a block's logical position always matches the
+order it was actually dispatched in.
+
+```
+  n = 1,048,576 floats = 4 MB in, 4 MB out
+
+  Three-pass (reduce -> scan aggregates -> add):
+    pass 1 reads  input                   =  4 MB
+    pass 2 reads/writes aggregates        = ~0 MB   (one value per block)
+    pass 3 reads input + writes output    =  8 MB
+    total HBM traffic                     = 12 MB
+
+  Decoupled look-back (single pass):
+    reads input + writes output           =  8 MB
+    descriptor traffic                    = ~0 MB
+    total HBM traffic                     =  8 MB
+
+  traffic ratio = 12 / 8 = 1.5x less moved -> ~1.5x faster on a bandwidth-bound op
+```
+
+This is the algorithm behind `cub::DeviceScan` and therefore behind `thrust::inclusive_scan`
+and `cupy.cumsum`. It is worth understanding rather than reimplementing: the flag protocol
+is short, but the memory ordering and forward-progress requirements are exactly the kind of
+detail that produces a kernel which passes every test on a small input and corrupts results
+on a full-sized one.
+
 ### 6.6 Histogram: Global Atomic vs. Privatized
 
 ```cpp

@@ -14,7 +14,7 @@ In distributed systems, caching reduces:
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Caching is like keeping a notepad of recent answers on your desk — instead of walking to the library (database) for every question, you check the notepad first.
 
@@ -26,7 +26,7 @@ In distributed systems, caching reduces:
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Cache Hit**: Requested data is found in cache — fast path.
 - **Cache Miss**: Data not found in cache — must fetch from the source, then optionally populate the cache.
@@ -78,7 +78,7 @@ Notice the shape: each equal-sized step in hit rate near the top buys a bigger m
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Architectures / Strategies
 
 ### 3.1 Cache-Aside (Lazy Loading)
 
@@ -157,7 +157,7 @@ The cache sits in front of the database. On a miss, the cache itself fetches fro
 
 ---
 
-## 4. Eviction Policies
+### Eviction Policies
 
 | Policy | Full Name | Evicts | Best For |
 |--------|-----------|--------|----------|
@@ -293,7 +293,7 @@ One hot key's expiry turns into 1000 simultaneous misses and 1000 parallel DB qu
 
 ---
 
-## 6. How It Works - Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Consistent Hashing for Cache Sharding
 In a distributed cache cluster, requests must be routed to the correct shard. Consistent hashing maps keys to nodes on a ring, minimizing remapping when nodes are added/removed. Virtual nodes improve load distribution.
@@ -400,7 +400,7 @@ An in-process L1 cache does not participate in any of this. It has no connection
 ### Netflix
 - Uses **EVCache** (built on Memcached) for session data, user preferences, and metadata.
 - Caches at multiple layers: CDN (video chunks), API gateway (rate limiting), microservices (user state).
-- Handles ~30 million cache requests per second at peak, across tens of thousands of memcached instances.
+- Netflix has publicly described EVCache handling on the order of **tens of millions of cache operations per second** across tens of thousands of memcached instances — a figure from Netflix engineering posts that has grown with the service, so quote it as an order of magnitude rather than a current measurement.
 - Uses cache-aside with aggressive TTLs for recommendation data.
 
 ### Twitter
@@ -414,7 +414,7 @@ An in-process L1 cache does not participate in any of this. It has no connection
 - Landmark paper: "Scaling Memcache at Facebook" — describes regional pools, cold cluster warmup, and lease-based cache invalidation.
 
 ### Amazon
-- **ElastiCache** (managed Redis/Memcached) across virtually all AWS services.
+- **ElastiCache** (managed Valkey/Redis/Memcached) across virtually all AWS services. AWS steers new clusters to the Valkey engine and prices it below Redis OSS — roughly 20% less for node-based clusters and 33% less for serverless.
 - Product pages use cache-aside; pricing uses write-through; cart uses write-back.
 - DynamoDB Accelerator (DAX) provides in-memory caching directly in front of DynamoDB.
 
@@ -503,14 +503,15 @@ So the first 1.2TB removes 80% of database load, and the second 1.2TB is what yo
 
 | Tool | Type | Notes |
 |------|------|-------|
-| **Redis** | In-memory data structure store | Persistence, pub/sub, Lua scripting, cluster mode, streams. De facto standard. |
+| **Valkey** | In-memory data structure store | BSD-3, Linux Foundation. The Redis fork created when Redis left BSD in March 2024; wire- and command-compatible, so clients and Lua scripts port unchanged. Valkey 9.x adds hash-field TTLs, multi-DB in cluster mode, and a redesigned I/O threading model. The default choice for new deployments. |
+| **Redis** | In-memory data structure store | Persistence, pub/sub, Lua scripting, cluster mode, streams. Redis 8.0 (May 2025) is **AGPLv3** — a copyleft licence that constrains offering it as a hosted service. |
 | **Memcached** | Pure cache | Simpler, multi-threaded, slightly faster for pure caching. No persistence. |
 | **Hazelcast** | Distributed in-memory grid | Java ecosystem, supports JCache (JSR-107). |
 | **Apache Ignite** | In-memory compute + cache | SQL support, distributed transactions. |
 | **Caffeine** | In-process JVM cache | Excellent LRU/LFU implementation for local caching. |
 | **Guava Cache** | In-process JVM cache | Google's library, simpler than Caffeine. |
 | **Varnish** | HTTP accelerator | Reverse proxy cache for HTTP responses. |
-| **AWS ElastiCache** | Managed Redis/Memcached | Auto failover, multi-AZ, cluster mode. |
+| **AWS ElastiCache / MemoryDB** | Managed Valkey/Redis/Memcached | Auto failover, multi-AZ, cluster mode. Valkey 9.1 is supported and priced ~20% below Redis OSS on node-based clusters, ~33% below on serverless. Google Memorystore and Azure equivalents offer Valkey the same way. |
 | **AWS DAX** | DynamoDB Accelerator | Microsecond latency for DynamoDB reads. |
 | **CDN (CloudFront, Fastly)** | Edge cache | HTTP-layer caching geographically distributed. |
 
@@ -603,6 +604,11 @@ A: The replication log is the one record every writer must pass through, so no c
 
 A: Multiply the per-entity cache size by the number of active entities, then add headroom for data-structure overhead and burst or retention buffers. In the Twitter case study, each user's timeline caps at 800 tweet IDs (Key Design Decision #3); at 8 bytes per ID that's 6.4KB raw, but Redis sorted-set overhead brings it to roughly 12KB per user, and multiplying by 200M DAU gives a 2.4TB theoretical minimum. Yet the design provisions a 50TB/200-node cluster (38TB actually used, 76% utilization) to cover celebrity-merge buffers and 30 days of inactive-user retention. Compute the theoretical minimum first, then size the real cluster several times higher once you account for overhead, replication, and retention beyond the "active" set — provisioning exactly to the minimum leaves no room for growth or failover.
 
+**Q: Would you still pick Redis for a new cache tier, or Valkey?**
+**Short:** Pick Valkey for a new cache tier: it is BSD-3 under the Linux Foundation, wire-compatible with Redis, and cheaper on managed services.
+
+A: Valkey, unless something forces Redis. Redis left BSD in March 2024 and Redis 8.0 (May 2025) ships under AGPLv3, a copyleft licence whose obligations bite anyone offering the engine as a hosted service — which is why the cloud vendors forked it. Valkey is that fork: BSD-3, stewarded by the Linux Foundation, built by the same long-time Redis contributors, and command- and wire-compatible, so existing clients, Lua scripts, and `redis-cli` habits carry over unchanged. Practically it is now the path of least resistance: AWS ElastiCache and MemoryDB support Valkey 9.1 and price it roughly 20% below the Redis OSS engine on node-based clusters and 33% below on serverless, and Google Memorystore offers it too. The cases for staying on Redis are narrow and specific — a dependency on a Redis Stack module the fork has no equivalent for (RedisJSON, RedisTimeSeries) or on Redis Enterprise's Active-Active CRDT geo-replication. Search is no longer one of them: Valkey 9.0 added full-text, vector, and hybrid search natively. If your design's answer is a plain `ZSET`, `HASH`, or `SETNX`, the licence is the only thing distinguishing them, and it points at Valkey.
+
 ---
 
 ## 13. Best Practices
@@ -620,7 +626,7 @@ A: Multiply the per-entity cache size by the number of active entities, then add
 
 ---
 
-## Cross-Perspective: LLD Connections
+### Cross-Perspective: LLD Connections
 
 **LLD View — Design Patterns That Implement Caching**
 

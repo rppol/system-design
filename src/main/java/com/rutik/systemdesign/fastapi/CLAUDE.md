@@ -14,10 +14,11 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 
 ---
 
-## Module List — 19 Modules
+## Module List — 21 Modules
 
 | Module Directory | Phase | Key Concepts |
 |-----------------|-------|-------------|
+| `python_api_framework_landscape/` | 1 | FastAPI vs Django/DRF vs Flask vs Litestar vs Starlette; ASGI vs WSGI; how to justify a choice |
 | `fastapi_fundamentals_asgi/` | 1 | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI |
 | `pydantic_v2_deep_dive/` | 1 | Validation, serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration |
 | `routing_and_request_handling/` | 1 | Path operations, `APIRouter`, response models, status codes, content negotiation |
@@ -29,6 +30,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 | `error_handling_and_validation/` | 2 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 9457 Problem Details |
 | `testing_fastapi/` | 2 | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, rollback |
 | `websockets_sse_and_streaming/` | 2 | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
+| `serving_llm_and_ai_workloads/` | Streaming completions, backpressure, cancellation, token budgets, MCP servers from FastAPI | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
 | `background_jobs_and_task_queues/` | 2 | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, DLQ |
 | `http_clients_and_external_apis/` | 2 | `httpx`/`aiohttp`, connection pooling, retries/backoff, circuit breakers |
 | `message_queues_and_event_driven/` | 2 | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
@@ -72,7 +74,11 @@ Every module page (`<module>/<module>.md`) follows the standard 14-section templ
 
 **15-Q&A floor everywhere** — every module page must carry at least 15 Q&As in
 §12, ordered gotchas/traps first, then internals, then edge cases (see root
-`CLAUDE.md` Interview Q&A Rules). Deep modules below need 15-18.
+`CLAUDE.md` Interview Q&A Rules). It is a floor, not a target: the section runs 16–20, and the
+four deep modules listed below require **18+**. Every Q&A needs an authored `**Short:**` line
+as the first non-blank line of its answer (15–220 chars) — and any pass that edits an answer
+MUST update the `**Short:**` above it in the same edit, or a stale summary ships as the
+correct MCQ option.
 
 ---
 
@@ -100,9 +106,18 @@ the game's Case Studies tab. The README also carries a Knowledge-Question Map an
 
 ## Case Studies — 6 Total
 
-`case_studies/` — all use the 7-section legacy template (Problem Statement → Architecture
-Overview → Key Design Decisions → Implementation → Python/FastAPI Components Used →
-Tradeoffs and Alternatives → Interview Discussion Points).
+`case_studies/` — every file uses the **11-section principal case-study template** defined in
+root `CLAUDE.md` (Intuition → 1. Requirements Clarification → 2. Scale Estimation →
+3. High-Level Architecture → 4. Component Deep Dives → 5. Design Decisions & Tradeoffs →
+6. Real-World Implementations → 7. Technologies & Tools → 8. Operational Playbook →
+9. Common Pitfalls & War Stories → 10. Capacity Planning → 11. Interview Discussion Points).
+There is no section-local exception: root `CLAUDE.md` is the only template authority here.
+
+Quality bar, per root `CLAUDE.md`: 900–1100 lines; executable code in §4; at least one
+`# BROKEN` → `# FIX` pair in §4; §6 must name **real companies with real published
+numbers**, never a generic "a large e-commerce site"; §9 quantifies the impact of each war
+story; §11 carries 10+ Q&As. Case-study Q&As are excluded from the MCQ bank by design
+(`extract.py` skips every `case_studies/` path) — do not "rescue" them into a module.
 
 design_rate_limited_api_fastapi, design_multi_tenant_saas_api, design_realtime_chat_fastapi, design_async_task_queue, design_async_web_scraper, design_ml_inference_api_fastapi
 
@@ -123,8 +138,28 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 
 ## Q&A Minimums (FastAPI-specific)
 
-- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`)
-- Deep modules (15–18 required): `pydantic_v2_deep_dive`, `dependency_injection_in_fastapi`, `async_database_sqlalchemy`, `authentication_and_security`
+- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`). The section currently runs
+  16–20; treat 15 as the floor you must clear, never as the target you aim at.
+- Deep modules — **18+ required**: `pydantic_v2_deep_dive`, `dependency_injection_in_fastapi`,
+  `async_database_sqlalchemy`, `authentication_and_security`. All four are at 18–19 today, so a
+  new Q&A here adds to that, it does not top up to a quota.
+
+## Boundary with `backend/` — who owns what
+
+Eight modules here have a `backend/` twin (`rest_api_design`, `websockets_and_sse`,
+`rate_limiting_in_depth`, `backend_security_owasp`, `auth_and_authorization_systems`,
+`observability_and_monitoring`, `caching_strategies_deep_dive` + `connection_pooling_deep_dive`,
+and the four event-driven modules). The rule, so nobody re-derives it:
+
+> **`backend/` owns the protocol and the pattern. `fastapi/` owns the framework wiring.**
+
+So the SSE wire format, the token-bucket algorithm, the outbox pattern and the OWASP category
+belong in `backend/`; `fastapi.sse` as a response class, a `Depends`-injected limiter, an
+outbox drained from an `AsyncSession`, and the FastAPI-specific way to get each wrong belong
+here. When a module starts restating generic theory, cross-link the `backend/` page instead of
+duplicating it — duplicated first sentences also feed the same section-wide MCQ distractor
+pool, so the duplication degrades the quiz as well as the prose. The same rule one level more
+abstract governs the `hld/` twins.
 
 ## Adding a New FastAPI Module
 

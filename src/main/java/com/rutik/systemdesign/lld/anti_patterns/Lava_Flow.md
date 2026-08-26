@@ -416,6 +416,68 @@ A startup calculated that new engineers spent an average of 3 days in their firs
 
 ---
 
+## Interview Questions with Answers
+
+**Q: What is the Lava Flow anti-pattern, and why the geological name?**
+**Short:** Dead or obsolete code that hardens into a permanent, untouchable fixture because nobody knows whether it's safe to remove.
+Lava Flow describes the accumulation of dead, obsolete, or poorly understood code that persists because no one knows what it does or whether removing it is safe. Like solidified lava that hardens over time into an immovable rock layer, this code becomes a permanent fixture — untouched, undocumented, and quietly dangerous. It typically originates from rapid prototyping that was never cleaned up, departed engineers who left no documentation, or fear-driven development where removing something "just in case it breaks production" feels riskier than leaving it.
+
+**Q: How do you find dead code you are afraid to delete?**
+**Short:** Search for callers, grep 90 days of production logs, check git blame, then gate it behind a feature flag before deleting.
+The "Archaeological Dig" process is a four-step audit: use your IDE to find all callers of the suspicious method; search production logs for the method name over a 90-day window to catch infrequent invocations like batch jobs; check git blame for when it was last touched and why; and if no callers and no recent activity turn up, delete it — don't comment it out. For genuinely uncertain cases, gate the code behind a feature flag defaulting to off, monitor for a full release cycle, and only delete the flag and code together once nothing breaks.
+
+**Q: In the "Phantom Batch Job" scenario, why did deleting `processOrderLegacy()` cause a production incident despite it "appearing unused"?**
+**Short:** It was invoked by a cron job defined in an XML scheduler file in a different repository, invisible to the IDE's caller search.
+An IDE's "find usages" only sees callers within the codebase it's indexing — it cannot see a cron job's XML scheduler configuration living in an entirely separate repository that invokes the method by name at runtime. The team deleted the method confidently after an IDE-only search found no callers, and the next morning overnight batch reconciliation failed silently, leaving thousands of orders stuck. This is exactly why the archaeological-dig process also requires a production log search — a cross-repository or reflection-based caller is invisible to static analysis but shows up in logs if it ever actually ran.
+
+**Q: What is the difference between `@Deprecated` code with a removal date and the deprecated code in this file's violation example?**
+**Short:** A removal date and ticket number create an enforceable lifecycle; the example's `@Deprecated` methods have neither and never get removed.
+`processOrderLegacy()` in the violation example is marked `@Deprecated` with a comment saying "left here because the batch job might still call it (nobody checked)" — there is no removal date, no ticket reference, and no plan, so the deprecation is purely decorative and the method persists indefinitely. The prevention strategy is to always attach a removal date and ticket number using `@Deprecated(since = "2026-07", forRemoval = true)` with a Javadoc `@deprecated` pointing to the replacement and citing a tracking ticket, turning "deprecated" from a permanent label into a scheduled, enforceable event.
+
+**Q: Why is a "500-line class where 300 lines are inert" still a 500-line cognitive burden, not a 200-line one?**
+**Short:** The reader must first prove each dead line is actually dead before they can safely ignore it, which costs as much as reading live code.
+You cannot skip the 300 dead lines just because they're unused — you have to read and understand them well enough to confirm they're genuinely unreachable, unless someone has already done that verification and documented it. That proof-of-deadness effort costs roughly the same cognitive work as understanding live code would, so the class doesn't get cheaper to reason about just because a majority of it never executes; it stays exactly as expensive to onboard onto until the dead code is actually removed.
+
+**Q: What security risk does "nobody calls this method" actually leave unaddressed?**
+**Short:** A deprecated method invocable via reflection, serialization, or a forgotten cron job can still be a live attack surface.
+Static "no callers found" analysis only sees direct method calls in the indexed codebase — it cannot rule out invocation via reflection, deserialization of an old payload format, or an external scheduler referencing the method by name (as in the Phantom Batch Job scenario). A security audit must therefore cover dead code paths as thoroughly as live ones, because "nobody calls this" is an unverified assumption, not a proven fact, and the "Resurrected Vulnerability" scenario shows a commented-out authentication bypass being mistaken for a useful local-dev shortcut and merged back into production.
+
+**Q: Why does the file insist on deleting dead code outright rather than commenting it out?**
+**Short:** Version control already IS the history — commented-out code just duplicates that history inline where it costs ongoing attention.
+`git log` and `git blame` already preserve every version of a file including deleted code, so commenting a block out and leaving it in the source provides no historical value that version control doesn't already give you — it only adds permanent visual clutter that every future reader has to mentally filter out. The "COMMENTED-OUT GRAVEYARD" block in the violation example is a direct illustration: three dead private methods preserved as comments, occupying space and attention for zero benefit, when `git log -p` could recover them in seconds if ever actually needed.
+
+**Q: How does a mysterious static initializer like `LEGACY_REGISTRY` become dangerous even if nothing reads it after startup?**
+**Short:** Work of unknown purpose runs with no test coverage, so nobody can confirm removing it is safe without risking a regression.
+The static initializer populates `LEGACY_REGISTRY` with `INIT_FLAG` and `MODE` entries that nothing subsequently reads, but because it has no test coverage and nobody currently on the team wrote it, there's no way to be confident it's truly side-effect-free — it could, for instance, be silently relied upon by a reflection-based framework hook or a monitoring agent. In the refactored version, this initializer is investigated and confirmed unnecessary before being removed entirely, which is the discipline the anti-pattern is really about: verify, don't assume, before deleting anything with unclear provenance.
+
+**Q: What is a "zombie feature flag," and how is it a form of Lava Flow?**
+**Short:** A flag left permanently on or off after rollout that nobody cleaned up, leaving dead conditional branches that still cost attention.
+A feature flag that is always evaluated `true` or always `false` because the rollout finished but the flag and its now-dead branch were never removed is Lava Flow at the configuration layer: the flag evaluation still adds a small amount of latency, the conditional code paths for the "other" branch still exist in the codebase, and new engineers still waste time trying to understand a toggle that in practice does nothing. The fix mirrors code-level dead code cleanup — once a flag's rollout is confirmed complete and stable, delete both the flag and the now-unreachable branch together.
+
+**Q: Why do deprecated but still-live API endpoints represent Lava Flow at the HLD level?**
+**Short:** An endpoint can't be removed because its remaining callers are unknown, so it must be maintained indefinitely.
+An endpoint marked deprecated but still receiving traffic cannot simply be turned off, because the team doesn't know which external or internal clients still depend on it — removing it risks breaking callers nobody has inventoried. This forces the endpoint to be maintained indefinitely, growing the API surface without bound; it's the exact same "we're afraid to delete it because we don't know what breaks" dynamic as dead code inside a single class, just expressed as network-accessible dead code that other teams' systems may silently depend on.
+
+**Q: What is the practical benefit of the "Onboarding Time Sink" scenario's math — 3 days per new hire across a year?**
+**Short:** 10 hires × 3 days each = 30 engineering-days, roughly six full work weeks, spent investigating code that turned out to be dead.
+The scenario quantifies a cost that's usually invisible because it's distributed across many individuals over time: new engineers spending an average of 3 days in their first two weeks investigating mysterious legacy code that ultimately proves to be dead, multiplied across 10 new hires in a year, totals 30 engineering-days — about six full work weeks of pure waste. Making this cost explicit and quantified is useful in an interview or a business case for prioritizing a cleanup effort, since "the code is confusing" is a much weaker argument than "this costs six person-weeks per year."
+
+**Q: How does feature-flag-gated removal reduce the risk of deleting suspect code compared to deleting it directly?**
+**Short:** It creates a reversible, monitored intermediate step — code stays present but inert, so a break can be caught and reverted cheaply.
+Rather than deleting a code path outright and hoping nothing depended on it, gating it behind a feature flag set to `false` keeps the code physically present (so re-enabling it is instant) while making it inert in production — if something breaks during the monitoring period, the fix is flipping the flag back, not a rushed revert-and-redeploy. Only after a full release cycle passes with nothing breaking does the file recommend deleting the flag and the dead code path together, converting an irreversible action into a reversible experiment first.
+
+**Q: What is the difference in cost between the SOC 2 audit scenario and the Onboarding scenario in this file?**
+**Short:** Onboarding cost is steady, distributed toil; the audit cost was a hard six-week external delay triggered by undocumented code.
+The Onboarding Time Sink is a chronic, distributed cost — 3 days per new hire, absorbed continuously as normal (if wasteful) engineering activity. The SOC 2 audit failure is an acute, concentrated cost: auditors required documentation for every code path touching PII, the team could not explain 30% of a data-processing class due to undocumented legacy code, and the entire audit was delayed six weeks while engineers reverse-engineered their own system. Both trace back to the same root cause — undocumented, unexplained code — but the audit scenario shows how that same debt can suddenly become a hard business blocker rather than a background tax.
+
+**Q: Why does documenting "intent, not mechanics" matter when code must remain for a non-obvious reason?**
+**Short:** A ticket-referenced business reason survives staff turnover; a mechanical description of what the code does does not explain why it must stay.
+Documenting *why* code must remain — e.g., "Required for PCI compliance audit trail. See SEC-2201. Do not remove without review from the Security team" — gives a future engineer a concrete, verifiable reason to leave it alone and a specific path (the ticket, the named team) to get clarity if they want to challenge it. A comment merely restating what the code mechanically does, by contrast, doesn't explain why it can't simply be deleted, and the reasoning behind "why does this need to exist" is precisely the information that gets lost first when the original author leaves the team.
+
+**Q: Why does dead code inflate complexity metrics and produce noisy static analysis reports?**
+**Short:** Dead classes and unreachable methods still get counted by coverage, complexity, and dependency tools, hiding real problems in the noise.
+Static analysis tools, test coverage reports, and dependency graphs all include dead code in their totals, because the tooling has no reliable way to distinguish "unreachable" from "reachable but untested" without the same archaeological effort a human would need. This inflates complexity scores and produces coverage gaps that look identical to genuinely risky untested live code, and engineers who repeatedly see the same false-positive noise learn to ignore the reports altogether — which means a real problem hiding in the same report is now also more likely to be missed.
+
 ## Quick Reference Summary
 
 | Dimension | Details |

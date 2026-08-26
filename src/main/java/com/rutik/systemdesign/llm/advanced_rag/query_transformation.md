@@ -216,36 +216,14 @@ def multi_query_retrieve(query: str, llm, retriever, n_queries: int = 4):
 
 Deduplication is critical: the same document retrieved by multiple query variants should appear only once in the final candidate set.
 
-**What the formula is telling you.** Fan-out multiplies cost linearly and recall sub-linearly. Gross candidates are exactly `N x top_k`, but *unique* candidates saturate — because every variant is fishing in the same small pool of genuinely relevant documents. Modelling each variant as drawing `k` documents from an effective relevant pool of size `P`, the expected unique count is `P x (1 - (1 - k/P)^N)`.
-
-| Symbol | What it is |
-|--------|------------|
-| `N` | Query variants retrieved for, including the original — 5 in the code above |
-| `k` | `top_k` per variant, 20 here |
-| `N x k` | Gross retrievals — the cost you pay in ANN searches every time |
-| `P` | Effective pool of documents any phrasing of this question can surface |
-| `(1 - k/P)^N` | Probability a given pool document is missed by all `N` variants |
-| dedup rate | `(gross - unique) / gross` — the fraction of your retrieval work thrown away |
-
-**Walk one example.** `k = 20`, `P = 80`:
-
-```
-  N    gross   unique   duplicates   dedup rate   new docs this variant added
-  ------------------------------------------------------------------------------
-   1      20    20.00       0.00        0.0%        20.00
-   2      40    35.00       5.00       12.5%        15.00
-   3      60    46.25      13.75       22.9%        11.25
-   5     100    61.02      38.98       39.0%         6.33
-  10     200    75.49     124.51       62.3%         1.50
-
-  Cost is a straight line: N = 10 runs 10x the ANN searches of N = 1.
-  Yield is a decaying curve: the 10th variant contributes 1.50 new documents
-  for the same price as the 1st, which contributed 20.
-```
-
-**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 8's "3-5 variants" guidance and under Pitfall 5's warning about 10+ variants: past five, you are buying duplicates at full price.
-
-**What dedup actually saves.** At `N = 5`, 38.98 of the 100 retrievals are repeats. Removing them before the reranker cuts 39 cross-encoder passes — roughly `38.98 x 0.8 ms = 31 ms` — but the real damage of skipping dedup (Pitfall 3) is not latency. A document surfaced by four of five variants appears four times in the reranker's input and four times in the final context, so it both distorts the ranking and consumes context slots that other evidence needed.
+**The fan-out cost/dedup math is canonical in [Advanced RAG §4.1](advanced_rag.md)** — the
+`N x top_k` gross-vs-unique saturation curve, the symbol table, the walked latency example, and
+why the marginal yield past 3-5 variants stops paying for itself all live there rather than
+being re-derived per technique. The short version: sub-queries are paraphrases of one intent, so
+their result sets overlap heavily (advanced_rag.md's worked example puts duplication at ~40% for
+a 3-way expansion), and skipping dedup before reranking does not just cost latency — a document
+surfaced by several variants wins reranker slots and context space it would not have earned on
+its own merits, at the expense of evidence a single-query retrieval would have surfaced instead.
 
 **Walk the transformation bill.** The case study in Section 14 measures `$0.0004` per query for the transformation LLM call:
 
@@ -424,8 +402,36 @@ LLM generates a hypothetical that contains wrong facts about recent events. Retr
 Fix: Test HyDE recall vs. direct retrieval. If HyDE underperforms on factual queries, use direct retrieval for that query type.
 
 **3. Multi-query without deduplication**
-The same document retrieved 3x by different query variants ends up 3x in the candidate set, inflating its apparent relevance.
-Fix: Always deduplicate by document ID before reranking.
+The same document retrieved 3x by different query variants ends up 3x in the candidate set, inflating its apparent relevance:
+
+```python
+# BROKEN: sub-query result lists are concatenated, never deduplicated
+def multi_query_retrieve_broken(query: str, llm, retriever, n_queries: int = 4):
+    alternatives = parse_list(llm.generate(f"Generate {n_queries} phrasings of: {query}"))
+    all_results = []
+    for q in [query] + alternatives:
+        all_results.extend(retriever.retrieve(q, top_k=20))  # BUG: no id check
+    return all_results  # up to 5 x 20 = 100 candidates, duplicates included
+```
+
+A document that genuinely matches all 5 phrasings occupies up to 5 of the reranker's input slots and, after reranking, can occupy multiple slots of the final top-k — crowding out documents that answered a different part of the question and were only surfaced once.
+Fix: deduplicate by document ID as each variant's results come in, before the merged set ever reaches the reranker:
+
+```python
+# FIXED: dedup by document id during merge, then rerank the unique set
+def multi_query_retrieve(query: str, llm, retriever, n_queries: int = 4):
+    alternatives = parse_list(llm.generate(f"Generate {n_queries} phrasings of: {query}"))
+    seen_ids: set[str] = set()
+    unique_results = []
+    for q in [query] + alternatives:
+        for doc in retriever.retrieve(q, top_k=20):
+            if doc.id not in seen_ids:
+                seen_ids.add(doc.id)
+                unique_results.append(doc)
+    return unique_results  # rerank this set, not the raw concatenation
+```
+
+At the fan-out rates worked in Section 6.3, dedup typically removes 20-40% of the raw candidate count before a single reranker pass runs — fewer redundant cross-encoder calls, and no document wins a final slot purely for having been asked about five different ways. Reciprocal-rank fusion (RRF) is the alternative when you want overlap across variants to count as a positive relevance signal rather than being discarded outright.
 
 **4. No reranking after multi-query merge**
 Merging 4×20 = 80 candidates without reranking provides 80 documents to the LLM — too much noise, context window exceeded.

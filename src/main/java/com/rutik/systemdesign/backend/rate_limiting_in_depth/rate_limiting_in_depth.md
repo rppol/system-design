@@ -863,7 +863,8 @@ A team used a leaky bucket to smooth requests to a third-party payment processor
 | Technology                   | Role                                                         | Notes                                               |
 |------------------------------|--------------------------------------------------------------|-----------------------------------------------------|
 | Redis + Lua                  | Distributed atomic rate limiting (sliding window)            | Single-threaded Lua execution guarantees atomicity  |
-| Redis `INCR` + `EXPIRE`      | Simple fixed window counter                                  | Simplest approach; prone to boundary burst          |
+| Valkey + Lua                 | Same, on the BSD-3-Clause Linux Foundation fork              | **The default engine you get now** — AWS ElastiCache and Google Memorystore provision Valkey, not Redis, for new clusters. Every script in this module runs byte-identically; `EVAL`, `EVALSHA`, `INCR`, `PEXPIRE` and sorted sets are unchanged. Engine internals: [`../../database/redis_internals/redis_internals.md`](../../database/redis_internals/redis_internals.md) |
+| Redis / Valkey `INCR` + `EXPIRE` | Simple fixed window counter                              | Simplest approach; prone to boundary burst          |
 | Nginx `limit_req`            | Edge rate limiting before reaching application               | `limit_req_zone`, `burst`, `nodelay`                |
 | HAProxy `stick-table`        | Connection-level and request-level rate limiting             | More complex config than Nginx                      |
 | Bucket4j                     | Java in-memory and Redis-backed token bucket                 | Good for application-level limiting                 |
@@ -997,6 +998,11 @@ A fixed window counter keyed by a rounded timestamp assigns requests to the wron
 **Short:** A leaky bucket queue deeper than the caller's timeout wastes capacity on requests that time out anyway.
 
 If the bucket's queue is deeper than the caller's own timeout allows, requests get queued, wait, and time out anyway — wasting a slot on a request that never completes. A queue tuned for a 50 requests-per-second outflow rate could make requests wait up to 4 seconds under a 200-request burst, but if the calling HTTP client has only a 2-second timeout, those requests are "successfully" queued yet still fail from the caller's perspective. This is worse than rejecting immediately, because the request consumed capacity and added latency without ever producing a usable response. Size queue depth as `outflow_rate * max_acceptable_wait_seconds` and reject with a 429 immediately once the queue is full instead of queuing indefinitely.
+
+**Q: Your rate limiter's Lua scripts were written for Redis and the platform team is moving you to Valkey. What has to change?**
+**Short:** Nothing in the scripts — Valkey is a wire- and command-compatible BSD-3-Clause fork of Redis 7.2.4, so `EVAL`, `EVALSHA`, `INCR`, `PEXPIRE` and sorted-set windows behave identically.
+
+Nothing in the scripts. Valkey is the Linux Foundation's BSD-3-Clause fork of Redis 7.2.4, created after the March 2024 relicensing, and it preserves the wire protocol, the command set and — critically for rate limiting — the single-threaded execution of a Lua script, which is the property that makes your check-and-increment atomic in the first place. `EVAL`, `EVALSHA`, `INCR`/`PEXPIRE` counters, `ZADD`/`ZREMRANGEBYSCORE` sliding windows and `CLIENT NO-EVICT` all behave the same, so the migration is a connection-string change. You should care because this is now the default rather than an alternative: AWS ElastiCache and Google Memorystore provision Valkey for new clusters, so a team that never made a decision will still end up here. Two things genuinely worth re-testing rather than assuming: script caching, because `EVALSHA` SHAs are per-node and a cluster rebuild loses them, so keep the `NOSCRIPT` fallback that reloads the script; and any dependence on Redis-only modules, which have no Valkey equivalent. Keep the same discipline either way — one script per limiter decision, all keys passed as `KEYS[]` so cluster mode can route them to one slot, and no cross-slot reads inside the script.
 
 ---
 

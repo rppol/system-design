@@ -9,7 +9,7 @@ LangChain is the most widely adopted orchestration framework for LLM application
 LangChain Expression Language (LCEL) is the canonical API: a composable pipe-based interface where every component is a Runnable and `|` wires them together. Agents are built on top of it with `create_agent`, a configurable harness that runs on the LangGraph runtime.
 
 **Current version**: langchain / langchain-core / langchain-community 1.x (1.3.x is the current stable line; Python 3.10+). Pre-1.0 chain classes such as `LLMChain` live in a separate `langchain-classic` package, which is where you will meet them in an inherited codebase.
-**Production adoption signal**: Used by Notion AI, Elastic, Replit (initially), numerous enterprise deployments. The most-starred LLM framework on GitHub as of 2024.
+**Production adoption signal**: Used by Notion AI, Elastic, Replit (initially), numerous enterprise deployments. Among the most-starred LLM frameworks on GitHub, and the one you are most likely to inherit — check the live star count and release cadence before treating popularity as a selection criterion, since it moves faster than any document can track.
 
 ---
 

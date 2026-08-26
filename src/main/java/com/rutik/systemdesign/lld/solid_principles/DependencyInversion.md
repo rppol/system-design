@@ -563,4 +563,81 @@ A: The single place in the application where all concrete implementations are wi
 
 ---
 
+**Q: What does DIP mean when it says "abstractions should not depend on details"?**
+**Short:** The interface itself must not leak implementation specifics, like a JDBC Connection parameter, into its method signatures.
+
+A: An interface's methods must be expressed purely in terms of the concept it represents, not the technology behind any one implementation. `UserRepository.findById(long id, Connection connection)` leaks a JDBC detail into the contract itself — every implementation and every caller is now coupled to JDBC even through the abstraction. The fix is `findById(long id)`: the connection, the SQL, the driver — all of it belongs inside the implementation, never in the interface signature.
+
+---
+
+**Q: In the UserService example, what specifically breaks when swapping MySQL for PostgreSQL without DIP?**
+**Short:** UserService itself must be edited, because it directly instantiates MySQLUserRepository.
+
+A: `UserService` holds `private MySQLUserRepository userRepository = new MySQLUserRepository();` — a direct construction of a concrete class inside the business logic. Switching to PostgreSQL means editing `UserService` itself, even though nothing about the business rule "register a user" actually changed. Unit testing `registerUser()` also requires a running MySQL instance, because there's no seam to substitute a fake. The DIP-compliant version injects a `UserRepository` interface through the constructor, so swapping the database means writing a new implementation and changing only the composition root.
+
+---
+
+**Q: What does "DIP inverts the ownership of abstractions" mean?**
+**Short:** The high-level module defines the interface's contract; low-level modules implement it, reversing the usual direction.
+
+A: Conventionally, a low-level module (say, a MySQL client library) defines its own interface, and high-level code adapts to it. DIP inverts that: the high-level module — the business logic — defines the interface it needs (`UserRepository`, shaped around what the domain requires), and the low-level module implements that interface on the high-level module's terms. The abstraction belongs conceptually to the policy layer, not to the infrastructure layer that happens to implement it.
+
+---
+
+**Q: How does DIP make UserService trivially unit-testable, per the InMemoryUserRepository example?**
+**Short:** An in-memory UserRepository implementation lets tests run without any real database or network dependency.
+
+A: Because `UserService` depends only on the `UserRepository` interface, a test can construct it with a ten-line `InMemoryUserRepository` backed by a `HashMap` instead of a real MySQL instance. The test asserts on an in-memory map's contents and a captured list of "sent" emails, with no schema, no container, and no network call — the whole test suite runs in milliseconds. Without DIP, the same test would need a live database and SMTP server just to exercise one business rule.
+
+---
+
+**Q: Why is field injection (`@Autowired private MySQLUserRepository userRepository`) worse than constructor injection of an interface?**
+**Short:** Field injection hides the dependency, permits a half-built object, and blocks a final field.
+
+A: Field injection hides the dependency from the type's public contract — you can't tell what a class needs just by reading its constructor. It also permits the object to exist in a half-constructed state before Spring populates the field, and it prevents the field from being declared `final`. Constructor injection of the `UserRepository` interface makes the dependency visible in the signature, lets Spring wire a single constructor with no annotation at all, and allows the field to be `final` and therefore guaranteed non-null after construction.
+
+---
+
+**Q: What's wrong with calling `EmailUtils.sendConfirmation(order)` as a static call from business logic?**
+**Short:** Static calls to infrastructure utilities are untestable and unconfigurable, since they can't be swapped or mocked.
+
+A: A static method call is a compile-time-fixed dependency — there is no interface to substitute, so a unit test for `OrderService.processOrder()` cannot avoid actually sending an email (or must resort to fragile static-mocking frameworks). It's also unconfigurable: switching email providers means finding and editing every call site instead of changing one binding in the composition root. Wrapping the static call behind an injected `EmailService` interface restores both testability and swappability.
+
+---
+
+**Q: How do Spring beans implement DIP in the OrderService/PaymentGateway example?**
+**Short:** OrderService's constructor depends on interfaces; Spring injects concrete beans like StripePaymentGateway at runtime.
+
+A: `OrderService`'s constructor declares dependencies on `OrderRepository`, `PaymentGateway`, and `NotificationService` — all interfaces — and Spring's container supplies the concrete `@Repository`/`@Component` beans (`JpaOrderRepository`, `StripePaymentGateway`, `PushNotificationService`) at runtime. `OrderService` never imports Stripe's SDK or JPA directly. Swapping `StripePaymentGateway` for a different provider means changing which bean is registered — via `@Primary` or configuration — with zero changes to `OrderService`'s code.
+
+---
+
+**Q: What's the dependency direction shown by the layered-architecture flowchart in this module?**
+**Short:** Dependencies point inward — infrastructure implements domain interfaces, and the domain never imports infrastructure.
+
+A: Presentation depends on the Application layer, which depends only on Domain Interfaces (repository/gateway interfaces) — arrows all point inward, toward the domain. The Infrastructure layer sits outside that chain and *implements* the domain interfaces rather than being depended upon; the arrow from Infrastructure to Domain Interfaces is "implements," not "depends on" in the usual sense. The domain never imports a JPA class, a REST client, or an SMTP library — it only ever imports its own interfaces.
+
+---
+
+**Q: When is it fine to depend directly on a concrete class instead of abstracting it via DIP?**
+**Short:** For stable JDK types like ArrayList or LocalDate, and for simple value objects and entities.
+
+A: Stable, low-level utilities such as `java.util.ArrayList` or `java.time.LocalDate` are so unlikely to need swapping that depending on them directly is fine — there's no realistic second implementation to prepare for. The same applies to value objects and entities like `User` or `Order`: they hold data and behavior, not a service to be mocked, so wrapping them in an interface adds no value. DIP is worth applying where you anticipate change or need testability, not as a blanket rule for every class in the codebase.
+
+---
+
+**Q: How do infrastructure "port" abstractions (StoragePort, NotificationPort) apply DIP at the HLD level?**
+**Short:** Application code depends on the port interfaces, not the S3 or Twilio SDK, insulating it from infrastructure churn.
+
+A: Application code depends on `StoragePort` and `NotificationPort` interfaces — the abstractions — rather than importing the S3 SDK or the Twilio SDK directly. Infrastructure adapters implement those ports, so a migration from S3 to a different object store, or from Twilio to a different SMS provider, touches only the adapter and the composition root. This is DIP applied at the scale of a whole application's infrastructure boundary, not just one service's constructor.
+
+---
+
+**Q: Does depending on an interface you also own and always use with exactly one implementation actually invert anything?**
+**Short:** Not meaningfully — real inversion requires the high-level module to own the contract while a genuinely swappable low-level module implements it.
+
+A: Not in any way that matters if there's only ever one implementation and both sides live in the same module under your control — you've added an interface and a composition-root wiring step without gaining a real seam to swap or test against. DIP's value comes from the high-level module owning a contract that an independently-varying low-level module implements; if nothing independently varies, there's nothing being inverted, just indirection. This is the tradeoff section's "diminishing returns" point made concrete: a project with three classes should not have three interfaces, because interfaces without a second implementation or a real testing need are ceremony, not inversion.
+
+---
+
 **Interview Tip:** Connect DIP to testability immediately. Say: "Without DIP, unit tests for business logic require real databases and external services. With DIP, I inject in-memory stubs and the tests run in milliseconds with no external dependencies." This shows you understand the practical value, not just the academic definition. Also mention that constructor injection of interface types is the canonical enterprise Java application of DIP — Spring wires a single constructor with no `@Autowired` annotation at all, which is why field injection is the form to avoid: it hides the dependency, permits an object to exist half-built, and blocks `final` fields.

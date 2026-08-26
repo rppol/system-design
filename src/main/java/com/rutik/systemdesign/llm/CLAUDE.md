@@ -75,27 +75,28 @@ Every module page (`<module>/<module>.md`) and deep-dive sub-file follows the **
   that way (owner-ruled 2026-07-28). Do not normalize it. This exception was previously
   undocumented, which is why an audit kept re-flagging it.
 
-Known divergences still to be adapted (survey 2026-07-28) — all share the SAME three
-deviations, so they are one job, not four:
+**The "known divergences" list is CLOSED — every file on it is conformant. Do not re-open it.**
+The 2026-07-28 survey recorded three shared deviations (unnumbered `## Intuition`, an absent
+`## 4. Types / Architectures / Strategies`, and `How It Works` / `Architecture Diagrams` in the
+opposite order) across 15 files in `fine_tuning/`, `advanced_rag/` and `agents_and_tool_use/`,
+plus a separate topic-named-headings case in
+`optimization_and_quantization/optimization_and_quantization.md`. **All of that work was done.**
+Re-measured 2026-08-25 across all 16 files plus `advanced_rag/advanced_rag.md`: every one runs
+`## 1. Concept Overview` through `## 14. Case Study` in template order, and
+`optimization_and_quantization` now numbers 1-14 with `## 6. How It Works — Detailed Mechanics`
+and `## 13. Best Practices` both present.
 
-    fine_tuning/         lora, qlora, peft_methods, instruction_tuning, domain_adaptation
-    advanced_rag/        agentic_rag, corrective_rag, graph_rag, multimodal_rag,
-                         query_transformation, self_rag
-    agents_and_tool_use/ agent_memory, function_calling_and_tool_design, plan_and_execute,
-                         react_and_reasoning_patterns
+The note survived the fix and kept re-surfacing in audits as open work — which is the cost of a
+stale exception record. If a future survey finds a real divergence, name the file and the
+deviation; do not restore this list. The only live template exception in this section is
+`vllm_deep_dive` above.
 
-For each of those 15 files:
-1. `## Intuition` is **unnumbered** -> becomes `## 2. Intuition`.
-2. `## 4. Types / Architectures / Strategies` is **absent entirely** -> must be AUTHORED,
-   not renumbered into existence.
-3. `How It Works` and `Architecture Diagrams` are in the **opposite order** to the template
-   (files have How It Works at 3 and Diagrams at 4; the template is Diagrams 5, How It Works
-   6). Conforming means MOVING a block that runs 400+ lines in some files.
-
-`optimization_and_quantization/optimization_and_quantization.md` is a separate case: it numbers 1-14 but its
-middle sections are topic-named (`4. Quantization Methods`, `5. Flash Attention & Mixture of
-Experts`, `7. Other Optimization Techniques`), it has no `How It Works` section, and it is
-**missing Best Practices entirely** — Interview sits at 13 and Case Study at 14.
+**Four `agentic_frameworks/` sub-files are SHORT BY DESIGN — do not "expand" them.**
+`smolagents.md` (~437 lines), `pydantic_ai.md` (~455), `strands_aws.md` (~467) and
+`mastra_typescript.md` (~485) are the shortest files in the section and each carries the 15-Q&A
+floor exactly. That is correct: they are vendor surveys in a catalogue module, not topic deep
+dives, and a reader needs enough to choose the framework, not to master it. Keep them current;
+do not pad them to the section's ~1,150-line module average.
 
 **The `A: ` answer prefix is NOT a divergence — do not "fix" it.** Root `CLAUDE.md` says
 "bold the question, plain text the answer" and mandates no prefix. Measured across `llm`:

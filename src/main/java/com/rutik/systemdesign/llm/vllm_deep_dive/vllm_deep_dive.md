@@ -43,8 +43,8 @@
 
 ## 1. Architecture Overview
 
-> **Version this document targets: vLLM v0.26.0** (released 2026-07-25). Every flag, default and
-> signature below was checked against the v0.26.0 source. vLLM's CLI and Python API move fast, so
+> **Version this document targets: vLLM v0.27.1** (released 2026-08-11). Every flag, default and
+> signature below was checked against the v0.27.1 source. vLLM's CLI and Python API move fast, so
 > re-check against your installed release before copying anything into production — and treat any
 > flag you find in a tutorial as unverified until `vllm serve --help` confirms it.
 
@@ -690,7 +690,7 @@ TTFT at all.
 | API | Transparent | Transparent |
 
 **The granularity row is a default, not a hard constraint any more.** `CacheConfig.prefix_match_unit`
-(v0.26.0) is "the finest token boundary a prefix-cache hit can land on" and "can be set finer than
+(v0.27.1) is "the finest token boundary a prefix-cache hit can land on" and "can be set finer than
 the physical KV cache block sizes ... as long as every KV cache group's `block_size` is divisible
 by it". It controls matching only, not how often states are stored. Left at its default of `None`
 it resolves to the scheduler block size for an ordinary single-group model — so 16 tokens — and to
@@ -854,8 +854,9 @@ All speculative decoding is configured through **one** flag, `--speculative-conf
 `-sc`), which takes a JSON object validated against `SpeculativeConfig`
 (`vllm/config/speculative.py`). There are no per-knob CLI flags: the only shorthands are
 `--spec-method`, `--spec-model` and `--spec-tokens`, and each is mutually exclusive with the
-corresponding JSON key. Valid `method` values in v0.26.0 include `ngram`, `ngram_gpu`, `suffix`,
-`medusa`, `mlp_speculator`, `draft_model`, `eagle`, `eagle3`, and the per-model MTP variants.
+corresponding JSON key. Valid `method` values in v0.27.1 include `ngram`, `ngram_gpu`, `suffix`,
+`medusa`, `mlp_speculator`, `draft_model`, `custom_class`, `eagle`, `eagle3`, and the per-model MTP
+and DSpark variants.
 
 #### Option 1: Draft Model
 
@@ -917,10 +918,14 @@ vLLM supports multiple quantization formats, affecting memory, throughput, and q
 ### Supported Formats
 
 `--quantization` accepts the values in `QuantizationMethods`
-(`vllm/model_executor/layers/quantization/__init__.py`). In v0.26.0 that list includes `awq`,
-`gptq`, `gptq_marlin`, `awq_marlin`, `fp8`, `modelopt`, `modelopt_fp4`, `mxfp4`,
-`compressed-tensors`, `bitsandbytes`, `quark`, `torchao` and several online-quantization
-shorthands. That enum is the whole contract: a value outside it fails argument validation at
+(`vllm/model_executor/layers/quantization/__init__.py`). In v0.27.1 that list includes `awq`,
+`gptq`, `gptq_marlin`, `awq_marlin`, `fp8`, `modelopt`, `modelopt_fp4`, `modelopt_mxfp8`,
+`mxfp4`, `gpt_oss_mxfp4` (the format `gpt-oss` ships natively), `deepseek_v4_fp8`,
+`compressed-tensors`, `bitsandbytes`, `quark`, `torchao`, `moe_wna16`, `experts_int8` and several
+online-quantization shorthands (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`,
+`nvfp4_per_token`, `mxfp8`, among others). `fbgemm_fp8` and `fp_quant` are present but listed in
+`DEPRECATED_QUANTIZATION_METHODS` — accepted for now, not the value to reach for in new configs.
+That enum is the whole contract: a value outside it fails argument validation at
 startup. GGUF is served through an out-of-tree plugin rather than a `--quantization` value.
 
 | Format | Bits | `--quantization` value | Method | Quality loss |
@@ -969,9 +974,10 @@ Separate from weight quantization — quantizes the KV cache itself to save memo
 --kv-cache-dtype fp8_e4m3    # explicit E4M3 variant (CUDA 11.8+ and ROCm)
 ```
 
-There is no plain `int8` KV cache dtype in v0.26.0. The accepted values are `auto`, `float16`,
+There is no plain `int8` KV cache dtype in v0.27.1. The accepted values are `auto`, `float16`,
 `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2`, `fp8_inc`, `fp8_ds_mla`, `nvfp4`, the `turboquant_*`
-family and the per-token-head variants `int4_per_token_head`, `int8_per_token_head`,
+family (`turboquant_k8v4`, `turboquant_4bit_nc`, `turboquant_k3v4_nc`, `turboquant_3bit_nc`) and
+the per-token-head variants `int4_per_token_head`, `int8_per_token_head`,
 `fp8_per_token_head` (`CacheDType` in `vllm/config/cache.py`).
 
 **Impact**: FP8 KV cache halves KV memory versus FP16. Recompute it for LLaMA 3 70B (80 layers,
@@ -1080,8 +1086,8 @@ python -m vllm.entrypoints.openai.api_server \
     --distributed-executor-backend ray
 ```
 
-**Ray is no longer the only multi-node path.** Current vLLM (checked against `main` / v0.26.0 on
-30 July 2026) ships a native launcher on the `mp` backend — `--nnodes` / `-n`, `--node-rank` / `-r`,
+**Ray is no longer the only multi-node path.** Current vLLM (checked against v0.27.1) ships a
+native launcher on the `mp` backend — `--nnodes` / `-n`, `--node-rank` / `-r`,
 `--master-addr`, `--master-port` — with no Ray cluster to stand up first:
 
 ```bash
@@ -1755,7 +1761,7 @@ server {
 ### Essential Flags
 
 Values shown are illustrative; the **defaults** are called out where they matter (all read from
-`vllm/config/*.py` at v0.26.0).
+`vllm/config/*.py` at v0.27.1).
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
@@ -2111,7 +2117,7 @@ Because `--request-rate` defaults to `inf`, which fires every request at once, s
 > **This case study is an illustrative composite, not a public incident report.** The company,
 > the traffic figures and the before/after metrics are constructed to exercise the mechanics in
 > §1-19; they are not measurements from a named deployment. The configuration flags and the block
-> arithmetic are real and checked against vLLM v0.26.0 — the business numbers are not citable.
+> arithmetic are real and checked against vLLM v0.27.1 — the business numbers are not citable.
 
 **Scenario:** A generative AI startup serves a Llama-3-70B instruction model as their core product API. Current load: 500 RPS, average prompt 512 tokens, average output 256 tokens, p99 TTFT SLA < 800ms, p99 decode latency < 50ms/token. GPU budget: 8 x A100 80GB SXM. The naive deployment (HuggingFace `generate()` with static batching) saturates at 40 RPS with p99 TTFT > 3s.
 
