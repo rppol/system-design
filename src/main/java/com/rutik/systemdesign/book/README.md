@@ -175,6 +175,158 @@ ddia_2e/13_philosophy_of_streaming_systems
   13_philosophy_of_streaming_systems.md  -
 ddia_2e/14_doing_the_right_thing
   14_doing_the_right_thing.md  -
+the_staff_engineers_path/01_what_would_you_say_you_do_here
+  01_what_would_you_say_you_do_here.md  -
+the_staff_engineers_path/02_three_maps
+  02_three_maps.md  -
+the_staff_engineers_path/03_creating_the_big_picture
+  03_creating_the_big_picture.md  -
+the_staff_engineers_path/04_finite_time
+  04_finite_time.md  -
+the_staff_engineers_path/05_leading_big_projects
+  05_leading_big_projects.md  -
+the_staff_engineers_path/06_why_have_we_stopped
+  06_why_have_we_stopped.md  -
+the_staff_engineers_path/07_youre_a_role_model_now
+  07_youre_a_role_model_now.md  -
+the_staff_engineers_path/08_good_influence_at_scale
+  08_good_influence_at_scale.md  -
+the_staff_engineers_path/09_whats_next
+  09_whats_next.md  -
+staff_engineer_larson/01_overview
+  01_overview.md  -
+staff_engineer_larson/02_operating_at_staff
+  02_operating_at_staff.md  -
+staff_engineer_larson/03_getting_the_title_where_you_are
+  03_getting_the_title_where_you_are.md  -
+staff_engineer_larson/04_switching_companies
+  04_switching_companies.md  -
+staff_engineer_larson/05_stories_and_resources
+  05_stories_and_resources.md  -
+database_internals/01_introduction_and_overview
+  01_introduction_and_overview.md  -
+database_internals/02_btree_basics
+  02_btree_basics.md  -
+database_internals/03_file_formats
+  03_file_formats.md  -
+database_internals/04_implementing_btrees
+  04_implementing_btrees.md  -
+database_internals/05_transaction_processing_and_recovery
+  05_transaction_processing_and_recovery.md  -
+database_internals/06_btree_variants
+  06_btree_variants.md  -
+database_internals/07_log_structured_storage
+  07_log_structured_storage.md  -
+database_internals/08_distributed_systems_introduction
+  08_distributed_systems_introduction.md  -
+database_internals/09_failure_detection
+  09_failure_detection.md  -
+database_internals/10_leader_election
+  10_leader_election.md  -
+database_internals/11_replication_and_consistency
+  11_replication_and_consistency.md  -
+database_internals/12_anti_entropy_and_dissemination
+  12_anti_entropy_and_dissemination.md  -
+database_internals/13_distributed_transactions
+  13_distributed_transactions.md  -
+database_internals/14_consensus
+  14_consensus.md  -
+site_reliability_engineering/01_introduction
+  01_introduction.md  -
+site_reliability_engineering/03_embracing_risk
+  03_embracing_risk.md  -
+site_reliability_engineering/04_service_level_objectives
+  04_service_level_objectives.md  -
+site_reliability_engineering/05_eliminating_toil
+  05_eliminating_toil.md  -
+site_reliability_engineering/06_monitoring_distributed_systems
+  06_monitoring_distributed_systems.md  -
+site_reliability_engineering/08_release_engineering
+  08_release_engineering.md  -
+site_reliability_engineering/09_simplicity
+  09_simplicity.md  -
+site_reliability_engineering/11_being_on_call
+  11_being_on_call.md  -
+site_reliability_engineering/14_managing_incidents
+  14_managing_incidents.md  -
+site_reliability_engineering/15_postmortem_culture
+  15_postmortem_culture.md  -
+site_reliability_engineering/22_addressing_cascading_failures
+  22_addressing_cascading_failures.md  -
+building_microservices/01_what_are_microservices
+  01_what_are_microservices.md  -
+building_microservices/02_how_to_model_microservices
+  02_how_to_model_microservices.md  -
+building_microservices/03_splitting_the_monolith
+  03_splitting_the_monolith.md  -
+building_microservices/04_microservice_communication_styles
+  04_microservice_communication_styles.md  -
+building_microservices/05_implementing_microservice_communication
+  05_implementing_microservice_communication.md  -
+building_microservices/06_workflow
+  06_workflow.md  -
+building_microservices/07_build
+  07_build.md  -
+building_microservices/08_deployment
+  08_deployment.md  -
+building_microservices/09_testing
+  09_testing.md  -
+building_microservices/10_from_monitoring_to_observability
+  10_from_monitoring_to_observability.md  -
+building_microservices/11_security
+  11_security.md  -
+building_microservices/12_resiliency
+  12_resiliency.md  -
+building_microservices/13_scaling
+  13_scaling.md  -
+building_microservices/14_user_interfaces
+  14_user_interfaces.md  -
+building_microservices/15_organizational_structures
+  15_organizational_structures.md  -
+building_microservices/16_the_evolutionary_architect
+  16_the_evolutionary_architect.md  -
+ai_engineering/01_introduction_to_building_ai_applications
+  01_introduction_to_building_ai_applications.md  -
+ai_engineering/02_understanding_foundation_models
+  02_understanding_foundation_models.md  -
+ai_engineering/03_evaluation_methodology
+  03_evaluation_methodology.md  -
+ai_engineering/04_evaluate_ai_systems
+  04_evaluate_ai_systems.md  -
+ai_engineering/05_prompt_engineering
+  05_prompt_engineering.md  -
+ai_engineering/06_rag_and_agents
+  06_rag_and_agents.md  -
+ai_engineering/07_finetuning
+  07_finetuning.md  -
+ai_engineering/08_dataset_engineering
+  08_dataset_engineering.md  -
+ai_engineering/09_inference_optimization
+  09_inference_optimization.md  -
+ai_engineering/10_ai_engineering_architecture_and_user_feedback
+  10_ai_engineering_architecture_and_user_feedback.md  -
+generative_ai_system_design_interview/01_introduction_and_overview
+  01_introduction_and_overview.md  -
+generative_ai_system_design_interview/02_gmail_smart_compose
+  02_gmail_smart_compose.md  -
+generative_ai_system_design_interview/03_google_translate
+  03_google_translate.md  -
+generative_ai_system_design_interview/04_chatgpt_personal_assistant_chatbot
+  04_chatgpt_personal_assistant_chatbot.md  -
+generative_ai_system_design_interview/05_image_captioning
+  05_image_captioning.md  -
+generative_ai_system_design_interview/06_retrieval_augmented_generation
+  06_retrieval_augmented_generation.md  -
+generative_ai_system_design_interview/07_realistic_face_generation
+  07_realistic_face_generation.md  -
+generative_ai_system_design_interview/08_high_resolution_image_synthesis
+  08_high_resolution_image_synthesis.md  -
+generative_ai_system_design_interview/09_text_to_image_generation
+  09_text_to_image_generation.md  -
+generative_ai_system_design_interview/10_personalized_headshot_generation
+  10_personalized_headshot_generation.md  -
+generative_ai_system_design_interview/11_text_to_video_generation
+  11_text_to_video_generation.md  -
 -->
 > In-depth, chapter-by-chapter summaries of foundational engineering books — written so
 > that reading the summary is as close as possible to reading the book itself, then mapped
@@ -226,6 +378,13 @@ former.
 |------|--------|--------|----------|--------|
 | Designing Data-Intensive Applications **(1st ed., 2017)** | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/designing_data_intensive_applications.md) | 12 (+ preface) | Complete |
 | Designing Data-Intensive Applications **(2nd ed., 2026)** | Martin Kleppmann & Chris Riccomini | [ddia_2e/](ddia_2e/ddia_2e.md) | 14 | Complete |
+| The Staff Engineer's Path | Tanya Reilly | [the_staff_engineers_path/](the_staff_engineers_path/the_staff_engineers_path.md) | 9 | Complete |
+| Staff Engineer: Leadership Beyond the Management Track | Will Larson | [staff_engineer_larson/](staff_engineer_larson/staff_engineer_larson.md) | 5 parts (6 book sections) | Complete |
+| Database Internals | Alex Petrov | [database_internals/](database_internals/database_internals.md) | 14 | Complete |
+| Site Reliability Engineering | Google (Beyer, Jones, Petoff & Murphy, eds.) | [site_reliability_engineering/](site_reliability_engineering/site_reliability_engineering.md) | 11 of 34 (selected) | Complete |
+| Building Microservices **(2nd ed., 2021)** | Sam Newman | [building_microservices/](building_microservices/building_microservices.md) | 16 | Complete |
+| AI Engineering | Chip Huyen | [ai_engineering/](ai_engineering/ai_engineering.md) | 10 | Complete |
+| Generative AI System Design Interview | Ali Aminian & Hao Sheng | [generative_ai_system_design_interview/](generative_ai_system_design_interview/generative_ai_system_design_interview.md) | 11 | Complete |
 | System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/system_design_interview_vol_1.md) | 16 | Complete |
 | System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/system_design_interview_vol_2.md) | 13 | Complete |
 | Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/machine_learning_system_design_interview.md) | 11 | Complete |
@@ -233,8 +392,8 @@ former.
 | Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/understanding_distributed_systems.md) | 33 (as 5 parts) | Complete |
 
 The two *System Design Interview* volumes are one series split across two folders (each
-volume numbers its chapters independently); with both DDIA editions, MLSDI, DMLS, and UDS the section
-covers **seven books across seven folders**. More may be added over time (e.g. *Database
+volume numbers its chapters independently); with both DDIA editions, MLSDI, DMLS, UDS and the seven added in 2026-08 the section
+covers **fourteen books across fourteen folders**. More may be added over time (e.g. *Database
 Internals*, *Streaming Systems*). New books follow the folder-per-chapter convention —
 with one sanctioned exception: **UDS uses folder-per-PART** (its ~33 chapters are 3–8
 pages each; a part is the multi-concept narrative the chapter template was designed for) —
@@ -274,8 +433,10 @@ exists to answer), so you always know why you're reading it.
 ## Interview-Priority Reading Order
 
 `book/` IS wired into the learning game: every chapter folder is a Study topic, ordered by
-the `STUDY_ORDER.book` array in `game/app.js` — all seven books, in the order
-**DDIA 1e → DDIA 2e → SDI Vol 1 → SDI Vol 2 → DMLS → MLSDI → UDS**. The
+the `STUDY_ORDER.book` array in `game/app.js` — all fourteen books, in `STUDY_ORDER.book` order — the seven originals
+(**DDIA 1e → DDIA 2e → SDI Vol 1 → SDI Vol 2 → DMLS → MLSDI → UDS**) followed by
+**The Staff Engineer's Path → Staff Engineer → Database Internals → Google SRE →
+Building Microservices → AI Engineering → GenAI System Design Interview**. The
 section is **Full-only** — it has no `STUDY_PATHS` interview subset, because a
 chapter-by-chapter book summary has no meaningful "interview cut"; instead, use these
 prose priorities:
