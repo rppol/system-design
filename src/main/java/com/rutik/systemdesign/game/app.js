@@ -22,7 +22,7 @@ const SECTION_LABELS = {
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
-  technologies: "Technologies",
+  technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
 };
 
 // Per-section visual identity for the reader: a One-Dark-band accent (readable on
@@ -50,6 +50,7 @@ const SECTION_IDENTITY = {
   llm:             { accent: "#a67cf2", glyph: "Ψ" },     // 270  violet
   lld:             { accent: "#c778e4", glyph: "{ }" },   // 295  purple
   technologies:    { accent: "#ee76c2", glyph: "⌗" },     // 320  magenta
+  soft_skills:     { accent: "#eb7099", glyph: "“" },     // 340  rose
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
@@ -64,6 +65,7 @@ const BOOK_LABELS = {
   machine_learning_system_design_interview: { name: "ML System Design Interview", author: "Aminian & Xu", short: "ML SDI" },
   designing_machine_learning_systems: { name: "Designing Machine Learning Systems", author: "Huyen", short: "DMLS" },
   understanding_distributed_systems: { name: "Understanding Distributed Systems", author: "Vitillo", short: "UDS" },
+  ddia_2e: { name: "Designing Data-Intensive Applications (2nd ed.)", author: "Kleppmann & Riccomini", short: "DDIA 2e" },
 };
 // book slug of a module/path id, or null when it isn't a nested book id.
 const bookOf = (id) => {
@@ -141,8 +143,8 @@ const modulePage = (mod) => String(mod).replace(/\/+$/, "").split("/").pop() + "
 const STUDY_ORDER = {
   backend: [
     "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
-    "backend/rest_api_design","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse",
-    "backend/performance_profiling","backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns",
+    "backend/rest_api_design","backend/api_contracts_and_schema_governance","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse","backend/webhooks_and_event_delivery",
+    "backend/performance_profiling","backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns","backend/serving_ai_workloads",
     "backend/database_internals_and_indexing","backend/query_optimization","backend/database_migrations","backend/distributed_transactions_and_consistency","backend/database_types_deep_dive",
     "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/observability_and_monitoring",
     "backend/backend_security_owasp","backend/auth_and_authorization_systems",
@@ -163,7 +165,7 @@ const STUDY_ORDER = {
     "book/designing_data_intensive_applications/09_consistency_and_consensus",
     "book/designing_data_intensive_applications/10_batch_processing",
     "book/designing_data_intensive_applications/11_stream_processing",
-    "book/designing_data_intensive_applications/12_future_of_data_systems",
+    "book/designing_data_intensive_applications/12_future_of_data_systems","book/ddia_2e/01_tradeoffs_in_data_systems_architecture","book/ddia_2e/02_defining_nonfunctional_requirements","book/ddia_2e/03_data_models_and_query_languages","book/ddia_2e/04_storage_and_retrieval","book/ddia_2e/05_encoding_and_evolution","book/ddia_2e/06_replication","book/ddia_2e/07_sharding","book/ddia_2e/08_transactions","book/ddia_2e/09_trouble_with_distributed_systems","book/ddia_2e/10_consistency_and_consensus","book/ddia_2e/11_batch_processing","book/ddia_2e/12_stream_processing","book/ddia_2e/13_philosophy_of_streaming_systems","book/ddia_2e/14_doing_the_right_thing",
     "book/system_design_interview_vol_1/01_scale_from_zero_to_millions_of_users",
     "book/system_design_interview_vol_1/02_back_of_the_envelope_estimation",
     "book/system_design_interview_vol_1/03_a_framework_for_system_design_interviews",
@@ -223,10 +225,10 @@ const STUDY_ORDER = {
   ],
   cs_fundamentals: [
     "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/discrete_math_for_engineers","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/character_encoding_deep_dive","cs_fundamentals/recursion_and_problem_solving_patterns",
-    "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
+    "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures","cs_fundamentals/probabilistic_and_streaming_structures",
     "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms","cs_fundamentals/dsa_patterns",
-    "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
-    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/how_code_runs_compilers_and_interpreters",
+    "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization","cs_fundamentals/memory_models_and_concurrency_theory",
+    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/information_theory_and_compression","cs_fundamentals/how_code_runs_compilers_and_interpreters",
   ],
   cuda: [
     "cuda/gpu_computing_foundations","cuda/gpu_hardware_architecture","cuda/cuda_toolkit_and_compilation",
@@ -239,8 +241,8 @@ const STUDY_ORDER = {
   database: [
     "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
     "database/postgresql_internals","database/mysql_innodb_internals","database/sql_query_optimization","database/schema_design_and_normalization","database/database_migrations_zero_downtime",
-    "database/document_databases","database/key_value_stores","database/redis_internals","database/wide_column_databases","database/search_engines","database/elasticsearch_internals","database/graph_databases","database/time_series_databases",
-    "database/vector_databases","database/newsql_and_distributed_sql","database/in_memory_databases",
+    "database/document_databases","database/key_value_stores","database/redis_internals","database/wide_column_databases","database/search_engines","database/elasticsearch_internals","database/graph_databases","database/time_series_databases","database/analytical_databases_and_olap",
+    "database/vector_databases","database/newsql_and_distributed_sql","database/in_memory_databases","database/lakehouse_and_table_formats",
     "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus","database/database_caching_patterns",
     "database/connection_pool_management","database/database_performance_tuning","database/backup_recovery_and_disaster_recovery","database/database_security_and_compliance",
     "database/database_selection_framework","database/polyglot_persistence_patterns",
@@ -256,14 +258,14 @@ const STUDY_ORDER = {
     "devops/ml_platform_and_gpu_infrastructure","devops/event_streaming_operations","devops/performance_and_load_testing",
   ],
   hld: [
-    "hld/scalability","hld/load_balancing","hld/caching","hld/database_design",
-    "hld/cap_theorem","hld/api_design","hld/message_queues","hld/rate_limiting",
-    "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/microservices","hld/distributed_transactions","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/consensus_algorithms","hld/event_sourcing_cqrs",
+    "hld/scalability","hld/capacity_estimation","hld/load_balancing","hld/caching","hld/database_design",
+    "hld/cap_theorem","hld/api_design","hld/realtime_updates","hld/message_queues","hld/rate_limiting",
+    "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/geospatial_indexing","hld/microservices","hld/distributed_transactions","hld/coordination_and_contention","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/cell_based_architecture","hld/consensus_algorithms","hld/multi_region_and_data_residency","hld/event_sourcing_cqrs","hld/stream_processing",
   ],
   java: [
     "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io","java/json_processing_jackson",
-    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features","java/java_platform_module_system",
-    "java/jvm_internals","java/bytecode_and_classfile","java/reference_types_and_cleaners","java/graalvm_native_image",
+    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features","java/java22_to_26_features","java/java_platform_module_system",
+    "java/jvm_internals","java/bytecode_and_classfile","java/reference_types_and_cleaners","java/aot_startup_and_class_data_sharing","java/graalvm_native_image",
     "java/concurrency","java/collections_internals","java/design_patterns_in_java",
     "java/performance_and_tuning","java/java_memory_model",
     "java/java_interview_patterns","java/testing_junit_mockito","java/logging","java/annotation_processing","java/build_tools_maven_gradle",
@@ -271,9 +273,9 @@ const STUDY_ORDER = {
     "java/networking_and_http_client","java/jdbc_and_database","java/security_and_cryptography","java/grpc_protobuf","java/microservices_patterns",
   ],
   lld: [
-    "lld/design_principles","lld/solid_principles",
+    "lld/oop_and_uml_foundations","lld/design_principles","lld/solid_principles","lld/dependency_injection_and_testability",
     "lld/creational","lld/structural","lld/behavioral",
-    "lld/pattern_comparisons","lld/anti_patterns","lld/concurrency_patterns","lld/system_design_problems",
+    "lld/pattern_comparisons","lld/anti_patterns","lld/refactoring","lld/concurrency_patterns","lld/system_design_problems",
   ],
   llm: [
     "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search","llm/faiss_deep_dive",
@@ -296,13 +298,13 @@ const STUDY_ORDER = {
     "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
   ],
   python: [
-    "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",
-    "python/cpython_memory_model","python/the_gil_and_free_threading","python/metaclasses_and_metaprogramming","python/the_type_system_and_typing","python/performance_and_profiling","python/functional_programming",
+    "python/data_model_and_objects","python/core_language_idioms","python/the_import_system","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/dataclasses_enums_and_data_modeling","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",
+    "python/cpython_memory_model","python/the_gil_and_free_threading","python/metaclasses_and_metaprogramming","python/the_type_system_and_typing","python/performance_and_profiling","python/c_extensions_and_native_interop","python/functional_programming",
     "python/threading_and_multiprocessing","python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/design_patterns_in_python","python/stdlib_datetime_and_logging","python/testing_with_pytest","python/packaging_and_project_tooling",
   ],
   fastapi: [
-    "fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/routing_and_request_handling","fastapi/dependency_injection_in_fastapi","fastapi/middleware_and_lifecycle","fastapi/configuration_and_settings_management",
-    "fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation","fastapi/websockets_sse_and_streaming","fastapi/background_jobs_and_task_queues","fastapi/testing_fastapi","fastapi/http_clients_and_external_apis","fastapi/message_queues_and_event_driven",
+    "fastapi/python_api_framework_landscape","fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/routing_and_request_handling","fastapi/dependency_injection_in_fastapi","fastapi/middleware_and_lifecycle","fastapi/configuration_and_settings_management",
+    "fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation","fastapi/websockets_sse_and_streaming","fastapi/serving_llm_and_ai_workloads","fastapi/background_jobs_and_task_queues","fastapi/testing_fastapi","fastapi/http_clients_and_external_apis","fastapi/message_queues_and_event_driven",
     "fastapi/production_deployment_and_scaling","fastapi/observability_and_monitoring","fastapi/caching_and_performance","fastapi/api_design_and_versioning","fastapi/security_hardening_and_owasp",
   ],
   spring: [
@@ -313,12 +315,21 @@ const STUDY_ORDER = {
     "spring/spring_data_jpa","spring/spring_data_nosql","spring/database_migrations","spring/spring_transactions","spring/spring_caching",
     "spring/spring_security_architecture","spring/spring_security_jwt_oauth","spring/spring_session",
     "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_websocket_stomp","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
-    "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
+    "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm","spring/spring_boot_4_migration",
   ],
   technologies: [
     "technologies/apache_airflow","technologies/temporal_durable_execution","technologies/nvidia_triton_inference_server","technologies/intel_openvino",
     "technologies/envoy_proxy","technologies/hashicorp_vault",
-    "technologies/debezium_change_data_capture",
+    "technologies/debezium_change_data_capture","technologies/apache_iceberg",
+  ],
+  soft_skills: [
+    "soft_skills/engineering_career_ladders","soft_skills/scope_impact_and_ownership","soft_skills/staff_plus_archetypes",
+    "soft_skills/precise_technical_vocabulary","soft_skills/business_and_finance_vocabulary","soft_skills/leadership_and_org_vocabulary","soft_skills/hedging_commitment_and_disagreement",
+    "soft_skills/technical_writing_for_engineers","soft_skills/design_docs_rfcs_and_adrs","soft_skills/executive_communication","soft_skills/upward_and_async_communication","soft_skills/incident_communication_and_postmortems",
+    "soft_skills/influence_without_authority","soft_skills/giving_and_receiving_feedback","soft_skills/difficult_conversations_and_conflict","soft_skills/negotiation_for_engineers","soft_skills/scope_prioritization_and_saying_no",
+    "soft_skills/mentorship_and_sponsorship","soft_skills/technical_leadership_and_execution","soft_skills/cross_functional_collaboration","soft_skills/team_health_and_sustainable_pace",
+    "soft_skills/behavioral_interview_systems","soft_skills/story_portfolio_and_star_frameworks","soft_skills/interviewing_as_the_interviewer","soft_skills/performance_reviews_and_promotions",
+    "soft_skills/ai_era_engineering_leadership",
   ],
 };
 
@@ -814,15 +825,22 @@ function toggleHelp() {
   const row = (k, d) => `<div class="hk"><span>${d}</span><span class="keys">${k.split(" ").map((x) => `<kbd>${x}</kbd>`).join("")}</span></div>`;
   const o = document.createElement("div");
   o.className = "help-overlay"; o.id = "helpOverlay";
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Keyboard shortcuts");
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Shortcuts and how LORA works");
   o.innerHTML = `<div class="help-card">
-    <h2>Keyboard shortcuts</h2>
+    <h2 class="help-h2">Keyboard shortcuts</h2>
     <div class="help-cols">
       <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}${row("D", "Double down")}</div>
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
       <div><h3>Everywhere</h3>${row("Cmd/Ctrl+K /", "Search everything")}${row("?", "This help")}</div>
+    </div>
+    <h2 class="help-h2">How LORA works</h2>
+    <div class="help-cols help-mech">
+      <div><h3>Review</h3><p>Every question you answer is scheduled to come back. Get it right and the gap grows (1 day, then 3, then multiplying); get it wrong and it resets to tomorrow. Answering while unsure grows the gap more slowly on purpose &mdash; that is the point, not a penalty.</p></div>
+      <div><h3>Gauntlet</h3><p>Ten questions, rebuilt once a day and sealed after your scored attempt. The mix is fixed: your oldest-due reviews first, then your suggested and weakest sections, then one harder finisher. Replay any time as unscored practice.</p></div>
+      <div><h3>XP and level</h3><p>10 XP per correct answer, plus 5 for each step of an answer streak, plus boss and double-down bonuses. Your level is total XP &divide; 250.</p></div>
+      <div><h3>Streak and freezes</h3><p>A streak counts days you studied, not days in a row you were perfect. Miss a day and a freeze covers it automatically, if you have one.</p></div>
     </div>
     <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too<span class="touch-hint"> &middot; more options live behind the &#8943; button on phones</span></p>
     <button class="ghost" id="helpClose">Close <span class="key-hint">(Esc)</span></button>
@@ -1150,15 +1168,17 @@ function safeSet(key, val) {
 }
 
 // [PERF] `reviews` is the ONLY unbounded store in sd_progress: one entry (~190 B)
-// per question ever first-attempted. Ungoverned it climbs toward the ~8,800-question
-// bank ceiling (~1.7 MB), and the whole blob is JSON-parsed on every boot and
+// per question ever first-attempted. Ungoverned it climbs toward the bank ceiling
+// (14,005 Q&As as of 2026-08-26, ~2.7 MB), and the whole blob is JSON-parsed on every boot and
 // re-serialized on every save — so boot/save cost grows linearly with use (the
 // "heavier to load" symptom, identical on Pages and APK). Cap it, evicting the
 // entries LEAST valuable to spaced repetition: the most stable, furthest-future
 // items. NEVER drop a user-flagged leech, a planted time capsule, or anything due
 // now/overdue. Only the entry COUNT changes — the map shape is untouched, so the
 // additive-field invariant holds and old exports still import (the next save just
-// re-applies the cap). The cap sits well above any realistic active review set.
+// re-applies the cap). The cap sits well above any realistic active review set --
+// but it is NOT a hard ceiling: pruneReviews() refuses to evict anything due or
+// overdue, so a long-neglected map can exceed REVIEWS_CAP. 6000 x ~190 B = ~1.14 MB.
 const REVIEWS_CAP = 6000;
 function pruneReviews(p) {
   const r = p && p.reviews;
@@ -1276,7 +1296,7 @@ function migrateReadModulesForRename() {
 
 // SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
 // tracked as an EMA so future difficulty tuning has a per-question latency signal.
-function scheduleReview(rv, status, today, ms, conf) {
+function scheduleReview(rv, status, today, ms, conf, id) {
   if (status === "correct") {
     rv.reps = (rv.reps || 0) + 1;
     rv.ease = Math.min(3.0, (rv.ease || 2.5) + 0.1);
@@ -1294,6 +1314,16 @@ function scheduleReview(rv, status, today, ms, conf) {
     rv.interval = 1;
   }
   if (ms > 0) rv.ms = rv.ms ? Math.round(0.7 * rv.ms + 0.3 * ms) : Math.round(ms);
+  // [E4] cap, then fuzz. Without a cap a long correct streak schedules years out;
+  // without fuzz a cohort answered on one day re-clumps on one day forever. The
+  // jitter is derived from the item id, so it is deterministic per item (no
+  // Math.random(): identical input must give identical output for replay/export).
+  if (rv.interval >= 7) {
+    const spread = Math.max(1, Math.round(rv.interval * 0.05));   // +/-5%
+    const h = cyrb53(String(id || rv.due || ""));                 // repo's seeded hash
+    rv.interval = rv.interval + ((h % (2 * spread + 1)) - spread);
+  }
+  rv.interval = Math.min(365, Math.max(1, rv.interval));           // cap LAST, so 365 is real
   const due = new Date(today + "T00:00:00");
   due.setDate(due.getDate() + rv.interval);
   rv.due = due.toLocaleDateString("en-CA");
@@ -1350,7 +1380,7 @@ function saveSessionLocal(session, opts = {}) {
       // Slow correct -> schedule like low confidence; never double-shrink.
       let eff = res.conf;
       if (res.status === "correct" && medCorrect && res.ms > 2 * medCorrect) eff = "low";
-      scheduleReview(rv, res.status, session.date, res.ms, eff);
+      scheduleReview(rv, res.status, session.date, res.ms, eff, res.id);
       reviews[res.id] = rv;
       // A due review answered correctly counts toward this week's reviews quest.
       if (wasDue && res.status === "correct") {
@@ -1980,11 +2010,36 @@ async function openTopics(section) {
   };
   el("#allBtn").addEventListener("click", () => setAll(true));
   el("#noneBtn").addEventListener("click", () => setAll(false));
-  el("#modFilter").addEventListener("input", () => {
-    const f = el("#modFilter").value.trim().toLowerCase();
-    document.querySelectorAll(".filterrow").forEach((r) =>
-      (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
-  });
+  // [E4] a filter matching nothing used to hide every row with no count, no message
+  // and no reset -- renderTech's emptyHTML() already solves this properly; same shape.
+  const modFilterApply = () => {
+    const inp = el("#modFilter"); if (!inp) return;
+    const f = inp.value.trim().toLowerCase();
+    const rows = document.querySelectorAll(".filterrow");
+    let vis = 0;
+    rows.forEach((r) => {
+      const hit = r.querySelector(".mname").textContent.toLowerCase().includes(f);
+      r.style.display = hit ? "" : "none";
+      if (hit) vis++;
+    });
+    let note = el("#modFilterNote");
+    if (f && !vis) {
+      if (!note) {
+        note = document.createElement("div");
+        note.id = "modFilterNote"; note.className = "tx-empty";
+        rows[0]?.parentNode?.appendChild(note);
+      }
+      // only wire the button once the note is actually in the document
+      if (note.parentNode) {
+        note.innerHTML = `No topic matches that. <button type="button" class="ghost tx-widen" id="modFilterClear">Clear filter</button>`;
+        const clr = el("#modFilterClear");
+        if (clr) clr.onclick = () => { inp.value = ""; modFilterApply(); inp.focus(); };
+      }
+    } else if (note) note.remove();
+    if (f) announce(`${vis} of ${rows.length} topics match`);
+  };
+  el("#modFilter").addEventListener("input", modFilterApply);
+  el("#modFilter").addEventListener("search", modFilterApply);
   document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
     safeSet("sd_deck_len", b.dataset.len);
     document.querySelectorAll(".lenopt").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b ? "true" : "false"); });
@@ -2130,9 +2185,21 @@ async function startBlitz(section, modules, sourceFiles = null, limit = null) {
   // buffer for this section; only top up from the recent set if the fresh
   // pool runs short (small module selections, tiny sections).
   const recent = new Set(loadRecent(section));
-  const fresh = shuffle(bank.filter((q) => !recent.has(q.id)));
-  const stale = shuffle(bank.filter((q) => recent.has(q.id)));
-  const picked = [...fresh, ...stale].slice(0, limit || deckLen());
+  // [E4] due-aware blitz: every answered question schedules a review, but nothing
+  // used to consume them outside the opt-in Review card and the gauntlet's 3 slots,
+  // so the due map grew forever. Seed the deck with this section's oldest-due items,
+  // capped at half so new material still flows, then fill as before.
+  const size = limit || deckLen();
+  const byId = new Map(bank.map((q) => [q.id, q]));
+  const dueHere = dueReviews()
+    .map(([id]) => byId.get(id))
+    .filter(Boolean)
+    .slice(0, Math.floor(size / 2));
+  const dueSet = new Set(dueHere.map((q) => q.id));
+  const rest = bank.filter((q) => !dueSet.has(q.id));
+  const fresh = shuffle(rest.filter((q) => !recent.has(q.id)));
+  const stale = shuffle(rest.filter((q) => recent.has(q.id)));
+  const picked = [...dueHere, ...fresh, ...stale].slice(0, size);
   pushRecent(section, picked.map((q) => q.id));
   // [A2] confusion-aware interleaving for multi-module decks: no two consecutive
   // questions share a module; graph-connected topics sit adjacent (A-B-A'-C).
@@ -2327,7 +2394,14 @@ function showPrimeSheet(section, m, justRead) {
     safeSet("sd_prime_opt", String(opt + 1));
     close(); justRead();
   });
-  o.addEventListener("click", (e) => { if (e.target === o) { close(); justRead(); } });   // backdrop = just read
+  // [E4] backdrop dismissal IS an opt-out signal -- routing it straight to justRead()
+  // never incremented sd_prime_opt, so a backdrop-dismisser saw the interstitial forever.
+  o.addEventListener("click", (e) => {
+    if (e.target !== o) return;
+    let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
+    safeSet("sd_prime_opt", String(opt + 1));
+    close(); justRead();
+  });
 }
 async function startPrime(section, module, moduleName) {
   const bank = await loadBank(section);
@@ -3688,13 +3762,19 @@ function strongestShakiestHTML() {
 
 // Leeches: questions missed 3+ times. Question text is looked up lazily (banks
 // are multi-MB) — fillLeeches() runs only when the <details> is first expanded.
-function leechIds() {
-  return Object.entries(state.progress.reviews || {})
+// [E4] the .slice(0, 7) display cap used to live in here, so the drill and the count
+// only ever saw the worst 7 no matter how many leeches existed. The cap belongs to the
+// RENDERER, not to the data.
+function leechIds(limit) {
+  const all = Object.entries(state.progress.reviews || {})
     .filter(([, r]) => (r.lapses || 0) >= 3)
     .sort((a, b) => (b[1].lapses || 0) - (a[1].lapses || 0))
-    .slice(0, 7).map(([id]) => id);
+    .map(([id]) => id);
+  return limit ? all.slice(0, limit) : all;
 }
 function leechesHTML() {
+  // [E4] the COUNT must be the true total -- fillLeeches() renders every leech, so
+  // capping here made the summary say "7" above a list of 40.
   const ids = leechIds();
   if (!ids.length) return "";
   return `<div class="ins-card">
@@ -5284,6 +5364,17 @@ async function openStudySection(sectionPath) {
     });
     wrap.classList.toggle("filtering", !!f);
     countEl.textContent = f ? `${visIdx.length} of ${mods.length} topics` : "";
+    // [E4] the count existed but there was no way back except deleting the text.
+    let clr = el("#pathFilterClear");
+    if (f && !visIdx.length) {
+      if (!clr) {
+        clr = document.createElement("button");
+        clr.type = "button"; clr.className = "ghost tx-widen"; clr.id = "pathFilterClear";
+        clr.textContent = "Clear filter";
+        clr.onclick = () => { filterIn.value = ""; applyFilter(); filterIn.focus(); };
+        countEl.parentNode?.insertBefore(clr, countEl.nextSibling);
+      }
+    } else if (clr) clr.remove();
     if (f) announce(`${visIdx.length} of ${mods.length} topics match`);
     layoutPath();
   };
@@ -7617,7 +7708,14 @@ function appendEvalBlock(main, path) {
   block.querySelector("#evalBtn").addEventListener("click", async () => {
     const bank = await loadPool(section);
     const pool = (bank || []).filter(inScope);
-    if (!pool.length) { announce("No questions extracted for this page yet."); return; }
+    if (!pool.length) {
+      // [E4] was announce()-only: sighted users saw the click do nothing at all.
+      announce("No questions extracted for this page yet.");
+      const note = block.querySelector(".eb-note") || document.createElement("div");
+      note.className = "eb-note"; note.textContent = "No questions for this page yet.";
+      if (!note.parentNode) block.appendChild(note);
+      return;
+    }
     closeReader();
     launch(null);                                    // quick: deckLen()-capped random subset
   });
@@ -7688,7 +7786,25 @@ async function appendWhatNext(main, path) {
     }
   }
   if (last && last.path && last.path !== path) push(last.path, "Resume", last.title);
-  if (!cards.length) return;
+  // [E4] terminal card: with no unread next, no graph-related pair and no different
+  // resume page, this used to append nothing at all -- a bare dead end. That is a
+  // routine OFFLINE state too, since loadGraph() returns null on a failed fetch.
+  if (!cards.length) {
+    const sec = (path || "").split("/")[0];
+    const block = document.createElement("div");
+    block.className = "whatnext";
+    block.innerHTML = `<div class="wn-rule" aria-hidden="true"></div>
+      <div class="wn-h">End of this path</div>
+      <div class="wn-done">You've reached the end of <strong>${esc(label(sec))}</strong>'s reading order from here.</div>
+      <div class="wn-cards"></div>`;
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "wn-card";
+    b.innerHTML = `<span class="wn-kind">Section</span><span class="wn-title">Back to ${esc(label(sec))}</span>`;
+    b.onclick = () => { closeReader(); go("#/study/" + sec); };
+    block.querySelector(".wn-cards").appendChild(b);
+    main.appendChild(block);
+    return;
+  }
   const block = document.createElement("div");
   block.className = "whatnext";
   block.innerHTML = `<div class="wn-rule" aria-hidden="true"></div>
@@ -7807,7 +7923,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   const backBtn = reader.back.length
     ? `<button class="reader-nav" id="readerBack" title="Back">&lsaquo; Back</button>` : "";
   const modBtn = nav
-    ? `<button class="reader-nav reader-icon" id="readerMod" title="Module list">&#9776;</button>` : "";
+    ? `<button class="reader-nav reader-icon" id="readerMod" title="Module list" aria-label="Module list">&#9776;</button>` : "";
   const navBtns = nav
     ? `<button class="reader-nav" id="readerPrev" title="Previous topic" ${nav.idx <= 0 ? "disabled" : ""}>&lsaquo; Prev</button>
        <button class="reader-nav" id="readerNext" title="Next topic" ${nav.idx >= nav.list.length - 1 ? "disabled" : ""}>Next &rsaquo;</button>` : "";
@@ -7827,14 +7943,14 @@ async function openReaderPath(path, title, navCtx, frag) {
       ${backBtn}${modBtn}
       <span class="reader-title">${esc(reader.titleText)}</span>
       ${navBtns}
-      <button class="reader-nav reader-icon rfs" id="readerFsDn" title="Smaller text">A&#8722;</button>
-      <button class="reader-nav reader-icon rfs" id="readerFsUp" title="Larger text">A+</button>
-      <button class="reader-nav reader-icon" id="readerType" title="Reading options (font, width, drop-cap)">Aa</button>
-      <button class="reader-nav reader-icon" id="readerDir" title="Diagram orientation">&#10530;</button>
-      <button class="reader-nav reader-icon" id="readerFindBtn" title="Find in page (Ctrl/Cmd+F)">&#8981;</button>
-      <button class="reader-nav reader-icon" id="readerIdx" title="Contents">&#8801;</button>
-      <button class="reader-nav reader-icon" id="readerFull" title="Immersive reading (F)">&#11036;</button>
-      <button class="reader-close" id="readerClose" title="Close (Esc)">&times;</button>
+      <button class="reader-nav reader-icon rfs" id="readerFsDn" title="Smaller text" aria-label="Smaller text">A&#8722;</button>
+      <button class="reader-nav reader-icon rfs" id="readerFsUp" title="Larger text" aria-label="Larger text">A+</button>
+      <button class="reader-nav reader-icon" id="readerType" title="Reading options (font, width, drop-cap)" aria-label="Reading options">Aa</button>
+      <button class="reader-nav reader-icon" id="readerDir" title="Diagram orientation" aria-label="Diagram orientation">&#10530;</button>
+      <button class="reader-nav reader-icon" id="readerFindBtn" title="Find in page (Ctrl/Cmd+F)" aria-label="Find in page">&#8981;</button>
+      <button class="reader-nav reader-icon" id="readerIdx" title="Contents" aria-label="Contents">&#8801;</button>
+      <button class="reader-nav reader-icon" id="readerFull" title="Immersive reading (F)" aria-label="Immersive reading">&#11036;</button>
+      <button class="reader-close" id="readerClose" title="Close (Esc)" aria-label="Close reader">&times;</button>
     </div>
     <div class="reader-progress" aria-hidden="true"><i id="readerProg"></i></div>
     ${bottomBar}
@@ -9234,7 +9350,7 @@ function renderInterviewIntro(section, panel, deckQ) {
 async function startInterview(section, panel) {
   const tier = tierOf(section);
   if (tier !== "silver" && tier !== "gold") {   // locked: path header shows the chip
-    showToast(`Interview unlocks at Silver tier for ${label(section)}.`);
+    showToast(`Interview mode unlocks at Silver in ${label(section)} — 20 questions seen at 70% accuracy.`);
     redirect("#/study/" + section); return;
   }
   if (panel === undefined) panel = tier === "gold";
