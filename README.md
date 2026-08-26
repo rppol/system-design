@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, and **CS Fundamentals** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, **CS Fundamentals**, and **Soft Skills & Leadership** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -68,9 +68,12 @@ Patterns that deal with communication between objects, defining how objects inte
 | Section | Description |
 |---------|-------------|
 | [SOLID Principles](src/main/java/com/rutik/systemdesign/lld/solid_principles/solid_principles.md) | The 5 foundational principles of OOP |
+| [Dependency Injection and Testability](src/main/java/com/rutik/systemdesign/lld/dependency_injection_and_testability/dependency_injection_and_testability.md) | Constructor injection, seams, test doubles, and designing for substitution without a framework |
 | [Anti-Patterns](src/main/java/com/rutik/systemdesign/lld/anti_patterns/anti_patterns.md) | Common design mistakes and how to avoid them |
+| [Refactoring](src/main/java/com/rutik/systemdesign/lld/refactoring/refactoring.md) | Code smells, the refactoring catalogue, and changing a design safely under test |
 | [Pattern Comparisons](src/main/java/com/rutik/systemdesign/lld/pattern_comparisons/pattern_comparisons.md) | Head-to-head comparisons of similar patterns |
 | [Design Principles](src/main/java/com/rutik/systemdesign/lld/design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| [OOP and UML Foundations](src/main/java/com/rutik/systemdesign/lld/oop_and_uml_foundations/oop_and_uml_foundations.md) | Encapsulation, composition vs inheritance, and reading/writing the UML an interview actually uses |
 | [Concurrency Patterns](src/main/java/com/rutik/systemdesign/lld/concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
 | [System Design Problems](src/main/java/com/rutik/systemdesign/lld/system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
 
@@ -81,23 +84,30 @@ Patterns that deal with communication between objects, defining how objects inte
 | Concept | Description |
 |---------|-------------|
 | [Scalability](src/main/java/com/rutik/systemdesign/hld/scalability/scalability.md) | Horizontal vs Vertical scaling strategies |
+| [Capacity Estimation and Back-of-the-Envelope Math](src/main/java/com/rutik/systemdesign/hld/capacity_estimation/capacity_estimation.md) | Back-of-the-envelope math: QPS, storage, bandwidth, connections — derived from DAU and per-user behaviour |
 | [Load Balancing](src/main/java/com/rutik/systemdesign/hld/load_balancing/load_balancing.md) | Distributing traffic across servers |
 | [Caching](src/main/java/com/rutik/systemdesign/hld/caching/caching.md) | Caching strategies and cache invalidation |
 | [Database Design](src/main/java/com/rutik/systemdesign/hld/database_design/database_design.md) | SQL vs NoSQL, replication, indexing |
 | [Message Queues](src/main/java/com/rutik/systemdesign/hld/message_queues/message_queues.md) | Async communication with Kafka, RabbitMQ |
 | [Microservices](src/main/java/com/rutik/systemdesign/hld/microservices/microservices.md) | Microservices architecture and patterns |
 | [API Design](src/main/java/com/rutik/systemdesign/hld/api_design/api_design.md) | REST, GraphQL, gRPC best practices |
+| [Pushing Realtime Updates](src/main/java/com/rutik/systemdesign/hld/realtime_updates/realtime_updates.md) | Polling vs SSE vs WebSockets, connection budgets, fan-out cost, gap-fill and resume |
 | [CAP Theorem](src/main/java/com/rutik/systemdesign/hld/cap_theorem/cap_theorem.md) | Consistency, Availability, Partition Tolerance |
 | [Consistent Hashing](src/main/java/com/rutik/systemdesign/hld/consistent_hashing/consistent_hashing.md) | Distributed hash ring for load distribution |
 | [Rate Limiting](src/main/java/com/rutik/systemdesign/hld/rate_limiting/rate_limiting.md) | Throttling strategies and algorithms |
 | [CDN](src/main/java/com/rutik/systemdesign/hld/cdn/cdn.md) | Content Delivery Network architecture |
 | [Database Sharding](src/main/java/com/rutik/systemdesign/hld/database_sharding/database_sharding.md) | Partitioning data across databases |
+| [Geospatial Indexing](src/main/java/com/rutik/systemdesign/hld/geospatial_indexing/geospatial_indexing.md) | Geohash, S2, H3, quadtrees; proximity search, k-nearest, and the cell-boundary problem |
 | [Consensus Algorithms](src/main/java/com/rutik/systemdesign/hld/consensus_algorithms/consensus_algorithms.md) | Raft, Paxos, PBFT, etcd/ZooKeeper, split-brain prevention, quorum math |
+| [Multi-Region Architecture and Data Residency](src/main/java/com/rutik/systemdesign/hld/multi_region_and_data_residency/multi_region_and_data_residency.md) | Active-active vs active-passive, write locality, consensus latency, GDPR residency constraints |
 | [Event Sourcing & CQRS](src/main/java/com/rutik/systemdesign/hld/event_sourcing_cqrs/event_sourcing_cqrs.md) | Event sourcing, CQRS read/write separation, projections, Saga pattern, snapshots |
+| [Stream Processing](src/main/java/com/rutik/systemdesign/hld/stream_processing/stream_processing.md) | Watermarks, windowing, exactly-once, state backends, and rescaling a stateful job |
 | [Distributed Transactions](src/main/java/com/rutik/systemdesign/hld/distributed_transactions/distributed_transactions.md) | 2PC, 3PC, Saga, TCC, outbox pattern, idempotency keys |
+| [Coordination and Contention](src/main/java/com/rutik/systemdesign/hld/coordination_and_contention/coordination_and_contention.md) | Distributed locks, leases, fencing tokens, hot keys, and when coordination is the bottleneck |
 | [Observability](src/main/java/com/rutik/systemdesign/hld/observability/observability.md) | Metrics, logs, traces, SLI/SLO/error budgets, distributed tracing |
 | [Security and Authentication/Authorization](src/main/java/com/rutik/systemdesign/hld/security_and_auth/security_and_auth.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT, mTLS, RBAC vs ABAC, encryption |
 | [Resilience Patterns](src/main/java/com/rutik/systemdesign/hld/resilience_patterns/resilience_patterns.md) | Circuit breaker, bulkhead, retries with backoff + jitter, graceful degradation, failover |
+| [Cell-Based Architecture](src/main/java/com/rutik/systemdesign/hld/cell_based_architecture/cell_based_architecture.md) | Cells as blast-radius containment, cell routing, poison-pill isolation, and per-cell capacity |
 
 ---
 
@@ -251,6 +261,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Java Streams — Deep Dive](src/main/java/com/rutik/systemdesign/java/java_streams/java_streams.md) | All 20+ ops, lazy eval, flatMap, reduce, Spliterator, parallel rules |
 | [Functional Programming](src/main/java/com/rutik/systemdesign/java/functional_programming/functional_programming.md) | Function composition, custom Collectors, parallel streams, immutability |
 | [Java 9–21 Features](src/main/java/com/rutik/systemdesign/java/java9_to_21_features/java9_to_21_features.md) | Records, Sealed classes, Virtual threads, Pattern matching, JPMS |
+| [Java 22–26 Features](src/main/java/com/rutik/systemdesign/java/java22_to_26_features/java22_to_26_features.md) | Module imports, compact source files, flexible constructors, Gatherers, Class-File API, compact object headers |
 | [JPMS — Java Platform Module System](src/main/java/com/rutik/systemdesign/java/java_platform_module_system/java_platform_module_system.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink |
 
 #### Phase 3 — JVM Internals
@@ -258,6 +269,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 |--------|-------------|
 | [JVM Internals](src/main/java/com/rutik/systemdesign/java/jvm_internals/jvm_internals.md) | G1/ZGC algorithms, JIT tiers, Java Memory Model, class loading, object layout |
 | [Reference Types & Cleaners](src/main/java/com/rutik/systemdesign/java/reference_types_and_cleaners/reference_types_and_cleaners.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks |
+| [AOT Startup & Class Data Sharing](src/main/java/com/rutik/systemdesign/java/aot_startup_and_class_data_sharing/aot_startup_and_class_data_sharing.md) | CDS/AppCDS/dynamic archives, the AOT cache, training runs, and silent fallback |
 | [Bytecode & Class-File Format](src/main/java/com/rutik/systemdesign/java/bytecode_and_classfile/bytecode_and_classfile.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation |
 | [GraalVM Native Image](src/main/java/com/rutik/systemdesign/java/graalvm_native_image/graalvm_native_image.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput |
 | [Java Memory Model](src/main/java/com/rutik/systemdesign/java/java_memory_model/java_memory_model.md) | Happens-before rules, memory barriers, volatile semantics, safe publication, double-checked locking without volatile |
@@ -372,6 +384,7 @@ A comprehensive guide to mastering **Spring Framework internals**, Spring Boot, 
 | [Observability & Tracing](src/main/java/com/rutik/systemdesign/spring/observability_and_tracing/observability_and_tracing.md) | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging |
 | [Spring AI](src/main/java/com/rutik/systemdesign/spring/spring_ai/spring_ai.md) | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans (Spring AI 1.0 GA) |
 | [Spring Native & GraalVM](src/main/java/com/rutik/systemdesign/spring/spring_native_graalvm/spring_native_graalvm.md) | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
+| [Spring Boot 4 Migration](src/main/java/com/rutik/systemdesign/spring/spring_boot_4_migration/spring_boot_4_migration.md) | Boot 3.5 to 4.x: modular starters, package relocations, Jackson 3, JSpecify, `@MockitoBean`, OpenRewrite |
 | [Spring Integration](src/main/java/com/rutik/systemdesign/spring/spring_integration/spring_integration.md) | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
 | [Spring Modulith](src/main/java/com/rutik/systemdesign/spring/spring_modulith/spring_modulith.md) | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
 | [Spring for GraphQL](src/main/java/com/rutik/systemdesign/spring/spring_graphql/spring_graphql.md) | Schema-first @QueryMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
@@ -402,10 +415,12 @@ A comprehensive, one-stop reference for mastering **pure Python** — from langu
 |--------|-------------|
 | [Data Model & Objects](src/main/java/com/rutik/systemdesign/python/data_model_and_objects/data_model_and_objects.md) | Dunder methods, `__slots__`, MRO/C3 linearization, operator overloading, hashing/equality contract |
 | [Core Language Idioms](src/main/java/com/rutik/systemdesign/python/core_language_idioms/core_language_idioms.md) | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=`, `match`/`case` (3.10) |
+| [The Import System](src/main/java/com/rutik/systemdesign/python/the_import_system/the_import_system.md) | Finders, loaders, `sys.path`, packages vs namespace packages, circular imports, import-time side effects |
 | [Iterators & Generators](src/main/java/com/rutik/systemdesign/python/iterators_and_generators/iterators_and_generators.md) | Iterator protocol, `yield`/`yield from`, lazy pipelines, `itertools`, generator coroutines |
 | [Decorators & Closures](src/main/java/com/rutik/systemdesign/python/decorators_and_closures/decorators_and_closures.md) | Closures, function/class/parametrized decorators, `functools.wraps/lru_cache/cached_property` |
 | [Context Managers & Exceptions](src/main/java/com/rutik/systemdesign/python/context_managers_and_exceptions/context_managers_and_exceptions.md) | `contextlib`, `ExitStack`, async CMs, `ExceptionGroup`/`except*` (3.11), traceback manipulation |
 | [Collections & Data Structures](src/main/java/com/rutik/systemdesign/python/collections_and_data_structures/collections_and_data_structures.md) | `list`/`dict`/`set` internals, `collections` module, `heapq`, `bisect`, Big-O |
+| [Dataclasses, Enums & Data Modeling](src/main/java/com/rutik/systemdesign/python/dataclasses_enums_and_data_modeling/dataclasses_enums_and_data_modeling.md) | `dataclass` fields and defaults, `slots`, frozen instances, `Enum`/`StrEnum`, and when to reach for Pydantic |
 | [Strings, Bytes, Encoding & Regex](src/main/java/com/rutik/systemdesign/python/strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) | `str` vs `bytes`, Unicode/codecs, `re` engine, catastrophic backtracking |
 | [File I/O & Serialization](src/main/java/com/rutik/systemdesign/python/file_io_and_serialization/file_io_and_serialization.md) | `pathlib`, text/binary I/O, `json`/`csv`, `pickle` security |
 
@@ -417,6 +432,7 @@ A comprehensive, one-stop reference for mastering **pure Python** — from langu
 | [Metaclasses & Metaprogramming](src/main/java/com/rutik/systemdesign/python/metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md) | `type()`, metaclasses, `__init_subclass__`, descriptors (non-data/data), `__getattr__` |
 | [Type System & Typing](src/main/java/com/rutik/systemdesign/python/the_type_system_and_typing/the_type_system_and_typing.md) | Type hints, generics, `Protocol`, `TypeVar`/`ParamSpec`, variance, PEP 695 (3.12), mypy/pyright |
 | [Performance & Profiling](src/main/java/com/rutik/systemdesign/python/performance_and_profiling/performance_and_profiling.md) | `cProfile`/`dis`, CPython 3.11+ speedups, Cython/mypyc/C extensions, common slow patterns |
+| [C Extensions and Native Interop](src/main/java/com/rutik/systemdesign/python/c_extensions_and_native_interop/c_extensions_and_native_interop.md) | CPython C API, `ctypes`/`cffi`, Cython, PyO3, the GIL boundary, and packaging native wheels |
 | [Functional Programming](src/main/java/com/rutik/systemdesign/python/functional_programming/functional_programming.md) | `map`/`filter`/`reduce`, `functools`, immutability, currying/partial, comprehension vs generator perf |
 
 #### Phase 3 — Concurrency, Async & Quality
@@ -442,6 +458,7 @@ A comprehensive, one-stop reference for mastering **FastAPI** and the **ASGI** p
 | Module | Key Concepts |
 |--------|-------------|
 | [FastAPI Fundamentals & ASGI](src/main/java/com/rutik/systemdesign/fastapi/fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
+| [Python API Framework Landscape](src/main/java/com/rutik/systemdesign/fastapi/python_api_framework_landscape/python_api_framework_landscape.md) | FastAPI vs Django/DRF vs Flask vs Litestar vs Starlette — ASGI vs WSGI and how to justify a choice |
 | [Pydantic v2 — Deep Dive](src/main/java/com/rutik/systemdesign/fastapi/pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) | Validation/serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration, `BaseSettings` |
 | [Routing & Request Handling](src/main/java/com/rutik/systemdesign/fastapi/routing_and_request_handling/routing_and_request_handling.md) | Path operations, `APIRouter`, response models, status codes, content negotiation |
 | [Dependency Injection in FastAPI](src/main/java/com/rutik/systemdesign/fastapi/dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) | `Depends`, sub-dependencies, `yield` deps, caching/scopes, `dependency_overrides` for tests |
@@ -456,6 +473,7 @@ A comprehensive, one-stop reference for mastering **FastAPI** and the **ASGI** p
 | [Error Handling & Validation](src/main/java/com/rutik/systemdesign/fastapi/error_handling_and_validation/error_handling_and_validation.md) | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
 | [Testing FastAPI](src/main/java/com/rutik/systemdesign/fastapi/testing_fastapi/testing_fastapi.md) | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
 | [WebSockets, SSE & Streaming](src/main/java/com/rutik/systemdesign/fastapi/websockets_sse_and_streaming/websockets_sse_and_streaming.md) | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
+| [Serving LLM and AI Workloads](src/main/java/com/rutik/systemdesign/fastapi/serving_llm_and_ai_workloads/serving_llm_and_ai_workloads.md) | Streaming completions, backpressure, cancellation, token budgets, and MCP servers from FastAPI |
 | [Background Jobs & Task Queues](src/main/java/com/rutik/systemdesign/fastapi/background_jobs_and_task_queues/background_jobs_and_task_queues.md) | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, dead-letter queues |
 | [HTTP Clients & External APIs](src/main/java/com/rutik/systemdesign/fastapi/http_clients_and_external_apis/http_clients_and_external_apis.md) | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers |
 | [Message Queues & Event-Driven](src/main/java/com/rutik/systemdesign/fastapi/message_queues_and_event_driven/message_queues_and_event_driven.md) | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
@@ -498,10 +516,12 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 #### Phase 2 — API Design & Protocols
 | Module | Key Concepts |
 |--------|-------------|
-| [REST API Design](src/main/java/com/rutik/systemdesign/backend/rest_api_design/rest_api_design.md) | REST constraints, resource modeling, versioning, idempotency, cursor pagination, RFC 7807 |
+| [REST API Design](src/main/java/com/rutik/systemdesign/backend/rest_api_design/rest_api_design.md) | REST constraints, resource modeling, versioning, idempotency, cursor pagination, RFC 9457 |
+| [API Contracts & Schema Governance](src/main/java/com/rutik/systemdesign/backend/api_contracts_and_schema_governance/api_contracts_and_schema_governance.md) | OpenAPI 3.2, AsyncAPI 3.1, Spectral/oasdiff/buf gates, compatibility modes, Deprecation/Sunset |
 | [gRPC and Protobuf](src/main/java/com/rutik/systemdesign/backend/grpc_and_protobuf/grpc_and_protobuf.md) | Protobuf wire format, 4 RPC modes, interceptors, deadlines, health checking, gRPC-Web |
 | [GraphQL](src/main/java/com/rutik/systemdesign/backend/graphql/graphql.md) | Schema-first design, DataLoader N+1 fix, persisted queries, complexity limiting, federation |
 | [WebSockets and SSE](src/main/java/com/rutik/systemdesign/backend/websockets_and_sse/websockets_and_sse.md) | WebSocket upgrade, frame structure, SSE reconnection, STOMP, Redis pub/sub fan-out |
+| [Webhooks & Event Delivery](src/main/java/com/rutik/systemdesign/backend/webhooks_and_event_delivery/webhooks_and_event_delivery.md) | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence |
 
 #### Phase 3 — Performance Engineering
 | Module | Key Concepts |
@@ -510,6 +530,7 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 | [Connection Pooling Deep Dive](src/main/java/com/rutik/systemdesign/backend/connection_pooling_deep_dive/connection_pooling_deep_dive.md) | HikariCP ConcurrentBag internals, pool sizing formula, leak detection, PgBouncer |
 | [Caching Strategies Deep Dive](src/main/java/com/rutik/systemdesign/backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) | Cache-aside/write-through/write-behind, Redis data structures, XFetch stampede prevention |
 | [Async and Concurrency Patterns](src/main/java/com/rutik/systemdesign/backend/async_and_concurrency_patterns/async_and_concurrency_patterns.md) | Thread pool sizing, CompletableFuture pitfalls, virtual thread pinning, reactive backpressure |
+| [Serving AI Workloads](src/main/java/com/rutik/systemdesign/backend/serving_ai_workloads/serving_ai_workloads.md) | Streaming transport, admission control, cancellation, per-tenant token budgets, GPU queueing |
 
 #### Phase 4 — Database Engineering
 | Module | Key Concepts |
@@ -573,7 +594,7 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ### Database Engineering — Principal Engineer & Interview Prep Guide
 
-A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 30 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 33 modules across 7 phases plus 8 case studies, covering relational, NoSQL, emerging, and distributed database concepts.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -603,6 +624,7 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 | [Elasticsearch Internals](src/main/java/com/rutik/systemdesign/database/elasticsearch_internals/elasticsearch_internals.md) | Lucene segment files, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 one-byte norms, per-shard IDF and `dfs_query_then_fetch`, PIT + `search_after`, routing factor and `_split`, seq_no/primary-term checkpoints, voting configuration, `doc_count_error`, logsdb/TSDS, frozen tier, `dense_vector` BBQ |
 | [Graph Databases](src/main/java/com/rutik/systemdesign/database/graph_databases/graph_databases.md) | Property graph, Neo4j index-free adjacency, Cypher, fraud detection patterns |
 | [Time-Series Databases](src/main/java/com/rutik/systemdesign/database/time_series_databases/time_series_databases.md) | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla XOR compression |
+| [Analytical Databases and OLAP](src/main/java/com/rutik/systemdesign/database/analytical_databases_and_olap/analytical_databases_and_olap.md) | Columnar storage, vectorized execution, MergeTree parts, sort keys vs indexes, ClickHouse/Druid/Pinot/DuckDB |
 
 #### Phase 4 — Emerging Databases
 | Module | Key Concepts |
@@ -610,6 +632,7 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 | [Vector Databases](src/main/java/com/rutik/systemdesign/database/vector_databases/vector_databases.md) | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | [NewSQL & Distributed SQL](src/main/java/com/rutik/systemdesign/database/newsql_and_distributed_sql/newsql_and_distributed_sql.md) | Spanner TrueTime, CockroachDB Raft, TiDB HTAP, YugabyteDB, global ACID |
 | [In-Memory Databases](src/main/java/com/rutik/systemdesign/database/in_memory_databases/in_memory_databases.md) | Redis vs Memcached, VoltDB, Ignite, eviction policies, durability modes |
+| [Lakehouse and Table Formats](src/main/java/com/rutik/systemdesign/database/lakehouse_and_table_formats/lakehouse_and_table_formats.md) | ACID on object storage, snapshot isolation, time travel, Iceberg vs Delta vs Hudi, CoW vs MoR, compaction |
 
 #### Phase 5 — Distributed Database Concepts
 | Module | Key Concepts |
@@ -650,7 +673,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 24 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 46 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 25 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 47 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -767,7 +790,7 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 
 ### DevOps, Cloud & Platform Engineering — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 13 principal case studies. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
+A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 13 principal case studies + 6 deep-dive sub-files. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -865,7 +888,7 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 
 ### GPGPU & CUDA Programming — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 6 principal case studies. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
+A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 8 principal case studies + 2 deep-dive sub-files. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
 
 #### Phase 1 — GPU Foundations
 | Module | Key Concepts |
@@ -931,7 +954,7 @@ See the [CUDA Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md)
 
 ### CS Fundamentals — Senior Engineer & Interview Prep Guide
 
-The language-agnostic computer-science spine: 24 modules across 6 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (25 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+The language-agnostic computer-science spine: 28 modules across 6 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (25 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
 
 #### Phase 1 — Complexity & Computation
 
@@ -951,6 +974,7 @@ The language-agnostic computer-science spine: 24 modules across 6 phases + 6 int
 | [trees_and_binary_search_trees](src/main/java/com/rutik/systemdesign/cs_fundamentals/trees_and_binary_search_trees/trees_and_binary_search_trees.md) | Binary tree traversals, BST, AVL/red-black (concept), B/B+ trees (concept), trie |
 | [heaps_and_priority_queues](src/main/java/com/rutik/systemdesign/cs_fundamentals/heaps_and_priority_queues/heaps_and_priority_queues.md) | Binary heap, heapify O(n), d-ary heaps, extract-min O(log n), k-way merge |
 | [graphs_tries_and_advanced_structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) | Graph representations, trie, union-find/DSU (path compression + union by rank), segment tree, Fenwick tree, Bloom filter |
+| [Probabilistic and Streaming Data Structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, t-digest, reservoir sampling, consistent hashing |
 
 #### Phase 3 — Algorithms
 
@@ -969,6 +993,7 @@ The language-agnostic computer-science spine: 24 modules across 6 phases + 6 int
 | [cpu_scheduling_algorithms](src/main/java/com/rutik/systemdesign/cs_fundamentals/cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | FCFS, SJF, Round-Robin, MLFQ, preemption, starvation, CFS concept |
 | [memory_management_and_virtual_memory](src/main/java/com/rutik/systemdesign/cs_fundamentals/memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | Paging (4 KB pages), TLB, page faults, page-replacement (OPT/LRU/Clock) |
 | [deadlocks_and_synchronization](src/main/java/com/rutik/systemdesign/cs_fundamentals/deadlocks_and_synchronization/deadlocks_and_synchronization.md) | Mutex/semaphore/monitor, Coffman conditions, prevention/avoidance/detection, dining philosophers |
+| [Memory Models and Concurrency Theory](src/main/java/com/rutik/systemdesign/cs_fundamentals/memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | happens-before, DRF-SC, SC/TSO/weak, acquire-release, linearizability vs serializability, ABA |
 
 #### Phase 5 — Systems & Security Foundations
 
@@ -980,6 +1005,7 @@ The language-agnostic computer-science spine: 24 modules across 6 phases + 6 int
 | [cryptography_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/cryptography_fundamentals/cryptography_fundamentals.md) | Hash functions, symmetric/asymmetric encryption, HMAC, digital signatures, Diffie-Hellman, salting |
 | [character_encoding_deep_dive](src/main/java/com/rutik/systemdesign/cs_fundamentals/character_encoding_deep_dive/character_encoding_deep_dive.md) | Unicode code points/planes, UTF-8/16/32, surrogate pairs, BOM, normalization (NFC/NFD/NFKC/NFKD), grapheme clusters, mojibake |
 | [theory_of_computation](src/main/java/com/rutik/systemdesign/cs_fundamentals/theory_of_computation/theory_of_computation.md) | DFA/NFA, regular languages & pumping lemma, CFG/PDA, Turing machines, halting problem, P vs NP, NP-completeness |
+| [Information Theory and Compression](src/main/java/com/rutik/systemdesign/cs_fundamentals/information_theory_and_compression/information_theory_and_compression.md) | Entropy, source and channel coding, KL/cross-entropy, Kolmogorov complexity, entropy/dictionary/lossy coding |
 | [how_code_runs_compilers_and_interpreters](src/main/java/com/rutik/systemdesign/cs_fundamentals/how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md) | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
 
 #### CS Fundamentals Case Studies (interview-problem walkthroughs)
@@ -1021,8 +1047,27 @@ A canonical, senior-engineer-level module per major infrastructure technology �
 | [envoy_proxy](src/main/java/com/rutik/systemdesign/technologies/envoy_proxy/envoy_proxy.md) | L7 Proxy & Service-Mesh Data Plane | Listener/filter-chain/route/cluster/endpoint model, xDS + ADS ordering, LB policies and locality/priority/panic mode, the `enforcing_*` outlier trap, circuit breaking as five ceilings, retry budgets, the seven-layer timeout stack, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc |
 | [hashicorp_vault](src/main/java/com/rutik/systemdesign/technologies/hashicorp_vault/hashicorp_vault.md) | Secrets Management | Barrier + four-layer key hierarchy, seal/unseal and why recovery keys cannot unseal, Integrated Storage, every secrets engine, the KV v2 `data/` policy trap, leases and the lease-count arithmetic, secret-zero and auth methods, `bound_claims` vs `claim_mappings`, policies + identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, the OpenBao delta |
 | [debezium_change_data_capture](src/main/java/com/rutik/systemdesign/technologies/debezium_change_data_capture/debezium_change_data_capture.md) | Change Data Capture | Logical decoding and output plugins, what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`), `flush.lsn.source` and the idle-captured-table heartbeat trap, `REPLICA IDENTITY` and `before: null`, TOAST and `__debezium_unavailable_value`, snapshot modes and their removals, the incremental-snapshot watermark algorithm, the four-quadrant position-loss recovery table, the never-compact schema-history topic, ordering per key / per table / never across tables, the five tombstone modes, the `EventRouter` defaults, why `tasks.max` is ignored |
+| [Apache Iceberg](src/main/java/com/rutik/systemdesign/technologies/apache_iceberg/apache_iceberg.md) | Spec versions, catalogs, metadata layout, maintenance procedures, and engine integrations |
 
 See the [Technologies Master Index](src/main/java/com/rutik/systemdesign/technologies/README.md) for the learning path, Knowledge-Question Map, and Study Plan.
+
+---
+
+### Soft Skills & Leadership — Senior to Principal Engineer Guide
+
+The half of the job the other fifteen sections do not cover: getting the design approved, getting the other team to adopt it, getting the headcount, and surviving the behavioural loop. Written to the same evidence bar as everything else — named companies, named books, real numbers, verbatim scripts, and a `Weak version -> Strong version` pair in every module in place of the repo's usual broken-code-then-fix.
+
+| Phase | Modules |
+|-------|---------|
+| 1 — What Seniority Actually Means | [engineering_career_ladders](src/main/java/com/rutik/systemdesign/soft_skills/engineering_career_ladders/engineering_career_ladders.md), [scope_impact_and_ownership](src/main/java/com/rutik/systemdesign/soft_skills/scope_impact_and_ownership/scope_impact_and_ownership.md), [staff_plus_archetypes](src/main/java/com/rutik/systemdesign/soft_skills/staff_plus_archetypes/staff_plus_archetypes.md) |
+| 2 — Vocabulary & Precision | [precise_technical_vocabulary](src/main/java/com/rutik/systemdesign/soft_skills/precise_technical_vocabulary/precise_technical_vocabulary.md), [business_and_finance_vocabulary](src/main/java/com/rutik/systemdesign/soft_skills/business_and_finance_vocabulary/business_and_finance_vocabulary.md), [leadership_and_org_vocabulary](src/main/java/com/rutik/systemdesign/soft_skills/leadership_and_org_vocabulary/leadership_and_org_vocabulary.md), [hedging_commitment_and_disagreement](src/main/java/com/rutik/systemdesign/soft_skills/hedging_commitment_and_disagreement/hedging_commitment_and_disagreement.md) |
+| 3 — Writing That Travels | [technical_writing_for_engineers](src/main/java/com/rutik/systemdesign/soft_skills/technical_writing_for_engineers/technical_writing_for_engineers.md), [design_docs_rfcs_and_adrs](src/main/java/com/rutik/systemdesign/soft_skills/design_docs_rfcs_and_adrs/design_docs_rfcs_and_adrs.md), [executive_communication](src/main/java/com/rutik/systemdesign/soft_skills/executive_communication/executive_communication.md), [upward_and_async_communication](src/main/java/com/rutik/systemdesign/soft_skills/upward_and_async_communication/upward_and_async_communication.md), [incident_communication_and_postmortems](src/main/java/com/rutik/systemdesign/soft_skills/incident_communication_and_postmortems/incident_communication_and_postmortems.md) |
+| 4 — Influence, Conflict, Negotiation | [influence_without_authority](src/main/java/com/rutik/systemdesign/soft_skills/influence_without_authority/influence_without_authority.md), [giving_and_receiving_feedback](src/main/java/com/rutik/systemdesign/soft_skills/giving_and_receiving_feedback/giving_and_receiving_feedback.md), [difficult_conversations_and_conflict](src/main/java/com/rutik/systemdesign/soft_skills/difficult_conversations_and_conflict/difficult_conversations_and_conflict.md), [negotiation_for_engineers](src/main/java/com/rutik/systemdesign/soft_skills/negotiation_for_engineers/negotiation_for_engineers.md), [scope_prioritization_and_saying_no](src/main/java/com/rutik/systemdesign/soft_skills/scope_prioritization_and_saying_no/scope_prioritization_and_saying_no.md) |
+| 5 — Leading People and Teams | [mentorship_and_sponsorship](src/main/java/com/rutik/systemdesign/soft_skills/mentorship_and_sponsorship/mentorship_and_sponsorship.md), [technical_leadership_and_execution](src/main/java/com/rutik/systemdesign/soft_skills/technical_leadership_and_execution/technical_leadership_and_execution.md), [cross_functional_collaboration](src/main/java/com/rutik/systemdesign/soft_skills/cross_functional_collaboration/cross_functional_collaboration.md), [team_health_and_sustainable_pace](src/main/java/com/rutik/systemdesign/soft_skills/team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) |
+| 6 — Interviews & Career Operations | [behavioral_interview_systems](src/main/java/com/rutik/systemdesign/soft_skills/behavioral_interview_systems/behavioral_interview_systems.md), [story_portfolio_and_star_frameworks](src/main/java/com/rutik/systemdesign/soft_skills/story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md), [interviewing_as_the_interviewer](src/main/java/com/rutik/systemdesign/soft_skills/interviewing_as_the_interviewer/interviewing_as_the_interviewer.md), [performance_reviews_and_promotions](src/main/java/com/rutik/systemdesign/soft_skills/performance_reviews_and_promotions/performance_reviews_and_promotions.md) |
+| 7 — 2026 | [ai_era_engineering_leadership](src/main/java/com/rutik/systemdesign/soft_skills/ai_era_engineering_leadership/ai_era_engineering_leadership.md) |
+
+Plus 8 case studies — a full Amazon behavioural loop, getting a migration approved, saying no to a VP, a SEV1 and its blameless postmortem, an underperforming teammate, a staff promotion packet, a design disagreement re-run correctly, and translating a platform bet to the CFO. See the [Soft Skills Master Index](src/main/java/com/rutik/systemdesign/soft_skills/README.md) for the Full/Senior/Principal paths, the Knowledge-Question Map, and the 6-week Study Plan.
 
 ---
 
@@ -1033,6 +1078,7 @@ In-depth, chapter-by-chapter summaries of foundational engineering books, writte
 | Book | Author | Chapters | Folder |
 |------|--------|----------|--------|
 | [Designing Data-Intensive Applications](src/main/java/com/rutik/systemdesign/book/designing_data_intensive_applications/designing_data_intensive_applications.md) | Martin Kleppmann | 12 (+ preface) | `book/designing_data_intensive_applications/` |
+| [Designing Data-Intensive Applications (2nd ed.)](src/main/java/com/rutik/systemdesign/book/ddia_2e/ddia_2e.md) | Martin Kleppmann & Chris Riccomini | 14 | `book/ddia_2e/` |
 | [System Design Interview — Vol 1](src/main/java/com/rutik/systemdesign/book/system_design_interview_vol_1/system_design_interview_vol_1.md) | Alex Xu | 16 | `book/system_design_interview_vol_1/` |
 | [System Design Interview — Vol 2](src/main/java/com/rutik/systemdesign/book/system_design_interview_vol_2/system_design_interview_vol_2.md) | Alex Xu & Sahn Lam | 13 | `book/system_design_interview_vol_2/` |
 | [Machine Learning System Design Interview](src/main/java/com/rutik/systemdesign/book/machine_learning_system_design_interview/machine_learning_system_design_interview.md) | Ali Aminian & Alex Xu | 11 | `book/machine_learning_system_design_interview/` |
@@ -1057,6 +1103,8 @@ Each chapter covers the book's sections in depth with Mermaid/ASCII diagrams, a 
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
 | **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
 | **Algorithm / coding interview prep** | `cs_fundamentals/` phase 1 (Big-O) → phase 2 (data structures) → phase 3 (algorithms) → `cs_fundamentals/case_studies/` for walkthroughs |
+| **Behavioural / leadership interview prep** | `soft_skills/` phase 1 (ladders + scope) → phase 2 (vocabulary) → phase 6 (behavioural systems + story portfolio) → `soft_skills/case_studies/the_amazon_loop.md` |
+| **Senior engineer going for Staff** | `soft_skills/` phases 1-5 in order, principal tier → `soft_skills/case_studies/writing_the_promotion_packet.md` |
 | **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` + `ml/neural_network_fundamentals/` |
 
 ### Navigation

@@ -7,20 +7,21 @@ A comprehensive system design study repository. All content is Markdown — no r
 | Section | Coverage | Sub-CLAUDE |
 |---------|---------|-----------|
 | **LLD** | Design patterns (GoF), SOLID, anti-patterns | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
-| **HLD** | Distributed system concepts (CAP, caching, queues, sharding) | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
-| **Backend** | Networking, API design, performance, resilience, security, microservices — 35 modules, 5 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
-| **Database** | Relational, NoSQL, distributed DB, production ops — 31 modules, 6 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
-| **Java** | Pure Java senior-engineer guide — 33 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
-| **Spring** | Spring Framework guide — 39 modules, 9 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
-| **Python** | Pure Python senior-engineer guide — 21 modules, 0 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
-| **FastAPI** | FastAPI + ASGI production guide — 19 modules, 6 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
-| **ML** | Machine Learning guide — 47 modules, 24 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
-| **LLM** | LLM engineering guide — 54 modules, 29 case studies, 85 deep-dive sub-files (75 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
-| **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies, 1 deep-dive sub-file | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
-| **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
-| **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
-| **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium) — 7 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
-| **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template; no line ceiling) — DDIA (Kleppmann) 12+preface; SDI Vol 1 (Xu) 16; SDI Vol 2 (Xu & Lam) 13; ML System Design Interview (Aminian & Xu) 11; Designing ML Systems (Huyen) 11; Understanding Distributed Systems (Vitillo) 33 chapters as 5 part-folders. Game shows one Study node per book (`BOOK_LABELS` + `STUDY_ORDER.book` in game/app.js) | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
+| **HLD** | Distributed system concepts (CAP, caching, queues, sharding) — 25 modules, 26 case studies | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
+| **Backend** | Networking, API design, performance, resilience, security, microservices — 38 modules, 7 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
+| **Database** | Relational, NoSQL, distributed DB, production ops — 33 modules, 8 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
+| **Java** | Pure Java senior-engineer guide — 35 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
+| **Spring** | Spring Framework guide — 40 modules, 10 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
+| **Python** | Pure Python senior-engineer guide — 24 modules, 5 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
+| **FastAPI** | FastAPI + ASGI production guide — 21 modules, 7 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
+| **ML** | Machine Learning guide — 47 modules, 25 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
+| **LLM** | LLM engineering guide — 54 modules, 30 case studies, 88 deep-dive sub-files (78 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
+| **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies, 6 deep-dive sub-files | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
+| **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 8 case studies, 2 deep-dive sub-files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
+| **CS Fundamentals** | Language-agnostic CS spine — 28 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
+| **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium, Apache Iceberg) — 8 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
+| **Soft Skills** | Behavioural interviewing, leadership, influence, communication, and four professional **vocabularies** (precise-technical, business/finance, leadership/org, hedging and disagreement) — 26 modules, 8 case studies. Template-adapted: §4 "Types / Levels / Modes", §5 "Models & Frameworks Diagrammed", §11 **"Frameworks, Books & Further Reading"** (the §11 retitle is load-bearing — see below) | [soft_skills/CLAUDE.md](src/main/java/com/rutik/systemdesign/soft_skills/CLAUDE.md) |
+| **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template; no line ceiling) — DDIA (Kleppmann) 12+preface; DDIA 2e (Kleppmann & Riccomini) 14; SDI Vol 1 (Xu) 16; SDI Vol 2 (Xu & Lam) 13; ML System Design Interview (Aminian & Xu) 11; Designing ML Systems (Huyen) 11; Understanding Distributed Systems (Vitillo) 33 chapters as 5 part-folders. Game shows one Study node per book (`BOOK_LABELS` + `STUDY_ORDER.book` in game/app.js) | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
 | **Game** | **LORA — Learn Often, Recall Always**, by Rutik (Pages-deployed daily learning game; a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). Also ships as a fully-offline sideloadable Android APK — built and released by CI on every push; see `android/`. | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
 ---
@@ -43,6 +44,7 @@ src/main/java/com/rutik/systemdesign/
 ├── cuda/             ← GPGPU / CUDA programming guide + CLAUDE.md
 ├── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
 ├── technologies/     ← Per-technology deep dives + CLAUDE.md
+├── soft_skills/      ← Behaviour, leadership, vocabulary, communication + CLAUDE.md
 ├── book/             ← Book summaries (chapter-by-chapter) + CLAUDE.md
 └── game/             ← Browser learning game (app, not study content) + README.md
 ```
@@ -54,7 +56,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 16, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 17, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -74,7 +76,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 15 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 16 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -96,7 +98,7 @@ question there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Both passes are COMPLETE for all 15 in-scope sections** (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 15 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25, after the migration, and was authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every non-book Q&A in
 the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s
@@ -560,6 +562,18 @@ silently dropped from the game or renders wrong. These rules are derived from
   inside it makes the index index the bank into itself (3809/613 → 3810/614, no error).
   So `build_tech_bank()` fails the build on any `## NN.` template heading found there.
   Full authoring contract: `technologies/CLAUDE.md`.
+- **`soft_skills/` retitles §11 to `## 11. Frameworks, Books & Further Reading`, and that
+  is load-bearing, not cosmetic.** `TECH_HDR` matches on heading TEXT, not number — it
+  needs both a `technolog*` token and a `tool`/`tools` token — so a soft-skills §11 under
+  the canonical title would silently inject RACI, SBI, Radical Candor and Cynefin into
+  `tech_index.json` as if they were software products, on a green build. The retitle was
+  chosen over a path exclusion because it costs zero lines of code and cannot be
+  re-armed without a visible edit to a content file. §8 `Tradeoffs` is deliberately left
+  alone: `TRADE_HDR` still indexes it into the tradeoff digest, which is section-labelled
+  and where a "sponsorship vs mentorship" table genuinely belongs. Never put both a
+  `technolog*` word and `tool`/`tools` in a `##` heading in that section, and never name a
+  file there `*_deep_dive.md` / `*_internals.md` (`DEEP_NAME_RE` makes that FATAL unless
+  hand-listed in `build_tech.py`). See `soft_skills/CLAUDE.md`.
 - The bank (`game/questions/*.json`) and the module-relatedness graphs
   (`game/graph/*.json`) are **generated, not committed** — they are
   gitignored; the Pages CI regenerates them fresh on every push (see
@@ -666,6 +680,16 @@ silently dropped from the game or renders wrong. These rules are derived from
   (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
   wraps across lines. This is why the "bold the question" rule is load-bearing,
   not cosmetic.
+- **NEVER demote a `##` heading that sits AFTER §12 to a `###` in place** (found
+  2026-08-25 while renumbering `hld` to the canonical 1-14). The Q&A span opens on a
+  heading matching `interview q` and **closes at the next `##`** — so demoting a trailing
+  `## Cross-Perspective: …` block to `###` does not tidy it, it swallows the whole block
+  INTO the Q&A span, where its bold lines are parsed as questions and ship as garbage MCQs.
+  It would have hit `microservices`, `rate_limiting`, `cdn` and `database_sharding`.
+  **Move such a block below the `## 13.` heading instead of demoting it where it lies.**
+  The general rule: a `##` after §12 is what TERMINATES the bank's read of that file, so
+  changing its level changes what the bank ingests. Renumbering headings is otherwise
+  safe — the same pass renumbered 12 modules for a net Q&A change of exactly zero.
 - **NEVER number your Q&As as a Markdown list.** `is_question_line()` requires the
   line to *start* with `**`, so `1. **"question?"**` never registers as a question
   boundary and the whole section is silently unreachable. Measured 2026-07-29: six
