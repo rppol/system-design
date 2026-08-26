@@ -594,7 +594,7 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ### Database Engineering — Principal Engineer & Interview Prep Guide
 
-A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 33 modules across 7 phases plus 8 case studies, covering relational, NoSQL, emerging, and distributed database concepts.
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 34 modules across 7 phases plus 11 case studies, covering relational, NoSQL, emerging, and distributed database concepts.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -673,7 +673,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 25 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 47 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 27 end-to-end case studies (all on the principal 11-section template, plus 5 cross-cutting shared-primitive files). 47 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -790,7 +790,7 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 
 ### DevOps, Cloud & Platform Engineering — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 13 principal case studies + 6 deep-dive sub-files. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
+A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 15 principal case studies + 10 deep-dive sub-files. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -888,7 +888,7 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 
 ### GPGPU & CUDA Programming — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 8 principal case studies + 2 deep-dive sub-files. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
+A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 8 principal case studies + 4 deep-dive sub-files. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
 
 #### Phase 1 — GPU Foundations
 | Module | Key Concepts |
