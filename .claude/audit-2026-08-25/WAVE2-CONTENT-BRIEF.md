@@ -121,3 +121,29 @@ For EVERY file you created:
 - for a case study: the rows needed in all five parts of `case_studies/case_studies.md`
 - the README module-table row and the section CLAUDE.md row
 Also list anything you deliberately did NOT write, and why.
+
+---
+
+# WAVE 3 ADDENDUM (2026-08-26) — the deferred backlog
+
+Same contract as above. Additional rules learned in wave 2:
+
+1. **READ THE DESTINATION BEFORE WRITING.** Wave 2 agents correctly DECLINED 14 of their
+   proposed files because a wave-1 fixer had already folded the payload into a parent module.
+   `cuda` declined an entire proposed MODULE on these grounds. **"Already covered — nothing to
+   write" is a valid, expected, and valuable result.** A redundant module is worse than a
+   missing one. Say what you declined and cite the file and line where the payload lives.
+2. **Count Q&As with `grep -c '^\*\*Q:'`** — NOT `'^\*\*Q'`, which also matches bold prose
+   beginning "Qu…" and manufactured two phantom findings.
+3. **Question label is `**Q: `** — never `**Q1:`. 132 labels had to be normalized after wave 2.
+4. **A `**Short:**` is 15-220 chars and FAILS THE BUILD outside it.** Two wave-2 files shipped
+   over-length lines.
+5. **Verify by EXECUTION where you can.** Wave 2's worst defects were found by running the
+   code: an lz77 example printing 3 tokens where its own function returns 2 (while claiming it
+   had been decoded back to verify), a Java file that did not compile, and a scheduler demo
+   whose documented output was unreachable. If you write code, run it.
+6. **deprecated != removed.** The single most common defect in this repo. One word, inverted
+   advice. Check the vendor's own deprecation policy, not a blog.
+7. **Do not invent a number.** If a benchmark, price or count cannot be traced to a primary
+   source, omit it. Wave 2 caught a cited CNCF survey that does not exist and a "10M -> 50M"
+   ceiling with no source at all.

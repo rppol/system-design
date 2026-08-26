@@ -829,3 +829,125 @@ parsed Q&As                          14,005    authored Shorts 12,914    gap 1,0
 the entire wave, which is the proof that all 1,183 new Q&As carry an authored `**Short:**`.
 
 Working tree: **462 files changed, +40,967 / -8,126**, 531 paths. Nothing committed.
+
+---
+
+# ===== WAVE 3 (2026-08-27) — the deferred backlog =====
+
+## backend — 10 written, 1 DECLINED
+`auth_and_authorization_systems/passkeys_and_authn_frontier.md` 520/16 ·
+`observability_and_monitoring/modern_otel_stack.md` 650/16 ·
+`grpc_and_protobuf/connect_and_browser_rpc.md` 469/16 ·
+`http_protocols/transport_security_frontier.md` 387/16 ·
+`service_mesh_and_service_discovery/ambient_mesh_and_workload_identity.md` 426/17 ·
+`api_gateway_patterns/gateway_api_and_modern_proxies.md` 508/16 ·
+`durable_execution_and_workflows/` **module** 604/20 ·
+`multi_tenancy_and_isolation/` **module** 1067/17 ·
+`case_studies/design_rate_limiter_service/` 946/12 ·
+`case_studies/design_multi_tenant_saas_backend/` 1100/10
+
+`STUDY_ORDER["backend"]`: `multi_tenancy_and_isolation` after `backend/rate_limiting_in_depth`;
+`durable_execution_and_workflows` after `backend/event_sourcing_and_cqrs`.
+
+**DECLINED `fine_grained_authorization.md`** — the entire Zanzibar payload is already inline in
+`auth_and_authorization_systems.md`: relation tuples L267, the RBAC/ABAC/ReBAC table L271-274,
+zookies + new-enemy L276/L959, Check-vs-ListObjects with executable OpenFGA model L867-914, §11
+rows L1021-1024, and 4 Q&As at L1130/1135/1140/1145. `passkeys_and_authn_frontier.md` was
+RESCOPED for the same reason — it now owns only PAR, RAR, token exchange, CIBA, SD-JWT, SCIM,
+MCP/agent authz and the DPoP-vs-mTLS decision.
+
+**Tier ceilings:** `connect_and_browser_rpc` and `transport_security_frontier` cannot reach
+principal (senior-only parents); `ambient_mesh_and_workload_identity` and
+`gateway_api_and_modern_proxies` cannot reach senior (principal-only parents). Promote the
+parent in the same commit if you want either.
+
+## python + database — 7 written, 2 DECLINED
+python: `packaging_and_project_tooling/supply_chain_and_publishing.md` 979/15 ·
+`the_gil_and_free_threading/subinterpreters_and_interpreter_pools.md` 772/18 ·
+`case_studies/cross_cutting/choosing_a_concurrency_model.md` 944/15 (**no study-paths line** —
+`cross_cutting/` is an excluded dir).
+database: `graph_databases/graph_query_languages.md` 780/16 ·
+`vector_databases/disk_ann_and_filtered_search.md` 906/16 ·
+`postgresql_internals/planner_and_parallel_execution.md` 846/16 ·
+`embedded_and_edge_databases/` **module** 975/17.
+
+`STUDY_ORDER["database"]`: `embedded_and_edge_databases` after `database/in_memory_databases`.
+
+**DECLINED** `type_checkers_and_adoption.md` (payload inline at `the_type_system_and_typing.md`
+L1227-1250 incl. pyrefly/ty, PEP 705 L758, PEP 702 L778, PEP 696 L799, Q&As L1450/1459/1469) and
+`percolator_calvin_and_spanner.md` (`distributed_transactions.md:555-609` is a dedicated section
+on all four systems + Q&As L781/786).
+
+**Tier ceilings:** `packaging_and_project_tooling.md` is principal-only, so
+`supply_chain_and_publishing.md` cannot be senior. `graph_databases.md` is `-`, so
+`graph_query_languages.md` is forced to `-` and **invisible to both tiers on a green build** —
+GQL/ISO-39075 is current interview material; consider promoting the parent.
+`postgresql_internals.md` is senior-only.
+
+## technologies — 8 written, 8,380 lines, 202 Q&As
+`trino/` **module** 1199/32 · `apache_flink/` **module** 1490/36 · `cilium/` **module** 1428/45 ·
+`envoy_proxy/gateway_api_and_inference_extension.md` 719/19 ·
+`temporal_durable_execution/versioning_and_safe_deploys.md` 858/16 ·
+`debezium_change_data_capture/cdc_across_failover_and_into_the_lakehouse.md` 890/19 ·
+`hashicorp_vault/workload_identity_and_the_end_of_stored_secrets.md` 832/19 ·
+`apache_airflow/assets_partitions_and_the_state_store.md` 964/16
+
+`STUDY_ORDER["technologies"]`: `cilium` after `technologies/envoy_proxy`; `apache_flink` after
+`technologies/apache_iceberg`; `trino` after `technologies/apache_flink`.
+**All study-paths lines tier `-`** — tiering stays deferred (owner decision).
+
+README + CLAUDE.md rows (4-column: Dir | Category | Version Studied):
+`cilium/` | eBPF CNI, network policy, load balancing, service mesh | Cilium 1.20.1
+`apache_flink/` | Stateful stream processing | Apache Flink 2.3.0
+`trino/` | Distributed MPP SQL query engine | Trino 483
+
+Also: `technologies/CLAUDE.md` "Module List — 8 Modules" -> **11**; rewrite the open-slot prose
+(traffic/edge slot now filled by `cilium`, data-integration by `apache_flink` + `trino`; **no
+open slots remain** — say so or the next author appends blindly); root CLAUDE.md technologies
+7 -> 11 modules **and 6 deep-dive sub-files**; and the tiering-deferral caveat naming
+`versioning_and_safe_deploys.md` as "the obvious first candidate" is now SATISFIED — the stated
+blocker is cleared and the deferral is a live decision again, not a blocked dependency.
+
+## *** A GRADED-ANSWER DEFECT FIXED REPO-WIDE: GAIE v1.6.0 ***
+Two agents reported contradicting facts; I fetched the release notes myself and settled it:
+> "The following experimental APIs have been removed from GAIE (migrated to `llm-d`):
+> `InferenceObjective` (`inference.networking.x-k8s.io/v1alpha2`)" — plus
+> `InferenceModelRewrite` and `EndpointPickerConfig`.
+
+**TWO SEPARATE MIGRATIONS happened at once and were being conflated:** the alpha **CRDs** were
+removed, and independently the full **EPP/BBR/Latency-Predictor implementations** moved to
+`llm-d`. `InferencePool` is v1/stable and stays; `spec.endpointPickerRef` is now optional.
+
+Fixed in: `devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md`
+(4 sites incl. a manifest applying the removed CRD), `devops/kubernetes_networking.md`,
+`technologies/envoy_proxy/envoy_proxy.md` (4 sites — **the stale claim was in a `**Short:**`,
+i.e. shipping as the graded-CORRECT MCQ option**), and `backend/serving_ai_workloads.md`.
+
+## Orchestrator errors made and corrected this wave — read before re-running any bulk edit
+1. **The CLAUDE.md row-cloning script put descriptions in the wrong column** for tables shaped
+   `Module | Level | Q&As | Topics` and `Module | Phase | Key Concepts`. 11 rows rebuilt by hand.
+   hld/java/lld/backend were unaffected (their tables are `Module | Topic`).
+2. **A Q&A-count "corrector" guarded on `abs(new-old) <= 25` overwrote 130 cells including
+   single-digit PHASE columns** (`core_language_idioms/ | 1 |`). Reverted all 7 files to HEAD and
+   reapplied only the 11 rows I could name explicitly. **A numeric heuristic that "usually"
+   identifies a column is a corruption engine at scale — enumerate targets instead.**
+3. **A reported `Parquet` bank orphan was a FALSE POSITIVE.** `tech_key()` already strips a
+   leading `apache ` (`re.sub(r"^apache\s+", "", name.lower())`), so "Apache Parquet" merges to
+   "parquet" automatically. My alias was dead code and was reverted. Bank coverage unchanged at
+   3743/4478, 27 orphans.
+
+## DECISION: `**Short:**` lines on CASE STUDIES — leave them, do not sweep either way
+
+My wave-3 brief told agents to add `**Short:**` lines to case-study Q&As as "house style". **That
+instruction was wrong**, and two agents pushed back with the precedent rather than complying:
+hld 0/26, java 0/12, fastapi 0/7, devops 0/21, database 0/8 carry none; only python (7/7) and
+backend (4/9) do. Correctly pushing back on a wrong instruction is the behaviour I want.
+
+**They are INERT either way** — `extract.py` skips every `case_studies/` path, so a case-study
+Q&A never becomes an MCQ option and its Short is never read by anything.
+
+**Decision: leave what exists, add no more, remove none.** Rationale: a sweep in either
+direction is pure churn across ~100 files with zero reader-visible effect, and this session has
+already been burned once by exactly that shape (the 149-line blank-line normalization that had
+to be reverted). If the case-study exclusion is ever lifted, the existing Shorts become useful;
+until then they cost nothing. Record it here so the next author does not "fix" it.
