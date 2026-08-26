@@ -921,9 +921,13 @@ Lambda runs two parallel paths — a streaming path for fast approximate results
 Partitioning by `ad_id` sends all of a viral ad's clicks to one partition and one aggregate node, which saturates while others idle. The fix is to allocate more aggregation nodes to hot ads and/or salt the hot key — append a random suffix (`ad_viral#0`, `#1`, ...) so its events fan across several partitions — then re-sum the sub-counts in the reduce step. This trades a slightly more complex reduce for removing the single-node bottleneck.
 
 **Q: Why keep raw data if you already store aggregated data?**
+**Short:** Raw data is the source of truth for replay, audits, and recomputation that aggregated data cannot reconstruct.
+
 Raw data is the source of truth that aggregated data can't reconstruct — it enables replay, audits, dispute resolution, recomputation after a logic bug, adding new filter dimensions later, and the nightly reconciliation that validates the stream. Aggregated data is a lossy derivation optimized for fast queries; if its computation was wrong, only raw data can produce the correct number. At ~100 GB/day, raw is affordable, especially aged into cold storage.
 
 **Q: Why put two message queues in the pipeline instead of writing aggregation results straight to the database?**
+**Short:** A second queue decouples aggregation from the database write, letting each be made exactly-once independently.
+
 The second queue (topic 2) holds the aggregator's output so the aggregation step and the database-write step can each be made exactly-once independently, each tracking its own Kafka offset and replaying safely after a crash. Writing results directly to the DB couples the aggregator to the DB's availability and makes atomic offset/result handling harder. The queues also absorb 50K-QPS bursts in a durable buffer instead of backpressuring upstream.
 
 **Q: Walk through the aggregation service's map, aggregate, and reduce roles.**
@@ -948,12 +952,16 @@ A nightly batch job re-aggregates the full day's raw events by event time — in
 It's write-heavy: 1 billion clicks/day ÷ 86,400 s ≈ 10,000 write QPS on average, peaking around 50,000 (~5x), while reads (dashboards, billing runs) are far less frequent. That drives choosing databases optimized for ingest (Cassandra-style, time-series) rather than read fan-out. Storage math: 1B events × 0.1 KB ≈ 100 GB/day raw, ~3 TB/month, which is cheap enough to justify keeping all raw data.
 
 **Q: Why must you provision enough Kafka partitions up front rather than repartitioning later?**
+**Short:** Changing partition count remaps hash(ad_id) modulo partitions, scattering an ad's events and breaking per-ad ordering.
+
 Because partition assignment is `hash(ad_id) % partition_count`, changing the partition count remaps which partition each ad lands on, scattering an ad's events across partitions and breaking the per-ad grouping and ordering the aggregation depends on. Doing this on a live, loaded topic is disruptive and can corrupt in-flight aggregation. Over-provisioning partitions initially avoids the painful live resize.
 
 **Q: What is the latency requirement, and how does it differ from RTB?**
 End-to-end latency of a few minutes is acceptable for the aggregation queries, because they feed dashboards, billing, and bid-pricing signals rather than the live auction. This is deliberately looser than RTB's ~100 ms budget, which decides which ad to show in real time and is a separate system. That minutes-of-slack is precisely what allows windowing, watermarks for late events, and nightly reconciliation.
 
 **Q: Which database types fit the raw and aggregated data, and why?**
+**Short:** Both tiers are write-heavy, so a Cassandra-style store fits both, with object storage added for bulk-scanned raw data.
+
 Both tiers are write-heavy, so a Cassandra-style wide-column store fits both; raw data additionally suits cheap object storage (S3/HDFS) in columnar formats (ORC/Parquet/Avro) since it's re-read in bulk sequential scans, not point lookups. Aggregated data is time-series-shaped (keyed by minute) and read occasionally, so Cassandra or a time-series store works — or Druid/Pinot in the buy-it-off-the-shelf stack. The common thread is optimizing for ingest throughput over read fan-out.
 
 **Q: In practice, would you build the custom MapReduce DAG, and what would you use instead?**
@@ -963,6 +971,8 @@ Usually no — the custom DAG is a teaching model, and in a real company you'd a
 Before processing an event, the node checks a durable dedup store (in HDFS/S3, keyed by record-id/offset) to see if that record was already processed; if so it skips, otherwise it processes and records the marker. Because the marker lives in durable storage that survives the crash, a restarted node that replays uncommitted events recognizes them as already-done and drops them. This is what prevents the classic "crash before offset commit" replay from double-counting.
 
 **Q: Why is keeping raw and aggregated data on different retention schedules sensible?**
+**Short:** Aggregated data stays hot for constant per-minute reads; raw data ages into cheap cold storage after its active window.
+
 Aggregated data is small and read constantly by the per-minute queries, so it's kept hot; raw data is voluminous (~100 GB/day) and only needed for reprocessing, audits, and reconciliation, so it ages into cheap cold object storage after its active window. Splitting retention keeps query-serving storage lean and fast while still preserving the source of truth affordably. You keep everything, but not everything at hot-tier cost.
 
 ---

@@ -1010,36 +1010,43 @@ Because it applies to essentially any model, gives both memory and compute wins,
 Post-training quantization (PTQ) quantizes the finished fp32 model after training with no retraining, which is fast and needs no data but causes a larger accuracy drop, especially at int8 or binary. Quantization-aware training (QAT) simulates low precision during training so the model learns to be robust to it, recovering most or all of the accuracy at the cost of retraining. QAT is used when PTQ's accuracy loss is unacceptable.
 
 **Q: What are the four myths about ML deployment, in one line each?**
+**Short:** The four myths: deploying few models, stable performance, rare updates, and scale not mattering are all false.
 That you only deploy one or two models (reality: hundreds, per task, region, and segment — Uber runs thousands); that performance stays stable if untouched (reality: it decays from training's end due to software rot and data distribution shift); that you won't need to update models much (reality: update as often as infra allows — Etsy 50/day, Weibo ~10 min); and that most ML engineers don't worry about scale (reality: most work at scale-relevant companies). Each myth leads teams to under-invest in the serving, monitoring, and retraining platform.
 
 **Q: Why does a deployed model's accuracy degrade even if nobody changes the code?**
 Because the data distribution shifts: the world the model serves drifts away from the world it was trained on, so its inputs increasingly differ from the training distribution and predictions get worse. On top of that, ordinary software rot (dependency, OS, and hardware drift) degrades any untouched system. The key mental model is that model performance is a decaying asset from the moment training ends, not a fixed property, which is why monitoring and frequent retraining are mandatory.
 
 **Q: How does low-rank factorization shrink a convolution, using MobileNet as the example?**
+**Short:** It splits a convolution into a depthwise per-channel step plus a pointwise 1x1 step, cutting cost by roughly 1/K squared.
 It replaces a standard convolution with a depthwise-separable convolution, splitting one big K×K×C×C' operation into a cheap depthwise step (one K×K filter per channel, costing K×K×C) plus a pointwise 1×1 step that mixes channels (costing C×C'). This changes the cost from K×K×C×C' to K×K×C + C×C', roughly a 1/K² reduction — about 9x for a 3×3 filter — with little accuracy loss. SqueezeNet pushed the same compact-building-block idea to AlexNet accuracy with ~50x fewer parameters in under 0.5 MB.
 
 **Q: What is the difference between unstructured (sparse) and structured pruning, and why does it matter for speed?**
+**Short:** Unstructured pruning zeros weights but keeps the dense shape; structured pruning removes whole channels, which actually speeds up hardware.
 Unstructured pruning zeros out individual weights, producing a sparse matrix that can cut nonzero parameters by ~10x to ~30x, but the dense tensor shape is unchanged, so you only get real speedups on hardware or kernels that exploit sparsity. Structured pruning removes whole neurons, channels, or filters, so the network becomes genuinely smaller and dense and speeds up on ordinary hardware. This is why a big parameter-count reduction from unstructured pruning is not automatically a speedup.
 
 **Q: What is the Lottery Ticket Hypothesis?**
 It's the claim that a large randomly-initialized network contains a small sub-network (a "winning ticket") that, if trained in isolation from the same initialization, can match the full network's accuracy. It suggests large networks are heavily over-parameterized and that most of the network is scaffolding for finding a good sparse sub-network. It gives theoretical motivation for pruning, though finding the ticket in practice is nontrivial.
 
 **Q: What are the main benefits of running a model on the edge instead of the cloud?**
+**Short:** Edge inference works offline, cuts network latency, keeps data private, and is cheaper at scale than the cloud.
 Edge inference works offline without a network connection, removes the network round-trip from latency, keeps data on the device for privacy and GDPR compliance, and is cheaper at scale because it runs on hardware the user already owns. The primary motivation is often cost — cloud bills grow with usage and can dominate expenses. The tradeoff is that edge hardware is compute-, memory-, and energy-constrained, so the model may be too big or slow to run without compression and optimization.
 
 **Q: What is the framework-by-hardware compatibility problem, and how do intermediate representations solve it?**
 It's the M×N problem of making many ML frameworks (TensorFlow, PyTorch, JAX) each run efficiently on many hardware backends (CPU, GPU, mobile NPU, TPU) — an intractable number of pairwise hand-tuned integrations. Intermediate representations solve it the way compilers do: express the model as a neutral computation graph in the middle, so you build M front-ends (framework to IR) and N back-ends (IR to hardware) instead of M×N direct paths. ONNX-style IRs and ML compiler stacks then progressively lower and optimize the graph down to each target.
 
 **Q: What is operator fusion and why is it one of the biggest optimization wins?**
+**Short:** Operator fusion merges adjacent ops into one kernel so intermediates stay in registers instead of hitting memory.
 Operator fusion merges adjacent operations, such as a convolution followed by a bias add and a ReLU, into a single kernel so intermediate results stay in registers instead of being written to and read from memory after each op. Memory traffic, not arithmetic, is often the bottleneck, so eliminating the intermediate reads and writes gives a large speedup. It's a global graph optimization the compiler applies after the model is lowered to an IR.
 
 **Q: What is autoTVM-style autotuning, and what is its tradeoff versus hand-tuned kernels?**
+**Short:** AutoTVM searches schedules with a learned cost model, beating hand-tuned kernels at the cost of hours of compile time.
 AutoTVM-style autotuning uses an ML cost model that learns the target hardware and searches the space of possible schedules (loop orders, tile sizes, fusion choices), using measured or predicted runtimes to pick the fastest one for your specific model and device. The advantage is it can beat hand-tuned vendor kernels like cuDNN and generalizes to new ops and hardware, rather than being limited to what a human optimized. The tradeoff is that the search takes hours, a one-time compile-time cost you pay for a faster deployed model.
 
 **Q: What is WebAssembly's role in in-browser ML, and how does its performance compare?**
 WebAssembly (WASM) is a compiled bytecode format browsers run at near-native speed, letting you compile a model or its runtime and run inference client-side much faster than JavaScript. The precise positioning is that WASM is faster than JavaScript but slower than running natively on the device, so it's the best portable option inside the browser sandbox but not a replacement for a native NPU kernel. It's how in-browser ML gets acceptable performance while keeping the deploy-anywhere reach of the web.
 
 **Q: What three things do you need to move from batch prediction to online prediction?**
+**Short:** Online prediction needs fast inference, real-time transport like Kafka, and a stream computation engine.
 You need fast inference so the model returns within the request's latency budget, real-time transport to move data as it's produced (Kafka/Kinesis-style), and a stream computation engine to compute streaming features from that transport. Miss any one and you fall back to batch. This is why teams often ship batch first and migrate to online as the fast-inference and streaming pieces come online.
 
 **Q: Why does the book call batch prediction a "workaround" rather than a permanent design?**

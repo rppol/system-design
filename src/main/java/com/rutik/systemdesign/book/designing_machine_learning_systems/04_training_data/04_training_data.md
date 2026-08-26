@@ -295,7 +295,7 @@ Take a model **pretrained on a base task** (usually one with abundant, cheap, or
 - **Zero-shot** — apply the pretrained model to your task with **no additional training** and no task labels at all. (A large language model answering a classification prompt it was never explicitly trained for.)
 - **Fine-tuning** — continue training the pretrained model on your (small) labeled dataset, adapting its learned representations to your task. Fine-tuning needs far fewer labels than training from scratch because the model already knows general features.
 
-Transfer learning slashes label requirements because the expensive representation learning was already done on the base task. **Huyen's "BERT era" note:** the rise of large pretrained language models (BERT and successors) made transfer learning the **default** for NLP — you almost never train a text model from scratch anymore; you fine-tune a pretrained one, and the same pattern took over computer vision (ImageNet pretraining) before that. This is arguably the single biggest reason modern teams can ship NLP models with modest labeled datasets.
+Transfer learning slashes label requirements because the expensive representation learning was already done on the base task. **Huyen's "BERT era" note:** the rise of large pretrained language models (BERT and successors) made transfer learning the **default** for NLP — you almost never train a text model from scratch anymore; you fine-tune a pretrained one, and the same pattern took over computer vision (ImageNet pretraining) before that. *(Beyond the book: Huyen does not rank the causes, but in practice this is one of the main reasons a team can ship an NLP model on a modest labeled dataset at all.)*
 
 #### Active learning
 
@@ -723,6 +723,7 @@ Training data, not model architecture, is where most ML performance is won or lo
 ## Interview Questions
 
 **Q: Explain reservoir sampling and why every item ends up with equal k/n probability.**
+**Short:** Reservoir sampling keeps k of n stream items in O(k) memory, giving every item equal k/n selection probability.
 Reservoir sampling keeps a sample of k items from a stream of unknown length n in one pass using O(k) memory: fill the reservoir with the first k items, then for the n-th item accept it with probability k/n and, if accepted, have it replace a uniformly random reservoir slot. The newest item is in with probability k/n by construction. An existing item stays in if the n-th item is either rejected or accepted-but-replacing-a-different-slot, giving survival probability 1 − 1/n; by induction k/(n−1) · (1 − 1/n) = k/n, so every item satisfies the invariant at every step. It's the go-to when you can't know or store the full stream.
 
 **Q: Under heavy class imbalance, why prefer PR curves over ROC-AUC?**
@@ -765,12 +766,15 @@ Because a model predicting "no cancer" for everyone can score 99.99% accuracy on
 Data lineage is tracking where each data point and its label came from — which source and which labeler produced it. It matters because data is combined from many sources of varying quality, and when metrics degrade you need to attribute the problem. Huyen's example: a team added a new data source, accuracy dropped, and because they tracked lineage they isolated the new source and found it was mislabeled. Without lineage they'd have been debugging a healthy model against poisoned data with no way to tell good data from bad.
 
 **Q: Compare the four methods for handling a lack of labels.**
+**Short:** Huyen's four fixes for missing labels are weak supervision, semi-supervision, transfer learning, and active learning.
 Weak supervision generates noisy labels programmatically from labeling functions and needs essentially no hand labels; semi-supervision expands a small seed set using structural assumptions (self-training, clustering, consistency); transfer learning reuses a pretrained model either zero-shot (no labels) or fine-tuned (a few labels); active learning has the model choose the most useful examples so a small labeling budget goes furthest. They're not exclusive — teams stack them, e.g. fine-tune a pretrained model, weakly-supervise the bulk, and spend a small hand-label budget via active learning.
 
 **Q: How does active learning decide what to label, and when does it shine?**
+**Short:** Active learning has the model pick the examples most useful to label next, often via uncertainty sampling.
 Active learning has the model pick the examples most useful to label next, most commonly by uncertainty sampling (label the examples nearest the decision boundary), query-by-committee (label what an ensemble disagrees most about), or margin sampling (smallest gap between the top two class probabilities). It shines under a tight label budget — spend each label where it improves the model most — and in streaming settings where you must decide on the fly whether each incoming example is worth labeling. It can reach a target accuracy with far fewer labels than random labeling.
 
 **Q: Why did transfer learning become the default in NLP, and what are its two modes?**
+**Short:** Pretrained language models let NLP tasks reuse rich representations via zero-shot or fine-tuning instead of training from scratch.
 Because large pretrained language models like BERT learned rich general language representations from abundant self-supervised data, so downstream tasks with scarce labels could reuse them instead of training from scratch. The two modes are zero-shot — apply the pretrained model to your task with no additional training or labels — and fine-tuning — continue training it on a small labeled dataset, needing far fewer labels than from scratch. The "BERT era" made fine-tuning a pretrained model the standard NLP workflow, mirroring ImageNet pretraining in vision.
 
 **Q: What's the risk in treating "recommended but not clicked" as a negative label?**
@@ -780,6 +784,7 @@ The risk is mislabeling genuine slow positives as negatives because of timing. A
 Simple label-preserving augmentation (crop, flip, rotate, synonym replacement) just multiplies data with transforms that keep the label. Perturbation deliberately adds difficulty — noise injection or crafted adversarial examples (generated with methods like BIM) — to make the model robust rather than merely larger; training on them is adversarial training. Mixup goes further and synthesizes new examples by linearly interpolating two examples and their labels together, so a 60/40 blend of a cat and dog image gets the soft label "60% cat, 40% dog," which smooths decision boundaries and improves generalization.
 
 **Q: Why is data augmentation standard in computer vision but harder in NLP?**
+**Short:** Images tolerate continuous label-preserving perturbations, while discrete text edits can flip meaning or produce nonsense.
 Because images are continuous — you can crop, flip, rotate, add noise, or nudge pixels slightly and the label reliably survives — whereas text is discrete, so changing a token is a large, discrete move that can flip the label or produce nonsense. A wrong synonym can invert sentiment; you can't add an imperceptible continuous perturbation to a word the way you can to a pixel. So vision has cheap, reliable augmentation (near-universal in pipelines) while NLP relies on subtler techniques — synonym replacement, back-translation, templates — and augmentation there is growing but still comparatively immature.
 
 **Q: Give an example of nonprobability sampling and the bias it introduces.**

@@ -823,21 +823,25 @@ An ML metric measures model quality (accuracy, F1, log loss, latency) while a bu
 Take-rate is the number of quality plays divided by the number of recommendations a user was shown. It is a proxy because the true business goal (retention/LTV) is too slow to observe, whereas take-rate is measurable in days and correlates with higher total streaming hours and lower cancellation. It lets Netflix evaluate a recommender quickly, as long as they keep verifying that the correlation with the real goal still holds.
 
 **Q: How does ranking a newsfeed purely by engagement cause harm, and what is the fix?**
+**Short:** Engagement-only ranking rewards outrage via Goodhart's Law; the fix decouples it into a separate quality objective.
 Optimizing engagement alone teaches the model that extreme, outrageous, or misinforming content maximizes clicks, so it promotes exactly that, degrading the product — a case of Goodhart's Law where a measure that becomes a target stops being a good measure. The fix isn't to abandon engagement but to also optimize a competing quality objective, ideally by decoupling objectives into separate quality and engagement models combined with a tunable score.
 
 **Q: Why do ML systems "fail silently," and why does that make reliability different?**
 Because a broken ML model keeps returning predictions — confidently wrong ones — with no exception, crash, or error, unlike traditional software that announces a fault with a stack trace. Worse, the ground truth needed to catch the error (did the user actually churn?) often arrives days later or never, so the system can be operationally healthy yet functionally broken. This is why ML reliability must include detecting wrong-but-confident predictions, motivating dedicated monitoring and continual learning.
 
 **Q: What are the three axes of scalability for an ML system?**
+**Short:** Scalability spans three axes: model size, traffic volume, and the number of models run at once.
 Model complexity/size (the model itself grows until it no longer fits one machine), traffic volume (more users and queries per second), and model count (an organization runs tens, hundreds, or thousands of models at once). The third axis is the one people underestimate and the one unique to mature ML organizations. It forces autoscaling for cost control and disciplined artifact management so a fleet of models stays trained, versioned, and monitored.
 
 **Q: Why is framing the app-prediction problem as regression better than as classification?**
+**Short:** Regression scores each app from its own features, so adding a new app needs no retraining, unlike per-app classification nodes.
 Because the classification framing puts one output node per app, so adding a new app changes the model architecture and forces a retrain, whereas the regression framing scores each candidate app from its own features and needs no retraining when apps are added. In regression, the model takes user + context + candidate-app features and outputs a single likelihood score, run once per app and ranked. Same prediction, but the regression frame is adaptable where the classification frame is brittle.
 
 **Q: What does "decoupling objectives" mean and why is it better than a single fused loss?**
 Decoupling objectives means training a separate model per objective and combining their outputs with a tunable weighted score at serving time, instead of training one model on a fused loss like α·quality + β·engagement. It's better because α and β become serving-time knobs you can retune freely without retraining, and you retrain a model only when its own objective changes. It also lets each model use its own data and retraining cadence.
 
 **Q: Why is multilabel classification harder than multiclass classification?**
+**Short:** Multilabel has a variable label count per example, requiring a tunable per-class threshold instead of a simple argmax.
 Because the number of labels per example varies, so you can't just take the top class — you must choose a threshold for how many classes to emit, trading precision against recall, and the right threshold differs per class. Multiclass has exactly one correct class, so argmax suffices. Multilabel also suffers more annotator disagreement about which subset of classes applies, producing noisier labels.
 
 **Q: What are the two ways to implement multilabel classification?**
@@ -847,12 +851,14 @@ One model producing a multi-hot probability vector that you threshold per class,
 Use hierarchical classification: build a tree of classifiers where a first model picks the broad top-level category and a specialized second model picks the sub-category within that branch. High cardinality is hard because you need enough examples per class and many classes are rare or imbalanced. Splitting the decision into levels means each model faces far fewer classes and needs less data per decision.
 
 **Q: Why does Huyen call ML development an iterative loop rather than a pipeline?**
+**Short:** Huyen frames ML development as a loop because nearly every step has back-edges to earlier steps, not a straight pipeline.
 Because almost every step has back-edges to earlier steps: model evaluation sends you back for more data or a re-framing, deployment reveals gaps that send you back to modeling, and monitoring detecting drift sends you back to retrain. The six steps — scoping, data engineering, model development, deployment, monitoring and continual learning, business analysis — are circled repeatedly, not marched through once. Treating it as a straight line is the classic newcomer mistake.
 
 **Q: What are the six steps of the iterative ML process, in order?**
 Project scoping, data engineering, model development, deployment, monitoring and continual learning, and business analysis. Scoping sets goals and resources; data engineering ingests and processes data; model development extracts features and trains and evaluates; deployment makes the model accessible; monitoring detects decay and drives continual learning; business analysis evaluates against business goals and feeds the next iteration. The whole thing loops, with business analysis restarting scoping.
 
 **Q: Why is a business problem rarely an ML problem out of the box?**
+**Short:** Businesses state symptoms, not prediction targets, so the real fix may be non-ML and the problem must be reframed.
 Because the business states a symptom ("customer support is too slow"), not a prediction target, and the real bottleneck might be non-ML — like requests being routed to the wrong department, fixable with better routing rules. To make it an ML problem you must reframe it into a concrete learnable target, such as classifying which department a request belongs to. Diagnosing whether ML even applies, and how to phrase the target, is a design decision that dominates the project's outcome.
 
 **Q: What are the four requirements every production ML system must satisfy?**

@@ -852,6 +852,7 @@ Model iteration changes the model itself (architecture, features, algorithm) and
 Because the data warehouse is populated by scheduled ETL jobs that add hours of lag, so its freshest data may already be a day old — fatal for an hourly update cadence. Reading directly from the real-time transport (Kafka or Kinesis) lets you consume events before they land in the warehouse, giving you genuinely fresh data. The same broker already carries these events to online serving, so continual learning simply taps that existing stream.
 
 **Q: Name the main bandit algorithms and the idea behind each.**
+**Short:** Epsilon-greedy, Thompson sampling, and UCB each balance exploration against exploitation to minimize regret.
 Epsilon-greedy explores a random arm with probability epsilon and exploits the current best otherwise; Thompson sampling maintains a probability distribution over each arm's payout, samples from them each round, and plays the arm with the highest sampled value; and Upper Confidence Bound (UCB) applies optimism under uncertainty, choosing the arm with the highest upper confidence bound so rarely-tried arms get explored until their estimates tighten. All three balance exploration against exploitation to minimize regret, shifting traffic toward the better-performing arm as evidence accumulates — unlike A/B testing's fixed split.
 
 **Q: What is a contextual bandit and what problem does it address?**

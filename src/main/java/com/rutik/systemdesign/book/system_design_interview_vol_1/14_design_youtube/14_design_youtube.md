@@ -841,6 +841,8 @@ A pre-signed URL is a short-lived, scoped URL the API server mints so a client c
 Because a GOP (Group of Pictures) is a chunk of frames that is independently playable and decodable, usually a few seconds long. Splitting on GOP boundaries lets each chunk be transcoded and uploaded in parallel by different workers, and lets a failed upload or transcode resume from the last good chunk instead of restarting the whole 1 GB file. Cutting at arbitrary byte offsets would produce chunks that can't be decoded on their own.
 
 **Q: How do the two parallel processes in the upload flow work?**
+**Short:** One uploads the video bytes through original storage, transcoding, and the CDN while the other writes the metadata, so the user can fill in the form while a 1 GB file transfers.
+
 One process uploads the actual video bytes (original storage, then transcoding servers, then transcoded storage and CDN), while the other updates the video metadata (title, size, format) in the DB and cache at the same time. They run in parallel so the user can fill in the metadata form while the potentially 1 GB file is still transferring, and neither flow blocks the other. They meet only at the shared metadata store.
 
 **Q: What is the difference between streaming and downloading a video, and why does it matter?**
@@ -856,6 +858,8 @@ Message queues decouple the pipeline stages so a downstream stage no longer wait
 The preprocessor splits the video into GOP-aligned chunks, generates the DAG from client configuration files, caches segmented data in temporary storage, and handles splitting for old clients that can't split themselves. Caching the GOP chunks and metadata gives reliability: if encoding fails, the system retries from the persisted data instead of from the raw file. It sits at the front of the transcoding architecture, feeding the DAG scheduler.
 
 **Q: How does the system protect uploaded videos from piracy?**
+**Short:** Three combined layers: DRM (FairPlay, Widevine, PlayReady), AES encryption with an authorization policy, and a visual watermark burned onto the video.
+
 Through three layers: DRM systems (Apple FairPlay, Google Widevine, Microsoft PlayReady), AES encryption with an authorization policy so the video is decrypted only on authorized playback, and visual watermarking that burns an identifying overlay onto the video. These are combined rather than chosen exclusively, so content is protected both cryptographically and visibly. Encryption plus DRM controls who can watch; the watermark deters redistribution.
 
 **Q: How is temporary storage organized during transcoding?**
@@ -865,6 +869,8 @@ Temporary storage uses different systems by data type, size, access frequency, a
 API servers are stateless, so a failed one is simply bypassed and the request is routed to another server; the tier scales horizontally the same way. A metadata DB master failure is handled by promoting a slave to become the new master, since the DB is stateful and its data must be preserved. The general rule is that stateless services reroute while stateful services replicate and fail over.
 
 **Q: How does the system decide when to retry versus abort on error?**
+**Short:** Errors are classified: a recoverable one like a failed transcode segment is retried a few times, while a non-recoverable one like a malformed video stops its tasks immediately.
+
 It classifies errors as recoverable or non-recoverable: a recoverable error, like a segment failing to transcode, is retried a few times and only returns an error code if it still fails, while a non-recoverable error, like a malformed video, stops the associated tasks immediately and returns an error code. This avoids wasting compute retrying something that can never succeed while still absorbing transient failures. Retries are cheap because the preprocessor cached the chunks.
 
 **Q: What are the streaming protocols mentioned, and how do you choose one?**

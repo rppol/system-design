@@ -974,6 +974,8 @@ Because DNS resolution is synchronous and a single lookup takes 10 to 200 ms, so
 Front queues handle priority and back queues handle politeness, and they compose. The prioritizer scores each URL by signals like PageRank, traffic, and update frequency and places it in a front queue by priority level; the front-queue selector pulls from higher-priority queues more often. The selected URL is then routed by host into a back queue, where one worker per queue drains it with a delay — so important pages get crawled sooner without ever fetching a single host too aggressively.
 
 **Q: What is a spider trap and how do you defend against it?**
+**Short:** A spider trap is a page set that loops the crawler forever, like an infinitely deep generated directory; the defenses are a maximum URL length and a manual blacklist of trap hosts.
+
 A spider trap is a page or set of pages that causes the crawler to loop infinitely, such as an infinitely deep, dynamically generated directory structure like /foo/bar/foo/bar/… The defenses are setting a maximum URL length so absurdly long generated URLs are rejected, and maintaining a manual blacklist of hosts known to be traps. There is no perfect automatic detector because traps can be algorithmically generated, so a human-curated blacklist is the practical backstop.
 
 **Q: How does the crawler handle freshness, given pages change constantly?**
@@ -995,6 +997,8 @@ Because links inside a page are frequently written relative to the current page 
 It excludes URLs the crawler should not fetch: blacklisted sites and content types, links that lead to error pages, and URLs with unwanted file extensions. For a scope of HTML only, that means filtering out extensions like .jpg, .png, .mp4, and .pdf, plus any blacklisted or error-prone links. Filtering here keeps junk out of the Frontier before the URL Seen? check.
 
 **Q: How does the crawler stay robust against crashes and bad servers?**
+**Short:** Consistent hashing spreads hosts across downloaders, periodic checkpoints let a crawl resume rather than restart, exceptions are handled gracefully, and data is validated before storage.
+
 It uses consistent hashing to distribute hosts across downloader servers so servers can be added or removed with minimal remapping, and it checkpoints crawl state periodically so it resumes from the last checkpoint rather than restarting from seeds after a crash. It also handles exceptions gracefully so a malformed page or timeout does not crash the system, and validates data to keep bad content out of storage. Together these let a weeks-long crawl survive the inevitable failures.
 
 **Q: Why store most content on disk but keep some in memory?**
@@ -1013,9 +1017,13 @@ Statelessness of the crawl servers, so more servers can be added freely to incre
 Scalability, robustness, politeness, and extensibility. Scalability means crawling billions of pages efficiently in parallel; robustness means handling bad HTML, unresponsive servers, and crashes without stopping; politeness means not overwhelming any single host; and extensibility means absorbing new content types by plugging in modules rather than rewriting the core. Every Step-3 deep dive maps back to one of these four.
 
 **Q: What performance optimizations does the HTML Downloader use?**
+**Short:** Distributed crawling over a partitioned URL space, a cached DNS resolver, geographic locality of crawl servers, and short timeouts so one slow host cannot stall a worker.
+
 Distributed crawling across many servers with a partitioned URL space, a cached DNS resolver to remove synchronous lookups from the hot path, geographic locality to place crawl servers near the sites they crawl, and short timeouts so one slow or unresponsive host cannot stall a worker. Together these push the crawl to its 800-pages-per-second peak target while keeping latency bounded.
 
 **Q: How does extensibility manifest concretely in the design?**
+**Short:** Through plug-in modules that attach at the seams between components — a PNG Downloader, a Web Monitor — without changing the core downloader-parser-extractor-filter loop.
+
 Through plug-in modules that attach at the seams between components without changing the core loop, such as a PNG Downloader module to handle image content or a Web Monitor module to detect copyright and trademark infringement. Because the crawler is built from separated components — downloader, parser, extractor, filter — each seam is a natural place to add a new module. This is why the design keeps parsing separate from downloading rather than fusing them.
 
 **Q: What is data noise and how is it handled?**

@@ -147,18 +147,53 @@ understanding_distributed_systems/04_resiliency
   04_resiliency.md  -
 understanding_distributed_systems/05_maintainability
   05_maintainability.md  -
+ddia_2e/01_tradeoffs_in_data_systems_architecture
+  01_tradeoffs_in_data_systems_architecture.md  -
+ddia_2e/02_defining_nonfunctional_requirements
+  02_defining_nonfunctional_requirements.md  -
+ddia_2e/03_data_models_and_query_languages
+  03_data_models_and_query_languages.md  -
+ddia_2e/04_storage_and_retrieval
+  04_storage_and_retrieval.md  -
+ddia_2e/05_encoding_and_evolution
+  05_encoding_and_evolution.md  -
+ddia_2e/06_replication
+  06_replication.md  -
+ddia_2e/07_sharding
+  07_sharding.md  -
+ddia_2e/08_transactions
+  08_transactions.md  -
+ddia_2e/09_trouble_with_distributed_systems
+  09_trouble_with_distributed_systems.md  -
+ddia_2e/10_consistency_and_consensus
+  10_consistency_and_consensus.md  -
+ddia_2e/11_batch_processing
+  11_batch_processing.md  -
+ddia_2e/12_stream_processing
+  12_stream_processing.md  -
+ddia_2e/13_philosophy_of_streaming_systems
+  13_philosophy_of_streaming_systems.md  -
+ddia_2e/14_doing_the_right_thing
+  14_doing_the_right_thing.md  -
 -->
 > In-depth, chapter-by-chapter summaries of foundational engineering books — written so
 > that reading the summary is as close as possible to reading the book itself, then mapped
 > back into the deep-dive modules elsewhere in this repository.
 
-> **PARKED — to be done later (owner-set 2026-07-28).** This section is out of scope for the
-> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
-> re-opens it. **Parked, not cancelled**: all 6 books are complete, pushed, and still ship in
-> the game. Paused: **1,402 Q&As awaiting one-line MCQ summaries**. The audit exclusion is
-> permanent rather than temporary — a book summary is faithful to its source, so "is this
-> claim current today" is the wrong test for it. Scope table: root `CLAUDE.md` ->
-> "Deferred / To Be Planned".
+> **PERMANENTLY EXCLUDED from the repo-wide factual-currency audit — not parked, and the
+> exclusion does not expire (owner-set 2026-07-28, reaffirmed 2026-08-04).** `devops/`,
+> `cs_fundamentals/` and `cuda/` were parked and later unparked; this section was not parked.
+> A book summary is answerable only to its source, so "is this claim current today" is the
+> wrong test for it: "correcting" a 2017 DDIA claim to 2026 reality makes the summary *wrong
+> about the book*, and REPLACE-DO-NOT-ANNOTATE inverts into fabrication attributed to a named
+> author. The test that *does* apply here is **fidelity** — does the book actually say this,
+> is the chapter attribution right, is the summarizer's own material disclosed as such. See
+> [CLAUDE.md](CLAUDE.md) and the `## Beyond the book` rule it mandates.
+>
+> The `**Short:**` MCQ-summary migration is a **separate, fidelity-neutral** question and was
+> answered separately: a targeted pass over the ~310 Q&As whose derived option ships broken
+> was run on 2026-08-25. The remaining ~1,090 derive a perfectly good option and are
+> deliberately left unmigrated — a blanket 1,402-line migration is not justified here.
 
 ---
 
@@ -189,7 +224,8 @@ former.
 
 | Book | Author | Folder | Chapters | Status |
 |------|--------|--------|----------|--------|
-| Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/designing_data_intensive_applications.md) | 12 (+ preface) | Complete |
+| Designing Data-Intensive Applications **(1st ed., 2017)** | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/designing_data_intensive_applications.md) | 12 (+ preface) | Complete |
+| Designing Data-Intensive Applications **(2nd ed., 2026)** | Martin Kleppmann & Chris Riccomini | [ddia_2e/](ddia_2e/ddia_2e.md) | 14 | Complete |
 | System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/system_design_interview_vol_1.md) | 16 | Complete |
 | System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/system_design_interview_vol_2.md) | 13 | Complete |
 | Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/machine_learning_system_design_interview.md) | 11 | Complete |
@@ -197,12 +233,22 @@ former.
 | Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/understanding_distributed_systems.md) | 33 (as 5 parts) | Complete |
 
 The two *System Design Interview* volumes are one series split across two folders (each
-volume numbers its chapters independently); with DDIA, MLSDI, DMLS, and UDS the section
-covers five books across six folders. More may be added over time (e.g. *Database
+volume numbers its chapters independently); with both DDIA editions, MLSDI, DMLS, and UDS the section
+covers **seven books across seven folders**. More may be added over time (e.g. *Database
 Internals*, *Streaming Systems*). New books follow the folder-per-chapter convention —
 with one sanctioned exception: **UDS uses folder-per-PART** (its ~33 chapters are 3–8
 pages each; a part is the multi-concept narrative the chapter template was designed for) —
 see [CLAUDE.md](CLAUDE.md).
+
+**Every book folder states which edition it summarizes, and that is not optional.** A
+summary that does not identify its source edition is unfalsifiable. It became load-bearing
+for DDIA in March 2026, when the **2nd edition** (Kleppmann & Riccomini) shipped with a
+different chapter structure — 14 chapters against 1e's 12 — so a 2026 reader following a
+`## 7.3` heading against a 2e copy lands in the wrong chapter. **This folder summarizes the
+1st edition (O'Reilly, 2017)** and every one of its 14 files now says so in its byline. The
+1e claims are deliberately left as 1e claims; covering 2e is a separate decision (a
+chapter-mapped 1e→2e delta page, or a sibling `..._2e/` folder) and is not this folder's
+job. UDS likewise states "(2nd ed.)" throughout.
 
 **In the learning game**, the book section gets an extra navigation level: the Study view
 shows **one node per book** (`#/study/book`), and clicking a book opens that book's own
@@ -214,7 +260,11 @@ per-book headers. Adding a book = a `BOOK_LABELS` entry + `STUDY_ORDER.book` ent
 
 ## How to Read a Book Folder
 
-Open the book's `README.md` first: it carries the book's thesis, a part map, a chapter
+Open the book's own index page first — `<book_slug>/<book_slug>.md`, e.g.
+[designing_data_intensive_applications/designing_data_intensive_applications.md](designing_data_intensive_applications/designing_data_intensive_applications.md).
+**There is no `README.md` in any book folder**; the 2026-07-30 rename made every content
+page named for the folder that contains it, and `book/README.md` is the only README in the
+section. The index carries the book's thesis, a part map, a chapter
 table, and a recommended reading path. Then read chapters in order — each one opens with a
 **Chapter Map** (where it sits, what it builds on) and a **Big Question** (the problem it
 exists to answer), so you always know why you're reading it.
@@ -224,7 +274,8 @@ exists to answer), so you always know why you're reading it.
 ## Interview-Priority Reading Order
 
 `book/` IS wired into the learning game: every chapter folder is a Study topic, ordered by
-the `STUDY_ORDER.book` array in `game/app.js` (DDIA → SDI Vol 1 → SDI Vol 2 → DMLS). The
+the `STUDY_ORDER.book` array in `game/app.js` — all seven books, in the order
+**DDIA 1e → DDIA 2e → SDI Vol 1 → SDI Vol 2 → DMLS → MLSDI → UDS**. The
 section is **Full-only** — it has no `STUDY_PATHS` interview subset, because a
 chapter-by-chapter book summary has no meaningful "interview cut"; instead, use these
 prose priorities:
@@ -254,7 +305,7 @@ prose priorities:
 | Storage engines (B-tree / LSM) | [database/storage_engines_internals/](../database/storage_engines_internals/storage_engines_internals.md) |
 | Consensus, linearizability | [database/consistency_models_and_consensus/](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |
 | Distributed-system theory (CAP, etc.) | [hld/](../hld/README.md) |
-| Streaming / messaging / Kafka | [backend/](../backend/CLAUDE.md), [devops/](../devops/README.md) |
+| Streaming / messaging / Kafka | [backend/](../backend/README.md), [devops/](../devops/README.md) |
 
 ---
 
@@ -262,4 +313,4 @@ prose priorities:
 
 - [Database Engineering](../database/README.md) — production-depth on storage, replication, sharding, transactions
 - [High-Level Design](../hld/README.md) — distributed-systems concepts and the interview framework
-- [Backend Engineering](../backend/CLAUDE.md) — networking, messaging, microservices, resilience
+- [Backend Engineering](../backend/README.md) — networking, messaging, microservices, resilience

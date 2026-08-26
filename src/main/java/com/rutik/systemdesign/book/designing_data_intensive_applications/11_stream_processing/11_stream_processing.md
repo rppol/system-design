@@ -1,6 +1,6 @@
 # Chapter 11: Stream Processing
 
-> Part III — Derived Data · DDIA (Kleppmann) · builds on Ch 10, leads to Ch 12
+> Part III — Derived Data · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · builds on Ch 10, leads to Ch 12
 
 ## Chapter Map
 
@@ -48,12 +48,56 @@ for new events is inefficient, so streaming uses **push**-based delivery via mes
 A **publish/subscribe** messaging system delivers events from producers to consumers. Two design
 questions define its behavior: *what if producers outpace consumers?* (drop messages, buffer in a
 queue, or apply backpressure/flow control), and *what if a node crashes?* (durability via disk/
-replication, or accept message loss for speed). **Traditional message brokers** (RabbitMQ/AMQP, JMS)
-are the classic answer: a broker holds a queue; consumers acknowledge messages; **once acknowledged,
-the broker deletes the message**. Two delivery patterns: **load balancing** (each message to one of
-several consumers, to parallelize work) and **fan-out** (each message to all consumers). Their
-weakness for stream processing: messages are transient (gone after delivery), so a new consumer can't
-replay history, and complex per-message acknowledgment with redelivery can reorder messages.
+replication, or accept message loss for speed).
+
+### Direct messaging
+
+Before reaching for a broker at all, the simplest option is **direct messaging** between producers
+and consumers with no intermediary: producers push events straight to consumers over a protocol
+like UDP multicast, or a brokerless library (e.g. ZeroMQ), or a direct HTTP/RPC call from producer
+to consumer. This avoids the cost and operational overhead of a separate broker process, but it
+gives up almost everything a broker provides: if the consumer is unreachable or overloaded, there is
+nowhere for the event to wait — it is simply lost, unless the producer itself implements retry logic;
+the producer must know the network location of every consumer, coupling the two together the way a
+direct RPC call couples a client to a server; and fault tolerance is limited, since there is no
+central, durable store of in-flight events that a recovering consumer can catch up from. Direct
+messaging is workable when occasional loss is acceptable and the topology is simple, but it is not
+what most systems mean by "stream processing," which is why the chapter moves quickly to brokers.
+
+**Traditional message brokers** (RabbitMQ/AMQP, JMS) are the classic broker-based answer: a broker
+holds a queue; consumers acknowledge messages; **once acknowledged, the broker deletes the message**.
+Two delivery patterns: **load balancing** (each message to one of several consumers, to parallelize
+work) and **fan-out** (each message to all consumers). Their weakness for stream processing: messages
+are transient (gone after delivery), so a new consumer can't replay history, and complex per-message
+acknowledgment with redelivery can reorder messages.
+
+### Acknowledgments and redelivery
+
+A traditional broker's per-message acknowledgment protocol is more delicate than it first looks. A
+consumer signals "done" for each message individually; if it crashes or disconnects *before*
+acknowledging a message it has already started (or even finished) processing, the broker assumes the
+message was never delivered and **redelivers** it — to the same consumer on reconnect, or, under load
+balancing, to a *different* consumer in the pool. That redelivery is exactly where ordering breaks:
+suppose a consumer is midway through messages 1, 2, and 3 when it crashes after processing 1 and 2 but
+before acknowledging either. The broker redelivers 1 and 2 to another consumer, which may now process
+them *after* message 3 (already delivered to, and acknowledged by, a different consumer in the pool),
+scrambling an order that held when everything went to a single consumer. This is a direct consequence
+of combining load balancing with per-message redelivery, and it is one more reason the chapter treats
+per-key ordering as something a traditional broker cannot really promise once more than one consumer
+is involved.
+
+### Disk space usage
+
+The two broker families also diverge sharply in how their storage cost behaves over time. A
+traditional broker's queue **shrinks as messages are consumed and acknowledged** — its disk usage
+tracks the *backlog* (unconsumed messages), so a healthy, keeping-up consumer keeps the queue small
+regardless of how long the system has been running. A log-based broker instead **retains everything
+until an explicit retention policy removes it** (a time window, a size cap, or log compaction keeping
+only the latest value per key) — its disk usage tracks the *product of retention window and
+throughput*, independent of whether any consumer is behind. This means a log-based broker's storage
+bill is a capacity-planning decision you make up front (how much history do I need to be able to
+replay?), whereas a traditional broker's storage is mostly a symptom of consumer health — a growing
+queue size is itself the signal that something downstream has stalled.
 
 ### Partitioned logs (the log-based broker)
 
@@ -206,6 +250,27 @@ database and the index permanently inconsistent; CDC removes the second write en
 downstream store instead follows the database's own ordered change log, so there is only ever one
 write to race with.
 
+### Initial snapshots
+
+A CDC stream alone is not enough to bring a brand-new downstream consumer — a fresh search index, a
+newly added replica, a cache being populated for the first time — up to date, because the change log
+typically doesn't retain *every* write back to the beginning of time. You also need a **consistent
+snapshot** of the existing data, taken at some definite point, before switching over to consuming the
+ongoing change stream from that exact point onward. This mirrors Ch 5's discussion of bootstrapping a
+new follower: take a snapshot associated with a precise position in the log (an offset, an LSN, a
+binlog coordinate), load the snapshot, then apply every change event *after* that position — skip
+either half and you either miss the historical data or double-apply/miss changes that happened during
+the copy.
+
+### API support for change streams
+
+Some databases and platforms expose CDC as a **first-class API** — a changefeed you subscribe to
+directly — rather than leaving you to parse a general-purpose replication log format never designed
+to be a public interface, or to periodically diff snapshots yourself (which is slow and can miss
+transient states). A dedicated changefeed API is more robust because it is a stable, supported
+contract, whereas parsing an internal replication log ties your CDC pipeline to implementation
+details that can change between database versions without warning.
+
 ### Event sourcing
 
 A related idea from a different community: instead of storing *current state* and overwriting it,
@@ -216,6 +281,23 @@ history; you can reconstruct *any* past state; you can build *new* derived views
 later you want a new index/report and replay history to build it); and it captures user *intent*
 ("added to cart" carries more meaning than the resulting count). Events are immutable — you never
 update or delete them, you append new events.
+
+**Commands vs. events.** Event sourcing draws a sharp line between the two. A **command** is a
+request from a user or another part of the system that has not yet been validated and might still be
+rejected — "remove this item from the cart" is a command until the system confirms the item is
+actually in the cart. Only once a command passes validation does it become an **event**: an immutable
+statement of fact that something *did* happen and cannot be un-happened — "item removed from cart."
+This distinction matters because the event log is only ever built from events, never from commands
+that might have failed; anything appended to the log is, by construction, something that is true.
+
+**Concurrency control.** Turning a command into an event still has to contend with concurrent
+commands touching the same entity — two commands trying to remove the last item from the same cart,
+say. Because the event log is what supplies the single agreed order for a given entity ("aggregate"),
+event-sourced systems typically need some form of per-aggregate serialization or conflict detection
+at the point a command is validated and turned into an event, so that only one of two conflicting
+commands is accepted as an event and the other is rejected (or produces a compensating event) —
+otherwise the same problem Ch 7's write skew and Ch 9's uniqueness constraints describe would simply
+resurface inside the event-generation step.
 
 ### State, streams, and immutability
 
@@ -243,6 +325,17 @@ caches), trigger actions (alerts, emails), or do analytics.
   often with approximation algorithms (HyperLogLog, Bloom filters) for efficiency.
 - **Materialized views / search indexes:** keep a derived dataset continuously current (CDC →
   search index is the canonical example).
+
+These three uses share a shape even though they sound different: each takes an unbounded stream and
+continuously maintains something derived from it — a match state for CEP, a rolling aggregate for
+analytics, a queryable index or table for a materialized view — rather than computing a one-off
+answer and discarding the intermediate work. Stream analytics in particular leans on approximation
+because exact answers over an unbounded, high-throughput input can be prohibitively expensive to
+maintain precisely: a HyperLogLog sketch estimates a distinct-count (e.g. unique visitors) in a fixed
+small memory footprint instead of storing every value ever seen, and a Bloom filter answers
+approximate set-membership queries ("have we seen this ID before?") without keeping the full set —
+both trade a small, bounded error rate for state that stays flat as the stream grows, which an exact
+count or exact set cannot do.
 
 ### Reasoning about time
 
@@ -365,9 +458,34 @@ Three kinds, increasingly tricky because *both* sides are moving:
 - **Table-table join (materialized view maintenance):** both inputs are change streams of tables;
   the output is a change stream of a join/materialized view kept continuously up to date.
 
+**Stream-table joins in more depth.** The reason this is called *enrichment* rather than simply
+"join" is the asymmetry between the two sides: the stream side is the thing actually being processed
+event by event, while the table side supplies context. Naively, enriching each event with a database
+lookup means one network round trip to the database per event — at the throughputs this chapter's
+capacity numbers assume (tens of thousands of events per second), that is not viable. So the stream
+processor instead subscribes to the table's own **change stream** (its CDC feed, from the previous
+section) and maintains a continuously-updated **local replica** of the table in memory or on local
+disk, exactly the way a database follower maintains a replica of a leader. Every incoming stream
+event is then enriched against this local copy with no network call in the hot path — the cost of a
+database lookup has been converted into the cost of keeping a local index current, which the
+processor pays once per table update rather than once per stream event.
+
+**Table-table joins, worked through.** The chapter's own example is a social network timeline cache:
+one change stream carries "user X follows user Y" events, another carries "user Y posted Z" events,
+and the join's output is a third stream — "add Z to X's timeline" — that itself continuously
+maintains a materialized view (each user's home timeline). Unlike a stream-table join, *neither* side
+is a static reference table here; both the follow graph and the post stream are themselves live
+streams of database writes, so the processor must maintain local state for both sides and re-emit an
+updated join result whenever either side changes — a follow event can trigger re-scanning a user's
+recent posts, and a post event can trigger fanning out to all of that user's current followers.
+
 A subtlety: joins are **time-dependent** — if the table being joined against changes, replaying the
 same stream later can produce a different result (which profile version was current *at that event's
-time*?). Deterministic reprocessing requires being explicit about which version of the table to join.
+time*?). Deterministic reprocessing requires being explicit about which version of the table to join
+against — not simply "whatever the table looks like right now" — which is precisely why reprocessing
+a stream job for a bug fix is harder than reprocessing a batch job: a batch job's bounded input is a
+frozen dataset, while a stream job's reference tables keep moving underneath it even during the
+reprocessing run unless you deliberately pin them to a point in time.
 
 ### Fault tolerance — exactly-once
 
@@ -390,6 +508,17 @@ Techniques:
 
 The throughline: reprocessing after a crash is only safe if the input is **replayable** (log-based
 broker) and the output is **idempotent or transactional**.
+
+**Rebuilding state after a failure.** The same replayability that makes exactly-once output possible
+also solves a second problem: recovering the processor's own *internal* state, not just its output.
+A stream-table join's local table replica, a windowed aggregate's running counts, a stream-stream
+join's buffered recent events — all of this is state a processor accumulates in memory (or local
+disk) as it consumes the stream, and a crash can wipe it out. Rebuilding it means replaying the
+relevant portion of the input log from the last checkpointed offset and re-deriving the state exactly
+as it was before the crash, the same replay mechanism from "transmitting event streams" applied
+inward to the processor's own bookkeeping rather than outward to its output. This is why the log's
+retention window matters even for processors that don't need to reprocess history for business
+reasons: it has to be long enough to rebuild state after the longest outage you plan to tolerate.
 
 **Recovering From a Crash: Replayability + Idempotence = Exactly-Once**
 
@@ -533,6 +662,15 @@ derived view.
 - **Stream-stream / stream-table / table-table join** — the three streaming join types.
 - **Exactly-once (effectively-once) semantics** — output as if each event processed once.
 - **Microbatching / checkpointing / idempotence / atomic commit** — fault-tolerance techniques.
+- **Direct messaging** — producer pushes straight to consumer (UDP multicast, ZeroMQ, direct RPC);
+  no broker, so no buffering and limited fault tolerance.
+- **Acknowledgment / redelivery** — per-message "done" signal; a crash before acking triggers
+  redelivery, which can scramble order under load balancing.
+- **Initial snapshot** — a consistent, log-position-tied copy of existing data, needed alongside a
+  CDC stream to bootstrap a brand-new consumer.
+- **Command vs. event** — a not-yet-validated request vs. an immutable, already-true fact.
+- **Aggregate** — the entity a stream of commands/events is serialized against for concurrency
+  control in event sourcing.
 
 ---
 
@@ -592,6 +730,14 @@ derived view.
 - **Forgetting that immutable logs make deletion hard.** Event sourcing / retained logs never forget
   by design, which collides with GDPR "right to be forgotten" — plan for crypto-shredding or compaction
   strategies if you must truly delete.
+- **Combining load balancing with per-message redelivery on a traditional broker.** A consumer that
+  crashes mid-batch causes its unacknowledged messages to be redelivered to a *different* consumer in
+  the pool, which can process them out of the order a single-consumer setup preserved. If ordering
+  matters, don't mix load balancing across consumers with the assumption that redelivery is order-safe.
+- **Skipping the initial snapshot when bootstrapping a new CDC consumer.** A change stream alone
+  usually doesn't go back to the beginning of time, so a new consumer built only from the ongoing CDC
+  stream silently starts from an incomplete view of the data. Always pair a definite-log-position
+  snapshot with the change stream picking up from that same position.
 
 ---
 
@@ -634,24 +780,30 @@ A traditional broker (JMS/AMQP) holds messages in a queue and *deletes* each one
 An offset is a monotonically increasing position number identifying a consumer's place within a partition's log. It's a better acknowledgment than per-message acks because a consumer only needs to periodically record a single number ("I've processed up to offset N") rather than track and acknowledge each message individually, which is far cheaper and enables sequential, high-throughput reads. The offset also doubles as a replay pointer: to reprocess, you simply reset it backward, something per-message acknowledgment can't support.
 
 **Q: What is change data capture, and what problem does it solve?**
+**Short:** CDC turns a database's own change log into an event stream so every other store follows it.
 Change data capture (CDC) taps a database's own change log (its logical replication log) and turns every committed write into an ordered event stream that downstream systems — search indexes, caches, data warehouses — consume to stay in sync. It solves the dual-write problem: if application code writes to the database *and* separately to the search index, races and partial failures leave them permanently inconsistent. With CDC there's a single source of truth (the database of record) and every other store is a derived, eventually-consistent follower of its change stream, so no dual writes are needed.
 
 **Q: What is event sourcing, and how does it differ from storing current state?**
+**Short:** Event sourcing stores immutable state-change events as the source of truth, not current state.
 Event sourcing stores the full, immutable, append-only sequence of state-*changing* events as the source of truth — "item added to cart," "item removed," "order placed" — rather than storing and overwriting the current state. Current state is then a derived view obtained by replaying the events. It differs from the conventional approach in that you never update or delete records; you only append new events. This yields a complete audit trail and history, the ability to reconstruct any past state, the freedom to build new derived views retroactively by replaying, and a record of user *intent* rather than just outcomes.
 
 **Q: Explain the principle "state is a materialized view of an immutable event log."**
+**Short:** Current state is just what you get by replaying an append-only log of change events.
 It means the authoritative truth is an append-only log of change events, and any "current state" is just what you get by folding (replaying) those events up to now — exactly like accounting, where the immutable list of transactions is the truth and an account balance is merely a derived summary. Because the log is immutable and retained, you can derive *multiple different* read-optimized views from the same log (a relational table, a search index, a cache), each rebuildable from scratch. This cleanly separates writes (append to the log) from reads (any number of derived views), the foundation for "unbundling the database" in Chapter 12.
 
 **Q: What is the difference between event time and processing time, and why does it matter?**
 Event time is when an event actually occurred (stamped by the producer); processing time is when the stream processor handles it. They diverge because of network delays, broker backlogs, and especially consumer restarts that suddenly process a burst of buffered events. It matters because windowed aggregations (counts, rates over the last 5 minutes) computed by *processing* time are simply wrong whenever there's lag — a backlog drains thousands of old events into the "current" window. Correct results require bucketing by event time, which then forces you to handle late-arriving events.
 
 **Q: What is a watermark, and what problem does it address?**
+**Short:** A watermark asserts all events before time T have arrived, letting a window be closed.
 A watermark is a marker in the stream asserting "all events with an event-time earlier than T have now arrived," which lets the processor decide when it's reasonable to consider an event-time window complete and emit its result. It addresses the fundamental "when is a window done?" problem: because events can arrive late (a phone that was offline), you can never be certain you've seen them all, so a watermark provides a principled, if approximate, cutoff. Events arriving after the watermark are stragglers, handled by either dropping them (and counting drops) or emitting a correction to the already-published result.
 
 **Q: Describe the three types of stream joins.**
+**Short:** Stream-stream joins within a window, stream-table enriches events, table-table maintains a joined view.
 A stream-stream (window) join correlates two event streams over a time window — e.g. matching a search-results event with a click event for the same query within N minutes — by keeping recent events from both streams in state and expiring them as the window passes. A stream-table join enriches each event with reference data (e.g. attaching a user profile to an activity event) by keeping a local copy of the table updated via the table's CDC change stream, avoiding a database lookup per event. A table-table join takes two change streams and continuously maintains the change stream of their joined materialized view.
 
 **Q: Why are stream joins time-dependent, and what's the implication for reprocessing?**
+**Short:** Reference data keeps changing, so replaying a join later can give a different result.
 They're time-dependent because the data being joined against can change over time: when you enrich an event with "the user's profile," the correct answer depends on which version of the profile was current *at the event's time*. The implication is that replaying the same stream later can produce different results if the reference table has since changed, breaking deterministic reprocessing. To make reprocessing reproducible, you must join against the version of the reference data that was valid at each event's timestamp (e.g. by versioning the table changes alongside the stream), rather than always using the latest.
 
 **Q: What does exactly-once (effectively-once) semantics mean, and why is it hard in streaming?**
@@ -661,9 +813,11 @@ It means that even though a processor may crash and reprocess some events, the *
 Microbatching (Spark Streaming) splits the stream into small batches and applies batch-style retry to each, trading some latency for simplicity. Checkpointing (Flink) periodically snapshots operator state and input offsets durably, so after a crash it restarts from the last checkpoint and replays the log from the saved offset. Idempotence makes reprocessing harmless by keying writes so duplicates overwrite rather than accumulate (or by deduplicating on event ID). Atomic commit (Kafka transactions, Flink) commits the output and the consumed offset together, so a failure can't leave output emitted without the offset advanced or vice versa.
 
 **Q: Why does fault-tolerant stream processing require a replayable log?**
+**Short:** Recovering from a crash means re-reading events that weren't durably accounted for yet.
 Because recovering from a crash means resuming processing from a known-good point and re-reading the events that hadn't been durably accounted for — which is only possible if those events are still available to read again. A traditional broker that deletes messages on acknowledgment can't provide this: once consumed, the message is gone, so a crashed processor can't replay it. A log-based broker retains events and lets the processor reset its offset backward to a checkpoint, replaying from there, which is what makes checkpoint-based exactly-once recovery feasible.
 
 **Q: What is complex event processing (CEP), and how is it "inverted" compared to a normal database?**
+**Short:** In CEP the query is long-lived and the data flows past it, the reverse of a normal database.
 CEP searches a stream for specific *patterns* of events — such as three failed logins followed by a success, or a temperature reading above a threshold sustained for five minutes — and emits a match when the pattern occurs. It's inverted relative to a normal database because in a database the data sits still and you run transient queries against it, whereas in CEP the *query* (the pattern) is long-lived and persistent while the *data* flows past it continuously. The processor maintains the query's matching state as events stream through, firing whenever the pattern completes.
 
 **Q: What are the main window types in stream processing?**
@@ -676,7 +830,20 @@ Log compaction is a Kafka retention policy that, instead of deleting old message
 Because a write to a database *is* an event, and a database's replication log *is* a stream of those events — so the two are dual representations of the same information. You can go from database to stream via change data capture (emit each write as an event) and from stream to database by materializing the stream into a table (apply each event to build current state). Recognizing this unifies the worlds: the immutable event log is the primary truth, and tables, indexes, and caches are all derived, rebuildable materialized views of it — the conceptual bridge to unbundling the database in Chapter 12.
 
 **Q: Why are dual writes from application code dangerous, and what's the correct alternative?**
+**Short:** Dual writes aren't atomic and can race or partially fail; CDC from one source of truth fixes it.
 Dual writes — having the application write the same change to two systems, like the database and the search index — are dangerous because the two writes aren't atomic: they can race (concurrent updates applied in different orders to each store) or partially fail (one succeeds, the other doesn't), leaving the systems permanently inconsistent with no easy way to detect or repair the drift. The correct alternative is to write only to a single source-of-truth database and propagate changes to all other stores via that database's ordered change log (CDC), so every derived store applies the same changes in the same order and converges.
+
+**Q: What are the tradeoffs of direct messaging, and when might you still use it over a broker?**
+**Short:** Direct messaging skips a broker's cost but loses buffering, decoupling, and fault tolerance.
+Direct messaging — UDP multicast, brokerless libraries like ZeroMQ, or a producer calling a consumer's API directly — avoids the operational cost of running a separate broker, but gives up nearly everything a broker provides: if the consumer is down or slow there is nowhere for the event to wait, so it is lost unless the producer itself retries; the producer must know each consumer's network location, tightly coupling them; and there's no durable central store a recovering consumer can catch up from. It remains workable for simple topologies where occasional loss is tolerable and low latency matters more than durability, but it is not what the chapter means by robust stream processing, which is why brokers dominate the rest of the discussion.
+
+**Q: What is the difference in disk-space behavior between a traditional broker's queue and a log-based broker's log?**
+**Short:** A traditional queue shrinks as consumers keep up; a retained log's size tracks retention times throughput.
+A traditional broker's queue shrinks as messages are consumed and acknowledged, so its disk usage tracks the current *backlog* — a healthy, caught-up consumer keeps it small no matter how long the system has run, and a growing queue is itself a signal that a consumer has stalled. A log-based broker instead retains messages until an explicit retention policy (a time window, a size cap, or log compaction) removes them, so its disk usage tracks *retention window times throughput*, independent of whether any consumer is behind. That makes log-based storage a capacity-planning decision made up front, rather than a symptom you read off consumer health.
+
+**Q: What role do initial snapshots play alongside change data capture, and why isn't the CDC stream enough on its own?**
+**Short:** A CDC stream alone can't backfill history, so a new consumer also needs a consistent point-in-time snapshot.
+A CDC stream typically doesn't retain every write back to the beginning of time, so a brand-new downstream consumer — a fresh search index, a newly added replica — cannot be built from the change stream alone. It also needs a consistent snapshot of the existing data taken at some definite log position, loaded first, with the ongoing change stream then applied from exactly that position onward. This mirrors bootstrapping a new database replica: skip either half and you either miss the historical data the snapshot would have provided, or double-apply and miss changes that happened during the copy.
 
 ---
 

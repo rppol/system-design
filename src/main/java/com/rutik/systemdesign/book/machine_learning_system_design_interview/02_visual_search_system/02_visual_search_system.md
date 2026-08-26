@@ -1071,6 +1071,7 @@ is picking the operating point that meets the latency SLA.
 Because the goal is open-ended similarity retrieval, not assigning one of a fixed label set. Representation learning trains an encoder to map each image to an embedding so that visually similar images are close in vector space, turning "find similar images" into "find nearest neighbors" — which scales to an unbounded, ever-growing catalog where new images appear constantly. A classifier would need predefined classes and couldn't rank arbitrary image-to-image similarity.
 
 **Q: Where do the positive pairs for contrastive training come from, and what are the tradeoffs?**
+**Short:** Positives come from human labeling, treating clicks as labels, or self-supervised image augmentation.
 There are three sources: human labeling (annotators mark similar images — most accurate but expensive and unscalable), interactions as labels (treat clicked/saved results as positives — free and abundant but noisy from position and click bias), and self-supervised augmentation (augment an image and treat the augmented view as its positive — zero labeling cost, guaranteed-similar pair, the SimCLR/MoCo approach the book starts with). Systems typically bootstrap self-supervised, then fine-tune with interaction and human labels.
 
 **Q: How does self-supervised augmentation manufacture a positive without any labels?**
@@ -1080,6 +1081,7 @@ It takes a single image, applies two random augmentations (crop, flip, color jit
 Trees recursively partition space and descend to the relevant leaf, scanning only nearby points (kd/R-trees axis-aligned, Annoy random-hyperplane forests). LSH hashes points so near ones collide in the same bucket, then scans only the query's buckets across L tables. IVF clusters the corpus with k-means and, at query time, searches only the nprobe clusters nearest the query. All three replace O(N) with a sublinear scan of a candidate subset, trading a little recall for large speedups.
 
 **Q: Why do plain kd-trees fail on high-dimensional embeddings?**
+**Short:** In high dimensions points become nearly equidistant, so kd-tree pruning fails and search nears O(N).
 The curse of dimensionality: in high dimensions almost all points become nearly equidistant from the query, so the tree's pruning breaks down and backtracking must explore nearly every branch, degrading search from O(log N) toward O(N). kd-trees work well only for low dimensions (roughly ≤10–20). For 256-D embeddings you need randomized forests (Annoy), LSH, or IVF, which are designed for high-dimensional data.
 
 **Q: What does the nprobe parameter control in an IVF index, and what happens if it's too low?**
@@ -1092,27 +1094,33 @@ An ordinary hash scatters similar inputs to unrelated buckets; LSH is deliberate
 Exact search is O(N·D) per query — it compares the query to every point. With N ≈ 2×10¹¹ and D ≈ 256 that's ~5×10¹³ operations per query, far beyond a tens-of-milliseconds budget (hours per query even at a billion ops/second). That cost is precisely why the system uses approximate nearest-neighbor search, which trades a small amount of recall for orders-of-magnitude speedup by not scanning most points.
 
 **Q: Why is nDCG a poor evaluation metric for this system, and what's better?**
+**Short:** nDCG suits graded relevance but visual similarity is binary, so mAP and recall@k fit this task better.
 nDCG is designed for graded relevance (relevance scores like 0/1/2/3), but visual-search relevance is essentially binary — an image either is or isn't visually similar — so nDCG degenerates and adds little over simpler metrics, while manufacturing graded labels is expensive and subjective. mAP (mean average precision) and recall@k fit binary relevance well and capture full-ranking quality, which is why the book prefers them, with precision@k and MRR as secondary.
 
 **Q: What does the temperature parameter do in the contrastive loss?**
 Temperature (τ) is a scalar that divides the similarities before the softmax, controlling how sharply the model separates the positive from the negatives. A small τ sharpens the distribution, forcing the model to focus hard on the hardest negatives (heavy penalty for a close negative); a large τ softens it, treating negatives more uniformly. Typical values are small (≈0.05–0.1), and τ materially shapes the geometry of the learned embedding space.
 
 **Q: What are the three services in the prediction pipeline, and what does each do?**
+**Short:** Embedding generation, nearest-neighbor search, and re-ranking are the pipeline's three services.
 Embedding generation service preprocesses the query image and runs the encoder to produce the query embedding; nearest-neighbor service searches the ANN index for the top-k closest corpus embeddings; and re-ranking service applies business logic — filtering near-duplicates so results are varied and removing private/unsafe/policy-violating content — before returning the ranked list. The first is model inference, the second is retrieval infrastructure, and the third is post-processing.
 
 **Q: What preprocessing is applied to images before the encoder, and why must it be identical at serving time?**
 Resize to a fixed size (224×224), scale pixel values from [0,255] to [0,1], z-score normalize per RGB channel, and force a consistent RGB color mode. It must be byte-for-byte identical at training and serving because any mismatch (different resize interpolation, different normalization stats, or a grayscale/RGBA input) shifts query embeddings into a slightly different space than the corpus, silently collapsing recall — a classic train/serve skew bug.
 
 **Q: How does product quantization let a billion-scale index fit in memory?**
+**Short:** PQ quantizes each sub-vector to one of 256 codewords, shrinking a vector to a compact byte code.
 PQ splits each embedding into sub-vectors and quantizes each sub-vector to the nearest of 256 learned codewords, storing a compact byte code instead of the raw floats — compressing, say, a 1024-byte 256-D float32 vector to 32–64 bytes (16–32× smaller). Distances are computed approximately from precomputed lookup tables. Paired with IVF (IVF-PQ), it adds quantization error on top of cluster pruning but is what makes 200B vectors fit in RAM at all.
 
 **Q: Why must the entire ANN index be rebuilt when you retrain the encoder?**
+**Short:** A retrained encoder maps images into a new incompatible embedding space, so the whole index must be rebuilt.
 Because a retrained encoder produces embeddings in a different, incompatible geometry — the new query embeddings and the old indexed embeddings live in different spaces, so nearest-neighbor search across them returns nonsense. Every encoder rollout therefore requires re-embedding the whole corpus and rebuilding the index, a costly but mandatory step at 200B scale, which is why encoders and indexes are versioned together.
 
 **Q: Why are hard negatives important, and what goes wrong with only random negatives?**
+**Short:** Hard negatives force fine-grained distinctions; random negatives only teach coarse category separation.
 Hard negatives — dissimilar images that look plausibly similar — force the encoder to learn fine-grained visual distinctions, whereas random negatives (a couch vs. a mountain) are trivially separated and only teach coarse categories. With only easy negatives the model scores well on toy metrics but fails at "find couches that look like this couch." Mining hard negatives (same coarse category, different instance) sharpens the embedding space; this is the same lesson as Ch 9's same-market negatives.
 
 **Q: How does the contrastive loss actually turn similarities into a training signal?**
+**Short:** The encoder softmaxes query-candidate similarities and applies cross-entropy with the positive as correct.
 The encoder embeds the query and all n candidates (1 positive + n−1 negatives), computes the query-to-candidate similarities, passes them through a softmax to form a probability distribution, and applies cross-entropy with the positive as the correct class. Minimizing this loss maximizes the query–positive similarity relative to the query–negative similarities, pulling the positive's embedding toward the query and pushing negatives away — the InfoNCE objective.
 
 **Q: When do dot product, cosine similarity, and Euclidean distance give the same ranking?**
@@ -1122,12 +1130,14 @@ When the embeddings are L2-normalized to unit length. In that case maximizing do
 The prediction pipeline is per-query, online, latency-critical, and read-only against the index (embed query → search → re-rank). The indexing pipeline is background and throughput-oriented: it embeds newly uploaded images with the same encoder and inserts them into the ANN index so they become searchable. Decoupling them lets search stay fast and available while the corpus grows, and lets index inserts/rebuilds run on their own schedule.
 
 **Q: What is the recall–speed tradeoff, and how do you choose an ANN operating point?**
+**Short:** Higher search effort (more trees, tables, or nprobe) trades latency and memory for better recall.
 Every ANN method exposes one knob — more trees (Annoy), more tables (LSH), or higher nprobe (IVF) — where more search effort buys higher recall at the cost of latency and memory, approaching exact recall only at exact-search cost. You choose the operating point by sweeping the method's knob to trace the recall–latency curve, then picking the setting that meets the product's latency SLA at an acceptable recall (validated with A/B tests), rather than chasing 100% recall.
 
 **Q: How would you add support for text queries (e.g. "red plaid couch") to this image system?**
 Train a shared image–text embedding space (CLIP-style) so that a text encoder and the image encoder map into the same space and their embeddings are directly comparable by dot product. Then a text query is embedded by the text encoder and run through the same ANN index of image embeddings. This is exactly the multimodal retrieval problem the book develops in Ch 4 (YouTube video search).
 
 **Q: Why does interaction-derived labeling introduce position bias, and how do you mitigate it?**
+**Short:** Clicks favor top-ranked results regardless of relevance; debias with IPW weighting and exploration.
 Users click results that appear near the top partly because of their position, not their relevance, so treating clicks as positives teaches the model "top-ranked equals similar" — a self-reinforcing bias that also contaminates offline eval built from the same clicks. Symptom: offline mAP looks fine but online engagement doesn't move. Mitigations: inverse-propensity weighting to debias clicks, randomized exploration in the results, and a small unbiased human-labeled evaluation set.
 
 ---

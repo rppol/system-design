@@ -1132,6 +1132,8 @@ inbox.
 ## Interview Questions
 
 **Q: What is the difference between POP3 and IMAP, and why does a multi-device email product use IMAP?**
+**Short:** POP3 downloads mail to one device and deletes it from the server; IMAP keeps state server-side for multi-device sync.
+
 POP3 downloads messages to one device and deletes them from the server, so state lives on the client and other devices never see that mail; IMAP keeps every message and all state (read flags, folders) on the server and downloads only on open. Because the server is authoritative, IMAP shows the same mailbox on phone, laptop, and web — exactly what a multi-device product needs. POP3 suits a single device treating mail as a local archive. This server-side-state model is also why the metadata store must be the single source of truth for read/unread status.
 
 **Q: What do SPF, DKIM, and DMARC each verify?**
@@ -1144,9 +1146,13 @@ Because a user only ever reads their own mail, partitioning by user_id co-locate
 Attachments go into object storage (S3-like) and the metadata row holds only a pointer, because attachments are large, immutable, whole-object reads. Deduplication uses the content checksum (e.g. SHA-256) as the object key, so identical files map to the same key and are stored exactly once. A 5 MB memo emailed to 1,000 employees is one stored blob with 1,000 pointers, and reference counting ensures deleting one copy doesn't remove the shared object. Since attachments are the storage monster (~1,460 PB/year), dedup is the biggest cost lever in the design.
 
 **Q: When should you use Elasticsearch versus a native embedded search index for email?**
+**Short:** Elasticsearch suits small-to-medium scale, but Gmail-scale mail search uses a native LSM-tree index for strong consistency.
+
 Use Elasticsearch for small-to-medium deployments where fast delivery and rich features matter, accepting that it's a separate system kept in sync via a pipeline (often Kafka), which means data duplication, extra ops, and eventual consistency where the index lags the store. Use a native LSM-tree index inside the primary store at Gmail scale, where you want strong consistency (mail is searchable the instant it's stored), no second system to sync, and no duplication, at the cost of building the search engine yourself and paying index maintenance on the write path. Large providers choose native for exactly these reasons.
 
 **Q: Why is storage, not QPS, the dominant challenge in an email service, and what are the numbers?**
+**Short:** Compute is cheap at roughly 100K QPS, but metadata and attachments together reach about 2,000 petabytes a year.
+
 Because compute is easy and storage is enormous: 1B users sending 10 emails/day is only ~100K QPS, but 40 emails/user/day at ~50 KB metadata is ~730 PB/year, and 20% of emails carrying ~500 KB attachments is ~4 PB/day or ~1,460 PB/year. Attachments alone are twice the metadata, and neither figure includes the ~3× replication multiplier. So the design centers on attachment object storage with dedup and a partitioned metadata store, not on handling send QPS.
 
 **Q: Why is a message queue placed between the web tier and the SMTP relay workers?**
@@ -1159,6 +1165,8 @@ If the recipient is online, a real-time server holding their long-lived WebSocke
 Base64 encodes 3 binary bytes as 4 ASCII characters, inflating size ~33% (about 37% with line-wrapping), because email transport is historically text-only and binaries ride inside MIME parts. This means advertised limits like Gmail's 25 MB are encoded sizes, so the real file limit is smaller, and it's a strong reason to store the decoded binary once in object storage rather than the inflated base64 blob inline in metadata rows. Inline base64 would bloat the write-heavy metadata store and waste petabytes on duplicates.
 
 **Q: Why does the traditional file-per-user mail server model (mbox/Maildir) fail at 1 billion users?**
+**Short:** Single-machine file-per-user mailboxes have no replication, create IO hotspots, and offer no search at scale.
+
 Because storing each mailbox as files on one machine's local disk has no replication (that disk dies, the mailbox is gone), creates IO hotspots (a heavy mailbox saturates one spindle with no way to spread load), offers no search (you'd have to grep the files), and can't scale past a single server's capacity. It also has slow, manual failover. The fix is a distributed stack: partitioned/replicated metadata database, object storage for attachments, and a proper search index, giving replication, horizontal scale, and searchability the file model can't.
 
 **Q: What consistency does a user's own mailbox require, and why isn't global consistency needed?**
@@ -1174,12 +1182,16 @@ IP warm-up is gradually ramping the daily send volume from a new dedicated IP so
 Greylisting is a receiver-side tactic where the server temporarily rejects mail from an unknown sender with a "try again later" (SMTP 4xx) response. A standards-compliant legitimate mail server retries a few minutes later and is then accepted, while many spam scripts fire once and never retry, so they're filtered out cheaply. The cost is a small delivery delay on the first email from a new correspondent. It exploits the behavioral difference between real mail servers and fire-and-forget spammers.
 
 **Q: How is conversation threading implemented?**
+**Short:** Each email carries a thread id derived from RFC headers, letting a reply chain be fetched as one partition-local read.
+
 Each email is tagged with a thread (conversation) id derived from the RFC headers Message-ID, In-Reply-To, and References (or a normalized subject as a fallback), and the metadata store adds a table or clustering keyed by (user_id, thread_id). That makes a whole reply chain a single partition-local read, so opening a conversation fetches all its messages from one node. Threading is a per-user view, since each participant sees the thread within their own mailbox partition.
 
 **Q: How are read/unread status and unread counts handled efficiently?**
 By denormalizing rather than scanning and filtering: keep a separate unread table (or per-folder unread partition) so "show unread" is a direct read, and maintain a per-folder unread counter updated on the write path. When a user opens an unread email, the flow flips read=true, moves the row out of the unread structure or decrements the counter, and because state is server-authoritative every device re-reads the same flag on next sync. This avoids scanning a large folder to compute counts on every open.
 
 **Q: Why choose a distributed NoSQL wide-column store over a relational database for email metadata?**
+**Short:** The workload is petabytes of small per-user writes with no cross-user joins, which relational strengths never use.
+
 Because the workload is petabytes of tiny writes queried only per user, with no cross-user joins or multi-row transactions, which is exactly where relational strengths go unused and its single-instance scaling ceiling hurts. A distributed wide-column store scales horizontally, handles a high volume of small updates, and lets you denormalize one table per access pattern (by-folder, by-read-status), all partitioned by user_id. You'd have to shard a relational DB by user anyway, losing joins, so you'd pay for machinery the workload never uses.
 
 **Q: How do the sending and receiving flows differ, step by step?**

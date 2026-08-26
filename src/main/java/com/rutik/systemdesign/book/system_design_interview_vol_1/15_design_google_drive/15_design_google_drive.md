@@ -1102,6 +1102,8 @@ Because relational databases natively support ACID properties, which make the st
 Simple upload sends a small file in a single request, while resumable upload is used for large files and can restart from where it was interrupted rather than from the beginning. Resumable upload is requested with `uploadType=resumable` and runs in three steps: send an initial request to get the resumable URL, upload the data while monitoring state, and resume from the lost portion if the transfer is disrupted. With a 10 GB per-file limit, resumability is what makes large uploads over flaky connections tolerable.
 
 **Q: How does a client learn that a file changed on another device, online versus offline?**
+**Short:** Online, the notification service tells it to pull the latest; offline, the changes are cached and pulled on reconnect — the download flow that follows is the same either way.
+
 If the client is online, the notification service tells it that a file changed elsewhere so it can pull the latest; if the client is offline, the changes are saved in a cache and the client pulls them when it comes back online. Once notified, the client requests the file's metadata from the API servers, downloads the changed blocks from the block servers, and reconstructs the file locally. There is one download algorithm regardless of how the client was told to run it.
 
 **Q: Walk through the upload flow and its two parallel requests.**
@@ -1135,6 +1137,8 @@ If the master goes down, a slave is promoted to become the new master and a repl
 Block servers compress each block before upload, choosing the algorithm by file type — for example gzip and bzip2 for text, and different algorithms for images or videos where text compressors add little. The full block-server pipeline when adding a file is split into blocks, compress, encrypt, then upload to cloud storage. Compression further reduces the bytes that actually reach cloud storage on top of the delta-sync savings.
 
 **Q: How does long polling actually deliver a change notification?**
+**Short:** The client parks an open request; on a change the service closes the connection, which returns the response, and the client immediately re-opens a new long poll while it downloads.
+
 Each client opens a long-poll request to the notification service and waits; when a file change is detected, the service closes the connection, which is how the parked request returns a response carrying "your files changed." Because the connection is now closed, the client immediately sends a new request to re-open the long poll so it is ready for the next change, and meanwhile runs the download flow to fetch the actual updates. The open connection is a parked request completed only when there is news.
 
 **Q: What follow-up improvements does the chapter propose in its wrap-up?**

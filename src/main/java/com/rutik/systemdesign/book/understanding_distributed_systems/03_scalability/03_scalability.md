@@ -2649,6 +2649,8 @@ It is when a hot key expires and many concurrent requests all miss at once, hamm
 Because DNS responses are cached at the client, OS, and resolvers according to the record's TTL, and many resolvers ignore the TTL and cache even longer. When a server dies, clients keep resolving to its dead IP until their cached record expires, so the dead server keeps receiving traffic for minutes. This is why DNS is used for coarse geographic steering, not fast within-region failover — use an L4/L7 load balancer with health checks for that.
 
 **Q: What is the difference between L4 and L7 load balancing?**
+**Short:** L4 routes opaque connections by their IP/port tuple with no view of the payload; L7 terminates the connection and routes on HTTP content, at higher cost.
+
 L4 operates at the transport layer, routing opaque connections by their tuple (source/destination IP and port) to a backend behind a VIP, with no visibility into HTTP; L7 terminates TCP and TLS, parses the HTTP request, and routes per request by path, header, or cookie. L4 is fast and cheap (it just shuffles packets, and can even use Direct Server Return), but pins a whole connection to one backend and cannot route by content. L7 is smarter (per-request routing, rewrites, mesh policy) at the cost of more CPU per request.
 
 **Q: Why does `hash(key) mod N` reshuffle almost all keys when you add a node, and what fixes it?**
@@ -2658,9 +2660,13 @@ Because changing N changes the modulo result for nearly every key at once, so ad
 A soft dependency means the data plane keeps serving requests on its last-known-good configuration when the control plane is down, so a control-plane outage degrades management (no new deploys or config), not serving. A hard dependency — where the data plane calls the control plane on every request — makes the control plane a single point of failure that takes down the whole request path when it hiccups. Design LBs, meshes, and resolvers to cache config and run independently so the request path never blocks on the management path.
 
 **Q: Why is exactly-once delivery impossible, and how do you get exactly-once processing anyway?**
+**Short:** A sender cannot tell a lost message from a lost acknowledgment, so delivery is at best at-least-once; idempotent processing with dedup keys gives exactly-once effects.
+
 Exactly-once delivery is impossible because a sender cannot distinguish a lost message from a lost acknowledgment (the two-generals problem), so it must either risk loss (at-most-once) or risk duplication (at-least-once). Exactly-once processing is achievable by combining at-least-once delivery with an idempotent consumer: deduplicate on a message ID or make the operation naturally idempotent (upsert, set-not-increment), so a message delivered twice takes effect once. The message may arrive more than once, but the effect happens exactly once.
 
 **Q: Why is a growing message queue backlog a hidden outage, and how do you catch it?**
+**Short:** A queue decouples producer and consumer rates, so consumers falling behind grows the backlog silently while producers still succeed — alert on consumer lag and queue age, not error rate.
+
 Because a queue decouples producer and consumer rates, so when consumers fall behind the backlog grows silently while producers still succeed and nothing errors — the system looks healthy while processing latency climbs to hours. It is an outage with extra steps, invisible until users notice their work never completed. Catch it by monitoring backlog age (the age of the oldest unprocessed message, which is the real latency users feel), bounding queue depth so you shed instead of accumulating, and autoscaling consumers on backlog.
 
 **Q: What is the difference between HTTP freshness and validation, and how does a 304 fit in?**
@@ -2700,30 +2706,44 @@ It is modeling the data layout from the list of queries the application will run
 A cache helps when the hit ratio is high, access is skewed toward a hot set, some staleness is tolerable, and the origin is expensive to hit. It is overhead when the hit ratio is low, because a miss costs a cache lookup plus the origin fetch plus a cache write — strictly more work than not caching. So caches pay off for read-heavy, skewed, staleness-tolerant workloads over slow origins, and hurt for uniform-access, write-heavy, or freshness-critical workloads.
 
 **Q: What are the tradeoffs between a local in-process cache and an external shared cache?**
+**Short:** A local in-process cache is fastest but duplicates data per instance and cold-starts on every restart; a shared external cache costs a network hop but gives one consistent copy.
+
 A local cache lives in the service's memory with zero network hop, making it the fastest, but it duplicates data across instances (N copies, N cold misses to fill), suffers cold-start stampedes on restart, and drifts out of consistency between instances. An external cache like Redis or Memcached is shared, so there is one consistent copy, better memory efficiency, and it survives instance restarts, but every access pays a network round trip and you must run and scale another distributed system. Use local for tiny, hot, staleness-tolerant data and external for shared, larger, consistency-sensitive data.
 
 **Q: What is the "distributed monolith" and how do you avoid it?**
+**Short:** A distributed monolith is a set of microservices coupled so tightly by a shared database, lockstep deploys, and synchronous call chains that you pay distribution's costs without its benefits.
+
 It is a set of microservices so tightly coupled — sharing a database, deploying together, calling each other synchronously in long chains — that you pay all the costs of distribution (network, partial failure, latency) and get none of the benefits (independent deploy, isolation). It usually comes from drawing service boundaries in the wrong place. Avoid it by splitting along real business seams, keeping services independently deployable with their own data, and starting from a well-modularized monolith, extracting a service only when a specific pain justifies it.
 
 **Q: How does an API gateway's response composition affect availability?**
 It multiplies availability risk downward: if the gateway must call K services each at availability p to compose one response, the aggregate availability is roughly p^K, worse than any single dependency. Composing a response from five 99.9% services yields about 99.5% — a real degradation caused purely by fan-out. Minimize synchronous fan-out, cache aggregated results, and make composition tolerant of partial failure (return a degraded response when one dependency is down) rather than failing the whole request.
 
 **Q: What is a reconciliation loop and how does static stability relate to it?**
+**Short:** A reconciliation loop continuously drives actual state toward desired state; static stability means the data plane keeps running on its last known state when the control plane is down.
+
 A reconciliation loop is a controller that continuously compares desired state to actual state and issues actions to converge them — a Kubernetes controller seeing 4 running pods against a desired 5 and creating one, forever self-healing drift. Static stability is the property that the data plane keeps operating correctly on its last-known-good state when the control plane (which runs the loop) is unavailable — it needs the control plane only to change, not to keep running. Pushing the full config every cycle (constant work) rather than deltas makes convergence robust and avoids fragile mode-switches under stress.
 
 **Q: What distinguishes a log-based broker like Kafka from a traditional queue like SQS?**
+**Short:** A log-based broker keeps messages in a partitioned append-only log with consumer-tracked offsets and time-based retention, so messages can be replayed; a queue deletes on acknowledgment.
+
 A log-based broker stores messages in a partitioned append-only log where consumers track their own offset and messages are retained for a window, so consumers can replay and multiple independent consumer groups can read the same log, with ordering guaranteed per partition. A traditional queue deletes each message after it is acknowledged, offering no replay and weaker ordering but easy competing-consumers scaling and per-message features like visibility timeouts. You scale a log by adding partitions and a queue by adding consumers; choose a log for event streams and replay, a queue for task distribution.
 
 **Q: What is a poison pill and why do you need a dead-letter queue?**
 A poison pill is a message that always fails to process — malformed or triggering a consumer bug — so an at-least-once consumer retries it forever and, in an ordered partition, blocks every message behind it. A dead-letter queue solves this: after N failed attempts the message is moved to a separate queue for offline inspection, unblocking the main channel so healthy messages keep flowing. You alert on dead-letter arrivals and debug them out of band rather than letting one bad message stall the pipeline.
 
 **Q: What are the three scaling dimensions of the scale cube, and where does caching fit?**
+**Short:** Functional decomposition, partitioning by key, and duplication of stateless replicas; caching is not a fourth dimension — it cuts the load the other three have to absorb.
+
 The three dimensions are functional decomposition (split the system into services by capability), partitioning (shard data and load across nodes by key), and replication (duplicate data or stateless instances across nodes). Every technique in Part III maps to one axis: microservices are functional decomposition, sharding is partitioning, and load-balanced instances plus read replicas are replication. Caching and CDNs sit on the replication axis — they are replicas you are allowed to let go stale, which is exactly what lets them scale so cheaply.
 
 **Q: Why start with a monolith instead of microservices?**
+**Short:** Microservices impose large fixed costs — operational surface, loss of cross-service ACID, distributed debugging — so start with a monolith and split only when the pain is real.
+
 Because microservices import large fixed costs — operational burden (many pipelines, dashboards, on-call surfaces), loss of cross-service ACID transactions (eventual consistency and sagas instead), harder testing and debugging, and the risk of a distributed monolith — that only pay off past a certain scale and team size. A well-modularized monolith gives you fast local calls, simple transactions, and one deploy while you are still finding the right boundaries. Extract a service only when a concrete pain (a team blocked by deploy coupling, one component needing independent scale) makes the tradeoff worthwhile.
 
 **Q: What does synchronous versus asynchronous database replication trade off?**
+**Short:** Synchronous replication guarantees no committed write is lost but blocks on the follower; asynchronous replication is fast and stays available but can lose recent writes on failover.
+
 Synchronous replication makes the leader wait for a follower to acknowledge before confirming a write, so the follower is guaranteed current and no committed write is lost — but a slow or down follower blocks writes, and more sync followers make writes slower and more fragile. Asynchronous replication confirms the write immediately and replicates in the background, so writes are fast and a slow follower does not block them, but if the leader crashes before a write propagates, that write is lost. Most systems compromise with semi-synchronous replication: one synchronous follower for durability, the rest asynchronous for speed.
 
 **Q: Why does adding read replicas not help a write-bound database, and what does?**
@@ -2733,6 +2753,8 @@ Because every write still funnels through the single leader, so read replicas sc
 Because a deleted key can only cause an extra miss, whereas an updated key can leave the cache holding a value the origin never durably stored. If you write the origin first and then delete the key, a crash between the two leaves the cache merely empty (self-correcting on the next read), and a concurrent reader that repopulates from a stale snapshot is bounded by the TTL. Updating the cache before the origin, or setting instead of deleting, opens races where cache and origin disagree and the wrong value persists — so the safe order is origin-first, then invalidate.
 
 **Q: Why does the number of partitions cap consumer parallelism in a log-based broker?**
+**Short:** The broker assigns each partition to exactly one consumer in a group, so the partition count is a hard ceiling on how many consumers can work in parallel.
+
 Because the broker assigns each partition to exactly one consumer within a consumer group, so at most one consumer per partition is active — 8 partitions cap a group at 8 working consumers, and any extra consumers sit idle. This means you must choose the partition count for peak parallelism up front, since repartitioning later reshuffles the key-to-partition mapping (a mod-N-style problem) and disturbs ordering. It is the direct consequence of per-partition ordering: one consumer per partition is what preserves order while allowing parallelism across partitions.
 
 **Q: Why must connection draining happen when removing an instance behind a load balancer?**

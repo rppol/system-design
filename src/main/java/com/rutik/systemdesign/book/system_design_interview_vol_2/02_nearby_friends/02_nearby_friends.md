@@ -1066,6 +1066,8 @@ Because current location only needs to be the single most recent point, read/wri
 Because to stay fresh, every client must poll for all ~100 friends every interval, multiplying the request rate by the friend count to ~33 million reads/second — roughly 100x the push cost. Push sends one message per *move* (334K publishes/second) and only to relevant friends, whereas polling every 30 seconds forces 334K polls × 100 friends of read amplification and still caps how quickly a friend entering range is detected at the poll interval. Push over WebSocket is the only affordable way to hit few-second freshness.
 
 **Q: What is connection draining and why do stateful WebSocket servers need it?**
+**Short:** Connection draining stops new connections and waits for existing ones to close before the server is removed.
+
 Connection draining is marking a server so it accepts no new connections, waiting for existing connections to close, then removing it — needed because a WebSocket server holds thousands of live persistent connections that you cannot sever all at once. To deploy new code or scale in, you drain: the load balancer stops routing new connections to the node, its connection count bleeds down as users disconnect naturally (with a max-timeout fallback where stragglers reconnect elsewhere), and only then is it removed. In-place restart would drop every connection at once and cause a reconnect storm, so every release becomes a drain-and-replace.
 
 **Q: Why use WebSocket here instead of HTTP long-polling or short-polling?**
@@ -1084,18 +1086,24 @@ It gives loose coupling between the location updater (publisher) and the friends
 Shard by hashing the channel id (user id) with consistent hashing, and use a service-discovery component like etcd or ZooKeeper holding the hash ring so WebSocket servers resolve a channel to its owning node. A WebSocket server that wants to publish to or subscribe to a channel first looks up the hash ring in service discovery to find which pub/sub node hosts that channel, then connects there. Consistent hashing keeps channel movement small when nodes are added or removed.
 
 **Q: What is the resubscribe-on-scaling problem and how do you mitigate it?**
+**Short:** Scaling remaps channels via consistent hashing, forcing servers to tear down and re-establish moved subscriptions.
+
 When you add a pub/sub node, consistent hashing remaps some channels to it, and every WebSocket server subscribed to a moved channel must tear down and re-establish that subscription — a thundering herd of resubscriptions. Because thousands of WebSocket servers may each hold many moved channels, a single resize can trigger a burst of subscription churn that briefly degrades live updates. Mitigate by scaling during off-peak hours (fewer live subscriptions to move), over-provisioning so resizes are rare, and rolling changes gradually.
 
 **Q: Why is there no celebrity ("Justin Bieber") fan-out problem in nearby friends?**
 Because friendship is mutual and capped, so no channel ever has millions of subscribers. The feed-world fan-out explosion comes from asymmetric relationships — one account with tens of millions of followers — but here you cannot have a million-friend account; platforms cap friends (Facebook at 5,000, and even a 10,000 cap is a hard bound). The worst-case fan-out per channel is a few thousand subscribers, which the sharded pub/sub tier handles comfortably, so celebrity-fan-out hedges are unnecessary.
 
 **Q: How does adding or removing a friend change the subscriptions?**
+**Short:** Adding a friend triggers mutual subscribe callbacks; removing one triggers an unsubscribe and a client-side drop.
+
 Adding a friend triggers a subscribe callback (your handler subscribes to their channel, and theirs to yours since friendship is mutual); removing, opting out, or going offline triggers an unsubscribe callback and a "drop this friend" push to the client. The subscription set is kept in sync with the friend graph in real time so the live view always mirrors the current friend list without a full refresh. This callback wiring is what lets friends appear and disappear from the nearby list instantly.
 
 **Q: How does the "nearby random person" feature change the channel key?**
 It keys channels by geohash cell instead of by user id, since strangers share no friendship to route on. When a user opts in they publish their location to the channel of the geohash cell they are currently in and subscribe to their own cell plus the 8 neighboring cells (so people just across a boundary are still visible), unsubscribing and resubscribing as they cross cell boundaries. The same pub/sub machinery is reused with geographic proximity, rather than the social graph, as the grouping key.
 
 **Q: How is the TTL used on the location cache, and what does it model?**
+**Short:** A roughly 10-minute TTL, reset on every location report, models whether a user is currently active.
+
 The TTL (~10 minutes) is reset on every location report and models whether a user is "active." An active user keeps reporting and keeps resetting the timer, so their entry stays; a user whose phone dies or who closes the app stops reporting, and ~10 minutes later the TTL lapses and the entry is auto-evicted — no separate "user went offline" signal is needed. The TTL is set comfortably longer than the 30-second report interval so a couple of missed updates never evict a genuinely active user.
 
 **Q: Why is sharding the location cache trivial?**
@@ -1111,6 +1119,8 @@ It stores `(user_id, timestamp) -> (latitude, longitude)` with `user_id` as the 
 About 334K writes per second: 10 million concurrent users each reporting once every 30 seconds is 10,000,000 / 30 ≈ 333,333 updates/second. This is before any fan-out, and every update hits a WebSocket server, the location cache, the history DB, and a pub/sub publish — which is why the system is characterized as write-heavy and steers the storage choices (Redis hot path, Cassandra history). Fanning each publish out to ~100 friends yields the ~33 million pub/sub deliveries/second figure.
 
 **Q: Why consider Erlang/OTP as an alternative to Redis pub/sub, and why do most teams avoid it?**
+**Short:** Erlang/OTP natively fits one process per user, but its small talent pool makes most teams choose Redis instead.
+
 Erlang/OTP fits the "one cheap process per user, route messages between them" shape natively — millions of lightweight processes, message-passing, and a BEAM VM that clusters nodes and distributes processes transparently, as WhatsApp used to scale to hundreds of millions of connections. Most teams avoid it because it is a niche language with a small talent pool, harder to hire for and operate, whereas Redis pub/sub plus etcd/ZooKeeper is built from commodity, well-understood components. Reach for Erlang only with deep in-house expertise; otherwise the mainstream stack is the safer default.
 
 **Q: What happens to your nearby-friends view when a friend goes offline?**

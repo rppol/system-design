@@ -1189,6 +1189,8 @@ An alert goes Inactive → Pending → Firing → Resolved. When the condition f
 Data is kept at decreasing resolution as it ages: 7 days raw, 30 days at 1-minute, 1 year at 1-hour. Keeping 10M series at raw resolution for a year is astronomically expensive and nobody queries year-old data at 1-second granularity, so downsampling trades resolution for a massive storage reduction — from ~8,640 points/series/day raw down to 24 at hourly. Recent debugging needs full detail; long-term capacity trends need only coarse points.
 
 **Q: What runs the downsampling, and how does it help queries as well as storage?**
+**Short:** Scheduled rollup jobs aggregate raw data into coarser buckets, shrinking storage and speeding long-range queries.
+
 Batch rollup jobs run on a schedule, reading higher-resolution data, computing an aggregate (avg/min/max/count) per coarser bucket, writing the lower-resolution series, and letting the raw data expire per the retention policy. Beyond shrinking storage, downsampling speeds long-range queries: a 1-year dashboard reads ~8,760 hourly points per series instead of billions of raw ones. It implements the 7-day/30-day/1-year resolution ladder.
 
 **Q: What are the three places aggregation can happen, and what does each trade off?**
@@ -1207,6 +1209,8 @@ Because SQL has no first-class time-window alignment, rate-of-change over monoto
 A metric is a time series where each data point has a metric name, a set of tags/labels, a timestamp, and a value — e.g. `CPU.load host=webserver01,region=us-west 1613707265 32.5`. A time series is uniquely identified by its metric name plus its full tag set, so the same name with different tags (`host=web01` vs `host=web02`) is a different series. This layout makes writes appends to the end of a series and makes timestamp/value delta-compression highly effective.
 
 **Q: Why should the visualization tier be bought (Grafana) rather than built?**
+**Short:** A production-grade dashboard system is a large product on its own, and Grafana already solves it well.
+
 Because a high-quality dashboard system — rich graph types, templating, alert overlays, sharing, permissions — is a large product on its own, and Grafana already solves it and connects to Prometheus, InfluxDB, Graphite, and most TSDBs as data sources. Building a bespoke graphing UI yields something worse than Grafana that needs perpetual maintenance. The engineering effort belongs on the parts that are genuinely your problem: ingestion and alerting.
 
 **Q: Why must a monitoring system be more available than the systems it watches, and how is that achieved?**

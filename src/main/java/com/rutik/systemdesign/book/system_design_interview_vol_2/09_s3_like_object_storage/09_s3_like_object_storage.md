@@ -1142,12 +1142,16 @@ Because hashing the composite key scatters a single bucket's objects across ever
 The API service authenticates and authorizes via IAM, asks the metadata service to reserve a row keyed by (bucket, object name), then streams the payload to the data store, which persists the bytes and returns a UUID. The API service then completes the metadata row with that UUID plus size and placement, and returns 200 OK with an ETag. Reserving metadata first and completing it only after the bytes land means a failed data write leaves an incomplete row rather than a dangling pointer to nonexistent bytes.
 
 **Q: What are the three ways to decide when a write is acknowledged, and what does each trade?**
+**Short:** Ack after the primary, after all replicas, or after a quorum trades latency against durability and slow-node tolerance.
+
 Ack after the primary persists is lowest latency but leaves a data-loss window if the primary dies before replicating; ack after all replicas persist is fully durable but couples write latency to the slowest replica; ack after a majority (quorum, W of N with W+R>N) is the balanced middle that tolerates one slow node. The choice is a direct consistency-vs-latency tradeoff. Most systems pick quorum to avoid both the loss window and the slow-replica stall.
 
 **Q: Why is the placement service replicated with Paxos or Raft while the data nodes are not?**
 Because the placement service is the cluster's brain — it owns the cluster map and picks primary+replica placement — so if its state is lost or inconsistent the whole cluster is corrupted. Consensus (Paxos/Raft) keeps a small replica set agreeing on one authoritative, consistent map. The data nodes are numerous, dumb workers that just persist bytes and answer heartbeats, so they need durability (replication/EC) but not consensus among themselves.
 
 **Q: Replication protects against a node dying — what protects against silent bit rot, and how?**
+**Short:** Per-chunk checksums, recomputed on every read, catch silent bit rot that replication alone cannot detect.
+
 Checksums. A per-chunk (or per-object) checksum such as MD5, SHA-1, CRC32, or HMAC is stored with the data and recomputed on every read; a mismatch means the bytes are present but corrupt, so that copy is treated as lost and served or rebuilt from a healthy replica or from erasure-coding parity. After any reconstruction the rebuilt data is checksum-verified before being returned, so a bad rebuild can't silently propagate. Replication only guarantees the bytes are present, not that they're correct.
 
 **Q: What is the point of multipart upload, and what new problem does it create?**
@@ -1169,12 +1173,16 @@ Because authorization is per-resource and per-action — a caller may read one b
 GC reclaims three kinds of dead data: objects hidden behind delete markers or expired by lifecycle policy, abandoned multipart parts, and chunks that failed checksum and were replaced. Because the data files are append-only and become dotted with dead holes, GC compacts them by copying the still-live objects into a new file, updating each object's offset in the mapping table, then deleting the old file wholesale. This turns "delete a range inside a huge file" into "rewrite the file without the dead ranges," reclaiming all the dead space sequentially.
 
 **Q: How does object storage differ from block and file storage, and when do you pick it?**
+**Short:** Block storage gives lowest-latency raw volumes, file storage a filesystem, object storage a flat namespace at lowest cost.
+
 Block storage exposes raw volumes with the lowest latency (databases, boot disks); file storage builds a hierarchical filesystem over NFS/SMB for shared files; object storage exposes a flat namespace of immutable objects over HTTP at the lowest cost per GB and highest durability. You pick object storage when data is large, written-once-read-many, and must survive anything — backups, media, archives, data lakes — and you can tolerate higher latency and no in-place edits. The progression block → file → object trades latency and mutability for scale, durability, and cost.
 
 **Q: Why are objects immutable, and what does that buy the storage engine?**
 Objects are immutable — to change one you upload a new object (a new version) rather than editing in place. This lets the data store treat bytes as strictly append-only: writes only ever append to the active file, and sealed files never change, so they're cheap to replicate, erasure-code, and checksum once. In-place mutation would break the append-only invariant and force read-modify-write contention on multi-GB files, so immutability is what makes the whole packing-and-durability scheme practical.
 
 **Q: What role does the cluster map play, and what keeps it consistent?**
+**Short:** The cluster map is the placement service's consensus-backed model of the whole storage topology, used to place replicas.
+
 The cluster map is the placement service's model of the whole storage topology — which data centers hold which racks hold which nodes and disks, plus their health from heartbeats — and it's what lets placement spread replicas across independent failure domains. The placement service keeps it consistent by being replicated with a consensus protocol (Paxos/Raft), so a small quorum always agrees on one authoritative map. Data nodes heartbeat into it; a missed heartbeat marks a node down and triggers re-replication of its chunks.
 
 **Q: Why does versioning make storage grow without bound, and how is that controlled?**

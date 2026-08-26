@@ -1081,6 +1081,7 @@ The continual-learning requirement decides it: GBDT is the stronger tabular lear
 Because the relevance labels are binary (registered or not) and a user may register for several events per session. MRR only credits the first relevant item, so it is biased toward one-relevant-item cases and wastes the other registrations. nDCG needs graded relevance to be meaningful and degenerates with binary labels. mAP is designed for binary relevance with multiple relevant items, averaging precision at each relevant rank, which matches the setup exactly.
 
 **Q: What is the difference between batch (static) and streaming (dynamic) features here?**
+**Short:** Batch features are precomputed offline and change slowly; streaming features are computed live per request.
 Batch features change slowly and are precomputed offline (user age, event category, price, description embedding, host popularity), while streaming features change fast and must be computed at request time (# registered so far, friends-registered ratio, remaining time, live travel time). Caching a dynamic feature makes it stale within minutes and silently degrades ranking. The serving design reads batch features cheaply from a feature store and computes streaming features from an online store per request.
 
 **Q: Name the five feature families and one example from each.**
@@ -1093,6 +1094,7 @@ Because people attend events their friends attend, so friend signals are more pr
 It filters before it ranks: a cheap event-filtering service uses geo radius, date window, and user filters (no model) to cut ~1M events to a few hundred candidates, then the model only scores those hundreds. Each stage is more expensive per item than the last, so the pipeline spends its cheapest filter first. This is why ~1,700 QPS over a 1M-event catalog can return in ~150 ms.
 
 **Q: What are the three stages of the serving pipeline?**
+**Short:** Event filtering, ranking (score P(register)), and re-ranking (business logic) form the serving pipeline.
 Event filtering (candidate generation by location, date, and user filters), ranking (hydrate batch and online features, score P(register), sort), and re-ranking (business logic — diversity, dedup, remove already-registered events). The filter cuts a million events to hundreds, the ranker applies the model, and the re-ranker enforces rules the pure model ignores. The output is the final ranked feed.
 
 **Q: Why does the system need continual learning, and how is it structured?**
@@ -1114,6 +1116,7 @@ Delayed feedback is a user registering days after the impression, so labeling th
 Users register more for events shown near the top regardless of quality, so raw impression logs over-credit high positions and teach the model that "position 1 is good," entrenching whatever the current ranker surfaces. The mitigation is to log the display position and de-bias — for example, include position as a feature during training and drop it at serving time — so the model learns event quality rather than display luck.
 
 **Q: How should new users and new events be handled at serving time?**
+**Short:** New users fall back to demographics and location; new events rely on content features plus exploration traffic.
 New users have no history, so fall back on demographic and location features and show popular or nearby events; new events have no interactions — the permanent condition — so rely on content/metadata features (category, description embedding, host popularity) and give them exploration traffic. Exploration, via epsilon-greedy or contextual bandits, prevents a rich-get-richer loop where only already-popular events are ever shown. This lets brand-new events gather the signal they need.
 
 **Q: What distinguishes pointwise from pairwise LTR in what the loss actually sees?**

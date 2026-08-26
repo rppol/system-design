@@ -1167,6 +1167,8 @@ Because immutability is what makes the ledger trustworthy as the system of recor
 Eavesdropping is countered with HTTPS/TLS, data tampering with digital signatures or HMAC, and man-in-the-middle with TLS plus certificate pinning. Data theft is neutralized by tokenization so no raw PAN is stored, replay attacks by the nonce or idempotency key that deduplicates a re-sent request, and fraud by velocity checks, AVS, CVV verification, and risk scoring. Tokenization and the idempotency key do double duty, removing the thing worth stealing and defeating replays.
 
 **Q: How does the pay-out flow differ from the pay-in flow?**
+**Short:** Pay-out mirrors pay-in's orchestration and ledger, just swapping the PSP for a payout provider like Tipalti.
+
 The pay-out flow moves money from the platform to sellers and has the same shape as pay-in with two substitutions: the PSP is replaced by a payout provider such as Tipalti, and the flow integrates heavily with accounting, invoicing, and tax reporting. Everything else — orchestration, the double-entry ledger entries, wallet updates, and reconciliation — mirrors the pay-in machinery, which is why the book keeps its treatment brief.
 
 **Q: Why is retrying a payment safe in this design?**

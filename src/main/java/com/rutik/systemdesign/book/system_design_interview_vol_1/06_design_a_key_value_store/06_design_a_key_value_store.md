@@ -1241,6 +1241,8 @@ The read checks the memtable first and returns immediately on a hit; on a miss i
 Because with virtual nodes the next N ring positions can map to fewer than N distinct physical servers, so choosing unique servers is what guarantees N real copies. Several virtual nodes may belong to the same machine, and if two replicas of a key landed on the same box, a single machine failure would lose two copies at once. Walking clockwise while skipping positions whose physical server is already chosen ensures the N replicas sit on N different machines, ideally in different data centers.
 
 **Q: What are the three consistency models, and which one do Dynamo and Cassandra choose?**
+**Short:** Strong returns the latest write, weak may return a stale value, and eventual is the weak form where replicas converge — the model Dynamo and Cassandra choose.
+
 Strong consistency returns the most recent write on every read, weak consistency may return a stale value, and eventual consistency is a weak form where replicas converge given enough time — the model Dynamo and Cassandra choose. Strong consistency requires blocking replicas until they agree, which hurts availability, so a highly available store instead accepts temporary divergence. Eventual consistency lets inconsistent values enter and pushes reconciliation to the client, which is why vector clocks and anti-entropy are part of the design.
 
 **Q: How does consistent hashing provide heterogeneity across differently-sized servers?**
@@ -1250,12 +1252,16 @@ By assigning each server a number of virtual nodes proportional to its capacity,
 Because both optimizations only delay a fixed capacity ceiling and leave the server as a single point of failure. Compression trades CPU for RAM and hot/cold tiering keeps the working set in memory with the tail on disk, but data and traffic keep growing past what one machine can hold or serve. The only way to store big data with high availability is to distribute it across many servers, which is what motivates the entire distributed design.
 
 **Q: What are the two downsides of vector clocks, and how serious is the second in practice?**
+**Short:** They push conflict resolution onto the client and their [server, version] list grows unbounded, needing truncation — but Amazon reported never hitting the truncation problem in production.
+
 Vector clocks add client-side conflict-resolution complexity and their [server, version] list grows unbounded, requiring truncation that can blur ancestry — but Amazon reported never hitting the truncation problem in production. Clients must implement the merge logic for siblings, and every server that touches an item adds a pair, so a threshold drops the oldest pairs when the clock grows too long. Dropping pairs can make descendant relationships inaccurate, yet the Dynamo paper notes this never caused issues in practice, so a truncation threshold is a safe default.
 
 **Q: Why must data replicas be placed across multiple data centers rather than within one?**
 Because nodes in the same data center tend to fail together from power outages, network failures, or natural disasters, so co-locating all N replicas makes the high-availability promise hollow. If every copy sits in one facility, a single power loss or fire takes down all of them at once. Spreading replicas across data centers connected by high-speed networks means users still reach their data through another data center when one goes completely offline, at the cost of some cross-DC latency.
 
 **Q: What responsibilities does every node carry in this decentralized design, and why does that matter?**
+**Short:** Every node runs the same duties — client API, vector-clock reconciliation, gossip failure detection, hinted handoff, Merkle-tree anti-entropy, storage — so there is no single point of failure.
+
 Every node runs the client API, vector-clock reconciliation, gossip failure detection, hinted handoff, Merkle-tree anti-entropy, and the storage engine — identical duties everywhere, so there is no single point of failure. Because the system is fully decentralized, any node can act as the coordinator/proxy for a request, and adding or removing nodes can be automatic. Uniform responsibilities are exactly what removes the master bottleneck and lets the cluster tolerate the loss of any individual node.
 
 ---

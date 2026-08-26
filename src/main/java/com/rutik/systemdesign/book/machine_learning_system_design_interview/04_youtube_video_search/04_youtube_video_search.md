@@ -928,15 +928,18 @@ Because the labeled data has exactly one relevant video per query, and MRR (mean
 Frame-level encoding samples a few frames, embeds each with a cheap 2D ViT, and aggregates (mean-pool) — far cheaper than a video-level 3D conv or video transformer, which is decisive at 1 billion videos. The tradeoff is that frame-level treats the video as a bag of frames and loses temporal dynamics, so it can't distinguish "sitting down" from "standing up" or handle motion-centric queries as well. The book accepts this because search relevance is mostly about what visually appears in the video, and the indexing-cost savings dominate the modest loss of temporal signal.
 
 **Q: Why run both an embedding-based visual search and an inverted-index text search instead of just one?**
+**Short:** Embeddings catch semantic/visual matches while an inverted index nails exact tokens neither covers alone.
 Because each covers the other's blind spot: the visual embedding path captures semantics and visual content (finding a "puppies in snow" clip titled "Winter 2019"), while the inverted index nails exact tokens, named entities, and model numbers that embeddings blur into nearby regions. An embedding-only system misses rare exact matches; a text-only system misses visually-relevant but poorly-titled videos. Fusing the two candidate lists reaches the quality neither achieves alone, which is the chapter's central architectural claim.
 
 **Q: How does contrastive training with in-batch negatives actually work?**
+**Short:** Each batch's N-1 other pairs serve as free negatives, so an N x N similarity matrix trains via softmax cross-entropy.
 For a batch of N annotated `<video, query>` pairs, you encode all N queries and all N videos, compute the N×N matrix of dot products (scaled by temperature), and treat the diagonal as positives and every off-diagonal cell as a negative. Softmax is applied along each row and column and cross-entropy pushes the diagonal probabilities toward 1, pulling matched pairs together and pushing mismatched pairs apart. The key efficiency: each example's N−1 other batch members serve as free negatives, so a batch of N yields N positives and N·(N−1) negatives at no extra encoding cost — which is why large batches (CLIP used ~32k) make contrastive training stronger.
 
 **Q: Why not use BoW or TF-IDF as the text encoder for the visual-search path?**
 Because BoW and TF-IDF carry no semantics — "puppy" and "dog" are as far apart as "puppy" and "invoice" — so they cannot align a query with a semantically-matching video in a shared space. They also produce huge sparse vectors, ignore word order, and handle out-of-vocabulary words poorly. Statistical methods are fine for the inverted-index *text* path (exact lexical matching), but the embedding path needs a semantic, ideally context-aware, encoder like a transformer.
 
 **Q: Why pick a transformer over word2vec or a plain embedding layer for the text encoder?**
+**Short:** A transformer gives context-aware embeddings, so a word's vector shifts with meaning unlike word2vec's static one.
 Because a transformer produces context-aware embeddings via self-attention, so "bank" in "river bank" and "bank account" get different vectors — whereas word2vec and a lookup embedding layer give one static vector per word regardless of context. word2vec (CBOW/skip-gram) already captures semantics and analogies, and an embedding layer is trainable, but neither disambiguates by context. For search queries where meaning depends on word combinations, the transformer's contextual representation is worth the extra cost.
 
 **Q: How can a text query and a video be compared with a single dot product when they are different modalities?**
@@ -946,6 +949,7 @@ Because both encoders are trained to map their inputs into the same shared embed
 Text normalization lowercases, strips or folds punctuation and accents, and trims/collapses whitespace so trivially-different strings match. Unicode NFKC normalization additionally collapses compatibility variants — full-width characters, ligatures, non-breaking spaces — into a single canonical byte form, so visually-identical characters aren't treated as distinct tokens. Without it, "Ａ" (full-width) and "A" become different vocabulary entries, fragmenting the index and the embeddings; NFKC guarantees one representation per visible character.
 
 **Q: What are the tradeoffs between word, subword, and character tokenization?**
+**Short:** Word-level tokenization is simple but suffers a huge vocabulary and unseen-word OOV failures.
 Word-level tokenization is simple but has a huge vocabulary and maps unseen words to `<UNK>` (OOV problem); character-level has a tiny vocabulary and never hits OOV but produces very long sequences with weak per-token semantics. Subword tokenization (BPE/WordPiece/SentencePiece) is the middle ground transformers use: a bounded ~30k–50k vocabulary where unseen words decompose into known pieces, so there is no OOV and sequences stay short. It is the default for the transformer text encoder chosen here.
 
 **Q: When would you map tokens to IDs with a hashing trick instead of a lookup table?**
@@ -955,9 +959,11 @@ Use the hashing trick when the token space is enormous or streaming and you can'
 Because an inverted index gives exact lexical matching that embeddings fundamentally can't: it never blurs a rare token, named entity, model number, or exact phrase into a neighbor, and it needs no training. Learned encoders compress rare tokens into shared regions and lose their precise identity, so tail queries with specific terms fail on the embedding path. The inverted index is cheap, interpretable, and immediately covers new metadata, making it the perfect complement to the semantic path.
 
 **Q: How do you fuse the visual and text candidate lists given their scores are on different scales?**
+**Short:** Normalize each path's scores then weight-sum them, or use reciprocal rank fusion, which combines by rank not raw score.
 You either normalize each path's scores before combining (e.g. min-max or z-score per path, then a weighted sum `α·visual + (1−α)·text`) or use reciprocal rank fusion (RRF), which combines results by rank position and ignores raw scores entirely. RRF sidesteps the core problem that cosine/dot-product similarity and BM25 live on incomparable scales, so a naive sum would let whichever path has the larger numeric range dominate. The fusion weight α is tuned on online metrics via A/B testing.
 
 **Q: What does the re-ranking service do after fusion?**
+**Short:** Re-ranking boosts popularity/freshness, enforces region rules, filters unsafe content, and removes near-duplicates.
 It applies business and integrity logic that pure relevance retrieval ignores: boosting for popularity and freshness, enforcing region restrictions, filtering policy-violating or unsafe content, removing near-duplicates, and optionally running a heavier cross-attention re-ranker over the top few hundred candidates. Retrieval optimizes relevance; re-ranking makes the final list safe, fresh, diverse, and compliant. Separating the stages keeps the expensive re-ranker off the billion-scale retrieval path.
 
 **Q: How does the indexing pipeline handle a newly uploaded video, and is there a cold-start problem?**
@@ -979,9 +985,11 @@ Because a video has far too many frames to encode all of them — cost scales li
 Yes — mining clicks and watches gives abundant, free `<query, video>` positive pairs without paying annotators, which is attractive at scale. The catch is noise: click logs carry position bias (users click what's shown high), clickbait, and presentation effects, so unless you de-bias them the model learns to rank thumbnails and titles rather than true relevance. A common practice is to train on interactions but keep a clean human-labeled set for evaluation.
 
 **Q: How would query understanding (spell-check, NER, intent) improve retrieval?**
+**Short:** Query understanding fixes spelling, entities, and intent upstream, before the query reaches either retriever.
 Query understanding sits upstream of both retrievers and fixes the query before it hits them: spell correction turns "puppys" into "puppies" so the inverted index matches, named-entity recognition identifies "Taylor Swift" as one entity to match precisely, and intent classification routes navigational vs informational queries. These steps raise recall and precision on both paths without touching the encoders, and are especially valuable for the exact-match text path where a single wrong token means zero results.
 
 **Q: What is multi-stage ranking and why adopt it here?**
+**Short:** Multi-stage ranking retrieves cheaply at scale, then reranks only the top few hundred with a heavier model.
 Multi-stage ranking uses a cheap light retrieval stage (ANN plus the inverted index) to fetch thousands of candidates fast, then a heavy re-ranker (e.g. cross-attention scoring query and video features jointly) that runs only on the top few hundred. It's the retrieve-then-rerank pattern: a big cheap net for coverage, a small expensive model for precision, so you get high-quality final ordering without paying the heavy model's cost across the whole corpus. It's the standard way to scale quality at billion-item retrieval.
 
 ---

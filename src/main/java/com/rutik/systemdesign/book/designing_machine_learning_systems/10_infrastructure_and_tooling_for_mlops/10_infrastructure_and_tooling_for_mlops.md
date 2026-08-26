@@ -988,27 +988,33 @@ clear advantage justify building.
 ## Interview Questions
 
 **Q: What are the three problems a feature store may solve, and which one most requires a feature store?**
+**Short:** A feature store may solve management, computation, or consistency — consistency needs it most, to stop train/serve skew.
 A feature store solves up to three distinct problems: feature management (a catalog to discover and share features across teams), feature computation/materialization (compute once and reuse, in both batch and streaming), and feature consistency (one definition compiled for both offline and online paths). Consistency is the one that most requires a feature store, because it's the only clean fix for train/serve skew — where training and serving compute the same feature with different code and drift apart, silently degrading the model. "Feature store" is an overloaded term, so the first question to ask is which of these three a given product actually does.
 
 **Q: What is the difference between a scheduler and an orchestrator?**
 A scheduler is concerned with jobs and an orchestrator is concerned with resources. A scheduler (SLURM, Borg, or a workflow tool like Airflow) takes a DAG of jobs with dependencies, priorities, and preemption, and decides when and where to run them on *existing* machines. An orchestrator (Kubernetes) provisions, scales, and heals the machines themselves. They're complementary and used together: the orchestrator maintains the cluster, and the scheduler places jobs onto it — the scheduler decides what runs next, the orchestrator guarantees there's a machine for it.
 
 **Q: What is train/serve skew and how does a feature store prevent it?**
+**Short:** Skew is drift between two code paths computing the same feature; a feature store fixes it with one shared definition.
 Train/serve skew is when the feature values a model sees in production differ from those it saw in training, because the features were computed by two different code paths — batch Python/Spark for training, a low-latency online service for serving — that drift apart. The model then serves on a distribution it never really trained on and silently degrades. A feature store prevents it by holding one feature definition and compiling it for both the offline (batch, high-throughput) and online (low-latency) paths, guaranteeing the values match.
 
 **Q: Why is real GPU utilization often only about 30% of peak FLOPS?**
+**Short:** Memory bandwidth, not FLOPS, is usually the bottleneck, so real GPU utilization often lands near 30% of peak.
 Because FLOPS measures how fast the cores can compute, but a job also has to move data into the compute unit's memory, and memory bandwidth often can't feed the cores fast enough — so the expensive GPU sits idle waiting for data. A utilization of 0.3 (actual FLOPS ÷ peak FLOPS) is not uncommon and often acceptable. The practical lever is to increase batch size so more computation happens per data-load, raising utilization until you run out of memory. Never budget capacity from peak FLOPS — always from realized FLOPS.
 
 **Q: When does cloud stop being cheaper than owning your own data center?**
 Cloud is cheaper at small and medium scale but becomes more expensive than owned hardware once your load is large and steady, because pay-per-use pricing scales with usage while owned hardware's cost is mostly fixed. Surveys show companies spend over 50% of cost of revenue on cloud, and a16z's "Trillion-Dollar Paradox" argues large companies can recover huge margin by repatriating. The canonical example is Dropbox saving roughly $75 million over two years by moving most workloads off AWS. The middle path: cloud for burst, owned hardware for steady-state.
 
 **Q: What are Airflow's main weaknesses, and how do Prefect and Argo address them?**
+**Short:** Airflow's DAGs are static; Prefect adds dynamic parametrized workflows, and Argo runs container-per-step on Kubernetes.
 Airflow pioneered config-as-code with rich operators, but its DAGs are monolithic, not natively parametrized, and static — the graph shape is fixed at definition time, so you can't build workflows whose steps depend on runtime input. Prefect addresses this with parametrized and dynamic workflows (the graph can depend on the input) and pitches "negative engineering" — handling retries and failure-guarding for you. Argo takes a different angle: it's Kubernetes-native with container-per-step isolation, though its workflows are verbose YAML and it only runs on K8s.
 
 **Q: A model store should track more than the model weights — what artifacts does it need to store?**
+**Short:** Eight artifacts: definition, weights, code, dependencies, training data lineage, config, experiment artifacts, and owners.
 To debug a production model you need eight artifacts, not just the weights: the model definition (architecture, loss), the parameters (weights), the featurize and predict functions (the code that turns raw input into a prediction), the dependencies (libraries and versions), the training data (lineage), the model-generation code and experiment config (hyperparameters, splits, features), the experiment artifacts (graphs, metrics), and tags/owners. Most companies store only the definition and parameters, which is not enough to reproduce or debug a prediction. MLflow is the closest OSS model store and still has gaps.
 
 **Q: What are the four layers of ML infrastructure?**
+**Short:** Bottom-up: storage and compute, resource management, the ML platform, and the development environment.
 The four layers, bottom-up, are storage and compute (the physical foundation — data storage plus CPU/GPU/TPU), resource management (deciding when and where jobs run — cron, schedulers, orchestrators, workflow tools), the ML platform (shared tooling built once for all models — model deployment, model store, feature store), and the development environment (where engineers actually work — IDEs, notebooks, versioning, containers). Storage & compute is the foundation everything rests on; the development environment is the top layer and, per Huyen, the highest-ROI one to invest in.
 
 **Q: Why does a single ML pipeline often need multiple containers?**
@@ -1021,9 +1027,11 @@ Because it's where ML engineers spend the majority of their time — writing cod
 Dev-to-prod parity means developing on the same environment — ideally the same instance type — that your model will run on in production, which eliminates a whole class of "worked in dev, broke in prod" bugs. Cloud development environments (GitHub Codespaces-style, AWS Cloud9) host the dev environment in the cloud, accessed from a browser or SSH, so every engineer gets the same standardized container and can be placed on the same hardware as production. They're also more secure, since source code never lives on a laptop that can be lost or stolen.
 
 **Q: What does the scale of a company imply about its ML infrastructure needs?**
+**Short:** Huyen sorts companies into one-model shops, the reasonable-scale majority, and the FAANG extreme, each needing different infra.
 Infrastructure needs differ wildly by scale, and Huyen sorts companies into three regimes: one-model shops barely need specialized infra (a notebook and a cloud VM suffice), the reasonable-scale majority (tens to hundreds of models, terabytes a day, like Shopify) is where standard off-the-shelf tooling pays off enormously, and the Google/Tesla extreme has needs so specialized it builds custom infra. The trap is cargo-culting the extreme — building FAANG-scale infrastructure for a company with three models. Match investment to your regime.
 
 **Q: How does cron differ from a scheduler?**
+**Short:** cron only knows fixed time; a scheduler understands job DAGs, dependencies, retries, and resource-aware placement.
 cron only knows time — it runs a script at a fixed schedule and reports success or failure, with no concept of dependencies, so it can't express "run B only after A succeeds." A scheduler understands job DAGs: it queues jobs, runs them in dependency order, retries failures, fires on time- or event-based triggers, and handles priorities and preemption. A scheduler is also resource-aware, placing jobs to maximize utilization. Once your jobs depend on each other, you've outgrown cron.
 
 **Q: What is Metaflow's "infrastructure abstraction" and how do its decorators work?**
@@ -1033,9 +1041,11 @@ Infrastructure abstraction means writing a workflow once and running it in both 
 Negative engineering is the observation that data engineers spend most of their time not on happy-path business logic but on guarding against failure — retries, timeouts, error handling, restarts. Prefect uses this as its marketing pitch: its job is to make negative engineering disappear so you write only the positive logic. It pairs this with parametrized and dynamic workflows that address Airflow's static-DAG limitation.
 
 **Q: Why is storage considered a largely solved problem while compute is not?**
+**Short:** Managed storage is cheap and commoditized, while compute still demands hard hardware, FLOPS, and utilization choices.
 Because data storage has become so cheap and commoditized that most companies just pay for managed storage (S3, Snowflake, BigQuery) and stop thinking about it — the genuinely hard data problems (formats, data models, structure) were covered in Chapter 3 and moved up the stack. Compute is the interesting layer: it involves choosing CPU/GPU/TPU flavors, reasoning about memory and FLOPS, dealing with utilization far below peak, and making the cloud-vs-owned decision that flips as you scale.
 
 **Q: What questions should you ask a model-deployment vendor, and should you build your own serving?**
+**Short:** Ask if it supports both online and batch prediction; Huyen advises buying, not building, your own serving.
 The most important capability question is whether the tool supports both online (request/response) and batch (scheduled bulk scoring) prediction, since most real systems need both and many tools do one well and the other poorly. Huyen's lean is: don't build your own serving unless you genuinely have to, because deployment is a mature, commoditized part of the stack, and it's easy to build a serving demo but very hard to build one that's reliable, observable, autoscaling, and handles both modes. Buy it (SageMaker, Vertex, Seldon, Ray Serve).
 
 **Q: What is the build-vs-buy framework for ML infrastructure?**
@@ -1045,9 +1055,11 @@ Build what's core to your competitive advantage (you want control where your edg
 Because Git versions code cleanly but chokes on large binary data and model weights, and while DVC exists to version data and models on top of Git, the tooling is immature and no approach is as clean as Git-for-code. Experiment-tracking tools (Weights & Biases, MLflow, Comet) partly compensate by recording the config, hyperparameters, metrics, and artifacts that produced each model — a form of versioning — but full reproducibility of data plus model plus code remains one of the hard, unsolved problems of the field.
 
 **Q: Why do companies eventually build a dedicated ML platform team?**
+**Short:** Every new ML app rebuilds the same deployment, storage, and feature infrastructure, so companies consolidate it into one team.
 Because as a company builds its second, third, and tenth ML application, each team keeps rebuilding the same supporting infrastructure — a way to deploy models, a place to store them, a way to manage features — which is obviously wasteful. At some point they consolidate by spinning up a shared ML platform team that builds these components once for everyone: model deployment, model store, and feature store. This is the same convergence that motivates buying mature platforms rather than every team rolling its own.
 
 **Q: What is the "multicloud is often accidental" observation?**
+**Short:** Multicloud usually accrues by accident, from mergers and disparate team choices, not as a deliberate lock-in-avoidance strategy.
 Teams describe multicloud (using AWS, GCP, and Azure together) as a deliberate strategy to avoid vendor lock-in and negotiate better prices, but in reality it usually accrues accidentally — from mergers, from different teams picking different providers, from a data-heavy workload on one cloud and an ML tool on another. And once you're multicloud, the theoretical leverage rarely materializes because moving data and workloads between clouds is painful and expensive (egress fees, incompatible services).
 
 **Q: How do you benchmark compute hardware given that FLOPS is unreliable?**

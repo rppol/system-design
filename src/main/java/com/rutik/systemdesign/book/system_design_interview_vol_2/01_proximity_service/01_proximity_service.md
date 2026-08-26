@@ -1272,6 +1272,8 @@ Because the index is small enough to fit on a single node, so replication scales
 Because business density varies by orders of magnitude, so no single cell size works everywhere. A downtown Manhattan cell might hold tens of thousands of businesses (too many to scan) while a desert or ocean cell holds zero (wasted, and forces sparse-area queries to fan out over many empty cells). The fix is an index that adapts resolution to density — geohash chooses precision per query, and quadtree splits deeper only where businesses are dense.
 
 **Q: Walk through the end-to-end search request flow.**
+**Short:** The location service maps radius to geohash precision, queries the 9 cells, then filters and sorts by exact distance.
+
 The location service maps the radius to a geohash precision, computes the user's geohash plus its 8 neighbors, looks up business ids for the 9 cells, hydrates details, then filters by exact distance, sorts, and paginates. It first checks Redis (geohash→id lists) and falls back to a read replica on a cache miss; it hydrates each candidate's name/address/rating from a business-object cache. The geohash cells are only a coarse candidate filter, so the final exact-distance filter and distance sort are essential before returning a page plus cursor.
 
 **Q: Why is the geohash 9-cell result only a candidate set that needs a final distance filter?**
@@ -1293,6 +1295,8 @@ Because there are far more searches than business edits — 5,000 search QPS ver
 Because those are the top-level halving lines, so two physically adjacent points on opposite sides fall into cells whose geohashes differ in the very first character and share nothing. Ordinary cell edges are handled by the 8-neighbor query, and the neighbor algorithm also accounts for these wrap-arounds, but it means proximity in geohash-string space is only an approximation of physical proximity. You should rely on the neighbor computation rather than a naive string-prefix comparison.
 
 **Q: Why split the system into a separate location service and business service?**
+**Short:** Because search and CRUD workloads scale on completely different axes, splitting lets each scale independently.
+
 Because their workloads scale on completely different axes — the location service is stateless, read-only, and handles ~5,000 QPS of search, while the business service handles a trickle of owner writes plus single-business reads. Splitting them lets you add location-service replicas for search traffic without touching the write path, and scale the write path independently. The load balancer routes by URL path, search to one service and CRUD to the other.
 
 **Q: How are the two database tables scaled differently, and why?**

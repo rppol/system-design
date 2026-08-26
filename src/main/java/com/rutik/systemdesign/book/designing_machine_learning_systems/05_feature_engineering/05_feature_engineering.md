@@ -1146,6 +1146,7 @@ matters (IS_RUSH_HOUR vs raw HOUR).
 Data leakage is when a feature carries information about the label that won't be available at prediction time, so the model relies on a signal that vanishes in production. Offline it scores suspiciously high because the leaked feature effectively encodes the answer; in production the leak is gone and accuracy collapses. It's insidious because standard evaluation *rewards* the leak — the better the leak, the better your test score — so nothing flags it. You hunt it with correlation audits, ablation, and skepticism toward any too-good new feature.
 
 **Q: What are the six common causes of data leakage in Huyen's chapter?**
+**Short:** Bad time splits, whole-dataset scaling or imputation, train/test duplicates, group leakage, and generation-process leaks.
 They are: (1) splitting time-correlated data randomly instead of by time, (2) computing scaling/statistics over the whole dataset before splitting, (3) imputing missing values with whole-dataset statistics, (4) duplicates spanning train and test, (5) group leakage where the same group's records straddle the split, and (6) leakage from the data-generation process. The first three are process-order mistakes (split before computing anything), the middle two are split-boundary mistakes, and the last needs domain knowledge to catch.
 
 **Q: Why must you split time-correlated data by time instead of randomly?**
@@ -1200,12 +1201,15 @@ It's worth it with limited data or when interpretability (especially for trees) 
 Transformers process all tokens in parallel through self-attention and have no inherent notion of order, so "dog bites man" and "man bites dog" look identical without position added as a feature. Learned positional embeddings treat each position index as a category with its own trainable vector — flexible but capped at the trained length. Fixed sinusoidal (Fourier) features compute position vectors from sines and cosines at varying frequencies, need no training, extend beyond the trained length, and generalize to continuous coordinate inputs like spatial positions.
 
 **Q: What log transform and scaling options exist, and which distributions suit each?**
+**Short:** Min-max, standardization, and log transforms each suit a different distribution, fit on the training set only.
 Min-max scaling rescales to a fixed range like [0,1] (Huyen notes [-1,1] often works better); standardization gives zero mean and unit variance and suits roughly normal features; and a log transform (`log(x)` or `log(1+x)`) tames right-skewed features like income, counts, and prices by pulling in the long tail. Log transform is a high-leverage, under-used move but not a silver bullet — validate it. All scaling statistics must be fit on the training set only and re-derived periodically as distributions drift.
 
 **Q: How do you detect data leakage before it ships?**
+**Short:** Check label correlation, ablate suspicious features, verify serve-time availability, and never peek at the test set.
 Audit each feature's correlation or mutual information with the label and treat an unusually high value as suspicious rather than a trophy; run per-feature ablation to see if one feature's removal collapses performance; scrutinize every new feature that dramatically improves the model, verifying it will truly exist with the same value at serving time; and never peek at the test set — lock it away for final evaluation only. Any modeling decision made by looking at test performance leaks information and corrupts your honest estimate.
 
 **Q: Should you oversample before or after splitting the data, and why?**
+**Short:** Always oversample after splitting, so duplicated minority examples never leak from train into test.
 After splitting — always. Oversampling before the split copies minority examples that can then land in both train and test, so the model memorizes examples it will also be tested on, inflating the score. Doing it after the split (on the training partition only) keeps the test set clean and honest. This is a specific case of the general leakage discipline: split first, then apply any transformation, imputation, scaling, or resampling using training data alone.
 
 ---

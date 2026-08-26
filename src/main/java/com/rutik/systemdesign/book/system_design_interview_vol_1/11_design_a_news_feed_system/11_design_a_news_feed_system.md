@@ -925,6 +925,8 @@ A user sends `GET /v1/me/feed`, the load balancer routes it to a web server, and
 To decouple the potentially slow fan-out from the user's publish request so publishing returns immediately. The fanout service puts the filtered friend list plus the post id on the queue, and a pool of fanout workers consumes it asynchronously, writing feed IDs into each recipient's news feed cache. This absorbs the fan-out spike and applies back-pressure through the queue instead of making the poster wait for thousands of cache writes.
 
 **Q: What are the five cache layers in a news feed system and what does each store?**
+**Short:** News feed (feed IDs), content (post data plus a hot tier), social graph (relationships), action (likes and replies), and counters (like, reply, follower, following).
+
 News feed stores the IDs of feeds (the per-user feed list); content stores post data, with very popular posts in a separate hot cache; social graph stores user relationship data; action stores whether a user liked or replied to a post; and counters store like, reply, follower, and following counts. Each layer answers one question fast so a feed load hits cache rather than the primary database, and the hot content tier absorbs viral-post read spikes.
 
 **Q: How does the design keep the news feed cache from growing without bound?**
@@ -940,6 +942,8 @@ Media is stored in and served from a CDN rather than streamed through the applic
 Because a stateless web tier can be scaled horizontally by adding or removing servers freely, with any request routable to any server. Identity rides in the `auth_token` and rate-limit counters live in a shared store like Redis, so no session state is pinned to a specific server. This means a server can die without dropping sessions and the load balancer can spread traffic evenly, which is the foundation for the horizontal scaling discussed in the wrap-up.
 
 **Q: What are the three downstream services in the publish flow and what does each do?**
+**Short:** The post service persists the post, the fanout service pushes it into friends' news feed caches, and the notification service tells friends new content is available.
+
 The post service persists the post to the post database and post cache; the fanout service pushes the new post into the news feed caches of the poster's friends; and the notification service informs friends that new content is available. Separating persistence from propagation from alerting means a slow fan-out never blocks the post from being saved, and each service can scale and fail independently.
 
 **Q: What is the concrete tradeoff that makes pure fanout-on-read (pull) undesirable as the only strategy?**
@@ -949,6 +953,8 @@ Its fatal weakness is slow reads, because the feed is not pre-computed and every
 Each fanout worker consumes the friend list and post id from the message queue and, for every recipient friend, appends a feed entry to that friend's news feed cache as a `<post_id, user_id>` mapping. It writes the id of the post plus the poster's user id, not the post content itself. This keeps the write tiny and lets the read path later hydrate the id into a full post and author object from the content and user caches.
 
 **Q: Which scaling and resilience levers does the wrap-up recommend?**
+**Short:** Scale the database (vertical vs horizontal, SQL vs NoSQL, replication, sharding), keep the web tier stateless, cache heavily, run multiple data centers, decouple with queues, and monitor.
+
 Scale the database with vertical vs horizontal scaling, SQL vs NoSQL choices, replication, and sharding; keep the web tier stateless; cache as much as possible; support multiple data centers; loosely couple components with message queues; and monitor key metrics. The two metrics called out are QPS during peak hours, to know when to add capacity, and feed retrieval latency, the user-facing speed of opening the app.
 
 **Q: Why sort the feed reverse-chronologically rather than by relevance, in this design?**

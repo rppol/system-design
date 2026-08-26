@@ -1034,21 +1034,25 @@ Because there is no clean single offline metric for a multi-objective ranker —
 Hide, block, and report are negative reactions signaling the post was unwanted, and the model has an explicit hide head whose predicted probability enters the engagement score with a negative weight (e.g. −20). This actively pushes likely-to-be-hidden posts down rather than merely ranking them lower on positives. Omitting the negative head is a pitfall: without it, annoying or harmful posts are never demoted, only less-positively ranked, so they still surface.
 
 **Q: How is the total training loss constructed for the multi-task network?**
+**Short:** The loss sums binary cross-entropy per reaction head plus a dwell-time regression, each weighted by lambda.
 The total loss is a weighted sum of per-head losses: binary cross-entropy for each reaction head (click, like, comment, share, hide, skip) plus a regression loss (MAE, robust to the heavy dwell-time tail, or MSE) for the dwell-time head, each multiplied by its training-time loss weight λ. The loss weights balance the very different base rates so one abundant head doesn't dominate the shared bottom's gradients. These λ are separate from the serving score weights w.
 
 **Q: What is a training example for this model, and where do the labels come from?**
 One training example is a single impression — a <user, post> pair that was actually shown — labeled with each reaction the user did or didn't make, plus the recorded dwell time and skip flag. Labels are logged naturally from the interaction stream, so no hand labeling is needed: a shown post that got a like is a positive for the like head and a negative for the others. Splitting must be by time (older to train, newer to test) to mimic serving and avoid leaking future engagement.
 
 **Q: What are the three serving stages of the feed pipeline?**
+**Short:** The feed pipeline runs retrieval, then ranking with the multi-task model, then rule-based re-ranking.
 Retrieval, ranking, and re-ranking. Retrieval cheaply gathers unseen fresh and older posts from the user's network with simple filters, cutting the firehose to a few hundred–thousand candidates without running the heavy model. Ranking hydrates features and runs the multi-task model once per candidate to compute the weighted engagement score and sort. Re-ranking then applies rules the raw score can't express — diversity (don't stack the same author/topic), integrity filters, ad adjacency, and dedup — to produce the final feed within ~200 ms.
 
 **Q: Why can't you just rank the feed reverse-chronologically or by current popularity?**
+**Short:** Reverse-chronological ignores relevance and popularity-only creates a rich-get-richer feedback loop.
 Reverse-chronological ignores relevance — a mediocre new post outranks an excellent older one the user missed — and popularity-only creates a rich-get-richer feedback loop where viral posts crowd out everything else and personalization vanishes. The engagement-score ranker instead predicts, per user, how much this specific person will engage with each post using affinity and content signals, so a post from a close friend or on a topic the user loves can beat a fresher or more globally popular one.
 
 **Q: What is position bias, and why does it corrupt the training labels here?**
 Position bias is that a post shown at the top of the feed earns more engagement because it was at the top, not because it is better. Since the training labels are logged from the previous ranker's output, they are biased toward whatever that ranker already placed high, so a naive model just learns to reproduce the old ranking. You mitigate it by logging the serving position and correcting for it (e.g. inverse-propensity weighting), otherwise the model can't distinguish genuinely good posts from merely well-placed ones.
 
 **Q: Why is the offline/online gap especially wide for feed ranking?**
+**Short:** Feed ranking is a feedback loop: training data comes from the very ranker being replaced, biasing offline replay.
 Because feed ranking is a feedback-loop system: the model is trained on data that the previous model's ranking generated, so offline replay flatters whatever policy created the logs and can't observe how a new ranker would reshape traffic. Add position bias in the labels, and offline metrics become unreliable proxies. Only an online A/B test measures the new ranker on the traffic it actually shapes, which is why the chapter validates ranking changes online with time spent, reaction rates, hide rate, and retention.
 
 **Q: How do you keep the system optimizing meaningful engagement instead of addictive clickbait?**
@@ -1058,15 +1062,19 @@ Weight high-effort positive reactions (comments, shares) far above clicks, keep 
 The skip head is a binary classifier predicting the probability the user scrolls past a post quickly without engaging (a very short dwell / immediate scroll-past). For passive users whose explicit reactions are all near zero, a high skip probability is the negative signal that says "this silent reader will bounce off this post," letting the ranker push it down. Combined with the dwell-time head, skip supplies the dense implicit signal that separates otherwise-tied posts for silent readers.
 
 **Q: Why is a neural network preferred over GBDT for the shared bottom here?**
+**Short:** Dense embeddings and multi-task sharing favor a neural net; frequent continual updates favor it too over GBDT.
 Because the inputs are dominated by dense embeddings — pretrained text and image encoders plus high-cardinality ID embeddings — which trees handle poorly, and multi-task sharing of one representation across many heads is natural in a neural net but awkward in GBDT. The platform also needs frequent continual/incremental updates as engagement drifts, which fine-tuning a NN supports better than retraining a forest. The tradeoff mirrors Ch 7/8's GBDT-vs-NN discussion, resolved toward NN by the embedding-heavy, multi-task, continual-learning requirements.
 
 **Q: How does the system handle a brand-new user with no interaction history (cold start)?**
+**Short:** New users fall back to demographics, trending posts among similar users, and exploration traffic.
 It falls back to signals that don't require personal history: demographics and context, popular or trending posts among similar users, and exploration traffic to gather engagement data quickly, while the user–author affinity features stay weak until interactions accrue. As the user reacts and dwells, affinity and history features fill in and personalization takes over. The same exploration/exploitation lever also helps surface new authors and posts that lack accrued signal.
 
 **Q: Why must features be computed with point-in-time correctness, and what breaks otherwise?**
+**Short:** Features like affinity and post age must reflect state as of the impression or future engagement leaks into training.
 Because features like user–author affinity, reaction-counts-so-far, and post age must reflect state as of the impression, not later — using a user's future engagement with an author to predict a past impression leaks the label into the features. Offline metrics look great and then collapse in production because the leaked future signal isn't available at serving time. Enforcing point-in-time feature computation and time-based splits avoids the leak, the same discipline the event-recommendation chapter stresses.
 
 **Q: Why calibrate each head before combining probabilities into the score?**
+**Short:** Calibrate each head so combining differently-scaled probabilities into one weighted score isn't distorted.
 Because the engagement score multiplies each head's probability by a score weight and sums them, so if heads are miscalibrated by different amounts, the weighted sum is distorted and the ranking is wrong even when each head ranks its own reaction well. Calibrating each head (e.g. Platt scaling or isotonic regression) makes the probabilities comparable across heads so the business weights combine them meaningfully. Calibration matters most when the weights are large and the base rates differ sharply across heads.
 
 ---

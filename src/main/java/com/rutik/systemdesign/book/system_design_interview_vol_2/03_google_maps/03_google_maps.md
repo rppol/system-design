@@ -1020,6 +1020,8 @@ Batching (buffering GPS points on the client and uploading every ~15 s) is the b
 A wide-column, write-optimized store like Cassandra, partitioned by `user_id` and clustered by timestamp. The workload is millions of append-only writes per second, rarely read back per user, which is exactly Cassandra's sweet spot: LSM-tree writes with no read-before-write and linear horizontal scaling. A relational database with synchronous per-point inserts would melt under the write volume.
 
 **Q: Beyond showing the blue dot, what is the location stream used for?**
+**Short:** The Kafka-published location stream also feeds live traffic aggregation, road-change detection, and personalization.
+
 The location stream is published to Kafka and fans out to several consumers: live traffic (aggregating overlapping GPS traces into per-segment speeds), new-road and road-change detection (consistent traces where no road is mapped), and personalization (a user's history informs results). So the telemetry is the sensor network that keeps the map and traffic model current, not just the source of one user's position.
 
 **Q: How does adaptive ETA / rerouting avoid recomputing every user's route on every traffic change?**
@@ -1035,18 +1037,26 @@ Web Mercator is the industry-standard map projection variant used by Google Maps
 Geocoding converts an address to a coordinate ("1600 Amphitheatre Parkway" → lat/lng); reverse geocoding converts a coordinate back to the nearest address or place. Interpolation handles addresses with no exact match by estimating the point along a street segment — if a block runs from house #1 to #100 over a known length, #50 is placed about halfway. Geocoding is a read-heavy, latency-sensitive key-value lookup, fronted by a cache like Redis.
 
 **Q: What positioning signals does a device combine, and what does each trade off?**
+**Short:** The client fuses GPS, cell-tower, Wi-Fi, and inertial sensors, each trading accuracy against speed, power, and coverage.
+
 GPS/GNSS trilaterates from satellites for meter-level accuracy outdoors but is slow to acquire, weak indoors, and power-hungry; cell-tower triangulation gives an instant, cheap, coarse fix and a warm-start hint for GPS; Wi-Fi positioning gives good indoor/urban fixes where GPS fails; and inertial sensors (accelerometer, gyroscope, compass) do dead reckoning to smooth the position between fixes and through tunnels. The client fuses these into a stream of `(lat, lng, timestamp)` fixes for the backend.
 
 **Q: What does a client actually fetch to render the map, versus downloading everything?**
+**Short:** The client fetches only the dozen or so tiles covering its current viewport plus a small prefetch ring, not the whole map.
+
 The client computes which tiles cover its current viewport at the current zoom and fetches only those — a phone screen needs only about a dozen tiles at a time plus a small prefetch ring for smooth panning — totaling a few hundred KB, not the petabyte-scale world. Each tile is addressed by `(zoom, x, y)` and is a static, cacheable resource identical for all users, so it comes from the CDN edge.
 
 **Q: What is the accuracy-vs-freshness tradeoff, and where does the design make that call?**
 It is the tension between fresher data (more frequent GPS, faster tile re-render) and the cost in battery, bandwidth, and write load. The design repeatedly picks "fresh enough": location is batched every ~15 s, tiles are re-rendered on a slow offline cadence, and adaptive ETA recomputes only for segments whose traffic actually moved. Maximal freshness everywhere would destroy battery life and overwhelm the write path.
 
 **Q: How does the shortest-path search expand across routing tiles and jump tiers?**
+**Short:** A* or bidirectional Dijkstra loads local tiles on demand, then climbs to coarser arterial and highway tiers for the middle.
+
 The search (A* with a geographic heuristic or bidirectional Dijkstra) starts in the origin's local tile, loads neighbor tiles on demand as the frontier reaches their borders via each tile's stored neighbor references, and never loads tiles the frontier does not touch. When the frontier moves far from origin and destination, it climbs to a coarser tier (arterial, then highway) to cross the long middle cheaply, then descends back to local tiles near the destination. This flood-fill-across-a-grid behavior keeps memory bounded to the tiles actually used.
 
 **Q: What do the updater services do in the navigation system?**
+**Short:** Background updater jobs refresh live traffic speeds and regenerate routing tiles when the road network changes.
+
 They are background jobs that keep the navigation data current: one refreshes the live traffic data (per-segment speeds derived from the location/Kafka stream) that the ETA service consumes, and another regenerates the routing tiles from raw road data when the road network changes. The shortest-path service itself only ever reads serialized routing tiles, never raw road data, so tile regeneration is how new and closed roads eventually reach routing.
 
 ---

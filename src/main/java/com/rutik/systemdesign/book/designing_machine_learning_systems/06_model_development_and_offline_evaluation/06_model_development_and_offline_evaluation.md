@@ -1105,6 +1105,7 @@ systems that feed one model's probability into another corrupt downstream. Measu
 calibration curve and fix it with Platt scaling.
 
 **Q: What is the difference between synchronous and asynchronous SGD, and why does async converge similarly despite staleness?**
+**Short:** Sync SGD waits for the slowest worker; async has no stragglers, and sparse updates make its staleness harmless.
 Synchronous SGD aggregates all workers' gradients in lockstep each step (exact, but the whole step
 waits for the slowest worker — the straggler problem), while asynchronous SGD lets each worker update
 the shared model whenever it finishes (no stragglers, but gradients are computed against stale
@@ -1134,6 +1135,7 @@ XGBoost). Stacking trains several different learners and then a meta-learner tha
 as features and *learns* how to combine them, rather than using a fixed vote or average.
 
 **Q: Why is data versioning harder than code versioning?**
+**Short:** Huge size, meaningless diffs, unresolved checksum granularity, and GDPR deletion all break Git-style versioning.
 Because data breaks the assumptions Git relies on: datasets are far larger than code (terabytes vs
 megabytes, so they can't just live in the repo), diffs between data versions are meaningless (a binary
 or shuffled-CSV diff tells you nothing human-readable), the right checksum granularity (whole dataset
@@ -1163,6 +1165,7 @@ model tested with background noise added, since real-world audio is never clean.
 collapses under small realistic perturbations will fail in production despite acing the test set.
 
 **Q: What are invariance tests and directional expectation tests?**
+**Short:** Invariance tests check output stays fixed when it should; directional tests check it moves the expected way.
 Invariance tests verify the output does *not* change when it shouldn't: changing a protected
 attribute like race must not change a loan decision, so you hold everything else fixed, vary the
 attribute, and confirm invariance (the robust fix is to exclude sensitive features and proxies).
@@ -1170,6 +1173,7 @@ Directional expectation tests verify the output moves the *right* way: increasin
 should not lower its predicted price, so a violation flags a bug, leakage, or a spurious correlation.
 
 **Q: What is the naming irony of model parallelism, and how does pipeline parallelism fix it?**
+**Short:** Naive model parallelism runs devices one at a time; pipeline parallelism streams micro-batches to keep them busy.
 Model parallelism splits the model's parameters across devices (e.g. early layers on GPU 0, later
 layers on GPU 1) to fit a model too big for one device — but naïvely it isn't parallel at all, because
 GPU 1 must wait for GPU 0's output before it can start, so only one device works at a time. Pipeline
@@ -1178,6 +1182,7 @@ stages like an assembly line, keeping every device busy — at the cost of a fil
 time.
 
 **Q: What are the components of Neural Architecture Search (NAS), and why is it Google-scale only?**
+**Short:** NAS needs a search space, a performance-estimation strategy, and a search strategy, costing thousands of GPU-days.
 NAS has three components: a search space (the building blocks and operations that architectures can be
 assembled from), a performance-estimation strategy (a cheap way to estimate a candidate's quality
 without fully training it), and a search strategy (how to explore — commonly reinforcement learning or
@@ -1186,6 +1191,7 @@ evolution). It's Google-scale only because evaluating architectures is astronomi
 EfficientNet.
 
 **Q: Why must hyperparameters be tuned on the validation set and never the test set?**
+**Short:** Tuning against the test set leaks it, so tune on validation and report only once on an untouched test set.
 Because tuning is a form of learning, and tuning against the test set leaks it — your final test
 metric becomes optimistically biased since you've effectively fit your hyperparameters to the very
 data meant to give an honest estimate of generalization. Tune on validation, then report on a test set
@@ -1200,6 +1206,7 @@ be best today but lose to a neural net that's still climbing once more data arri
 on trajectory, not just the current point.
 
 **Q: What should you track during training, and why is full reproducibility still elusive?**
+**Short:** Track loss, metrics, resource use, and gradient norms; bit-for-bit reproducibility stays elusive across hardware.
 Track everything you can: loss curves (train and validation), performance metrics on all non-training
 splits, speed and system-resource usage, gradient and weight norms, a sample of predictions vs ground
 truth, and the full hyperparameter/code/data configuration. Aggressive tracking serves
@@ -1208,6 +1215,7 @@ nondeterministic operations (some GPU kernels), unseeded randomness, and framewo
 goal is enough reproducibility to explain and defend a result.
 
 **Q: What model assumptions should you check, and give a concrete failure of one?**
+**Short:** Check IID, smoothness, tractability, and boundary shape — a linear model fails when the true boundary is curved.
 Check IID (examples independent and identically distributed), smoothness (small input change → small
 output change), tractability (for generative models, that P(latent|input) is computable), and the
 shape of the decision boundary. A concrete failure: a linear classifier assumes classes are separable
@@ -1215,6 +1223,7 @@ by a linear boundary, so if the true boundary is curved the model can never fit 
 you tune — the model is only as good as its assumptions match reality.
 
 **Q: What does the effective-batch-size caveat mean for scaling data parallelism?**
+**Short:** N machines multiply the effective batch size by N, but bigger batches give diminishing returns past a point.
 Data parallelism with N machines multiplies the effective batch size by N, and while a bigger batch
 lets you use a bigger learning rate, this only helps up to a point — past some batch size, increasing
 it (and the learning rate) gives diminishing returns and can hurt convergence and generalization

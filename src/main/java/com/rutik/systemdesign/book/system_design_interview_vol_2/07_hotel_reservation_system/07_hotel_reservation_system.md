@@ -1180,6 +1180,8 @@ It risks deadlocks and throttles throughput because transactions serialize behin
 It reads a `version` column, then updates only `WHERE version = oldVersion`, incrementing version — if someone else committed first, the update affects 0 rows and signals a conflict to retry. No locks are held, so it scales better and can't deadlock, which suits low contention. Its weakness is a retry/failure storm under high contention, when many transactions read the same version and all but one fail.
 
 **Q: What is the tradeoff of enforcing the limit with a database constraint?**
+**Short:** A CHECK constraint enforces the overbooking ceiling atomically but moves that logic outside application version control.
+
 A `CHECK (total_reserved ≤ 1.1 × total_inventory)` enforces the ceiling atomically in one place, but the logic lives in the database outside application version control, the raised error is a low-level exception you must map to a clean response, and not all databases support it well. Its strength is simplicity and that no service can bypass the invariant; like optimistic locking, it is a good low-overhead choice at this system's low contention.
 
 **Q: Why choose a relational database over NoSQL for this system?**

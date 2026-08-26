@@ -1,6 +1,6 @@
 # Chapter 6: Partitioning
 
-> Part II — Distributed Data · DDIA (Kleppmann) · builds on Ch 5, leads to Ch 7 (transactions)
+> Part II — Distributed Data · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · builds on Ch 5, leads to Ch 7 (transactions)
 
 ## Chapter Map
 
@@ -70,6 +70,19 @@ offers a compromise: a **compound primary key** where only the *first* column is
 the partition) and the rest are stored sorted, so you can do an efficient range scan on the
 remaining columns *within* a single partition (e.g. partition by user ID, range-scan that user's
 updates by timestamp).
+
+### The "consistent hashing" name confusion
+
+The term **consistent hashing** is often used loosely for *any* hash-based partitioning scheme,
+but it originally names a specific technique (Karger et al., 1997) built for a different problem:
+assigning keys to nodes without any central coordinator, using randomly chosen partition
+boundaries and avoiding the need to know the total number of nodes in advance. The book is
+explicit that this strict, original meaning of consistent hashing turns out to work poorly in
+practice and is **rarely actually used** by real databases — Cassandra is commonly described as
+using consistent hashing, but in fact uses one of the simpler rebalancing approaches covered in
+§6.4 (partitioning proportional to the number of nodes). Reaching for "consistent hashing" as the
+universal explanation for how any hash-partitioned database rebalances repeats a popular
+simplification the book itself pushes back on.
 
 ### Skewed workloads and relieving hot spots
 
@@ -341,21 +354,61 @@ automatically but committed by an operator) to prevent surprises.
 ## 6.5 Request Routing
 
 Once partitioned, a client's request must reach the node holding the relevant partition — and
-partitions move during rebalancing. This is a **service discovery** problem with three common
-shapes:
+partitions move during rebalancing. This is an instance of a more general problem called
+**service discovery**, which isn't unique to databases — anything reachable over a network faces
+it. At a high level there are three ways to approach it:
 
-1. **Clients contact any node** (e.g. round-robin via a load balancer); if that node doesn't own
-   the partition, it forwards the request to the right one and relays the reply. (Cassandra,
-   Riak use a **gossip protocol** so any node knows the cluster's partition assignment.)
-2. **A routing tier** sits in front; clients hit it, and it forwards to the right node (a
-   partition-aware load balancer).
-3. **Clients are partition-aware** and connect directly to the owning node.
+### Three approaches to request routing
 
-The hard part is **keeping everyone's view of partition assignments current** as rebalancing
-moves them. Many systems use a separate coordination service — **ZooKeeper** — that authoritatively
-tracks the cluster's partition-to-node mapping; nodes register there and routing components
-subscribe to changes (HBase, Kafka, SolrCloud). Cassandra/Riak instead gossip the mapping among
-nodes. Routing decisions ultimately depend on a consensus/coordination layer (→ Ch 9).
+1. **Clients contact any node** (e.g. round-robin via a load balancer). If that node happens to
+   own the requested partition, it handles the request directly; if not, it forwards the request
+   to the node that does, receives the reply, and passes it back to the client. This is the
+   simplest option for the client — it doesn't need to know anything about partitioning — but it
+   adds an extra network hop whenever the contacted node isn't the right one.
+2. **A routing tier sits in front of the database nodes.** Clients always send their requests to
+   this tier, which knows the current partition-to-node mapping and forwards each request to the
+   correct node — effectively a partition-aware load balancer, and a component the client treats
+   as though it were the whole database.
+3. **Clients are partition-aware** and connect directly to the node that owns the key they're
+   requesting, with no intermediary. This is the fastest path (no extra hop) but couples the
+   client to the partitioning scheme, meaning every client must be informed whenever partition
+   ownership changes.
+
+All three share the same underlying requirement: whoever makes the routing decision — a node, a
+routing tier, or the client — must have an accurate, current view of which partition lives on
+which node. Getting many independent processes to agree on that quickly and correctly is a small
+instance of the consensus problem that Chapter 9 tackles at length.
+
+### Coordination services: ZooKeeper
+
+Many distributed data systems rely on a separate coordination service, most commonly
+**ZooKeeper**, to track this cluster metadata. Each node registers itself in ZooKeeper, and
+ZooKeeper maintains the authoritative mapping of partitions to nodes. Other components — the
+routing tier, or partition-aware clients — subscribe to this information in ZooKeeper. Whenever a
+partition changes ownership (because of rebalancing, or a node being added or removed), ZooKeeper
+notifies the routing tier so it can keep routing requests to the right place, and it can also
+notify clients of the change directly. **HBase, SolrCloud, and Kafka** all use ZooKeeper this way
+for partition assignment. LinkedIn's **Espresso** takes an extra layer: it uses a cluster-management
+framework called **Helix**, which in turn relies on ZooKeeper underneath.
+
+### Gossip protocols: Cassandra and Riak
+
+**Cassandra and Riak** take a different approach and avoid depending on a separate coordination
+service at all. Instead, they use a **gossip protocol** among the database nodes themselves to
+disseminate any change in cluster state, so any node learns of a partition reassignment without
+consulting an external system. A request can be sent to any node, which forwards it to the
+appropriate one if needed — from the client's perspective this looks the same as approach 1
+above. Avoiding an external coordination service removes an operational dependency, but it pushes
+that complexity *into* the database nodes themselves, and the resulting protocol can be harder to
+reason about than "ask ZooKeeper."
+
+### Routing without a separate service: Couchbase
+
+**Couchbase** illustrates a third path. It does not rebalance partitions across nodes
+automatically — an operator must explicitly initiate rebalancing — which sidesteps a whole class
+of coordination problems that come from partition assignment changing unpredictably. It pairs
+this with a routing tier called **moxi**, which learns about changes to the cluster's partitioning
+directly from the database nodes rather than from a separate coordination service.
 
 ```mermaid
 flowchart LR
@@ -392,10 +445,16 @@ flowchart LR
 
 Caption: all three routing shapes ultimately depend on the same partition-to-node mapping — ZooKeeper centralizes it (nodes register, routers subscribe) while Cassandra/Riak gossip it peer-to-peer instead.
 
-**Parallel query execution.** Simple key-value access only needs to route to one partition. But
-**massively parallel processing (MPP)** analytic databases break a complex query into stages
-that run across many partitions in parallel and combine results — foreshadowing the batch/stream
-processing of Part III.
+### Parallel query execution
+
+Everything above concerns simple key-value access, where a request only ever needs to be routed
+to a single partition. **Massively parallel processing (MPP)** relational databases, typically
+used for analytics, support much more complex queries — joins, filters, aggregations across many
+tables. An MPP query optimizer breaks such a query into a number of execution stages and
+partitions, many of which can be executed in parallel across the different nodes of the cluster,
+before intermediate results are collected and combined into the final answer. This kind of
+distributed query execution foreshadows the batch and stream processing systems covered in
+Part III of the book.
 
 ---
 
@@ -498,6 +557,8 @@ the recurring failure mode is the hot spot, and the recurring trap is `hash mod 
 - **Key-range partitioning** — contiguous key ranges per partition; good for range scans.
 - **Hash partitioning** — partition by hash of key; even spread, no range scans.
 - **Compound primary key** — hash the first column (partition), sort the rest within it.
+- **Consistent hashing (Karger et al.)** — the original coordinator-free ring-hashing technique;
+  rarely what real hash-partitioned databases (e.g. Cassandra) actually implement.
 - **Local (document-partitioned) secondary index** — per-partition index; scatter/gather reads.
 - **Global (term-partitioned) secondary index** — index partitioned by term; fast reads, costly
   writes (often async).
@@ -511,6 +572,8 @@ the recurring failure mode is the hot spot, and the recurring trap is `hash mod 
 - **Request routing** — directing a request to the node owning the partition (service discovery).
 - **Gossip protocol** — nodes share cluster/partition state peer-to-peer.
 - **ZooKeeper (coordination service)** — authoritative partition-to-node mapping.
+- **Helix** — LinkedIn Espresso's cluster-management layer, itself built on ZooKeeper.
+- **moxi** — Couchbase's routing tier; learns partition mapping from the cluster nodes directly.
 - **Massively parallel processing (MPP)** — splitting a query across partitions in parallel.
 
 ---
@@ -571,7 +634,8 @@ the recurring failure mode is the hot spot, and the recurring trap is `hash mod 
 HBase, Google Bigtable, RethinkDB, MongoDB (key-range and rebalancing); Cassandra, Voldemort,
 Couchbase, Riak (hash, proportional rebalancing, gossip); Elasticsearch, Solr/SolrCloud (local
 index, scatter/gather); Amazon DynamoDB (global secondary indexes); ZooKeeper (routing/coordination
-for HBase, Kafka, SolrCloud); Ketama (consistent hashing); MPP databases (parallel query).
+for HBase, Kafka, SolrCloud); LinkedIn Espresso and Helix (cluster management atop ZooKeeper);
+Couchbase's moxi routing tier; Ketama (consistent hashing); MPP databases (parallel query).
 
 ---
 
@@ -594,24 +658,33 @@ tier — a service-discovery problem underpinned by the consensus machinery of C
 ## Interview Questions
 
 **Q: What is the difference between key-range and hash partitioning, and what does each give up?**
+**Short:** Key-range partitioning keeps range scans efficient; hash partitioning spreads load evenly instead.
 Key-range partitioning assigns contiguous ranges of keys to partitions, which keeps keys sorted within a partition and makes range scans efficient, but it's prone to hot spots when access is sequential (all of today's timestamped writes hitting one partition). Hash partitioning assigns keys by the hash of the key, spreading them evenly and eliminating sequential hot spots, but it scatters adjacent keys across partitions so range scans become inefficient (you must query every partition). You trade range-scan ability for even distribution, or vice versa.
 
 **Q: Why must you never define a partition as `hash(key) mod N`?**
+**Short:** hash(key) mod N reshuffles nearly every key whenever the node count changes.
 Because the partition number then depends on N, the node count, so adding or removing a single node changes the modulus and reassigns *nearly every* key to a different partition — forcing an almost total data reshuffle that floods the network and disrupts the database during rebalancing. The fix is to decouple the key-to-partition mapping from the node count: assign keys to a fixed set of partitions (e.g. a large fixed number) and rebalance by moving whole partitions between nodes, so only a fraction of data moves.
+
+**Q: Is Cassandra's hash partitioning really "consistent hashing," and why does the distinction matter?**
+**Short:** Kleppmann says "consistent hashing" is usually misapplied to schemes that aren't it.
+Not in the strict, original sense. "Consistent hashing" properly names Karger et al.'s specific coordinator-free ring-hashing technique from 1997, but the book notes that this original technique works poorly in practice and is rarely what real databases actually implement — Cassandra is commonly *described* as using consistent hashing, but in fact uses one of the simpler rebalancing approaches from §6.4 (partitioning proportional to the number of nodes). The distinction matters in an interview because reaching for "consistent hashing" as a one-size-fits-all explanation repeats a popular oversimplification the book explicitly corrects.
 
 **Q: What is a hot spot, and why doesn't hash partitioning solve every hot-spot problem?**
 A hot spot is a partition or key that receives disproportionately more load than others, bottlenecking the system on one node and defeating the purpose of partitioning. Hash partitioning evens out load across *different* keys, but it can't help when a *single* key is extremely hot — a celebrity account or a viral post — because all requests for that one key hash to the same partition. No system auto-corrects this; the application must split the hot key (e.g. append a random suffix) and fan out reads across the resulting keys.
 
 **Q: Compare document-partitioned (local) and term-partitioned (global) secondary indexes.**
+**Short:** Local indexes make writes cheap and reads scatter/gather; global indexes invert that.
 A local (document-partitioned) index keeps each partition's own index of only its documents, so writes update just one partition (cheap), but a read by the indexed attribute must query every partition and merge results — scatter/gather, which is slow and tail-latency-prone. A global (term-partitioned) index partitions the index by the term value itself, so a read goes straight to the one partition holding that term (fast), but a single document write may update several index partitions, making writes slower and usually asynchronous, so the index can lag the data.
 
 **Q: What is scatter/gather, and why does its latency get worse as you add partitions?**
 Scatter/gather is the read pattern of a local secondary index: the query is sent to all partitions ("scatter"), each searches its local index, and the results are merged ("gather"). Its latency is governed by the *slowest* partition to respond, so as the number of partitions grows, the probability that at least one is slow (GC pause, hot, degraded) rises, pushing up the overall p99. This is why secondary-index reads on heavily partitioned local indexes can have surprisingly bad tail latency.
 
 **Q: Describe the three main rebalancing strategies and when you'd use each.**
+**Short:** Fixed partitions, dynamic split/merge, and per-node proportional are the three strategies.
 Fixed number of partitions: create many more partitions than nodes up front and rebalance by moving whole partitions to new nodes — simple and predictable, but you must guess the count and can't exceed it in node scale (Riak, Elasticsearch). Dynamic partitioning: partitions split when they grow too large and merge when they shrink, adapting to data volume — good for unknown/growing datasets (HBase). Proportional to nodes: a fixed number of partitions per node, with new nodes splitting and stealing partitions — keeps partition size stable as cluster and data grow together (Cassandra).
 
 **Q: Why is fully automatic rebalancing risky, and what's the usual mitigation?**
+**Short:** Automatic rebalancing can cascade with failure detection, so a human should commit it.
 Because rebalancing is expensive — it moves large amounts of data and reroutes requests — and when coupled with automatic failure detection it can trigger cascading failures: a node that looks slow gets work shifted onto it, becomes more overloaded, and triggers further rebalancing, spiraling the cluster into instability. The usual mitigation is to keep a human in the loop: the system can *propose* a rebalancing plan automatically, but an operator reviews and commits it, preventing surprise data movements during incidents.
 
 **Q: How does request routing work, and what role does ZooKeeper play?**
@@ -624,22 +697,47 @@ They're largely independent techniques used together: partitioning decides which
 A compound primary key hashes only the first column to choose the partition, then stores the remaining columns *sorted* within that partition. This spreads different partition keys evenly across nodes (avoiding sequential hot spots) while still allowing efficient range scans on the sorted columns *within* a single partition. For example, partition by user ID but sort that user's updates by timestamp — so "give me this user's posts from last week" is a fast in-partition range scan, not a scatter/gather.
 
 **Q: Why does keying a time-series database purely by timestamp cause problems, and how do you fix it?**
+**Short:** Timestamp-only keys pile all current writes onto one partition; prefixing spreads them.
 Because timestamps are monotonically increasing, all writes for the current time fall into the single partition owning the "now" range while every other partition sits idle — a write hot spot that bottlenecks ingestion on one node. The fix is to prefix the key with another value such as the sensor or device name, so concurrent writes from different sources spread across partitions. The tradeoff is that a query for a time range across all sensors must now issue a separate range scan per prefix and combine the results.
 
 **Q: Why do global (term-partitioned) secondary index updates often have to be asynchronous?**
+**Short:** Global index writes touch several partitions, so the update is pushed asynchronous.
 Because a single document can have several indexed attribute values, and in a term-partitioned index each of those values may live on a *different* index partition, so writing one document requires updating multiple index partitions — a distributed, multi-node operation. Doing that synchronously would require a distributed transaction across index partitions on every write, which is slow and reduces availability. So systems typically apply index updates asynchronously, accepting that the global index briefly lags the underlying data.
 
 **Q: What is skew, and how does it undermine the benefits of partitioning?**
 Skew is an uneven distribution of data or query load across partitions, where some partitions hold far more data or serve far more requests than others. It undermines partitioning because the whole point is to spread work across nodes for scalability; if one partition is a hot spot, that node becomes the bottleneck and the system performs no better than a single machine for that workload, while other nodes sit underused. Avoiding skew — through good key/hash choice and hot-key handling — is central to effective partitioning.
 
 **Q: What is the cold-start problem in dynamic partitioning, and how is it addressed?**
+**Short:** A fresh dynamic-partitioned database starts on one node until pre-splitting spreads it.
 With dynamic partitioning, a brand-new database begins as a single partition (since there's no data to split yet), so all initial writes and reads hit one node until enough data accumulates to trigger the first split — leaving the rest of the cluster idle during early load. It's addressed by pre-splitting: the operator configures an initial set of partitions up front (using knowledge of the expected key distribution) so the load is spread across nodes from the start rather than waiting for organic splits.
 
 **Q: What is massively parallel processing (MPP), and how does it relate to request routing?**
+**Short:** MPP fans a single complex query out across many partitions and runs it in parallel.
 MPP is a technique used by analytic databases where a single complex query is decomposed into stages executed in parallel across many partitions/nodes, with intermediate results combined — as opposed to simple key-value access that routes to just one partition. It relates to routing because, unlike a point lookup, an MPP query deliberately fans out across partitions, and the system must coordinate which nodes run which stage. It foreshadows the batch and stream processing frameworks of Part III, which generalize this distributed-execution idea.
 
 **Q: How do gossip protocols differ from a ZooKeeper-based approach for tracking partition assignments?**
+**Short:** ZooKeeper centralizes partition assignment; gossip spreads it peer-to-peer instead.
 A ZooKeeper-based approach centralizes the partition-to-node mapping in a dedicated, consensus-backed coordination service that nodes register with and routing components subscribe to, giving a single authoritative source of truth (used by HBase, Kafka, SolrCloud). A gossip protocol instead has nodes share cluster-membership and partition-assignment state peer-to-peer, so every node eventually learns the full mapping without a central coordinator (used by Cassandra and Riak). Gossip avoids a dependency on a separate service at the cost of eventual (not instantaneous) convergence of the cluster view.
+
+**Q: What are the three approaches to request routing, and what does each cost the client?**
+**Short:** Any-node, a routing tier, and partition-aware clients each trade an extra hop for extra client complexity.
+The three are: clients contact any node and let it forward to the right one (simplest for the client, but adds an extra hop when it guesses wrong); clients always go through a dedicated routing tier that knows the partition map (keeps clients simple, but adds an extra component and hop); and partition-aware clients that connect directly to the owning node (fastest, no extra hop, but every client must track partition assignment and be updated whenever it changes). None eliminates the underlying need for an accurate, current partition-to-node mapping — they only decide who holds it.
+
+**Q: How does gossip-based routing avoid a dependency on a coordination service, and what does it cost instead?**
+**Short:** Gossip trades a ZooKeeper dependency for peer-to-peer state that's harder to reason about.
+Cassandra and Riak have nodes disseminate cluster-state changes to each other directly via a gossip protocol, so any node can learn the current partition-to-node mapping without querying an external system, and a request sent to any node gets forwarded to the right owner. This removes the operational dependency on running and maintaining a separate service like ZooKeeper, but it pushes that complexity into the database nodes themselves, producing a peer-to-peer protocol that can be harder to reason about and debug than "ask the coordinator."
+
+**Q: What does Couchbase's moxi/manual-rebalancing approach trade off compared to ZooKeeper-based routing?**
+**Short:** Couchbase skips automatic rebalancing and lets moxi learn routing straight from the cluster.
+Couchbase requires an operator to explicitly trigger rebalancing rather than doing it automatically, which avoids the coordination hazards of partition ownership changing unpredictably underneath a routing layer. Its routing tier, moxi, learns about partition-mapping changes directly from the database nodes rather than subscribing to a separate coordination service like ZooKeeper. The tradeoff is less automation — operators must decide when to rebalance — in exchange for a simpler, more predictable routing story with one fewer moving part.
+
+**Q: What is Helix, and how does LinkedIn's Espresso use it for partition routing?**
+**Short:** Espresso uses Helix, a cluster-management layer itself built on top of ZooKeeper.
+Helix is a cluster-management framework that LinkedIn's Espresso storage system uses to track and coordinate partition assignment. Helix itself is built on top of ZooKeeper, so Espresso's routing ultimately rests on the same coordination-service pattern as HBase, Kafka, and SolrCloud, just with an extra layer of cluster-management logic on top rather than talking to ZooKeeper directly. It's an example of how the ZooKeeper-based approach can be wrapped in higher-level tooling rather than used raw.
+
+**Q: Why must the component making routing decisions always have a consistent view of partition assignment, and what does that connect to in Chapter 9?**
+**Short:** Correct routing needs agreement on partition ownership, which is a consensus problem.
+Whichever component decides where to send a request — a node, a routing tier, or the client — must know which node currently owns the requested partition, or it will route requests to the wrong place, especially right after a rebalance moves partitions around. Getting many independent processes (nodes, routers, clients) to agree on that mapping quickly and correctly is a smaller instance of the same problem Chapter 9 addresses in general: how distributed processes agree on a single, current version of the truth. Routing is therefore ultimately underpinned by the same consensus machinery as leader election.
 
 ---
 

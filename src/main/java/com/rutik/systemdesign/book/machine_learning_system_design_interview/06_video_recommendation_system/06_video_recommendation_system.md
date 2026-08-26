@@ -1058,24 +1058,29 @@ Optimizing clicks rewards clickbait — sensational thumbnails and titles that g
 You cannot run a heavy, accurate model over billions of videos per request within a ~200 ms budget. So candidate generation uses a cheap, high-recall retriever (dot-product ANN) to narrow billions to a few thousand, and only then does a heavy ranking model score those thousands with high precision. The funnel spends a tiny per-item budget on everything and a large per-item budget on the few survivors, which is the only way to get both quality and latency.
 
 **Q: Compare matrix factorization and the two-tower network for candidate generation.**
+**Short:** MF learns embeddings purely from interactions; two-tower uses features, so only it handles cold start.
 Matrix factorization learns user and video embeddings purely from the interaction matrix with no features, so it is fast to train (WALS) but cannot embed a new user or new video (cold start) and cannot use content signals. The two-tower network computes each embedding from features via a neural net, so it handles cold start on both sides and uses rich features, at higher training and serving cost. The book picks two-tower for candidate generation because at 1 B users with hundreds of thousands of new videos daily, cold start is the daily reality, not an edge case.
 
 **Q: Why is the observed-only matrix-factorization loss degenerate, and how does weighted MF fix it?**
+**Short:** Zero-weighted unobserved pairs let dot products rise everywhere, so weighted MF pulls them toward 0 as weak negatives.
 With the loss summed over only the engaged (observed) pairs, unobserved entries carry no penalty, so the model can make the dot product large everywhere — predicting every user loves every video — while driving observed error to zero. Weighted MF fixes this by adding the unobserved entries as **weak negatives** pulled toward 0 with a small weight `w0`, while observed positives keep a high confidence weight. The unobserved pairs carry real (if weak) "probably not interested" signal that the naive loss threw away.
 
 **Q: Why is WALS preferred over SGD for training weighted matrix factorization?**
+**Short:** WALS alternates a convex least-squares solve per factor, converging fast and parallelizing across users.
 WALS exploits the squared loss's structure: with the video factor fixed, the loss is convex in the user factor with a closed-form least-squares solution, and vice versa, so it alternates and converges in a few iterations. Crucially, with one factor fixed every row solves independently, making it **embarrassingly parallel** across a billion-user matrix. SGD is more general (any differentiable loss) but converges slower, is learning-rate-sensitive, and is harder to parallelize; WALS wins precisely because weighted MF uses squared loss.
 
 **Q: How does the two-tower network solve cold start when matrix factorization cannot?**
 MF keys embeddings on an ID's position in the interaction matrix, so an ID it never saw during training has no vector — a new user or new video is invisible. The two-tower computes embeddings from **features** (a new user still has demographics and context; a new video still has category, title, duration), so both get usable embeddings immediately. The new video becomes retrievable the moment it is indexed, and the new user gets a feature-based embedding instead of a popularity-only fallback.
 
 **Q: Why do offline recommender metrics like precision@k systematically mislead?**
+**Short:** Offline metrics reward matching what the incumbent already showed, not the user's true unshown preferences.
 Because the logged data only contains feedback on videos the *current* system already showed, offline metrics reward a new model for agreeing with the incumbent, not for matching the user's true preferences — a great video the current system never surfaced has no positive label. Feedback loops and position/selection bias further skew the labels. So offline metrics can crown a model that loses in production; only an online A/B test measures true impact, with offline metrics used to cheaply cut clearly-worse candidates.
 
 **Q: What scoring primitive do both matrix factorization and the two-tower use, and what differs?**
 Both score a `<user, video>` pair by the **dot product** of a user embedding and a video embedding in a shared space. The difference is how the embeddings are produced: MF looks them up from factored matrices learned on the interaction data (no features), while each two-tower embedding is computed by a neural network from that side's features. Keeping the towers separate is what lets video embeddings be precomputed and ANN-searched at serving time.
 
 **Q: Why can't you use the ranking model for retrieval too?**
+**Short:** The ranking model scores pairs jointly with cross features, so its output can't split into independent user/item vectors.
 The ranking model scores a `<user, video>` pair *jointly* using cross features, so its output cannot be factored into an independent user vector and video vector — you would have to run it for every user-video pair, billions per request, which is impossible in 200 ms. The two-tower's separation of towers lets you precompute all video embeddings once and retrieve via ANN with only the user tower online. Retrieval trades joint accuracy for scalability; ranking trades scalability for accuracy on a small candidate set.
 
 **Q: What are cross features and why does the ranking model use them but the two-tower doesn't?**
@@ -1088,12 +1093,14 @@ The video tower embeds it from metadata (category, title, tags, duration), so it
 Content-based filtering recommends by video-feature similarity to the user's past — it handles new videos but gives no serendipity (traps users in a bubble). Collaborative filtering recommends from similar users' behavior — it is serendipitous and feature-free but weak on cold start. The hybrid (the book's choice) combines them: collaborative-style retrieval for serendipity plus a content-aware ranker for precision and cold-start coverage.
 
 **Q: What does the re-ranking stage do that the ranking model does not?**
+**Short:** Re-ranking enforces restrictions, freshness, diversity, and integrity filters the ranking model shouldn't learn.
 Re-ranking applies business and policy rules the model should not or cannot learn directly: removing region- or legally-restricted videos, boosting freshness, enforcing diversity (not ten cooking videos in a row), demoting misinformation/clickbait via integrity filters, deduping, and removing already-watched videos. It adjusts the model's relevance ordering for constraints that are rules, not learned preferences.
 
 **Q: Why does candidate generation union multiple sources instead of relying on one retriever?**
 A single retriever misses cases; unioning the personalized two-tower ANN with popular and trending sources raises recall and provides graceful fallbacks. Popular/trending especially cover cold-start users who have no history for the personalized retriever, and trending keeps the feed timely and gives new videos exposure. The union is deduplicated before ranking.
 
 **Q: How is the training label for the "relevant videos" objective actually created?**
+**Short:** A positive label comes from watching past a threshold or an explicit like/share in the interaction log.
 It is **natural labeling** from the interaction log: a `<user, video>` pair is positive if the user watched beyond a relevance threshold (a large fraction of the video) or gave an explicit positive signal like a like or share, and negative otherwise. No human annotation is needed, but the labels inherit implicit-feedback noise and bias — notably, a video the user never saw is not a true negative, just never shown.
 
 **Q: What is diversity as an offline metric and why measure it alongside precision?**
@@ -1103,12 +1110,15 @@ Diversity is the average pairwise dissimilarity among the recommended videos (e.
 CTR (clicks per recommendation) is easy to measure but carries the clickbait caveat — a model can inflate CTR with sensational thumbnails while actual watch time and satisfaction fall. So CTR is never read alone; it is paired with watch time, completed videos, and explicit feedback. A CTR gain accompanied by a watch-time drop signals clickbait rather than a genuine improvement.
 
 **Q: How do position and selection bias corrupt a recommender, and what mitigates them?**
+**Short:** Position bias skews clicks toward top slots; mitigate with position-aware features, IPW, or randomized exploration.
 Position bias means higher-placed videos get more clicks regardless of true relevance, and selection bias means you only observe feedback on videos that were shown — so both training labels and offline metrics are computed on a skewed sample. Mitigations include position-aware training (modeling the slot as a feature), inverse-propensity weighting, and randomized exploration logging that shows some items independently of the model to collect unbiased data.
 
 **Q: What is the exploration-exploitation tradeoff in this system and why does it matter?**
+**Short:** Exploitation maximizes short-term engagement but starves new items of the impressions needed to prove themselves.
 Exploitation always shows the current best-scoring videos, which maximizes short-term engagement but starves new and niche videos of the impressions they need to prove themselves, creating a rich-get-richer loop and no cold-start data. Exploration deliberately shows uncertain or new items (via bandits, ε-greedy, or exploration traffic) to gather signal, trading a little short-term engagement for long-term catalog coverage and better new-item handling.
 
 **Q: Why is user watch history turned into an aggregated embedding rather than fed as raw IDs?**
+**Short:** The last N watched video embeddings are averaged or attention-weighted into one fixed-length user taste vector.
 A user's watch history is a variable-length list of video IDs, but neural networks need fixed-size inputs, so the embeddings of the last N watched (or liked/searched) videos are aggregated — averaged or attention-weighted — into a single fixed-length "user taste" vector. This both fixes the input shape and summarizes the user's interests in the same embedding space as the videos, so it composes naturally with the towers.
 
 ---

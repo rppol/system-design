@@ -32,26 +32,81 @@ as the author's. A **currency** finding is not a finding here. Where the gap bet
 book and today is genuinely instructive it belongs in an explicitly-marked editorial aside,
 never as a silent correction.
 
-**The `**Short:**` migration is a separate question — and it was MEASURED on 2026-08-04.**
-Unlike the audit it is fidelity-neutral: an added one-line display summary of an answer the
-section already wrote, changing nothing about what the book is reported to say. book's
-1,402 Q&As do ship in the MCQ bank, so today every one of them quizzes on a *derived*
-option. The measurement (reproduce `make_short()` per Q&A and classify the result):
+---
+
+## HARD RULE — `## Beyond the book` (owner-set 2026-08-25)
+
+**Material the cited chapter does not contain may not sit under a `## N.x (Ch M)` heading.**
+This is the section's dominant defect class and every instance found in the 2026-08-25
+fidelity pass was of exactly this shape: *technically correct material the book does not
+contain, presented as the named author's*. Nothing was factually wrong. All of it read as
+Vitillo's, or Kleppmann's, or Huyen's.
+
+Adding material is not the problem — this section adds a great deal and is better for it.
+**Undisclosed** addition is the problem. The remedy is disclosure, never deletion.
+
+Two sanctioned forms, in order of preference:
+
+1. **A `## Beyond the book — <topic>` section**, placed after the last `## N.x` span and
+   before `## Visual Intuition`, opening with a `>` blockquote that states plainly what the
+   chapter does and does not say. Models:
+   `understanding_distributed_systems/01_communication/01_communication.md`
+   (`## Beyond the book — TCP retransmission timing and QUIC`) and
+   `system_design_interview_vol_1/07_design_a_unique_id_generator/07_design_a_unique_id_generator.md`
+   (`## Beyond the book — where Snowflake lives today`).
+2. **An inline *(beyond the book)* tag** on a single sentence or glossary line, where hoisting
+   a whole section would be heavier than the point deserves. Model:
+   `06_partitioning`'s Cassandra-4.0 vnode aside, and SDI Vol 1 Ch 2's inline
+   "including rows the book does not list (99.95%, 99.995%)".
+
+**What does NOT need disclosing.** Original scaffolding that is already framed as the
+summarizer's own — DDIA's "Decoding…" arithmetic boxes, worked derivations opening with
+"the chapter describes X without quantifying it" — is fine as-is, because the frame already
+tells the reader whose voice it is. The test is not "did the book say it", it is **"would a
+reader think the author said it"**.
+
+**Cross-links, glossary entries, and Q&As** are understood to be the repo's voice, not the
+author's, and do not need the tag. But a Q&A whose subject is beyond-the-book material
+should have that material disclosed *somewhere in the same file* — otherwise the quiz teaches
+as the author's a thing the author never wrote.
+
+**The `**Short:**` migration is a separate question — measured 2026-08-04, re-measured and
+EXECUTED 2026-08-25.** Unlike the audit it is fidelity-neutral: an added one-line display
+summary of an answer the section already wrote, changing nothing about what the book is
+reported to say. book's Q&As all ship in the MCQ bank, so a Q&A without one quizzes on a
+*derived* option. The measurement (reproduce `make_short()` per Q&A and classify the result),
+re-run against live `extract.py` on 2026-08-25 over 1,402 Q&As:
 
 | Derived option | Count | Share | Worth authoring? |
 |----------------|-------|-------|------------------|
-| Reads fine as-is | 967 | 69.0% | no |
-| **TRUNCATED** — `make_short()` cut the real first sentence, ships as a mid-clause fragment | **302** | 21.5% | **yes** |
-| Opens with a referring word ("It targets engineers who…") | 125 | 8.9% | marginal |
-| Under 40 chars ("Your application code is.") | 8 | 0.6% | yes |
+| Reads fine as-is | 1,092 | 77.9% | no |
+| **TRUNCATED** — `make_short()` cut the real first sentence, ships as a mid-clause fragment | **302** | 21.5% | **yes — done** |
+| Under 40 chars ("Your application code is.") | **8** | 0.6% | **yes — done** |
 | Contains code-fence / table debris | 0 | 0.0% | n/a |
 
-**Conclusion: a blanket 1,402-line migration is NOT justified here; a targeted pass over
-roughly 310 Q&As is.** The truncated ones are broken regardless of context — the option
-literally stops mid-thought. Discount the 125 referring-word cases: the quiz renders the
-question directly above the options, so "It" resolves for a reader and they are merely
-weak, not wrong. Rerun the measurement rather than trusting this table if the section has
-changed; the script pattern is in the 2026-08-04 session scratch and is ~40 lines.
+(The 2026-08-04 table split ~125 of the "reads fine" cases out as "opens with a referring
+word". Those were deliberately skipped and are folded back into "reads fine" here: the quiz
+renders the question directly above the options, so "It" resolves for a reader. They are
+weak, not wrong.)
+
+**A blanket 1,402-line migration is NOT justified here; the targeted pass over the 310 was
+run on 2026-08-25.** The truncated ones were broken regardless of context — the option
+literally stopped mid-thought. Rerun the measurement rather than trusting this table if the
+section has changed.
+
+**Two rules bind any `**Short:**` line written in this section, and they are not the
+repo-wide rules:**
+
+1. **The line states THE BOOK'S CLAIM, never the truth.** If the book is wrong by today's
+   standards, the Short line is still the book's position. That is what makes the pass safe
+   in a section excluded from the currency audit.
+2. **Where the claim is contestable, carry the attribution.** Prefer *"Kleppmann argues the
+   database should be unbundled — the replication log becomes the public interface"* over
+   *"Databases should be unbundled."* This is the whole difference between a faithful summary
+   and an editorial.
+
+The standing repo rule also binds: **never edit `answerFull` while adding one.** The line is
+added above the answer, never carved out of it.
 
 `book/` has never been entered into the audit manifest and still is not — the 295-unit
 denominator in root `CLAUDE.md` excludes it.
@@ -67,7 +122,7 @@ Only `book/README.md` is a README — each book's own index is `book/<book_slug>
 
 | Book | Folder | Chapters |
 |------|--------|----------|
-| Designing Data-Intensive Applications (Kleppmann) | `designing_data_intensive_applications/` | preface + Ch 1–12 |
+| Designing Data-Intensive Applications (Kleppmann) — **1st ed., O'Reilly 2017** | `designing_data_intensive_applications/` | preface + Ch 1–12 |
 | System Design Interview Vol 1 (Xu) | `system_design_interview_vol_1/` | Ch 1–16 |
 | System Design Interview Vol 2 (Xu & Lam) | `system_design_interview_vol_2/` | Ch 1–13 |
 | Machine Learning System Design Interview (Aminian & Xu) | `machine_learning_system_design_interview/` | Ch 1–11 |
@@ -104,7 +159,7 @@ completeness guarantee: a missing topic is structurally visible.
 
 ```
 # Chapter N: <Title>
-> Part <I/II/III> · DDIA (Kleppmann) · builds on Ch <x>, leads to Ch <y>
+> Part <I/II/III> · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · builds on Ch <x>, leads to Ch <y>
 
 ## Chapter Map            — 1-paragraph placement + 3-bullet TL;DR of the chapter's argument
 ## The Big Question       — the driving problem the chapter answers (analogy / intuition)
@@ -142,7 +197,11 @@ completeness guarantee: a missing topic is structurally visible.
 ## Adding a New Chapter
 
 1. Create `<book_folder>/NN_<slug>/NN_<slug>.md` using the chapter template above — the page
-   is named for its folder, and the folder IS the 3-segment module id, so keep both.
+   is named for its folder, and the folder IS the 3-segment module id, so keep both. **The
+   `>` byline MUST name the edition and year** (`(Kleppmann, 1st ed., O'Reilly 2017)`,
+   `(Vitillo, 2nd ed.)`). A summary that does not identify its source edition is
+   unfalsifiable, and once a second edition exists with different chapter numbering the
+   ambiguity sends readers to the wrong chapter.
 2. Map **every** book section to a `## NN.x` heading, in order — this is non-negotiable; it
    is how completeness is guaranteed.
 3. Add a glossary entry for every term the chapter defines.

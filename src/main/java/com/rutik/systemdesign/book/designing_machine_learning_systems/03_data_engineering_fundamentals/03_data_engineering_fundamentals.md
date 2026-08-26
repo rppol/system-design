@@ -1042,15 +1042,18 @@ In pub/sub, a producer publishes to a topic without naming any recipient, and an
 A data warehouse stores structured, processed data with schema-on-write — the schema is defined and enforced before data is loaded, so queries are fast and predictable. A data lake stores raw data in its native format with schema-on-read — structure is imposed only when the data is read, so ingestion is cheap and flexible. Warehouses suit curated BI and features; lakes suit logs, images, and exploratory ML; the lakehouse tries to combine both.
 
 **Q: What do ACID and BASE each stand for, and how do they differ?**
+**Short:** ACID guarantees strict correctness for OLTP; BASE trades strict consistency for availability and scale.
 ACID is Atomicity (all-or-nothing), Consistency (preserves invariants), Isolation (concurrent transactions don't interfere), and Durability (committed data survives crashes) — the correctness guarantees OLTP systems want. BASE is Basically Available, Soft state, and Eventual consistency — replicas stay available and converge over time rather than being strongly consistent at every instant. BASE trades strict consistency for availability and scale; it's really defined by giving up ACID.
 
 **Q: Why does the book say the OLTP-vs-OLAP distinction is becoming a legacy lens?**
+**Short:** HTAP hybrids, decoupled cloud-warehouse storage/compute, and a redefined "online" all blur the old line.
 Because three shifts blur it: transactional-and-analytical hybrids (HTAP engines, CockroachDB) serve both on one system; storage and compute are decoupled in cloud warehouses like BigQuery and Snowflake, breaking the monolithic-database assumption; and "online" now means "in production, low-latency" rather than "not batch." The workload-shape intuition (many small ops vs few large scans) still helps, but it no longer dictates which product you buy.
 
 **Q: What is the difference between ETL and ELT, and how does it map to warehouse vs lake?**
 ETL extracts data, transforms it (cleans and conforms to a schema) before loading, so only structured data enters the destination — the data-warehouse discipline. ELT extracts and loads the raw data first, then transforms later on demand — the data-lake discipline. ETL buys clean, fast queries at the price of up-front rigidity; ELT buys cheap flexible ingestion at the price of slow, repeated downstream transformation. The lakehouse reconciles them.
 
 **Q: What are the three modes of dataflow between processes?**
+**Short:** Processes exchange data via a shared database, via request/response services, or via real-time event transport.
 Passing through a database (process A writes, B reads or polls), passing through services (A sends a request and B responds — request-driven REST/RPC), and passing through real-time transport (A publishes events to a broker that B reads — event-driven pub/sub or message queues). They differ in coupling, latency, and who knows about whom: the database mode is simple but slow, services are fast but tightly coupled, and a broker is fast and decoupled.
 
 **Q: Why is request-driven architecture said to amplify failures, while event-driven decouples?**
@@ -1072,6 +1075,7 @@ Streaming is hard because joining unbounded streams requires deciding how long t
 Because users routinely enter data in the wrong format — text where a number is expected, wrong date formats, wrong file types — so any system that assumes clean input breaks in production. It implies user-input paths need heavy, defensive validation and normalization at the boundary. And because users are latency-intolerant, that validation must also be fast, which pushes user-facing paths toward real-time rather than batch processing.
 
 **Q: What is the difference between first-party, second-party, and third-party data?**
+**Short:** First-party is your own users' data; second-party is another firm's first-party data; third-party is aggregator data.
 First-party data is data your own company collects about your users; second-party data is another company's first-party data made available to you (often via partnership or purchase); third-party data is collected by data aggregators about the general public who aren't their direct customers. Trust and directness decrease from first to third. First-party is the durable asset because third-party data can be regulated away.
 
 **Q: How did the IDFA change squeeze third-party data?**
@@ -1081,12 +1085,15 @@ Third-party mobile data relied on a per-device advertiser ID (Apple's IDFA) to s
 Because a document stores all of an entity's data together as one self-contained object, so reading the whole entity is a single fetch with no joins — excellent locality. But relationships *across* documents aren't first-class, so joins are weak or must be done in application code, and many-to-many relationships (which relational handles naturally) become painful. Locality also backfires when you need just one field but must read the whole document.
 
 **Q: When should you choose a graph model over a relational model?**
+**Short:** Choose a graph model when queries mainly traverse variable-depth relationships, like friends-of-friends.
 Choose a graph model when your dominant queries traverse relationships, especially variable-depth ones like "friends of friends" or "everyone born in the USA." A graph stores edges as first-class objects, so following relationships is the native, cheap operation, whereas the relational model reconstructs relationships by joining across tables at query time, which gets slow as the traversal deepens. Relational still wins for ad-hoc joins, constraints, and column-wide aggregations.
 
 **Q: What does normalization buy you, and what does it cost at read time?**
+**Short:** Normalization stores each fact once, saving space and preventing anomalies, at the cost of joins on read.
 Normalization splits data across related tables so each fact is stored exactly once (1NF requires atomic cells, 2NF requires non-key columns to depend on the whole key), which saves space and prevents update anomalies — change a fact in one place instead of many. The cost is that reassembling data spread across tables requires joins at read time, so heavily normalized schemas trade cheaper, safer writes for more expensive reads.
 
 **Q: What is the tension behind "log everything," and how is it resolved in practice?**
+**Short:** Logs are cheap to generate but costly to store and search, so teams log liberally but cap retention.
 Logs are invaluable for debuggability and you can't know in advance which detail will matter, so teams tend to log everything — but logs are cheap to generate and expensive to store, and finding signal in the flood is hard. The practical resolution is to log liberally but set retention windows (discard logs after a period), invest in search/aggregation tooling, and process the high volume in batch, with near-real-time processing reserved for anomaly detection.
 
 ---

@@ -1101,12 +1101,14 @@ validation) in steps 5–6. Chapters 2–11 are this framework instantiated nine
 ## Interview Questions
 
 **Q: How do you translate a vague business objective like "increase engagement" into an ML objective?**
+**Short:** Pick a measurable proxy target that, when optimized, actually moves the vague business goal.
 Pick a measurable prediction target that, when optimized, moves the business goal — e.g. "maximize the predicted number of relevant videos shown" rather than the fuzzy "engagement." The translation is the highest-leverage decision in the design because a wrongly chosen ML objective optimizes the wrong thing perfectly; name several candidates (clicks, completed items, watch time, relevance) and defend one. For engagement, "maximize relevance" usually beats "maximize clicks," which breeds clickbait.
 
 **Q: Why can a model that wins on offline metrics still lose in production, and what do you do about it?**
 Offline metrics are a proxy measured on logged past data, while the business runs on live user behavior, so the two routinely disagree — a higher offline F1 can lower revenue via feedback loops or a proxy mismatch. Offline metrics are for fast, cheap iteration and model selection; the real goal is measured online. The fix is to validate the offline winner with a shadow deployment and then an A/B test with a significance check before trusting it.
 
 **Q: How do you decide between batch and online prediction?**
+**Short:** Use batch prediction when inputs are enumerable and staleness is tolerable; online when freshness matters.
 Use batch when the inputs can be enumerated ahead of time and some staleness is tolerable, so you precompute results on a schedule and serve them as a fast lookup; use online when the input arrives at request time and can't be pre-enumerated or freshness is critical, so the model runs per request. Batch is cheap per prediction but stale; online is always fresh but pays per request and needs low-latency infra. Many real systems are hybrid: batch-precompute candidates, then score/re-rank online.
 
 **Q: Why is accuracy a misleading metric, and what should you use instead?**
@@ -1122,6 +1124,7 @@ A simple baseline (logistic regression, a single decision tree, or GBDT) is fast
 Data distribution shift is when the data a model sees in production drifts away from its training data, silently degrading accuracy. It comes from train/serve skew (training never matched production) or the world changing after training (new behavior, seasonality, adversaries adapting). It dominates because a model is frozen at training time while its environment keeps moving; the defenses are large representative training data and periodic or continual retraining.
 
 **Q: Which questions should you ask when clarifying requirements?**
+**Short:** Ask about objective, features, data, constraints, scale, performance, and privacy before designing.
 Ask about the business objective, the features the system must support, the data (sources, size, whether it's labeled and trusted), constraints (compute budget, on-device vs cloud), scale (users, items, growth), performance (latency, throughput, and the accuracy-vs-latency tradeoff), and privacy/ethics. Then write the resulting assumptions on the board and state them aloud so the interviewer can correct a wrong premise before you build on it. The business objective is the hinge everything else swings on.
 
 **Q: When is machine learning the wrong tool for a problem?**
@@ -1143,9 +1146,11 @@ Use MRR (mean reciprocal rank of the first relevant result) when there is essent
 Resample the data — oversample the minority class (e.g. SMOTE) or undersample the majority — and/or use a class-weighted loss that penalizes errors on the rare class more heavily. Crucially, also switch metrics: accuracy is meaningless under imbalance, so evaluate with precision, recall, F1, and PR-AUC. Imbalance is common in fraud, harmful-content, and click prediction where positives can be around 1%.
 
 **Q: What model-compression techniques let a large model serve within a tight budget?**
+**Short:** Distillation, pruning, and quantization shrink a model's size and latency for a tight serving budget.
 Knowledge distillation trains a small student model to mimic a large teacher's soft outputs, keeping much of the accuracy at a fraction of the size; pruning removes low-contribution weights or neurons for a smaller, sparser model; quantization stores and computes weights in lower precision (fp32 to fp16 or int8) to shrink the model ~2–4× and speed inference. They're often combined and are essential for on-device serving and tight cloud latency budgets. Each trades a little accuracy for size and speed.
 
 **Q: What is shadow deployment and how does it differ from A/B testing?**
+**Short:** Shadow deployment logs a new model's predictions on live traffic without ever serving them to users.
 Shadow deployment runs the new model alongside the old one on real requests but serves only the old model's output, logging the new model's predictions to compare offline — zero user risk, but it can't measure user *reaction*. A/B testing actually serves the new model to a slice of live traffic and compares an online business metric against the control with a statistical significance test. Use shadow to catch prediction/latency problems safely, then A/B to prove the model moves the business metric.
 
 **Q: What is the difference between data parallelism and model parallelism in distributed training?**
@@ -1155,9 +1160,11 @@ Data parallelism replicates the whole model on each worker, splits the training 
 Serve on-device when you need to work offline, keep raw data private (it never leaves the device), or avoid a network round-trip's latency — for example a camera blurring faces without connectivity. The cost is tiny compute, so only small (often compressed) models fit, and updates must be pushed to devices. Cloud serving wins when you need large models, big compute, and instant server-side updates, accepting a network hop and per-request cost.
 
 **Q: How do you choose a loss function for a task?**
+**Short:** Match the loss to the task: cross-entropy for classification, MSE/MAE/Huber for regression.
 Match the loss to the task: cross-entropy (log loss) for classification because it heavily penalizes confident wrong predictions; MSE for regression when large errors should be punished hard (but it's outlier-sensitive); MAE for regression when you want robustness to outliers; and Huber as a compromise that's quadratic near zero and linear in the tail. Representation-learning and ranking problems use task-specific losses (contrastive, ranking) covered in later chapters.
 
 **Q: What are the differences among min-max normalization, z-score standardization, and log scaling?**
+**Short:** Min-max bounds to [0,1], z-score centers to mean 0 unit variance, log scaling compresses skewed tails.
 Min-max rescales a feature to [0, 1] via `(x − x_min)/(x_max − x_min)`, preserving shape but sensitive to outliers; z-score standardizes to mean 0 and unit variance via `(x − μ)/σ`, a robust unbounded default; log scaling applies `log(x)` to heavily right-skewed features (counts, prices) to compress the long tail. You scale features so distance- and gradient-based models (kNN, SVM, NNs, logistic regression) aren't dominated by large-magnitude features. Tree models don't need scaling.
 
 **Q: How do interleaving and bandits improve on a fixed-split A/B test for ranking?**

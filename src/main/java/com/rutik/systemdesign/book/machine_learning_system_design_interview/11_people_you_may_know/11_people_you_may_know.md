@@ -961,12 +961,14 @@ Because GraphSAGE is inductive and uses neighborhood sampling. Inductive means i
 Over-smoothing is when stacking too many message-passing layers makes every node's embedding converge toward the graph average, so nodes become indistinguishable and the embeddings stop being useful. Each layer mixes in a wider neighborhood, and past ~3 layers the mixing dominates the node's own signal. That's why PYMK GNNs stay shallow at K=2–3 — deep enough to reach the friends-of-friends structure, shallow enough to avoid collapse. It's a fundamental limit, not a tuning quirk.
 
 **Q: Which offline metrics fit PYMK and why not nDCG?**
+**Short:** ROC-AUC handles extreme class imbalance well; nDCG needs graded relevance PYMK's binary edges don't have.
 ROC-AUC as the primary classification metric because it's robust to the extreme class imbalance (true edges are ~10^-6 of all pairs) and measures ranking a true future edge above a random non-edge, plus mAP / precision@k / recall@k for the ranked top-N list. nDCG needs graded relevance, but PYMK relevance is binary (an edge either formed or not), so mAP fits more cleanly, and MRR over-weights just the single first hit. All are evaluated on a held-out future window so the number reflects forecasting, not memorization.
 
 **Q: Which online metrics actually judge a PYMK model, and what's the trap?**
 Connection requests sent per impression, acceptance rate within X days, and downstream engagement/retention of the new connections. The trap is optimizing requests sent, which a model can inflate by surfacing familiar-looking but unwanted people who then get ignored or reported. Acceptance rate and downstream interaction are the quality signals that map to the real objective — meaningful connections — so those are what you A/B test and optimize, not raw send volume.
 
 **Q: Why does ranking by mutual-connection count create a fairness / cold-start problem?**
+**Short:** Ranking by mutual count is rich-get-richer: well-connected users get suggested more and accrue even more edges.
 Because it produces rich-get-richer bias: well-connected users have many friends-of-friends and strong embeddings, so they get suggested more and gain even more connections, while new users with few connections have tiny FoF sets and weak embeddings, get poor suggestions, and are rarely suggested to others. This starves exactly the users who most need recommendations. Mitigations include content/feature-based fallbacks (school, company, location) and deliberate exploration for low-degree users.
 
 **Q: How do you handle mega-hubs (users with hundreds of thousands of connections)?**
@@ -982,6 +984,7 @@ Personalized PageRank, i.e. random walk with restart rooted at the user. It rank
 A LinkedIn/Facebook connection is symmetric — A connected to B means B connected to A — so the graph is undirected and the model predicts an unordered pair. But the invite act has an inviter and an invitee, and acceptance likelihood depends on who initiates. It matters for optimization: modeling send-vs-accept asymmetry separately can raise the accepted-connection rate rather than just the requests-sent rate, aligning the model with the meaningful-connection objective instead of surfacing people who get invited but never accept.
 
 **Q: How do you keep a PYMK system fresh when the graph gains millions of edges a day?**
+**Short:** Retrain embeddings on fresh snapshots and incrementally re-score only users whose neighborhoods changed.
 Retrain or fine-tune embeddings on fresh snapshots periodically and use incremental recomputation — only re-score users whose neighborhoods actually changed since the last cycle, rather than rescoring all billion users nightly. Because the graph changes incrementally, most users' candidate lists are unaffected on any given day, so bounding recompute to affected 2-hop neighborhoods is far cheaper. The online lightweight re-rank also folds in same-day edges and dismissed suggestions between full refreshes.
 
 **Q: Why is negative sampling necessary at all for graph link prediction?**

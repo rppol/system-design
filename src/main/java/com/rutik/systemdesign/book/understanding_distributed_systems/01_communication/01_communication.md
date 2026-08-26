@@ -53,36 +53,139 @@ engineering art of this part is spending as few of them as possible.
 
 ### Why build a distributed system at all
 
-You accept the enormous complexity of a distributed system for exactly three reasons, and it's
-worth being honest that if none of them apply, you shouldn't build one:
+Vitillo opens with Lamport's definition of the problem — *"a distributed system is one in which the
+failure of a computer you didn't even know existed can render your own computer unusable"* — and then
+answers the obvious follow-up: why bother? He gives **four** reasons, each with a named example:
 
-- **Scale beyond a single node.** A single machine has finite CPU, RAM, disk, and network. Once your
-  workload exceeds what the biggest machine you can buy (or afford) provides, you must spread it
-  across many machines. This is *scaling out* (more machines) versus *scaling up* (a bigger machine).
-- **Fault tolerance.** A single machine is a single point of failure — when it dies, your service
-  dies with it. Replicating state and computation across independent machines lets the system keep
-  serving when any one of them fails. Redundancy is the whole point.
-- **Low latency by proximity.** The speed of light is a hard floor: a round-trip from New York to
-  Sydney is ~160 ms *of physics alone*, before any processing. Placing copies of your service close
-  to users (multiple regions, CDNs) is the only way to beat that floor, and it inherently means many
-  geographically distributed nodes.
+- **Some applications are inherently distributed.** The web is the one you already use every day: you
+  reach it from a phone, tablet, desktop, or Xbox, and together with billions of other devices
+  worldwide *that* is the distributed system. There was never a single-node version of it to choose
+  instead. This reason is easy to overlook precisely because it isn't a design decision — it's the
+  shape of the problem.
+- **High availability — resilience to single-node failures.** A single machine is a single point of
+  failure. Dropbox replicates your data across multiple nodes so that losing one of them doesn't lose
+  your data. Redundancy across independent machines is the whole point.
+- **Workloads too big for one node, no matter how powerful.** Google receives tens of thousands of
+  search requests per second from all over the globe. There is no way a single node could handle
+  that, so the work is spread across many. This is *scaling out* (more machines) versus *scaling up*
+  (a bigger machine).
+- **Performance requirements that are physically impossible on one node.** Netflix streams movies to
+  your TV at high resolution because it has a datacenter close to *you*. Distance is a hard floor no
+  amount of single-node engineering removes, so the fix is placing copies of the service near users —
+  which inherently means many geographically distributed nodes.
 
-The rest of the book is organized as **five pillars**, one per part, and Part I is the first:
+### The five challenges the book is organized around
 
-1. **Communication** (this part) — how nodes exchange messages reliably and securely over the network.
-2. **Coordination** — how independent nodes agree despite failures and no shared clock (Part II).
-3. **Scalability** — how the system grows to handle more load (Part III).
-4. **Resiliency** — how it stays up when things break (Part IV).
-5. **Maintainability / operations** — how humans run and evolve it safely (Part V).
+Chapter 1 is a tour of the five problems that give the book its five parts. Each gets a section of
+its own, and each is stated as a *challenge* rather than a topic — the framing matters, because every
+later part is an answer to one of these.
+
+**Communication (Part I, this one).** The first challenge derives from nodes needing to talk over the
+network. When your browser loads a website it resolves the server's IP address from the URL and sends
+an HTTP request; the server returns a response with the page's content. Vitillo's three questions are
+the outline of the whole part: how are request and response represented *on the wire*? What happens
+when there's a temporary network outage, or a faulty switch flips a few bits? How does the server
+guarantee no intermediary can snoop on the conversation? It would be convenient to assume a
+networking library abstracts all of this away, but **abstractions leak** — Vitillo cites Joel
+Spolsky's Law of Leaky Abstractions — and you need to understand the stack for the day one does.
+
+**Coordination (Part II).** Some form of coordination is needed to make individual nodes work in
+unison toward a shared objective, and it is particularly hard in the presence of failures. The
+**two generals problem** is the thought experiment that makes this concrete. Two generals, each
+commanding an army, need to agree on a time to jointly attack a city. There is distance between the
+armies (the network) and the only way to communicate is via messengers, who can be captured (network
+failure). General 1 sends a proposed time — but since the messenger can be captured, general 1 can't
+know it was delivered. General 2 could send a confirmation — but general 2 then can't know *that* was
+delivered, so another confirmation is needed. **No matter how many rounds of confirmation are made,
+neither general can ever be certain the other will attack at the same time.** A problem that looked
+trivial turns out to be unsolvable, which is why Part II is devoted to the algorithms that get as
+close as is possible.
+
+**Scalability (Part III).** Performance is how efficiently an application handles **load**, and load
+is anything that consumes the system's resources — CPU, memory, network bandwidth. Because the nature
+of load depends on the use case and architecture, it is measured differently in different systems:
+the number of concurrent users and the ratio of writes to reads are both forms of load. For the
+applications this book discusses, performance is measured as **throughput** (requests processed per
+second) and **response time** (seconds elapsed between sending a request and receiving a response).
+
+As load increases the application eventually reaches its **capacity** — the maximum load it can
+withstand, hit when some resource is exhausted. At that point performance plateaus or worsens, and if
+load keeps growing the system eventually reaches a point where most operations fail or time out. The
+throughput that can be served without errors and with low response times is the system's **goodput**.
+
+Capacity depends on architecture, implementation, and an intricate web of physical limits — node
+memory size and clock cycle, link bandwidth and latency. For an application to be **scalable**, a
+load increase must not degrade performance, which requires increasing capacity at will. The quick way
+is **scaling up**: buy more expensive hardware. That approach is bound to hit a brick wall sooner or
+later, when such hardware simply doesn't exist. The alternative is **scaling out**: add more
+commodity machines and have them work together. Procuring machines at will was daunting a few decades
+ago; Amazon launched AWS in **2006** with EC2's rentable virtual machines, and the growth of cloud
+providers since has democratized the ability to build scalable applications.
+
+**Resiliency (Part IV).** A distributed system is resilient when it continues to do its job even when
+failures happen — and **at scale, anything that can go wrong will go wrong**. Every component has a
+probability of failing: nodes crash, links get severed. No matter how small that probability, the
+more components there are and the more operations the system performs, the higher the *number* of
+failures. And it compounds: the failure of one component can increase the probability that another
+fails, if the components are not well isolated.
+
+Unchecked failures hit **availability** — the percentage of time the system is available for use,
+defined as uptime divided by total time measured (uptime plus downtime). Availability is described in
+**nines**:
+
+| Availability | Downtime per day |
+|---|---|
+| 90% ("one nine") | 2.40 hours |
+| 99% ("two nines") | 14.40 minutes |
+| 99.9% ("three nines") | 1.44 minutes |
+| 99.99% ("four nines") | 8.64 seconds |
+| 99.999% ("five nines") | 864 milliseconds |
+
+Three nines is typically considered acceptable by users; anything above four is considered highly
+available. A system that isn't resilient will see its availability inevitably drop, so it needs to
+*embrace* failure and be prepared to withstand it — with redundancy, fault isolation, and
+self-healing mechanisms, which are Part IV's subject.
+
+**Maintainability (Part V).** It is well known that the majority of software cost is spent *after*
+initial development, on maintenance: fixing bugs, adding features, operating the thing. So systems
+should be easy to modify, extend, and operate. Any change is a potential incident waiting to happen,
+which makes good testing — unit, integration, end-to-end — the *minimum* requirement for changing a
+system without worrying it will break. Once a change is merged it must be released to production
+safely, without affecting availability. And operators need to monitor health, investigate
+degradations, and restore service when it can't self-heal, which requires altering behavior *without
+code changes* — toggling a feature flag, scaling out a service with a configuration change.
+
+Historically developers, testers, and operators were separate teams; microservices and DevOps changed
+that, and now the same team that designs and implements a system also tests and operates it. Vitillo
+counts that a good thing: **there is no better way to discover where a system falls short than being
+on call for it.**
 
 ### Anatomy of a distributed system
+
+Distributed systems come in all shapes and sizes; this book is mainly concerned with **backend
+applications running on commodity machines that implement some kind of business service**. Vitillo
+notes there are three equally valid ways to look at such a system, and the book switches between them
+depending on which is more useful for the topic at hand:
+
+| Viewpoint | A distributed system is… |
+|---|---|
+| Physical | a group of **machines** communicating over network links |
+| Run-time | a group of software **processes** communicating via inter-process communication (IPC) mechanisms like HTTP |
+| Implementation | a group of loosely-coupled **components (services)** communicating via APIs |
 
 The book's vocabulary, used throughout:
 
 - A **service** implements a specific business capability (say, a payments service or a catalog
-  service). It exposes an **interface** — the API other services call — and is built from **adapters**
-  that connect that interface to the outside world (an HTTP server adapter for inbound calls, a
-  database-client adapter for outbound storage).
+  service). At its core sits the **business logic**, which exposes **interfaces** to the outside
+  world: some define the operations the service offers to its users, others define the operations the
+  service can invoke on *other* services — data stores, message brokers, and so on.
+- Since processes can't call each other's interfaces directly, **adapters** connect IPC mechanisms to
+  service interfaces. An **inbound adapter** is part of the service's API: it handles requests
+  arriving over an IPC mechanism like HTTP by invoking operations defined in the service interfaces.
+  An **outbound adapter** grants the business logic access to external services like data stores.
+  This is the **ports and adapters** architectural style, and the point of it is the **dependency
+  inversion principle** — the business logic does not depend on technical details; the technical
+  details depend on the business logic.
 - A service runs as one or more **processes** on **servers** (also called nodes/hosts). The same
   service is typically run as *many* identical process replicas across many servers for scale and
   fault tolerance.
@@ -91,7 +194,14 @@ The book's vocabulary, used throughout:
   will fail.
 - The **client-server** relationship is the basic building block: a client sends a request, a server
   processes it and returns a response. A single process is often a server to some peers and a client
-  to others (a web server is a client of the database it calls).
+  to others (a web server is a client of the database it calls). Vitillo fixes the terms for the rest
+  of the book here — a process *running* a service is a **server**, a process *sending requests* to
+  one is a **client**, and sometimes a process is both.
+
+Two simplifying assumptions are stated up front and hold for the rest of the book: an individual
+instance of a service runs **entirely within a single server process**, and a process has a **single
+thread**. They aren't true of real deployments; they let the discussion skip implementation details
+that would complicate it without adding much.
 
 The central, sobering fact that makes all of this hard: **the network is unreliable**. Messages get
 lost, delayed, duplicated, corrupted, and reordered; a node can't distinguish "the peer is slow"
@@ -179,70 +289,22 @@ TCP delivers bytes reliably and in order over lossy IP using three ideas:
 - **Positive acknowledgments (ACKs).** The receiver sends back an ACK naming the next sequence number
   it expects (i.e. acknowledging everything before it). The sender knows data arrived only when it
   sees the ACK.
-- **Retransmission on timeout.** The sender starts a **retransmission timer (RTO)** for unacked data.
-  If the ACK doesn't arrive before the timer fires, the sender assumes the segment was lost and
-  **retransmits** it. The RTO is derived from measured round-trip times (a smoothed RTT plus a
-  variance margin), so it adapts to the path. Fast retransmit is an optimization: three duplicate ACKs
-  signal a loss before the timer even fires.
+- **Retransmission on timeout.** Every segment sent needs to be acknowledged by the receiver. When
+  that doesn't happen, **a timer fires on the sending side and the segment is retransmitted**. That is
+  the whole of the mechanism as Vitillo states it — the sender does not need to know *why* the ACK
+  never came.
+- **Checksums.** To ensure the data hasn't been corrupted in transit, the receiver uses a **checksum**
+  to verify the integrity of a delivered segment. Sequence numbers catch loss, duplication, and
+  reordering; the checksum catches the flipped bit that all three would otherwise wave through.
 
 Together these give the illusion of a perfect pipe: the application `write()`s bytes on one side and
 `read()`s exactly those bytes, in order, on the other — TCP hides every loss, duplicate, and reorder
-underneath.
+underneath. Vitillo's summary of the whole chapter is this pattern rather than the details: **build a
+reliable abstraction on top of an unreliable one**, which is a move the rest of the book makes again
+and again.
 
-Two refinements make this practical rather than pathologically slow:
-
-- **RTO is adaptive, not a fixed constant.** Retransmitting too eagerly wastes bandwidth and
-  aggravates congestion; retransmitting too late stalls the stream. TCP therefore continuously
-  measures RTT and computes the timeout as a **smoothed RTT plus a multiple of the RTT variance** (the
-  Jacobson/Karels estimator), and **doubles the RTO on each successive retransmission** (exponential
-  backoff) so a persistently lossy path isn't hammered. A path with a 20 ms RTT ends up with an RTO of
-  tens of milliseconds; a satellite path with a 600 ms RTT gets a proportionally larger one.
-- **Fast retransmit / fast recovery beat the timer.** Waiting for the full RTO on every loss would be
-  slow, so TCP treats **three duplicate ACKs** (the receiver re-acknowledging the same sequence number
-  because later segments arrived but the gap wasn't filled) as an early loss signal and retransmits the
-  missing segment **immediately**, without waiting for the timer. **Selective ACK (SACK)** lets the
-  receiver name exactly which non-contiguous ranges it already holds, so the sender retransmits *only*
-  the truly missing segments instead of everything after the gap.
-
-The distinction matters for performance: a loss caught by **fast retransmit** costs roughly one RTT
-and only halves cwnd, whereas a loss that falls through to an **RTO timeout** collapses cwnd to 1 and
-restarts slow start — an order of magnitude more expensive. This is why bursty loss on a
-high-throughput connection is far worse than the same loss rate spread out.
-
-**The idea behind it.** "Wait a bit longer than this path's usual round trip — plus a margin for how
-jittery that round trip has been — and if the retransmission also goes unanswered, double the wait
-every time."
-
-| Symbol | What it is |
-|--------|------------|
-| `SRTT` | Smoothed round-trip time: a running average of the RTTs actually measured on this connection |
-| `RTTVAR` | How much recent RTTs bounced around — the jitter margin |
-| `RTO` | `SRTT + 4 x RTTVAR`, the deadline for an ACK before the sender retransmits |
-| doubling | Each successive retransmission of the *same* segment doubles the RTO (exponential backoff) |
-
-**Walk one example.** Two paths sized by the same rule, then a run of failed retries:
-
-```
-  path             SRTT     RTTVAR    RTO = SRTT + 4 x RTTVAR
-  datacenter LAN    20 ms     5 ms     20 +  20  =    40 ms
-  satellite        600 ms    50 ms    600 + 200  =   800 ms
-
-  exponential backoff, starting from a 200 ms RTO
-    retry 1    wait   0.2 s     elapsed   0.2 s
-    retry 2    wait   0.4 s     elapsed   0.6 s
-    retry 3    wait   0.8 s     elapsed   1.4 s
-    retry 4    wait   1.6 s     elapsed   3.0 s
-    retry 5    wait   3.2 s     elapsed   6.2 s
-    retry 6    wait   6.4 s     elapsed  12.6 s
-    retry 7    wait  12.8 s     elapsed  25.4 s
-```
-
-**Why the `4 x RTTVAR` term exists.** Without it the RTO would sit right on top of the average RTT,
-so roughly half of all ACKs would arrive *after* the timer fired and the sender would retransmit data
-that was never lost — pouring extra traffic onto a path that is already the slow one. The variance
-term buys headroom proportional to how unpredictable the path is: a steady LAN gets a tight 40 ms
-deadline, a jittery satellite link gets 800 ms, and neither one fires spuriously. The doubling is the
-other half of the same instinct — if the path is not answering, asking louder makes it worse.
+*(How TCP actually sizes that retransmission timer, and the optimizations that beat it, are not part
+of Chapter 2 — see [Beyond the book](#beyond-the-book--tcp-retransmission-timing-and-quic) below.)*
 
 ### Connection lifecycle
 
@@ -470,30 +532,29 @@ of ramp, which is the entire reason the initial-cwnd default was raised. (Strict
 at 2,560 segments, 8 shy of the 2,568 the BDP wants; the 9th RTT closes that sliver, which is why the
 text above says "about 8".)
 
-### Custom protocols (UDP and QUIC)
+### Custom protocols (UDP)
 
-TCP's guarantees aren't free: every new connection pays the **1-RTT handshake** plus the **slow-start
-ramp** (several more RTTs to reach full bandwidth). For a workload of *many tiny, short-lived
-requests*, this setup tax dominates — you finish the request before slow start ever opened the window.
-This motivates alternatives:
+TCP's reliability and stability come at a price: **lower bandwidth and higher latencies than the
+underlying network can actually deliver**. Every new connection pays the handshake plus the
+slow-start ramp before it reaches full speed. Drop TCP's stability and reliability mechanisms and
+what's left is **UDP** — a connectionless transport-layer protocol you can use as an alternative.
 
-- **UDP** is the bare transport: connectionless, no handshake, no ordering, no retransmission, no
-  congestion control — just "wrap this datagram in ports and best-effort deliver it." You get IP's
-  unreliability with process-to-process addressing added, and **nothing else**. That's a feature when
-  you want to *build your own* reliability semantics (real-time media that prefers a dropped frame to a
-  late one; DNS queries that fit in one packet; custom protocols) — you add back exactly the
-  guarantees you need and skip the ones you don't.
-- **QUIC** is the modern synthesis, built *on top of UDP* in user space, and the transport under
-  **HTTP/3**. Its wins over TCP+TLS:
-  - **Faster setup**: QUIC folds the transport and TLS 1.3 handshakes together into **1 RTT** for a
-    new connection, and **0 RTT** when resuming a prior session (send the request with the very first
-    packet).
-  - **No head-of-line blocking across streams**: QUIC multiplexes independent **streams** within one
-    connection, each with its own sequence space. A lost packet stalls **only the stream it belongs
-    to**, not all of them. (TCP, by contrast, delivers one ordered byte stream, so a single lost
-    segment stalls *everything* layered on that connection — the flaw HTTP/2 still inherits.)
-  - **Connection migration**: a connection is identified by a **connection ID**, not the IP/port
-    4-tuple, so it survives a client changing networks (Wi-Fi → cellular) without a new handshake.
+Unlike TCP, UDP does not expose the abstraction of a byte stream. Clients can only send discrete,
+size-limited packets called **datagrams**. UDP offers no reliability: datagrams have no sequence
+numbers and are not acknowledged. It implements neither flow control nor congestion control. It is,
+in Vitillo's words, a lean and bare-bones protocol — and its purpose is to **bootstrap custom
+protocols** that provide *some*, but not all, of the guarantees TCP does.
+
+The book's example is multiplayer games. Clients sample gamepad events several times per second and
+send them to a server that tracks the global game state; the server samples the game state several
+times per second and sends snapshots back. **If a snapshot is lost in transmission there is no value
+in retransmitting it** — the game evolves in real time, so by the time the retransmitted snapshot
+arrived it would already be obsolete. This is where UDP shines and where TCP actively hurts: TCP
+would keep trying to redeliver the missing data and degrade the game's experience.
+
+Vitillo notes in passing that **HTTP/3 is based on UDP** to avoid some of TCP's shortcomings; the
+mechanics of the protocol it uses to do so are not part of this chapter — see
+[Beyond the book](#beyond-the-book--tcp-retransmission-timing-and-quic).
 
 ---
 
@@ -1068,6 +1129,87 @@ why it reappears in messaging (Part III) and in downstream-resiliency retries (P
 
 ---
 
+## Beyond the book — TCP retransmission timing and QUIC
+
+> **This section is not in Vitillo.** Everything above sits under a `## 1.x (Ch N)` heading and
+> reports what that chapter says. What follows is the summarizer's addition: it is accurate and it is
+> useful next to Part I, but Chapter 2 does not contain it. Chapter 2 §2.1 says only that "a timer
+> fires on the sending side and the segment is retransmitted" — no estimator, no formula. And Chapter
+> 2 §2.5 "Custom protocols" is a single page about **UDP**; **QUIC is never mentioned in it**, and
+> HTTP/3 appears only in a footnote noting it is based on UDP. Read this as commentary, not as the
+> author's.
+
+### How TCP actually sizes the retransmission timer
+
+The timer Vitillo mentions has a name and a formula — the **retransmission timeout (RTO)**, specified
+in RFC 6298 and originally due to Jacobson and Karels. The idea in one sentence: *wait a bit longer
+than this path's usual round trip, plus a margin for how jittery that round trip has been, and if the
+retransmission also goes unanswered, double the wait every time.*
+
+| Symbol | What it is |
+|--------|------------|
+| `SRTT` | Smoothed round-trip time: a running average of the RTTs actually measured on this connection |
+| `RTTVAR` | How much recent RTTs bounced around — the jitter margin |
+| `RTO` | `SRTT + 4 x RTTVAR`, the deadline for an ACK before the sender retransmits |
+| doubling | Each successive retransmission of the *same* segment doubles the RTO (exponential backoff) |
+
+**Walk one example.** Two paths sized by the same rule, then a run of failed retries:
+
+```
+  path             SRTT     RTTVAR    RTO = SRTT + 4 x RTTVAR
+  datacenter LAN    20 ms     5 ms     20 +  20  =    40 ms
+  satellite        600 ms    50 ms    600 + 200  =   800 ms
+
+  exponential backoff, starting from a 200 ms RTO
+    retry 1    wait   0.2 s     elapsed   0.2 s
+    retry 2    wait   0.4 s     elapsed   0.6 s
+    retry 3    wait   0.8 s     elapsed   1.4 s
+    retry 4    wait   1.6 s     elapsed   3.0 s
+    retry 5    wait   3.2 s     elapsed   6.2 s
+    retry 6    wait   6.4 s     elapsed  12.6 s
+    retry 7    wait  12.8 s     elapsed  25.4 s
+```
+
+**Why the `4 x RTTVAR` term exists.** Without it the RTO would sit right on top of the average RTT,
+so roughly half of all ACKs would arrive *after* the timer fired and the sender would retransmit data
+that was never lost — pouring extra traffic onto a path that is already the slow one. The variance
+term buys headroom proportional to how unpredictable the path is: a steady LAN gets a tight 40 ms
+deadline, a jittery satellite link gets 800 ms, and neither one fires spuriously. The doubling is the
+other half of the same instinct — if the path is not answering, asking louder makes it worse.
+
+**Fast retransmit and SACK beat the timer.** Waiting for the full RTO on every loss would be slow, so
+TCP treats **three duplicate ACKs** (the receiver re-acknowledging the same sequence number because
+later segments arrived but the gap wasn't filled) as an early loss signal and retransmits the missing
+segment **immediately**. **Selective ACK (SACK)** lets the receiver name exactly which non-contiguous
+ranges it already holds, so the sender retransmits *only* the truly missing segments instead of
+everything after the gap.
+
+The distinction matters for performance: a loss caught by **fast retransmit** costs roughly one RTT
+and only halves the congestion window, whereas a loss that falls through to an **RTO timeout**
+collapses the window and restarts slow start — an order of magnitude more expensive. This is why
+bursty loss on a high-throughput connection is far worse than the same loss rate spread out.
+
+### QUIC — the custom protocol Chapter 2's footnote points at
+
+Chapter 2 explains that UDP exists to **bootstrap custom protocols** and footnotes that HTTP/3 is
+built on UDP. **QUIC** is that custom protocol: a user-space transport that adds TCP-like reliability
+back on top of UDP, and the transport under HTTP/3. Its three wins over TCP+TLS:
+
+- **Faster setup.** QUIC folds the transport and TLS 1.3 handshakes together into **1 RTT** for a new
+  connection, and **0 RTT** when resuming a prior session (the request goes out with the very first
+  packet). This attacks exactly the cold-start penalty §2.2 describes.
+- **No head-of-line blocking across streams.** QUIC multiplexes independent **streams** within one
+  connection, each with its own sequence space, so a lost packet stalls **only the stream it belongs
+  to**. TCP by contrast delivers one ordered byte stream, so a single lost segment stalls everything
+  layered on that connection — the flaw HTTP/2 still inherits.
+- **Connection migration.** A connection is identified by a **connection ID** rather than the
+  IP/port 4-tuple, so it survives a client changing networks (Wi-Fi to cellular) without a new
+  handshake.
+
+For production-depth treatment see [backend/udp_and_quic/](../../../backend/udp_and_quic/udp_and_quic.md).
+
+---
+
 ## Visual Intuition
 
 ### End-to-end: one HTTPS request, layer by layer
@@ -1314,12 +1456,16 @@ It has exhausted its ephemeral ports because thousands of sockets are stuck in T
 Because throughput is bounded by WindowSize / RTT — the sender can only have one window of unacknowledged data in flight before it must wait a full round-trip for ACKs. On a 30 ms RTT path a 64 KB window tops out at about 17 Mbps regardless of whether the link is 100 Mbps or 10 Gbps, since the pipe sits idle waiting for ACKs. Filling a high bandwidth-delay-product ("long fat") pipe requires a much larger window, which is why TCP window scaling exists.
 
 **Q: A service that was healthy went completely down at midnight with no deploy — what's the classic cause?**
+**Short:** An expired TLS certificate — every handshake fails from the moment it lapses, so a timer takes the service down with no change to code or servers.
+
 An expired TLS certificate. Certificates carry an expiry date, and when one lapses, every TLS handshake fails and the service is totally unreachable even though the servers and code are fine — the failure is triggered by a timer, not a change. The remedy is to automate certificate rotation (ACME / Let's Encrypt / cert-manager) and alert well before expiry (e.g. 30 days out), treating "days to cert expiry" as a monitored metric.
 
 **Q: What is the DNS TTL tradeoff?**
 A short TTL gives fast failover and change propagation but generates more DNS queries and latency, while a long TTL reduces load via cache hits but leaves clients resolving to stale/dead IPs until their caches expire. You cannot force-expire caches you don't control, so the TTL is a promise made in advance. A common operational move is to lower a long TTL shortly before a planned migration so caches are short-lived when you flip the record.
 
 **Q: How do idempotency keys give exactly-once processing when delivery is only at-least-once?**
+**Short:** The client reuses one key across retries and the server, on seeing a key it already processed, returns the stored response instead of re-executing the work.
+
 The client attaches a unique key per logical operation and reuses it across retries; the server records each processed key with its response and, on seeing a duplicate key, returns the stored response instead of re-executing. So even if a POST arrives twice (because a lost response triggered a retry), the effect — like charging a card — happens exactly once. Storing the key and doing the work should be atomic so a crash can't leave one without the other.
 
 **Q: What is the difference between a safe and an idempotent HTTP method, and why does it matter for retries?**
@@ -1347,6 +1493,8 @@ Forward secrecy means that compromising the server's long-term private key in th
 TLS 1.3 completes in one round-trip because the client includes its key share in the first ClientHello, letting the server respond with everything needed to derive the session key (TLS 1.2 needed two). On resumption, TLS 1.3 supports 0-RTT, sending application data with the very first packet. The caveat is that 0-RTT early data is replayable by an attacker, so it must be used only for idempotent requests, never for operations like a payment.
 
 **Q: Walk through DNS resolution from a cold cache.**
+**Short:** Stub resolver to recursive resolver, then root server to TLD server to authoritative server, which returns the A record; the recursive resolver caches it for its TTL.
+
 The OS stub resolver asks a recursive resolver, which on a cache miss queries a root name server (which points to the TLD servers for, say, .com), then the .com TLD server (which points to the authoritative server for the domain), then the authoritative server, which returns the A record IP. The recursive resolver caches the answer per its TTL and returns it. On a warm cache the whole walk collapses to a single cached lookup, which is why DNS is usually instant.
 
 **Q: Why is DNS a common hidden single point of failure?**
@@ -1370,8 +1518,10 @@ Backward-compatible (additive) changes — adding an optional field, a new endpo
 **Q: What do UDP and QUIC give you that plain TCP doesn't, and when would you choose them?**
 UDP is a bare connectionless transport with no handshake, ordering, or congestion control, so you build exactly the reliability you need. That suits real-time media, DNS, or custom protocols where TCP's setup tax and strict ordering hurt. QUIC, built on UDP and used by HTTP/3, adds back reliability with independent streams (no cross-stream HOL blocking), folds in TLS for a 1-RTT (or 0-RTT resumed) setup, and supports connection migration — making it strong for modern, mobile, high-latency web traffic.
 
-**Q: Why are the three reasons to build a distributed system, and what does each cost?**
-You build one to scale beyond a single machine's finite resources, to tolerate faults through redundancy, and to lower latency by placing service copies near users. Each is a genuine driver, but all of them force you to accept an unreliable network as the only channel between nodes — messages can be lost, delayed, duplicated, or reordered, and you can't tell a slow node from a dead one. If none of the three reasons applies, a single machine is simpler and you shouldn't pay that complexity.
+**Q: What are Vitillo's four reasons for building a distributed system, and what do they cost?**
+**Short:** Vitillo gives four: some applications are inherently distributed (the web), high availability (Dropbox), workloads too big for one node (Google), and latency physics (Netflix).
+
+Vitillo gives four, each with a named example. Some applications are **inherently distributed** — the web is one, and there was never a single-node alternative to pick instead. Some need **high availability** and resilience to single-node failures, like Dropbox replicating your data across nodes. Some face **workloads too big to fit on one node**, no matter how powerful, like Google's tens of thousands of search requests per second. And some have **performance requirements physically impossible on a single node**, like Netflix streaming high-resolution video from a datacenter near you. What every one of them costs is the same: you accept an unreliable network as the only channel between nodes — messages can be lost, delayed, duplicated, or reordered, and you can't tell a slow node from a dead one. The first reason is the one people forget, because it isn't a design decision at all; the other three are, and where none of them applies a single machine is simpler.
 
 **Q: What does IP guarantee, and what does TCP add on top?**
 IP guarantees only best-effort host-to-host delivery: packets are routed by address but may be lost, duplicated, reordered, or corrupted, and are capped at the link MTU (~1500 bytes on Ethernet). TCP adds a reliable, ordered, process-to-process byte stream using sequence numbers (order and dedup), positive ACKs plus retransmission on timeout (recover losses), flow control (protect the receiver), and congestion control (protect the network). Everything TCP provides is a guarantee it had to build back on top of IP's unreliability.

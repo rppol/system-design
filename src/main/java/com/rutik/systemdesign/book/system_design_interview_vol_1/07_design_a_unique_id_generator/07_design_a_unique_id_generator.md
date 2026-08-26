@@ -1042,6 +1042,8 @@ It is Flickr's design: one dedicated database whose central `auto_increment` cou
 To maximize the usable lifetime of the 41-bit timestamp field. The field holds ms since the epoch and overflows after ~69 years, so starting the count at a recent date (Twitter used Nov 04, 2010) pushes overflow decades further out than starting at 1970, which would already have consumed ~40 years. The epoch must be chosen once and never changed, since it is encoded implicitly in every ID.
 
 **Q: How many machines and how many years does the default layout support, and how do you compute them?**
+**Short:** 1024 machines and about 69 years: the 5-bit datacenter and 5-bit machine fields give 2^10 identities, and the 41-bit millisecond timestamp spans roughly 69.7 years.
+
 1024 machines and about 69 years. The 5-bit datacenter and 5-bit machine fields give 2^5 × 2^5 = 32 × 32 = 1024 identities; the 41-bit millisecond timestamp gives 2^41 ms ≈ 2.199 × 10^12 ms, which is ≈ 2.199 × 10^9 seconds ÷ 86,400 ÷ 365 ≈ 69.7 years. These are the two capacity numbers to state in an interview.
 
 **Q: How would you tune the bit layout for a low-concurrency but long-lived application?**

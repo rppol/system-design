@@ -1,6 +1,6 @@
 # Chapter 1: Reliable, Scalable, and Maintainable Applications
 
-> Part I — Foundations of Data Systems · DDIA (Kleppmann) · the vocabulary chapter; leads to all of Parts II–III
+> Part I — Foundations of Data Systems · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · the vocabulary chapter; leads to all of Parts II–III
 
 ## Chapter Map
 
@@ -60,7 +60,13 @@ Caption: the chapter's framing — your app is a composite data system, and the 
 *between* its pieces (DB ↔ cache ↔ index) is your responsibility, not any single tool's.
 
 The three concerns — reliability, scalability, maintainability — are introduced as the lens
-for evaluating any such composite.
+for evaluating any such composite. Kleppmann is explicit that the boundaries in this book are
+drawn for convenience of exposition, not because the underlying problems are actually
+separate: the same techniques for replicating data reappear whether you call the tool a
+"database" or a "message queue," and a failure mode discussed under one label (say, a
+network partition affecting a database's replicas) applies just as much to a tool marketed
+under a different label (a message broker's replicas). Reading the book with that in mind is
+what lets the principles transfer to a tool you've never used before.
 
 ## 1.2 Reliability
 
@@ -68,9 +74,18 @@ for evaluating any such composite.
 even when things go wrong. The things that go wrong are **faults**; a system that
 anticipates and copes with faults is **fault-tolerant** or **resilient**. Crucial nuance:
 fault ≠ failure. A *fault* is one component deviating from spec; a *failure* is the system
-stopping service entirely. You can never reduce faults to zero, so you design to stop faults
-from cascading into failures. Deliberately *inducing* faults (Netflix's Chaos Monkey) is how
-you prove your fault-tolerance actually works.
+stopping service entirely. You can never reduce faults to zero — in fact in some cases it may
+be best to tolerate faults rather than trying to prevent them, since prevention is often
+impossible or prohibitively expensive — so instead you design fault-tolerance mechanisms that
+stop faults from cascading into failures. It's counterintuitive, but Kleppmann argues it can
+be a good idea to deliberately *increase* the rate of faults, by triggering them
+deliberately — for example, by randomly killing individual processes without warning. Many
+critical bugs are actually due to poor error handling, so deliberately inducing faults
+ensures the fault-tolerance machinery is continually exercised and tested, building
+confidence that faults will be handled correctly when they occur naturally. Netflix's Chaos
+Monkey, which randomly terminates production instances, is the book's example of this
+approach, precisely because a fault-tolerance mechanism nobody has actually exercised is not
+one you should trust in an emergency.
 
 ### Hardware faults
 
@@ -124,18 +139,57 @@ every day, so the software has to treat whole-machine loss as normal.
 
 Systematic faults are more insidious than hardware faults because they're **correlated** —
 a leap-second bug hits every node at once; a runaway process exhausts a shared resource for
-everyone. They lurk until an unusual condition triggers them. No quick fix; mitigations are
-careful assumptions, thorough testing, process isolation, measuring/monitoring, and
-crash-and-restart of individual processes.
+everyone. They lurk, dormant, until an unusual set of circumstances triggers them, and
+because the assumption that triggers the bug is baked into the software itself, no amount of
+hardware redundancy protects you from it. Kleppmann's named examples of the pattern: a
+software bug that causes every instance of an application server to crash when fed a
+particular bad input (the 2012 leap-second bug that hung many Java applications
+simultaneously across a fleet is the book's own example); a runaway process that uses up a
+shared resource — CPU time, memory, disk space, network bandwidth; a service that the system
+depends on slowing down, becoming unresponsive, or returning corrupted responses; and
+**cascading failures**, where one small fault in one component triggers a fault in another,
+which triggers another, snowballing into a large-scale outage from a locally minor trigger.
+There is no quick fix for systematic faults; the mitigations Kleppmann offers are cultural and
+procedural rather than mechanical: carefully thinking through assumptions and interactions in
+the system, thorough testing, process isolation, allowing processes to crash and restart,
+measuring/monitoring/analyzing system behavior in production, and building organizational
+practices and tooling around all of the above.
 
 ### Human errors
 
 Humans configure systems and are the leading cause of outages (one study: ~10–25% of
-outages from hardware, the rest config errors). You make systems reliable *despite* humans
-by: designing APIs/admin interfaces that make the right thing easy; decoupling places where
-mistakes happen (sandboxes with real data, no real users); testing thoroughly at all levels;
-allowing quick and easy *recovery* (fast rollback, gradual rollout); and detailed monitoring
-(telemetry).
+outages from hardware, the rest config errors).
+
+#### Decoding "10-25% hardware, the rest human"
+
+The stat is easy to skim past; walking it as a ratio makes the design implication concrete:
+
+```
+  if hardware causes 10-25% of outages, humans (directly or via config) cause 75-90%
+
+  so: for every 1 outage prevented by better hardware redundancy,
+      there are roughly 3 to 9 outages that only better human-error mitigation prevents
+```
+
+**The takeaway.** Investing purely in hardware redundancy (RAID, dual PSUs, more replicas)
+caps out addressing at most a quarter of your outage risk — the majority of the reliability
+budget belongs to the human side: interface design, testing, and recovery speed.
+
+You make systems reliable *despite* humans, not by expecting humans to be careful, but by
+engineering the surrounding system so mistakes are unlikely and cheap to undo:
+designing APIs/admin interfaces that make the right thing easy and discourage the wrong
+thing (well-chosen defaults, but overridable when truly needed); decoupling the places where
+people make the most mistakes from the places where those mistakes could cause failures —
+providing fully featured non-production **sandbox environments** where people can explore
+and experiment safely, using real data, without affecting real users; testing thoroughly at
+all levels, from unit tests to whole-system integration tests and manual tests, with
+automated testing being widely used, well understood, and especially valuable for edge cases
+that rarely arise in normal operation; allowing quick and easy *recovery* from human error
+to minimize the impact of a failure — fast rollback of configuration changes, rolling out new
+code gradually, providing tools to recompute data if it turns out the old computation was
+wrong; and setting up detailed and clear **monitoring**, such as performance metrics and
+error rates — known as *telemetry* in other engineering disciplines — so problems surface
+early, before they compound into a failure a human then has to diagnose under pressure.
 
 All three fault categories funnel into the same question — does fault-tolerance contain
 this one, or does it cascade into a failure?
@@ -454,31 +508,139 @@ arithmetic behind Amazon targeting p999 rather than p99, and behind Dean and Bar
 - **Scaling out (horizontal / shared-nothing)** — distribute load across many machines.
   Cheaper commodity hardware, but introduces all the distributed-systems complexity of
   Parts II–III.
+- A **hybrid** — a few sufficiently powerful machines, still simpler than distributing across
+  hundreds of small nodes — is often the pragmatic middle ground the book points to before
+  reaching for a full shared-nothing architecture.
 - Most real systems are **elastic** (auto-add resources on load) or manually scaled
-  (simpler, fewer surprises). There is **no magic "scalable" architecture** — the
-  architecture depends on which operations are common and which are rare (the load
-  parameters). An architecture for 100k req/s of 1 kB each is utterly different from one for
-  3 req/min of 2 GB each, even at identical "throughput."
+  (simpler, fewer surprises). Elastic systems are useful when load is highly unpredictable,
+  but manually scaled systems are simpler and may have fewer operational surprises.
+
+Distributing a **stateless** service across many machines is comparatively simple: there's no
+data to keep synchronized, so any request can go to any node. Distributing data that has
+state — the databases at the center of this book — is far harder, because now you must
+reason about consistency, network partitions, and node failure while the data itself is
+spread out; that hard problem is what the rest of the book is about, and it's why a
+"scalable" *stateless* web tier doesn't automatically imply a scalable overall system.
+
+There is **no magic "scalable" architecture** (informally known as "magic scaling sauce") —
+Kleppmann is emphatic that an architecture built for scale is highly specific to the
+application, built around assumptions of which operations will be common and which will be
+rare, and which load parameters matter. An architecture that is appropriate for one
+application is not necessarily appropriate for another with superficially similar-looking
+requirements. An architecture for 100k req/s of 1 kB each is utterly different from one for
+3 req/min of 2 GB each, even at identical "throughput" measured in bytes/sec. A system that
+is well designed for a particular application is built around assumptions of which
+operations will be common and which will be rare — and if those assumptions turn out to be
+wrong, the engineering effort spent scaling for the wrong dimension is largely wasted, in the
+best case, and misdirects the whole design in the worst.
+
+In an early-stage startup or unproven product, Kleppmann's practical advice is that it's
+usually more important to be able to iterate quickly on product features than to scale to
+some hypothetical future load — you don't yet know which load parameters will matter, so
+premature scaling work is frequently thrown away when the product's actual usage pattern
+turns out to differ from the guess.
 
 ## 1.4 Maintainability
 
 The majority of software cost is **ongoing maintenance**, not initial development: fixing
 bugs, keeping it operational, investigating failures, adapting to new platforms and
-requirements, paying down technical debt. Design for three principles:
+requirements, paying down technical debt. Kleppmann is explicit that this is well known yet
+badly underinvested in — everyone prefers to work on new features over maintaining old
+systems, so the book sets out to minimize maintenance pain by design, via three principles.
 
-- **Operability — make it easy for ops to keep it running.** Good monitoring, good defaults,
-  predictable behavior, self-healing, good documentation, avoiding dependence on individual
-  machines. Good operations can work around bad software; good software cannot survive bad
-  operations.
-- **Simplicity — manage complexity so new engineers can understand it.** The enemy is
-  *accidental complexity* (complexity not inherent in the problem but arising from the
-  implementation). The best tool against it is **abstraction**: a good abstraction hides
-  implementation detail behind a clean interface and is reusable (a high-level language
-  hides machine code; SQL hides storage engines).
-- **Evolvability (extensibility / modifiability / plasticity) — make change easy.**
-  Requirements always change. Evolvability operates at the data-system level and is tightly
-  linked to simplicity and good abstractions: simple, well-abstracted systems are easier to
-  modify. Agile working patterns (TDD, refactoring) are tools here.
+### Operability — make it easy for operations to keep the system running
+
+Kleppmann does not leave "operability" as a vague good intention; the chapter lists what a
+good operations team is actually responsible for, and operability is the property of
+software that makes each of these tractable rather than heroic:
+
+- **Monitoring** the health of the system and quickly restoring service if it goes into a
+  bad state.
+- **Tracking down the cause of problems**, such as system failures or degraded performance.
+- **Keeping software and platforms up to date**, including security patches.
+- **Keeping tabs on how different systems affect each other**, so a problematic change can
+  be avoided before it causes damage.
+- **Anticipating future problems and solving them before they occur** — e.g. capacity
+  planning.
+- **Establishing good practices and tools for deployment, configuration management**, and
+  more.
+- **Performing complex maintenance tasks**, such as moving an application from one platform
+  to another.
+- **Maintaining the security of the system** as configuration changes are made.
+- **Defining processes that make operations predictable** and help keep the production
+  environment stable.
+- **Preserving the organization's knowledge** about the system, even as individual people
+  come and go.
+
+Good operability means making routine tasks easy so the operations team can focus effort
+where it matters. Concretely, that means: visibility into the runtime behavior and internals
+of the system (monitoring/observability), support for automation and standard tooling,
+avoiding dependency on individual machines (so any single machine can be taken down for
+maintenance while the system as a whole keeps running), good documentation and an
+easy-to-understand operational model ("if I do X, Y will happen"), sensible default behavior
+combined with the freedom for admins to override defaults when needed, self-healing where
+appropriate but also manual control for admins when automation gets it wrong, and predictable
+behavior with minimal surprises. Kleppmann's summary judgment: **"good operations can often
+work around the limitations of bad (or incomplete) software, but good software cannot run
+reliably with bad operations."** Operability is therefore not a secondary polish item — a
+brittle, undocumented, self-inflicted-outage-prone system defeats even an excellent ops team.
+
+### Simplicity — managing complexity
+
+Small software projects can have delightfully simple, expressive code — but as a project
+grows, it typically becomes very complex and hard to understand, which slows down everyone
+who has to work on it and increases the maintenance cost. The symptoms Kleppmann names:
+explosion of the state space, tight coupling of modules, tangled dependencies, inconsistent
+naming and terminology, hacks aimed at solving performance problems, special-casing to work
+around one-off issues, and so on — much has been written about these symptoms already, but
+the book focuses on the cure rather than the taxonomy.
+
+The critical distinction is between two kinds of complexity:
+
+- **Essential (inherent) complexity** — complexity that is intrinsic to the problem the
+  software solves. It cannot be removed by any implementation choice, only managed and made
+  visible.
+- **Accidental complexity** — complexity that is not inherent in the problem the software
+  solves but arises only from the implementation. It is the complexity you added, not the
+  complexity the problem demanded.
+
+Making a system simpler does *not* necessarily mean reducing its functionality; it can also
+mean removing this accidental complexity. Kleppmann names **abstraction** as the best tool
+available for that: a good abstraction can hide a great deal of implementation detail behind
+a clean, simple-to-understand façade, and — because the same abstraction can be reused across
+many different applications — it is both more efficient (less duplicated effort) and tends to
+be higher quality than each application reinventing the mechanism for itself. High-level
+programming languages are abstractions that hide machine code, CPU registers, and syscalls;
+SQL is an abstraction that hides on-disk and in-memory data structures, concurrency-control
+algorithms, and query-execution details from anyone writing a query. But finding good
+abstractions is very hard, which is exactly why the distributed-systems abstractions the book
+builds toward in Parts II and III — transactions, consensus, replication guarantees — are so
+valuable: each one lets an application programmer pretend a much uglier reality (crash-prone
+networks, concurrent writers, partial failures) does not exist.
+
+### Evolvability — making change easy
+
+Requirements are a moving target almost by definition: new facts come to light, unanticipated
+use cases emerge, business priorities shift, regulation changes, growth forces a redesign.
+In terms of organizational processes, the Agile community developed techniques for adapting
+to change in a fast-paced environment — the *TDD* (test-driven development) and
+*refactoring* practices are the most widely known. But most discussions of Agile techniques
+operate at a fairly small, local scale (a couple of source files, or at most a few teams
+within one application). Kleppmann's move in this chapter is to take that same idea and scale
+it up to the level of an entire data system, possibly composed of several different
+applications or services with different characteristics — and he prefers the term
+**evolvability** (also seen as extensibility, modifiability, or plasticity) as the umbrella
+name for "agility at the level of a data system." Evolvability is tightly linked to the other
+two principles: a system that is simple and well abstracted is far easier to modify safely
+than one that is a tangle of accidental complexity, and a system that is operable is one an
+engineer can change with confidence, because they can observe the effect of the change and
+roll it back quickly if it's wrong.
+
+| Principle | The question it answers | Book's primary tool |
+|-----------|--------------------------|----------------------|
+| Operability | Can operations keep this running smoothly, day to day? | Monitoring, good defaults, documentation, machine-independence |
+| Simplicity | Can a new engineer understand this without a guided tour? | Abstraction, removing accidental complexity |
+| Evolvability | Can we change this safely as requirements shift? | Simplicity + operability, scaled up from Agile's local techniques |
 
 ---
 
@@ -554,8 +716,18 @@ between p50 and p95: it belongs to neither population.
   shared-nothing)** — more machines.
 - **Elastic** — automatically adds/removes resources with load.
 - **Maintainability** — operability + simplicity + evolvability.
+- **Operability** — the property of software that makes routine operational tasks
+  (monitoring, deployment, maintenance, incident response) tractable rather than heroic.
+- **Simplicity** — ease of understanding, achieved by removing accidental complexity.
+- **Essential (inherent) complexity** — complexity intrinsic to the problem; cannot be
+  designed away, only managed.
 - **Accidental complexity** — complexity from the implementation, not inherent to the problem.
 - **Abstraction** — clean reusable interface hiding implementation detail.
+- **Evolvability (extensibility / modifiability / plasticity)** — Agile-style ease of change,
+  scaled up to the level of an entire data system.
+- **Stateless vs. stateful scaling** — a stateless tier scales out trivially (any node handles
+  any request); a stateful (data-holding) system must additionally solve consistency and
+  partitioning, which is why distributed data is the hard problem this book is about.
 
 ---
 
@@ -600,6 +772,18 @@ between p50 and p95: it belongs to neither population.
 - **Confusing "we use Kubernetes/Cassandra" with "we are scalable."** Scalability is about
   matching architecture to the actual load parameters, not adopting a buzzword stack. The
   wrong load model produces an architecture that scales the wrong dimension.
+- **Scaling prematurely, before you know the real load parameters.** Building a
+  shared-nothing, horizontally-scaled architecture for a product whose actual usage pattern
+  hasn't stabilized wastes engineering effort that could have gone into iterating on the
+  product — and the assumptions baked into the early architecture are often wrong once real
+  usage arrives.
+- **Mistaking a reduction in features for simplification.** Removing accidental complexity
+  (tangled dependencies, inconsistent naming, special-case hacks) makes a system simpler
+  without touching what it does; cutting functionality to "simplify" is a different, much
+  more painful trade that the book does not conflate with good abstraction.
+- **Treating operability as an afterthought.** A system with no monitoring, no predictable
+  operational model, and undocumented failure modes forces the ops team into heroics at 3
+  a.m. — and, per the chapter's own framing, no amount of elegant code compensates for that.
 
 ---
 
@@ -653,6 +837,7 @@ Hardware faults (disk/RAM/power) are mostly uncorrelated and handled by redundan
 Hardware faults are largely independent — one disk dying doesn't make another die, so redundancy (RAID, replicas) works well. Software faults are correlated: a leap-second bug or a bad input pattern hits every node simultaneously, so your redundant copies all fail at once and redundancy gives no protection. Correlation defeats the statistical independence that hardware redundancy relies on.
 
 **Q: What are the three components of maintainability?**
+**Short:** Operability, simplicity, and evolvability — Kleppmann's three-part decomposition of maintainability.
 Operability (making it easy for operations to keep the system running smoothly — monitoring, good defaults, predictability), simplicity (managing complexity so new engineers can understand it, chiefly by removing accidental complexity through abstraction), and evolvability (making it easy to change as requirements evolve). Maintenance dominates total lifetime cost, so these are economically the most important properties.
 
 **Q: What is accidental complexity, and what is the primary tool for reducing it?**
@@ -668,13 +853,31 @@ He means scalability is always relative to specific load parameters, so an archi
 Because the server's view excludes queueing delay, network transit, and time the request spent waiting to be accepted — exactly the components that head-of-line blocking and load inflate. The client sees the full response time the user actually experiences. Server-side timing can look healthy while clients are timing out.
 
 **Q: What is the relationship between throughput and response time, and why keep them separate?**
+**Short:** Throughput is work per unit time, response time is per-request latency, and pushing one can worsen the other.
 Throughput measures work completed per unit time (jobs/sec, records/sec) and is the natural metric for batch systems; response time measures how long an individual request takes and is the natural metric for online systems. They can move in opposite directions — pushing throughput by batching often raises individual response times. Conflating them leads to optimizing one while silently degrading the other.
 
 **Q: How does the load parameter you choose change as a system's architecture changes?**
+**Short:** The right load parameter is whatever captures that architecture's dominant stress, so it shifts as the architecture does.
 The relevant load parameter is whatever best captures the dominant stress for *that* architecture: requests/sec for a stateless web tier, read:write ratio for a database, simultaneous connections for a chat server, cache hit rate for a read-through cache, fan-out for a social feed. As you redesign the system, the binding constraint shifts, so the parameter you track must shift with it; tracking the wrong one hides the real bottleneck.
 
 **Q: Why does the chapter say good operations can work around bad software but not vice versa?**
 Because operability — monitoring, runbooks, fast rollback, capacity headroom — lets a skilled ops team contain and recover from a flawed system, keeping it serving users. But no amount of elegant software survives an environment with no monitoring, no rollback path, and unpredictable manual changes; the software will eventually hit a condition operations can't see or recover from. Hence investing in operability pays off even for imperfect code.
+
+**Q: What ten responsibilities does the book assign to a good operations team, and why does that list matter for how you design software?**
+**Short:** Operability means designing software so the book's ten operational duties are tractable, not heroic.
+Kleppmann lists: monitoring and restoring service, tracking down the cause of problems, keeping software and platforms current (including security patches), tracking how systems affect each other to avoid damaging changes, anticipating and solving future problems (capacity planning), establishing good deployment/configuration tooling and practices, performing complex maintenance tasks like platform migrations, maintaining security as configuration changes, defining processes that make operations predictable, and preserving organizational knowledge as people come and go. The list matters because "operability" is otherwise a vague virtue; naming the concrete tasks tells you exactly what good monitoring, good defaults, and good documentation are *for*.
+
+**Q: What is the difference between essential complexity and accidental complexity?**
+**Short:** Essential complexity is inherent to the problem; accidental complexity comes only from the implementation.
+Essential (inherent) complexity is intrinsic to the problem the software solves and cannot be removed by any implementation choice, only managed. Accidental complexity is complexity that is *not* inherent in the problem but arises purely from how the software happens to be built — tangled dependencies, inconsistent naming, performance hacks, special-casing. Simplifying a system does not mean cutting functionality; it means stripping out the accidental kind while leaving the essential kind clearly exposed.
+
+**Q: Why does Kleppmann prefer the term "evolvability" over "agility" when talking about a whole data system?**
+**Short:** Kleppmann scales Agile's local techniques (TDD, refactoring) up to the level of an entire data system and calls that evolvability.
+Agile techniques like TDD and refactoring were developed for adapting to change at a fairly small, local scale — a few source files or a handful of teams within one application. Kleppmann wants a word for the same underlying goal — making change easy — applied to an entire data system that may be composed of several applications and services with very different characteristics, so "agility" (with its connotation of a specific set of team practices) doesn't quite fit. "Evolvability" names the system-level property directly: how easy is it to modify this data system and adapt it to changing requirements.
+
+**Q: What is an abstraction, according to the book, and why is finding a good one so valuable?**
+**Short:** A good abstraction hides implementation detail behind a reusable interface, cutting accidental complexity everywhere it's reused.
+An abstraction hides a great deal of implementation detail behind a clean, simple-to-understand interface, and because that same interface can be reused across many different applications, it both saves duplicated effort and tends to raise the quality of everything built on it (SQL hiding storage engines and concurrency control; a high-level language hiding registers and syscalls). Good abstractions are hard to find, which is exactly why the book treats distributed-systems abstractions like transactions and consensus as prized results in Parts II–III — each one lets application code pretend a much uglier reality (crash-prone networks, concurrent writers) doesn't exist.
 
 ---
 

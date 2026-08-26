@@ -831,6 +831,7 @@ Because offline accuracy is only a proxy for the business outcome, and the two o
 Because latency is a long-tailed distribution and the mean is dragged up by outliers, describing no real request. For `[100,102,100,100,99,104,110,90,3000,95]` the mean is ~390ms but the typical request is ~100ms; the mean hides both the typical experience and the real problem. Report percentiles — p50 (median) for the typical case and p90/p95/p99 for the tail — and optimize the tail, because the slowest requests often hit your most active, most valuable users.
 
 **Q: In the recommendation-ranking example, whose objectives conflict, and why does that matter?**
+**Short:** ML engineers, sales, product, and the manager each want something different, so no single model is objectively correct.
 The ML engineers want the most accurate ranking, sales wants to promote paying vendors, product wants the fastest response (users leave as latency grows), and the manager wants to maximize profit — all at once, and they genuinely conflict. The most accurate ranking is not the most profitable is not the fastest, so there's no single "correct" model, only a negotiated tradeoff. This is why production ML is as much about balancing stakeholder objectives as it is about building the model.
 
 **Q: How is an ML system's artifact different from a traditional software system's, and why does it matter?**
@@ -852,6 +853,7 @@ ML shines when the task is repetitive, wrong predictions are relatively cheap, i
 Don't use ML when it's unethical, when simpler heuristics already solve the problem, when it's not cost-effective, when there's no data or no learnable pattern, or when a single prediction matters enormously. ML is statistical — good on average but with no guarantee on any individual case — so a catastrophic, irreversible one-shot decision is a poor fit. And even when ML fits, start with the simplest non-ML baseline first.
 
 **Q: Why does the book insist on trying the simplest non-ML baseline first?**
+**Short:** A simple baseline may already suffice, gives ML a bar to beat, and serves as a fallback.
 Because a simple baseline does three things at once: it may already be good enough (saving an entire ML project), it gives you a baseline to prove ML actually beats, and it serves as a fallback for cold-start and model-failure cases. It forces ML to earn its complexity rather than being the default. This "earn the complexity" mindset runs through the whole book.
 
 **Q: How is monitoring an ML system different from monitoring traditional software?**
@@ -864,6 +866,7 @@ Google's 2009 experiment found that adding just 500ms of latency to search dropp
 Research data is static, clean, well-formatted, and already labeled (benchmarks like ImageNet), which is what makes leaderboards meaningful. Production data is messy, unstructured, user-generated (sometimes adversarial), biased, and — most importantly — constantly shifting as the world changes. A model trained on last month's distribution is asked to predict on this month's, so the "unseen data shares training patterns" assumption slowly breaks and the model decays.
 
 **Q: Why is versioning data harder than versioning code?**
+**Short:** Huge datasets shift statistically, not textually, so unlike code they have no clean diffable representation.
 Because datasets are huge — versioning a multi-terabyte dataset is nothing like a `git commit` — and there's no clean line-by-line diff for "the distribution shifted slightly." Code has a natural, compact, diffable representation; data doesn't, and the meaningful changes are statistical rather than textual. Tools like DVC help, but the problem is fundamentally messier than code versioning, which is why reproducibility is a real engineering effort in ML.
 
 **Q: Why is interpretability often required in production but optional in research?**

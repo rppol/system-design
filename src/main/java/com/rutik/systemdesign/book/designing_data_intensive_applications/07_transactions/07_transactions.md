@@ -1,6 +1,6 @@
 # Chapter 7: Transactions
 
-> Part II — Distributed Data · DDIA (Kleppmann) · builds on Ch 5–6, leads to Ch 8 (the trouble with distributed systems)
+> Part II — Distributed Data · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · builds on Ch 5–6, leads to Ch 8 (the trouble with distributed systems)
 
 ## Chapter Map
 
@@ -124,19 +124,41 @@ a counter, edit a JSON document, add to a list); they both read the old value, b
 value, and the second write *clobbers* the first — one update is silently lost. Snapshot isolation
 alone does not prevent this. Solutions:
 
-- **Atomic write operations** — let the database do the read-modify-write atomically
-  (`UPDATE counters SET value = value + 1`), avoiding the app-level race. Use these when you can;
-  they're implemented with an exclusive lock on the object (**cursor stability**).
-- **Explicit locking** — `SELECT ... FOR UPDATE` locks the rows the app will modify, forcing
-  concurrent transactions to wait. The app must remember to do it correctly everywhere.
-- **Automatic lost-update detection** — let transactions run in parallel; the database detects a
-  lost update and forces the loser to abort and retry (PostgreSQL repeatable read, others). Nice
-  because it works even if you forgot to lock.
-- **Compare-and-set (CAS)** — `UPDATE ... WHERE value = <old value>`; the write only succeeds if
-  the value hasn't changed since you read it (common in databases without transactions). Beware it
-  must read from the current data, not a stale snapshot.
-- (In replicated/multi-leader databases, locks and CAS don't suffice; you need conflict resolution
-  / version vectors / commutative operations from Ch 5.)
+- **Atomic write operations.** Many databases provide atomic update operations that remove the
+  need for the read-modify-write cycle to ever leave the database — `UPDATE counters SET value =
+  value + 1 WHERE key = 'foo'` in a relational database, or a dedicated increment operation in
+  MongoDB or Redis. Use these whenever the update can be expressed this way; they're typically
+  implemented by taking an exclusive lock on the object while reading it, so no other transaction
+  can read it until the update has been applied (a technique sometimes called **cursor
+  stability**), or by forcing all such operations onto a single thread.
+- **Explicit locking.** When an atomic operation doesn't cover what the application needs to do,
+  it can explicitly lock the objects it's about to update with `SELECT ... FOR UPDATE`, forcing
+  any other concurrent transaction that wants to touch the same row to wait. The book's example is
+  a multiplayer game where several players can move the same game figure at once — the application
+  locks the figure's row before checking the move is valid and writing the new position, so a
+  second concurrent move waits for the first to finish rather than racing it. The app must
+  remember to do this correctly at every call site, which is exactly the kind of thing that's easy
+  to forget once and hard to notice until it causes a production incident.
+- **Automatic lost-update detection.** Let transactions execute in parallel and have the database
+  itself detect when a lost update has occurred, aborting the loser and forcing it to retry. This
+  can be done efficiently alongside snapshot isolation — PostgreSQL's repeatable read, Oracle's
+  serializable, and SQL Server's snapshot isolation levels all detect lost updates automatically.
+  It's attractive because it needs no extra application code and works even if a developer forgot
+  to lock. The book flags a sharp exception, though: **MySQL/InnoDB's repeatable read does NOT
+  detect lost updates**, despite other databases offering exactly this protection at what sounds
+  like the same isolation level — another reminder that isolation-level names are not a reliable
+  guide to actual guarantees.
+- **Compare-and-set (CAS).** In databases that don't provide transactions at all, `UPDATE ... SET
+  value = new_value WHERE value = old_value` only takes effect if the value hasn't changed since
+  it was read, and the application detects a failed CAS and retries against the new current value.
+  This depends on the `WHERE` clause reading the object's *current* committed value rather than an
+  old snapshot — a CAS implementation that reads from a stale snapshot silently fails to prevent
+  the very race it's meant to catch.
+- **Replicated databases.** In a multi-leader or leaderless replicated database (Ch 5), none of
+  the above suffices, because locks and compare-and-set both assume there's one up-to-date copy of
+  the data to check against. Instead you must allow concurrent writes to create conflicting
+  versions and use application code or a purpose-built data structure (CRDTs, §5.3) to merge them
+  afterward.
 
 ### Decoding how likely a lost update actually is
 
@@ -269,17 +291,54 @@ cross-partition transactions far slower). Transactions are submitted as **stored
 whole transaction logic sent at once) rather than interactive multi-statement transactions, so the
 single thread never waits on network round-trips to the application.
 
+Encoding a transaction as a stored procedure means the database receives the whole transaction's
+logic in one shot, not just one statement while waiting for the application to decide the next one
+based on a query result. That single change is what makes single-threaded execution viable at all:
+an interactive, multi-round-trip transaction that pauses mid-flight for a human or a network call
+would stall the *entire* database while it waits, since nothing else can run concurrently on the
+one thread. Stored procedures give something up in return — an ORM, ad hoc debugging, and network
+calls to other services from inside a transaction all become awkward or impossible, and each
+vendor's stored-procedure dialect has its own quirks and, historically, a reputation for being
+harder to debug, version-control, and monitor than ordinary application code.
+
+For workloads too large for a single CPU core, actual serial execution scales by **partitioning**:
+give each partition its own dedicated thread, and a transaction confined to a single partition runs
+with no cross-thread coordination at all. A transaction touching more than one partition, though,
+must coordinate across every thread whose partition it touches, and that coordination cost is
+severe — the chapter notes cross-partition transactions running around an order of magnitude
+slower than single-partition ones on systems like VoltDB. The corollary is that actual serial
+execution is attractive only for workloads whose transactions are overwhelmingly single-partition;
+an application whose access patterns constantly cut across partitions gets little benefit from it.
+
 ### Two-phase locking (2PL)
 
-The classic (~30 years) approach. Far stronger locking than read committed: **readers block
-writers and writers block readers**. A transaction takes a **shared lock** to read and an
-**exclusive lock** to write; you must hold a lock to access an object, and locks are held until the
-transaction ends ("two-phase": acquire locks in a growing phase, release all at the end). To
-prevent phantoms, 2PL uses **predicate locks** (lock all objects matching a search condition,
-including ones that don't exist yet) — usually approximated by **index-range locks (next-key
-locking)** for efficiency. Correct but with **poor performance**: low concurrency (lots of waiting),
-and **deadlocks** are frequent (transactions waiting on each other's locks), forcing aborts and
-retries — so latency is unpredictable and throughput suffers.
+The classic approach. Far stronger locking than read committed: **readers block writers and
+writers block readers**. A transaction takes a **shared lock** to read an object and an
+**exclusive lock** to write one; several transactions can hold a shared lock on the same object at
+once, but an exclusive lock is truly exclusive — nobody else may hold any lock on that object while
+it's held. The "two-phase" name describes the lock lifecycle precisely: a **growing phase**, where
+the transaction acquires locks as it needs them, and a **shrinking phase**, right at the end, where
+it releases all of them at once (typically at commit or abort) — a transaction is never allowed to
+acquire a *new* lock after it has released any lock, which is exactly what makes the protocol
+correct.
+
+To stop phantoms — not just conflicting writes to existing rows, but a row that doesn't exist yet
+appearing later and violating an invariant (§7.2) — 2PL needs a **predicate lock**: instead of
+locking a specific object, it locks the *condition* of a search query, such as "any booking in room
+123 that overlaps 3pm–4pm today." Any future transaction that wants to read, insert, or modify
+anything matching that condition must wait for the predicate lock, even a row that didn't exist at
+lock time. Predicate locks are expensive to check against every write, so most databases instead
+implement **index-range locks (next-key locking)**: an approximation that locks a broader range of
+an existing index than the predicate strictly requires (e.g. every entry in a time-range index that
+overlaps the query, room 123 or not) — cheaper because it piggybacks on index structures the
+database already maintains, at the cost of occasionally blocking a transaction whose data doesn't
+actually conflict.
+
+2PL is correct but has **poor performance**: readers and writers block each other, so concurrency
+under contention is low, and **deadlocks** are frequent — two transactions each hold a lock the
+other wants and neither can proceed — forcing the database to detect the cycle, abort one
+transaction as the "victim," and force a retry. The result is unpredictable latency and reduced
+throughput, which is precisely what the arithmetic below quantifies.
 
 ### Decoding "poor performance" and "frequent deadlocks"
 
@@ -369,14 +428,29 @@ and evaporates when it is high.
 
 A 2008 breakthrough (now in PostgreSQL ≥9.1 "serializable", FoundationDB) that gives full
 serializability with much better performance than 2PL. It's **optimistic** instead of pessimistic:
-transactions run on a snapshot (as in snapshot isolation, no read locking — so no blocking), and at
-**commit** time the database checks whether the transaction's reads are still valid — specifically
-whether another committed transaction wrote to data this one *read* (a premise the transaction
-relied on that has since changed). If so, this transaction is **aborted and retried**. SSI detects
-"the basis of your decision is now outdated" and only aborts when a genuine serialization conflict
-occurred. Pros: no read locking (reads don't block, writes don't block reads), good performance
-when contention is low. Cons: abort rate rises under high contention (lots of retries), and it
-needs transactions to be short (long transactions are more likely to hit a conflict).
+transactions run against a consistent snapshot exactly as in ordinary snapshot isolation — no locks
+are taken while reading, so nothing blocks during execution — and the database instead verifies,
+only at **commit** time, that none of the transaction's decisions actually rested on outdated
+information. Two distinct checks do this work:
+
+- **Detecting reads of a stale MVCC object version.** Under MVCC, a transaction ignores any object
+  version that was still uncommitted when it took its snapshot. If one of those ignored,
+  then-uncommitted writes goes on to commit *before* this transaction commits, the original read
+  is now stale — with hindsight, the decision was based on data that was already out of date the
+  moment it was read.
+- **Detecting writes that affect prior reads.** The database also tracks, per transaction, which
+  rows and index ranges it has read (similarly to how a lock manager tracks locked rows, but
+  without blocking anyone). When a transaction commits a write, the database checks whether any
+  other still-active transaction had earlier read something that write just changed; if so, that
+  transaction's premise was invalidated by a write that happened after it read.
+
+Whichever check fires, the offending transaction is **aborted and retried** rather than blocked in
+advance — SSI only pays the cost of a conflict when one actually happens, instead of serializing
+every access to a row just in case. Pros: no read locking (reads don't block writers, writers don't
+block readers), good performance when contention is low. Cons: the abort rate rises sharply under
+high contention (lots of wasted work and retries), and it needs transactions to stay short, since a
+long-running transaction accumulates more reads and is proportionally more likely to have one of
+them invalidated before it can commit.
 
 ---
 
@@ -505,6 +579,10 @@ Caption: no technique wins on both axes — actual serial execution and SSI each
   modifying it, and writing it back races with concurrent transactions and silently loses updates
   under snapshot isolation. Use an atomic write (`SET value = value + 1`), `FOR UPDATE`, CAS, or a
   database with lost-update detection.
+- **Assuming "repeatable read" implies lost-update detection.** PostgreSQL, Oracle, and SQL Server
+  all detect lost updates automatically at their strongest weak-isolation level — but MySQL/InnoDB's
+  repeatable read does not, despite sounding like the same guarantee. Code that leans on "the
+  database will catch it" without checking the specific engine can ship a real, silent race.
 - **Write skew that passes every test.** Booking systems (double-booking a room/seat), the
   on-call-doctor invariant, claiming a unique username, spending against a balance — all are write
   skew that snapshot isolation permits and that rarely shows up in low-concurrency testing, then
@@ -559,15 +637,18 @@ Atomicity means all of a transaction's writes apply or none do, so a failed tran
 A dirty read is reading data another transaction has written but not yet committed — you might see a value that gets rolled back, or a partial multi-object update. A dirty write is overwriting data another transaction has written but not yet committed, letting concurrent writes interleave and corrupt each other. Both are prevented by the read committed isolation level, which guarantees you only read committed data and only overwrite committed data (typically via row locks for writes plus serving the old committed value to readers).
 
 **Q: What is read skew (non-repeatable read), and how does snapshot isolation fix it?**
+**Short:** Snapshot isolation fixes read skew by giving each transaction one consistent, frozen view.
 Read skew is when a transaction reads the database at two moments and sees different committed states because another transaction committed in between — e.g. summing two bank balances mid-transfer and seeing money apparently missing. Read committed allows it. Snapshot isolation fixes it by giving each transaction a consistent snapshot: it reads all data as of the instant it began, ignoring later commits, so every read within the transaction sees the same self-consistent view. It's implemented with MVCC, keeping multiple timestamped versions of each object.
 
 **Q: How does MVCC let readers and writers avoid blocking each other?**
 MVCC (multi-version concurrency control) keeps several committed versions of each object, each tagged with the transaction ID that created it. A reading transaction sees the version that was committed before it started and ignores any created later or still in progress, so it never has to wait for a writer — and a writer creates a new version without overwriting the old one a reader might be using, so it never has to wait for a reader. This "readers never block writers, writers never block readers" property is what makes snapshot isolation efficient.
 
 **Q: What is a lost update, and what are the ways to prevent it?**
+**Short:** A lost update silently drops one of two concurrent read-modify-writes to the same object.
 A lost update happens when two transactions concurrently do read-modify-write on the same object (incrementing a counter, editing a document), both read the old value, and the second write overwrites the first, silently losing one update. Snapshot isolation alone doesn't prevent it. Remedies: atomic write operations (`UPDATE ... SET value = value + 1`) that do the read-modify-write in the database under a lock; explicit `SELECT ... FOR UPDATE` locking; compare-and-set (`UPDATE ... WHERE value = old`); or databases that automatically detect the lost update and force the loser to retry.
 
 **Q: What is write skew, and why is it harder to prevent than a lost update?**
+**Short:** Write skew lets two transactions each preserve an invariant alone but violate it together.
 Write skew is when two transactions read the same set of data, then each writes to *different* objects based on what they read, and the combined effect violates an invariant each transaction individually preserved — like two on-call doctors each checking "are there ≥2 on call?" and both going off call, leaving zero. It's harder than a lost update because the transactions don't write the same object, so locking a single row or detecting an overwrite doesn't catch it; the conflict is on a *premise* (the count) that spans rows, and only serializability reliably prevents it.
 
 **Q: Walk through the on-call-doctor example of write skew.**
@@ -580,6 +661,7 @@ A phantom is when a write in one transaction changes the result set of a search 
 Actual serial execution: run transactions literally one at a time on a single thread, viable now that datasets fit in RAM and OLTP transactions are short (VoltDB, Redis). Two-phase locking (2PL): pessimistic shared/exclusive locks held until commit, where readers block writers and writers block readers, with predicate/index-range locks for phantoms. Serializable snapshot isolation (SSI): optimistic — run on a snapshot with no read locks and, at commit, abort any transaction whose reads were invalidated by another committed write (PostgreSQL serializable, FoundationDB).
 
 **Q: How can running everything on a single thread (actual serial execution) ever be a good idea?**
+**Short:** Kleppmann says serial execution works once RAM holds the dataset and transactions are short.
 Because two trends made it viable: RAM is cheap enough that the active dataset often fits entirely in memory, eliminating the disk-wait stalls that single-threading would otherwise expose; and OLTP transactions are typically short and make few requests. Removing concurrency removes all locking overhead and all the anomaly problems at once. The constraints are that transactions must be small and fast (one slow one stalls everything), submitted as stored procedures to avoid app round-trips, and write throughput must fit a single CPU core (or the data is partitioned).
 
 **Q: How does two-phase locking differ from the locking in read committed?**
@@ -595,10 +677,28 @@ SSI is better when contention is low to moderate: reads never block and writes n
 Abort-and-retry is the clean recovery model for transient problems (deadlocks, serialization conflicts, brief network issues) because atomicity guarantees a failed transaction left no partial state. The caveats: the transaction may have actually committed before its acknowledgment was lost, so a blind retry double-applies it unless it's idempotent; retrying during overload makes the overload worse, so you need exponential backoff; retrying a permanent error like a constraint violation is pointless; and any side effects outside the database, such as a sent email, can't be undone by the retry.
 
 **Q: Why does the book warn that isolation-level names are unreliable?**
+**Short:** Kleppmann warns vendors reuse isolation-level names for different actual guarantees.
 Because vendors use the same names for different guarantees: "repeatable read" denotes snapshot isolation in PostgreSQL and MySQL but a weaker level in the SQL standard, and Oracle's "serializable" is actually snapshot isolation, not true serializability. So the label tells you little about which anomalies are actually prevented — you must consult the specific database's documentation and verify whether dirty reads, read skew, lost updates, write skew, and phantoms are each prevented, rather than trusting the marketing name.
 
 **Q: What is the difference between single-object and multi-object transactions, and why do many distributed databases drop the latter?**
+**Short:** Single-object atomicity is per-row; multi-object transactions many distributed stores drop.
 Single-object operations need atomicity and isolation too (a partially written 20 KB document or a half-updated value read concurrently is bad), and storage engines provide this per object via logs and atomic compare-and-set. Multi-object transactions keep *several* objects consistent — a denormalized counter and its rows, foreign keys, a row and its secondary index. Many distributed/NoSQL stores dropped multi-object transactions because they're hard to implement across partitions and can reduce availability — but the need doesn't vanish, it just becomes error-prone application code that must handle partial failures by hand.
+
+**Q: What does "two-phase" actually refer to in two-phase locking?**
+**Short:** Two-phase locking names a growing phase that acquires locks, then a shrinking phase.
+It names the lock lifecycle of a single transaction: a growing phase, during which the transaction acquires shared or exclusive locks as it touches objects, and a shrinking phase, right at the end, during which it releases every lock it holds (typically all at once, at commit or abort). The rule that makes it correct is that a transaction may never acquire a new lock once it has released any lock — no re-entering the growing phase after the shrinking phase has begun. It's a statement about lock *ordering* within one transaction, not about there being exactly two kinds of lock.
+
+**Q: Why does actual serial execution scale by partitioning, and what happens to a cross-partition transaction?**
+**Short:** Partitioning gives each partition its own thread; cross-partition transactions coordinate and slow sharply.
+A single CPU core can only execute one transaction at a time, so to scale beyond it, actual serial execution assigns each partition its own dedicated thread — a transaction confined to one partition runs with no coordination overhead at all. A transaction that touches more than one partition must coordinate across every thread whose partition it touches, and that coordination is expensive: the chapter notes cross-partition transactions running around an order of magnitude slower than single-partition ones on systems like VoltDB. The technique is therefore attractive only when transactions are overwhelmingly single-partition.
+
+**Q: What are the two distinct checks SSI performs at commit time?**
+**Short:** SSI checks for stale MVCC reads and for writes that invalidated a transaction's earlier reads.
+The first checks for reads of a stale MVCC object version: if a transaction ignored an update that was still uncommitted when it took its snapshot, and that update commits before the transaction itself commits, the original read turns out to have been stale. The second checks for writes that affect prior reads: the database tracks which rows and index ranges each transaction has read, and when a write commits, it checks whether any other active transaction's earlier read is now invalidated by that write. Either check firing aborts the affected transaction and forces a retry.
+
+**Q: Why doesn't MySQL/InnoDB's "repeatable read" protect against lost updates the way PostgreSQL's does?**
+**Short:** MySQL/InnoDB's repeatable read is a case where a familiar isolation-level name hides a weaker guarantee.
+PostgreSQL's repeatable read, Oracle's serializable, and SQL Server's snapshot isolation all detect a lost update automatically and abort one of the racing transactions — but MySQL/InnoDB's repeatable read does not perform this detection, despite carrying the same name as PostgreSQL's stronger guarantee. This is a concrete instance of the book's broader warning that isolation-level names are not portable between vendors: code that relies on "repeatable read will catch my read-modify-write race" is only safe on the databases that actually implement that check, and needs an explicit remedy (atomic write, `FOR UPDATE`, or CAS) on MySQL/InnoDB.
 
 ---
 

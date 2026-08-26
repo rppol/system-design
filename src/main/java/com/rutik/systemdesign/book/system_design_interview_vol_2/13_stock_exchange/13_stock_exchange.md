@@ -1117,6 +1117,8 @@ in parallel — one thread, one log, one machine.
 Price-time priority means the best price matches first, and among orders at the same price the earliest-submitted matches first. The order book enforces it by keeping price-level nodes in price order (best price at the head of a doubly-linked list) and storing each level's orders in a FIFO queue, so taking the head price node then the head of its FIFO always yields the best-priced, earliest order. No sorting happens on the hot path — the structure is the priority. This is why fairness is provable rather than approximate.
 
 **Q: How does the order book achieve O(1) add, cancel, and best-price lookup?**
+**Short:** A linked list of price levels plus two hashmaps give O(1) best-price lookup, add, and cancel with no scanning.
+
 It composes three structures: a doubly-linked list of price-level nodes (head = best price, so best bid/ask is O(1)), a `price → node` hashmap (append a resting order at any level in O(1)), and an `order_id → order` hashmap where each order links to its FIFO node (cancel is an O(1) unlink, no scan). Matching repeatedly takes the head of the opposing best level's FIFO, O(1) per fill. The naive mistake is scanning to cancel, which is O(n) and kills latency under cancel-heavy flow.
 
 **Q: What does the sequencer do, and why is it the heart of the design?**
@@ -1141,6 +1143,8 @@ L1 is the top of book — the best bid and best ask (plus last trade) — which 
 It is the same event-sourcing rung from Ch 12 pushed to its extreme: state is the deterministic fold of an append-only event log rather than something mutated in place. In the wallet, a reproducible event log made balances reliable and auditable; in the exchange, the whole system — matching engine, market data, reporter — becomes a deterministic state machine over the sequencer's log. The exchange adds a hard microsecond latency budget, which is why the log lives in mmap shared memory rather than a database.
 
 **Q: Why are prices stored as fixed-point integers instead of floating point?**
+**Short:** Floating-point rounding error is unacceptable in money and can differ across hardware, breaking deterministic replay.
+
 Because floating-point arithmetic introduces rounding error that is unacceptable in money and, worse, can differ across CPUs, compilers, or optimization levels — which silently breaks determinism and would diverge a backup from the primary. Fixed-point integers (for example, price in units of 1/10000 of a dollar) are exact and reproducible everywhere. Determinism is a correctness requirement here, so anything nondeterministic like float math is banned from the hot path.
 
 **Q: What is the application loop (busy-poll) and why not use blocking I/O?**
@@ -1150,9 +1154,13 @@ The application loop is a hot spin loop where each component continuously polls 
 The market data publisher and reporter are strictly off-path consumers of the sequenced stream — matching emits executions and moves on, never waiting on fan-out. Distribution uses IP multicast, so one packet reaches all subscribers at once and the publisher's cost is constant whether there is one subscriber or fifty thousand. This decoupling means publishing quotes and candlesticks adds zero nanoseconds to the microsecond matching hot path.
 
 **Q: How does the exchange detect that an event was lost or missed?**
+**Short:** Every event carries a monotonically increasing sequence id, so a gap in ids reveals a missing event immediately.
+
 Every event carries a monotonically increasing sequence id, so a consumer that sees ids jump from 104 to 106 immediately knows event 105 is missing and can request a retransmit or halt rather than silently processing out of order. The same mechanism protects the multicast market-data feeds, where subscribers detect gaps and pull the missing packet from a retransmission service. Sequence-gap detection is how you catch a lost event in a system where losing one is catastrophic.
 
 **Q: Why is colocation the mechanism for physical fairness, and what problem does it solve?**
+**Short:** Colocation puts every participant's server the same cable distance from the matching engine, neutralizing the speed of light.
+
 Colocation places participants' servers in racks inside the exchange's own data center, and exchanges equalize the cable lengths so every co-located participant is literally the same physical distance from the matching engine. It solves the one unfairness the software cannot: the speed of light, which would otherwise give a nearer server a millisecond edge over a distant one. Combined with a single sequenced source and multicast delivery, colocation extends fairness down to the cable.
 
 **Q: What are speed bumps and batch auctions, and what problem do they address?**
@@ -1165,18 +1173,26 @@ Suppose the best ask is 100.03 with 200 shares (ord#7) then 50 (ord#9), and a li
 The gateway only authenticates the connection, validates message well-formedness, enforces rate limits, and normalizes FIX or binary wire formats into the compact internal format — then hands off, with no business logic. It matters because the gateway is on the hot path, so every microsecond it spends is added to round-trip latency; keeping it thin preserves the sub-millisecond budget. Risk and funds checks live in the order manager, and matching lives in the engine, so the gateway does the minimum.
 
 **Q: What is a limit order versus a market order, and why is only the limit order in scope?**
+**Short:** A limit order rests at its price or better; only it is in scope since market orders add slippage and thin-book complications.
+
 A limit order specifies both price and quantity and executes only at that price or better, resting on the book if it cannot match; a market order specifies only quantity and executes immediately against the best available price. Only limit orders are in scope because market orders add complications — no price to validate, exposure to slippage, price collars, and behavior when the book is thin or empty — that distract from the core matching and latency design. Market orders are deferred to the wrap-up discussion.
 
 **Q: What is the sync-versus-async tradeoff for cross-data-center replication here?**
+**Short:** Synchronous cross-DC replication adds unacceptable WAN latency, so the design replicates to a remote DC asynchronously.
+
 Synchronous cross-DC replication adds a WAN round-trip of milliseconds to every commit, which is unacceptable on a microsecond hot path, so the hot primary and backup stay in one DC and a remote DC is replicated asynchronously for disaster recovery. The cost is a small RPO — a few in-flight events could be lost if the entire primary DC is destroyed — accepted deliberately to protect latency and RTO. It is the classic replication tradeoff from the message-queue chapter, resolved firmly toward latency.
 
 **Q: How is a candlestick (OHLC) built from the execution stream?**
 Each candle covers a fixed interval (1 minute, 5 minutes, 1 day) and records Open (first trade price), High (max), Low (min), Close (last trade price), and Volume (summed quantity). The market data publisher folds executions as they arrive: the first execution in an interval sets open, high, low, and close equal to its price, and each later one updates high as a max, low as a min, close as the latest price, and adds to volume. Because it consumes the sequenced stream, every subscriber's candles are identical.
 
 **Q: Why does mechanical sympathy (CPU pinning, cache-resident book, no locks) matter at this scale?**
+**Short:** With the network removed, latency is CPU and memory, so the book is cache-pinned and single-threaded to hit microseconds.
+
 Once the network is removed, the remaining latency is CPU and memory, so the design tunes to the hardware: the order book (~250–320 KB) fits in L2/L3 cache and is touched at cache speed, the matching thread is pinned to a core so the scheduler never migrates it or evicts its cache, and single-threading removes locks and cache-line bouncing between cores. These choices are what turn "match an order" from milliseconds into single-digit microseconds. It is the opposite discipline from most of the book, where CPU-level detail rarely matters.
 
 **Q: How do crypto exchanges differ from a traditional stock exchange in this design?**
+**Short:** Crypto exchanges keep the same matching core but trade 24/7, tolerate looser latency, and must reconcile on-chain settlement.
+
 Crypto exchanges share the order-book and matching-engine core but relax nearly everything around it: they trade 24/7 with no market-open peak, tolerate looser millisecond-scale (often cloud-hosted) latency rather than microseconds, operate under a lighter and evolving regulatory regime, and must handle on-chain custody and settlement of assets. A traditional exchange settles through a central clearinghouse on a T+1/T+2 cycle and never custodies assets itself, whereas a crypto venue matches off-chain for speed but must reconcile with blockchains — an entirely extra responsibility.
 
 ---

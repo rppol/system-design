@@ -757,6 +757,7 @@ They are dangerous because a fluent, confident output that is right 90% of the t
 Smooth failing is serving a worse-but-instant backup answer when the main model misses its latency budget, instead of returning an error. Big models are more accurate but have long-tail latency, so some requests blow past a hard SLA; a naive timeout gives the user nothing after a spinner. Graceful degradation beats timeouts: fire the main model and, if it hasn't returned by the deadline, serve a simpler model, a cached prediction, or a heuristic default. A slightly-less-accurate answer inside the budget is almost always a better experience than a perfect answer that arrives too late.
 
 **Q: Compare the separate-ops-team and end-to-end-data-scientist approaches to team structure.**
+**Short:** A separate ops team specializes but creates handoff friction; end-to-end ownership keeps context but demands a unicorn.
 A separate ops team gives specialization — data scientists model, a dedicated team productionizes — but creates communication overhead, cross-boundary debugging, finger-pointing when something breaks, and narrow context because the scientist never sees the model in production. End-to-end data scientists own the whole lifecycle, giving full context and no handoff, but demand a person who knows modeling and all of infra (the unicorn problem) and risk drowning in infra toil. The book resolves the debate not by picking a side but by adding a condition: a paved-path platform makes end-to-end ownership feasible without DevOps expertise.
 
 **Q: What resolution does the book reach on the end-to-end data scientist debate?**
@@ -778,6 +779,7 @@ Because ZIP code is a proxy for protected attributes — it correlates strongly 
 Privacy techniques like differential privacy inject calibrated noise so no individual's data can be reconstructed, and that noise reduces model accuracy. The critical finding is that the accuracy cost falls hardest on underrepresented groups: because they have less data, the added noise swamps their already-thin signal disproportionately. So a privacy mechanism meant to protect everyone equally in fact degrades the model most for the people already least well-served, which is why you must evaluate its impact per slice rather than trusting the aggregate.
 
 **Q: What is the compactness-versus-fairness tradeoff in model compression?**
+**Short:** Pruning and quantization barely hurt aggregate accuracy but concentrate their accuracy loss on rare classes and groups.
 Compression techniques like pruning and quantization shrink models with barely any drop in aggregate accuracy, but that small drop is concentrated on rare classes and underrepresented groups — compression amplifies bias on the long tail. So a compressed model can look fine on headline metrics while being markedly less fair. The guidance is that you cannot judge a pruned or quantized model on aggregate accuracy alone; you must run slice-based evaluation to see the disparate impact before shipping it.
 
 **Q: What is a model card and what does it contain?**

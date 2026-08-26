@@ -1,6 +1,6 @@
 # Chapter 10: Batch Processing
 
-> Part III — Derived Data · DDIA (Kleppmann) · opens Part III, leads to Ch 11 (stream processing)
+> Part III — Derived Data · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · opens Part III, leads to Ch 11 (stream processing)
 
 ## Chapter Map
 
@@ -75,6 +75,28 @@ re-run it as many times as you like with different flags — experiment freely, 
 mistake by re-running. The downside of Unix tools: they run on a single machine, so they don't scale
 to data that exceeds one machine — which is exactly what MapReduce fixes while keeping the philosophy.
 
+### The chapter's four design principles, and why each carries over to MapReduce
+
+Kleppmann pulls four properties out of the log-analysis example that make Unix tools composable, and
+each one reappears, unchanged in spirit, once the same philosophy is scaled up to MapReduce:
+
+| Principle | What it means for a Unix tool | What it becomes in MapReduce |
+|---|---|---|
+| Uniform interface | Every tool reads a sequence of lines/bytes from stdin, writes the same to stdout | Every mapper/reducer reads and writes a sequence of key-value pairs |
+| Separation of logic from wiring | A program doesn't know or care where its input came from or where its output goes | A mapper/reducer doesn't know which machine its input block lives on or which machine runs next |
+| Transparency / friendliness to experimentation | You can redirect or inspect any intermediate stage without touching the rest of the pipeline | You can inspect a job's intermediate output on the distributed filesystem, or stop the workflow at any stage |
+| Doing one thing well | `sort` only sorts, `uniq` only deduplicates counted lines — each tool stays small and reliable | A mapper only maps and a reducer only reduces; the framework owns partitioning, sorting, and scheduling |
+
+**Transparency is easy to skim past, so it deserves a concrete example.** Take the log-analysis
+pipeline from the top of this section — `cat log | awk '{print $7}' | sort | uniq -c | sort -rn |
+head` — and suppose the final ranking looks wrong. Because every stage's output is just lines of text,
+you can inspect any intermediate point by simply stopping the pipe there: `cat log | awk '{print $7}'
+| sort | uniq -c | less` shows the raw (URL, count) pairs *before* the final sort, with nothing about
+the later stages changed or even re-run. A monolithic program computing the same answer in one pass
+gives no such window — you would have to add logging or attach a debugger to see any intermediate
+value. This "free" inspection at every pipe is a direct consequence of the uniform interface: because
+the format never changes between stages, every stage boundary doubles as a place to look.
+
 ## 10.2 MapReduce and Distributed Filesystems
 
 **MapReduce** is "Unix tools at the scale of thousands of machines." Like a Unix tool, a MapReduce
@@ -131,6 +153,22 @@ mapper output crosses the network.
 already stores a replica of that input block, so the (large) input doesn't cross the network — only
 the (smaller) mapper output does. Workflows of MapReduce jobs are chained (one job's output is the
 next's input), commonly orchestrated by tools like Oozie, Airflow, Luigi.
+
+### Fault tolerance at the level of a single task
+
+At the scale MapReduce runs — thousands of machines, jobs lasting hours — Kleppmann treats worker and
+disk failures as a near-certainty within any given job's runtime rather than an edge case, and the unit
+of retry is deliberately small. If a mapper or reducer task fails (a machine crashes, a disk dies
+mid-read), the scheduler simply reschedules that one task on another machine, re-reading its input
+block from a surviving replica; every other task that already completed is left untouched. This is only
+safe because of two properties the chapter has already established: the input is **immutable** (so
+re-reading it produces the same bytes) and a task is **deterministic** (so re-running it produces the
+same output) — together they make a retried task indistinguishable from one that succeeded on the
+first attempt. If a task keeps failing (for example, a bug that crashes on one particular input
+record), MapReduce eventually gives up and fails the whole job, since retrying cannot fix a
+deterministic bug. This per-task granularity — retry the one failed piece, not the whole computation —
+is the mechanical basis for the "MPP databases abort the whole query, MapReduce retries one task"
+contrast the chapter draws later against distributed databases.
 
 ### Decoding batch throughput: how long does a job actually take?
 
@@ -194,6 +232,22 @@ To **join** two datasets (e.g. user activity events with the user profile table)
 - **Handling skew (hot keys):** a celebrity user with millions of events sends them all to one
   reducer — a **hot-spot straggler** that delays the whole job. Mitigations (skewed/sharded joins)
   spread a hot key's records across multiple reducers.
+
+### GROUP BY uses exactly the same mechanism as a join
+
+Kleppmann's point here is that grouping records by a key — to run an aggregation over each group, e.g.
+counting events per user per day, or finding the maximum value per key — is **mechanically identical**
+to a reduce-side join. In both cases the shuffle partitions and sorts records by a key so that
+everything sharing that key arrives at one reducer, and the reducer iterates over the group; the only
+difference is what the reducer *does* with the group once it has it (join two datasets together, versus
+fold a single group down to a summary value). A MapReduce framework that already implements grouping
+has almost everything it needs to implement a join, and vice versa — the shuffle itself doesn't know or
+care whether the job ahead of it is about to join or aggregate.
+
+One practical consequence follows directly: **grouping suffers the same hot-key skew a join does.** A
+`GROUP BY user_id` has the same straggler risk as a join on `user_id` — a disproportionately active
+user's group overwhelms one reducer — so the skewed/sharded mitigation above applies unchanged: split
+the hot key's group across several reducers and combine their partial results in a second pass.
 
 ### Map-side joins
 
@@ -340,16 +394,60 @@ reducers at a skewed job raises the inflation factor, because the *uniform* base
 hot key's load does not move at all. Only splitting the hot key itself (a skewed/sharded join that
 scatters that one key across many reducers and replicates the other side to match) changes `f`.
 
-### The output of batch workflows and comparison to MPP databases
+### The output of batch workflows
 
-Batch output is *derived data*: build a **search index** (Lucene segments built by a batch job, as
-at early Google), build read-only **key-value stores** to bulk-load into a serving database
-(building the files offline and loading them avoids hammering the live DB), or train ML models. The
-guiding philosophy contrasts with parallel SQL (MPP) databases: MapReduce gives you **freedom**
-(arbitrary code, any data format — good for messy, semi-structured data and ML) and **fault
-tolerance at fine granularity** (retry one failed task, not the whole query) — MPP databases are
-faster for the queries they support but abort the whole query on a node failure and require data to
-be loaded into their schema first ("schema-on-read" vs the warehouse's "schema-on-write").
+Kleppmann's framing is that **the output of a batch process is often not a human-readable report but
+another kind of structure** — batch jobs build derived datasets that some other system then serves.
+Three concrete cases from the chapter:
+
+- **Search indexes.** This was the original motivating use case for MapReduce at Google: building the
+  company's own **proprietary full-text index of the web**, at a scale no single machine could handle,
+  by having mappers process a subset of documents and reducers merge the resulting postings. Separately
+  — an unrelated system, not the engine behind Google's index — **Lucene/Solr can also build their
+  index files (segments) as the output of a batch job**: a batch process computes the postings and
+  writes immutable segment files, which the search server then loads.
+- **Key-value stores as batch output.** Machine-learning classifiers and other derived data are often
+  served through a **read-only key-value store built by a batch job** — the chapter's example is
+  Voldemort's read-only stores, where the job writes immutable database files and the serving system
+  atomically switches over to the new files once the build finishes. Building the files offline and
+  loading them in one atomic swap avoids the batch job hammering a live database with millions of
+  individual writes, and it keeps the previous version fully queryable until the switch — a cheap,
+  natural way to roll back a bad build.
+- **The general shape.** In every case the batch job's role stops at *producing* a derived dataset; a
+  separate system (a search server, a key-value store, a recommendation service) is responsible for
+  *serving* reads against it. This separation — the write path is batch, the read path is a
+  purpose-built serving system — is what Part III of the book calls **derived data**, and it recurs
+  with streams in Chapter 11.
+
+### Comparing Hadoop to distributed databases (MPP)
+
+Hadoop (HDFS + MapReduce) and a massively parallel processing (MPP) SQL database both distribute a
+computation across many machines, but the chapter draws out real differences in philosophy.
+
+**Diversity of storage.** An MPP database requires data to be modeled and loaded into the database's
+own tables — schema-on-write — before anything can be queried. HDFS just stores files: whatever bytes
+you write, in whatever format, become readable to any later job, with structure imposed by whichever
+job reads them ("schema-on-read"). Kleppmann cites Bobby Johnson and Joseph Adler's **"sushi principle": raw data is
+better than cooked data** — keeping raw, unprocessed input around means you can always write a new job
+to reinterpret it as requirements change, whereas data that has already been transformed and loaded
+into a fixed schema has lost whatever the loading step discarded.
+
+**Diversity of processing models.** An MPP database is a single integrated product — one vendor's
+storage engine coupled to one query language (SQL) and one execution engine, chosen for you. HDFS
+deliberately decouples storage from processing: MapReduce is a comparatively low-level programming
+model sitting *beneath* many different higher-level processing styles (SQL-like queries through Hive,
+graph algorithms, machine-learning pipelines, or hand-written code), all operating over the same
+underlying files — the way many small Unix tools can all operate over the same plain-text file format.
+That openness is what let Hadoop absorb new processing paradigms (graph processing, ML) over time
+without a rewrite, in a way a single-vendor MPP engine cannot.
+
+**Designing for frequent faults.** The two kinds of system also assume different failure rates. Hadoop
+is built on the assumption that, at the scale of thousands of commodity machines running for hours, task
+and node failures are a routine, expected occurrence — so MapReduce tolerates a task dying mid-job by
+simply re-running that one task, using its disk-backed intermediate state to avoid redoing already
+finished work. MPP databases mostly assume a query either completes or the whole query aborts and is
+retried from scratch on any node failure — workable for them because their queries are usually much
+shorter-running than a multi-hour batch job, so the cost of restarting one is smaller.
 
 ## 10.3 Beyond MapReduce
 
@@ -412,6 +510,27 @@ materialization between steps); avoid unnecessary sorts and redundant mappers; a
 flexibly. This makes them often much faster than MapReduce for the same workflow, especially
 iterative ones.
 
+### Materialization of intermediate state: full write-to-disk versus pipelining
+
+The chapter frames MapReduce's forced materialization and a dataflow engine's alternative as two ends
+of a real tradeoff, not simply "materializing is wrong":
+
+| | Full materialization (MapReduce) | Pipelining (dataflow engines) |
+|---|---|---|
+| Where intermediate output lives | Written to the distributed filesystem, replicated | Kept in memory, spilling to local disk if it doesn't fit |
+| Fault recovery | Simple — re-read the already-written output | Needs lineage tracking, or must recompute from an earlier point |
+| Handling of very large intermediate results | Safe — disk has effectively unlimited capacity | Riskier — can exhaust memory and force a spill or a failure |
+| Speed between steps | Slow — every step pays a full disk write and read | Fast — operators can hand off data without a round trip to disk |
+| Downstream consumers | Any later job can independently read the materialized output | Consumers are generally part of the same DAG execution |
+
+So the dataflow engine's win is not free: it trades the *safety and simplicity* of "the last completed
+step's output is durably sitting on disk, ready for anything to read" for *speed*, and it must recover
+that safety another way — which is exactly what lineage-based recomputation (below) provides. A
+dataflow engine still materializes when a genuinely huge intermediate result would not fit in memory,
+or when an operator boundary is a deliberate checkpoint; the difference from MapReduce is that
+materialization becomes a choice the engine or the programmer makes, not something forced between
+every single step.
+
 **Fault tolerance in dataflow engines.** Since they don't materialize every intermediate result, they
 can't just re-read it after a failure. Spark uses **RDDs (Resilient Distributed Datasets)** that
 track **lineage** — the deterministic sequence of operations used to produce data — so a lost
@@ -426,11 +545,53 @@ stabilize. MapReduce is poor at this (each iteration is a separate job re-readin
 along edges across a series of supersteps, with state kept in memory between iterations (Apache Giraph,
 Spark GraphX).
 
+### The Pregel model, one superstep at a time
+
+The chapter's answer to "MapReduce re-reads everything every iteration" is Pregel/BSP, and its
+mechanics are worth spelling out because the word "superstep" alone doesn't convey the loop:
+
+1. The graph (vertices and edges) is partitioned across machines and held **in memory** for the whole
+   job — it is loaded once, not re-read from the distributed filesystem on every iteration.
+2. Computation proceeds as a series of **supersteps**. In superstep *i*, every vertex processes the
+   messages sent to it during superstep *i − 1*, updates its own state, and may send new messages to
+   its neighbors along outgoing edges, to be delivered at the *start* of superstep *i + 1*.
+3. A superstep is a synchronization barrier: the framework waits until every vertex has finished
+   superstep *i* before any vertex begins superstep *i + 1* — the "bulk synchronous" in the name, all
+   vertices marching through the same superstep number in lockstep.
+4. A vertex with no more work to do can vote to **halt**; it wakes up again only if it receives a new
+   message in a later superstep. The whole computation terminates once every vertex has halted and no
+   messages remain in flight.
+
+For **PageRank**, a vertex is a page, an edge is a link, and the message passed along each edge each
+superstep is a fraction of the sending page's current rank — so rank propagates one hop per superstep
+and the graph's ranks converge over a bounded number of supersteps, with the graph itself never
+re-read from disk after the first load. Apache Giraph and Spark GraphX are the chapter's named
+implementations of this model.
+
 **High-level APIs.** Writing raw map/reduce code is tedious, so higher-level languages and libraries
 emerged — **Pig, Hive, Cascading, Spark DataFrames/SQL** — that let you express joins and aggregations
 declaratively and compile down to the underlying engine, often with a **query optimizer** choosing
 join strategies (broadcast vs partitioned hash, etc.). This brings the declarative-vs-imperative
 advantage (Ch 2) back to batch processing.
+
+### High-level APIs and languages, and what they buy you
+
+Writing raw mapper/reducer classes by hand for every job is repetitive and error-prone, so an ecosystem
+of higher-level languages and libraries grew on top of MapReduce and, later, the dataflow engines:
+**Pig** (a dataflow scripting language), **Hive** (SQL-like queries over Hadoop data), **Cascading**
+and **Crunch** (Java/Scala APIs assembling pipelines out of reusable operators), and the
+dataframe-style APIs built into Spark, Flink, and Tez themselves. What they share is letting the
+programmer describe *what* result is wanted — a join, a filter, a grouped aggregation — declaratively,
+or as composable high-level operators, rather than hand-writing the mapper and reducer that implement
+it underneath.
+
+The payoff the chapter emphasizes is that the engine can then act like a **query optimizer**: given a
+declarative join or aggregation, it can pick the physical execution strategy — broadcast hash join
+versus partitioned join versus sort-merge join, how many reducers to use — from statistics about the
+data, the same freedom a relational query planner has (Chapter 2's declarative-versus-imperative
+distinction, arriving in the batch world). A hand-written MapReduce job locks in its join strategy at
+the time it's written; a declarative pipeline lets the engine change strategy as data sizes change,
+with nothing rewritten by hand.
 
 ---
 
@@ -556,6 +717,13 @@ and eliminate the shuffle when a join's small side fits in memory (map-side join
 | Data | Any format (schema-on-read) | Loaded into schema (schema-on-write) |
 | Fault tolerance | Per-task retry | Whole query aborts on node failure |
 
+| | Hadoop (HDFS + MapReduce) | MPP SQL database |
+|---|---|---|
+| Storage model | Any file format; structure imposed at read time | Data loaded into the vendor's tables first |
+| Processing models over that storage | Many, coexisting (Hive SQL, graph engines, ML libraries, hand-written code) | One, chosen by the vendor (SQL only) |
+| Failure assumption | Frequent, at cluster scale; expected during a job | Rare within a single query's shorter runtime |
+| Raw-data philosophy | Johnson and Adler's "sushi principle" — keep raw data, reinterpret later | Loading discards whatever the schema doesn't model |
+
 ---
 
 ## Common Pitfalls / War Stories
@@ -581,6 +749,20 @@ and eliminate the shuffle when a join's small side fits in memory (map-side join
   MapReduce jobs re-reads the entire dataset every iteration — crippling for hundreds of iterations.
   Use a BSP/graph engine (Giraph, GraphX) or an in-memory dataflow engine that keeps state across
   iterations.
+- **Broadcasting a "small" table that has outgrown a single mapper's memory.** A broadcast hash join
+  loads the small side into a hash table in every mapper; as that table grows, at some point it no
+  longer fits comfortably in a mapper's heap, causing memory pressure or an outright task failure.
+  Check the small side's actual size against available mapper memory before choosing broadcast, and
+  fall back to a partitioned or sort-merge join once it no longer clears that bar.
+- **Watching joins for hot keys but not GROUP BY.** Because grouping and joining share the same
+  shuffle machinery, a `GROUP BY` on a low-cardinality or celebrity-heavy key skews exactly like a
+  join on that key does — a team that only instruments join stages for skew gets blindsided by a slow
+  aggregation instead, since the straggler shows up in a stage nobody was watching.
+- **Debugging only the final output instead of the intermediate stages.** Because both Unix pipelines
+  and MapReduce workflows produce inspectable intermediate results at every stage, jumping straight to
+  "why is the final answer wrong" throws away the fastest diagnostic tool available. Checking each
+  stage's output in order — as if piping the workflow through `less` one step at a time — usually
+  isolates the bad step far faster than reasoning about the whole pipeline at once.
 
 ---
 
@@ -588,8 +770,10 @@ and eliminate the shuffle when a join's small side fits in memory (map-side join
 
 Unix and GNU coreutils (awk, sort, uniq), Google MapReduce and GFS, Apache Hadoop and HDFS, Apache
 Spark (RDDs, DataFrames), Apache Tez, Apache Flink (batch mode), Apache Hive, Apache Pig, Cascading,
-Apache Giraph and Spark GraphX (Pregel/BSP), workflow schedulers Oozie/Airflow/Luigi, and the
-contrast class of MPP databases (Teradata, Vertica, Impala).
+Apache Crunch, Apache Giraph and Spark GraphX (Pregel/BSP), workflow schedulers Oozie/Airflow/Luigi,
+Lucene/Solr (batch-built index segments), Voldemort's read-only stores (batch-built key-value output),
+Bobby Johnson and Joseph Adler's "sushi principle" (raw data is better than cooked data), and the contrast class of MPP
+databases (Teradata, Vertica, Impala).
 
 ---
 
@@ -618,6 +802,8 @@ Pregel/BSP model, and expose declarative **high-level APIs** (Hive, Pig, Spark S
 Batch processing reads a large, *bounded* input of known size and produces derived output, with no user waiting, so success is measured by throughput (how much data per unit time) rather than response time. Online services handle one request at a time and are judged by latency. Stream processing (Chapter 11) is the middle ground: it consumes *unbounded*, never-ending input and produces continuously updated output with low latency. Batch's bounded, no-one-waiting nature is what lets it prioritize throughput and rely on re-running jobs to handle failures.
 
 **Q: How does the Unix philosophy foreshadow MapReduce?**
+**Short:** MapReduce scales Unix's small tools, uniform interface, and immutable inputs to thousands of machines.
+
 The Unix philosophy builds complex behavior from small tools that each do one thing well, connected through a uniform interface (every tool reads and writes sequences of lines/bytes) and composed via pipes, treating inputs as immutable. MapReduce scales exactly these ideas: a job reads input and writes output without modifying the input or causing side effects, mappers and reducers are small composable functions, and jobs chain into workflows. The key inheritance is loose coupling and immutable inputs, which together make jobs re-runnable and fault-tolerant.
 
 **Q: What is the shuffle in MapReduce, and why is it the heart of the model?**
@@ -627,24 +813,36 @@ The shuffle is the framework-managed step between map and reduce that partitions
 It means the scheduler tries to run each mapper task on a machine that already stores a replica of the input block that task will read, rather than shipping the input across the network to wherever there's a free CPU. It matters because the input data is large while the program is small, so moving the computation to the data avoids saturating the network with bulk data transfer — only the smaller mapper *output* needs to be shuffled. This locality optimization is central to MapReduce's scalability on commodity clusters.
 
 **Q: Compare reduce-side and map-side joins.**
+**Short:** Reduce-side joins shuffle both datasets by key; map-side joins skip the shuffle when one side is small or co-partitioned.
+
 A reduce-side (sort-merge) join has mappers emit records from both datasets keyed by the join key; the shuffle brings all records for a key to one reducer in sorted order, which joins them — it works for any data sizes but pays the full shuffle and sort cost. A map-side join avoids the shuffle entirely: a broadcast hash join loads a small dataset into an in-memory hash table in every mapper and probes it per record, while a partitioned hash join exploits inputs already co-partitioned by the join key so each mapper joins matching partitions. Map-side is much faster but requires a small side or pre-partitioned inputs.
 
 **Q: What is hot-key skew in a join, and how do you mitigate it?**
+**Short:** Hot-key skew routes far more records to one reducer, which becomes the job's straggler; sharded joins split that key's load.
+
 Hot-key skew is when one join key has vastly more records than others — a celebrity user with millions of events — so all of them are shuffled to a single reducer, which becomes a straggler running long after every other reducer has finished, dragging out the whole job's completion time. Mitigations (skewed or sharded joins) detect the hot key and split its records across multiple reducers, replicating the matching record from the other (small) side to each of those reducers so the work is parallelized rather than bottlenecked on one node.
 
 **Q: Why is MapReduce's forced materialization a performance problem, and how do dataflow engines fix it?**
+**Short:** MapReduce materializes every step to replicated disk; dataflow engines keep a DAG's state in memory instead.
+
 MapReduce writes each job's complete output to the distributed filesystem (replicated three times) before the next job can read it, so a workflow of N jobs passes all intermediate data through disk and network N times, and jobs must run strictly sequentially. Dataflow engines (Spark, Tez, Flink) model the entire workflow as one DAG of operators and keep intermediate state in memory or local disk instead of materializing to HDFS between steps, also skipping unnecessary sorts and redundant mappers — making them substantially faster, especially for iterative workloads.
 
 **Q: How does Spark achieve fault tolerance without materializing every intermediate result?**
 Spark represents data as RDDs (Resilient Distributed Datasets) that record their *lineage* — the exact, deterministic sequence of operations that produced them from their inputs. When a partition is lost to a machine failure, Spark doesn't need a saved copy; it recomputes that partition by replaying the recorded operations on the (still available or itself recomputable) input data. This trades recomputation cost for avoiding the heavy materialization MapReduce does, but it depends critically on the operators being deterministic.
 
 **Q: Why must dataflow operators be deterministic, and what breaks determinism?**
+**Short:** Recomputing lost data from lineage requires identical output each time; random seeds or clock reads break that.
+
 Because fault recovery works by recomputing lost data from lineage, a recomputed partition must produce *exactly* the same result as the original — otherwise downstream results become inconsistent or effects get duplicated. Determinism is broken by anything that can differ between runs: random number generators without a fixed seed, reading the wall-clock time, relying on hash-map iteration order or the order in which records happen to arrive, or non-idempotent external side effects. Such sources must be eliminated or made reproducible (e.g. seeding the RNG) for lineage-based recovery to be correct.
 
 **Q: Why is plain MapReduce poor for iterative algorithms like PageRank, and what's the alternative?**
+**Short:** MapReduce re-reads the whole dataset each iteration; Pregel/BSP keeps graph state in memory across supersteps.
+
 Iterative algorithms repeat the same computation many times until convergence, but MapReduce treats each iteration as an independent job that must read the entire dataset from HDFS, recompute, and write it all back — so hundreds of iterations mean hundreds of full-dataset disk round-trips, which is crippling. The alternative is the Pregel / bulk synchronous parallel (BSP) model (Apache Giraph, Spark GraphX), where vertices keep state in memory across supersteps and send messages to each other along graph edges, so each iteration only propagates updates rather than re-reading and re-writing everything.
 
 **Q: How do batch processing (MapReduce/dataflow) and MPP SQL databases differ in philosophy?**
+**Short:** MapReduce offers arbitrary code and per-task retries; MPP databases offer fast fixed-schema SQL but abort a query on any node failure.
+
 MapReduce-style systems give you freedom and resilience: you can run arbitrary code in any language over data in any format (schema-on-read, good for messy semi-structured data and machine learning), and fault tolerance is fine-grained — a failed task is retried without restarting the whole job. MPP SQL databases require data to be loaded into a fixed schema first (schema-on-write) and only run SQL, and they typically abort an entire query if a node fails; in return they're often faster for the structured analytic queries they're designed for. It's a flexibility-and-fault-tolerance versus speed-and-structure tradeoff.
 
 **Q: What kinds of output do batch workflows typically produce, and why build them offline?**
@@ -657,10 +855,37 @@ Immutable inputs are what make batch jobs safely re-runnable, which is the found
 They let engineers express batch computations — joins, filters, aggregations — declaratively instead of hand-writing low-level map and reduce functions, then compile that down to the underlying execution engine. Crucially, they include query optimizers that automatically choose execution strategies, such as whether to use a broadcast hash join or a partitioned join based on data sizes, bringing the declarative-versus-imperative advantages from Chapter 2 to batch processing: more concise code, and the engine — not the programmer — picking the efficient physical plan.
 
 **Q: What is HDFS, and what design choices make it suitable for batch processing?**
+**Short:** HDFS replicates file blocks across commodity disks and colocates mappers with the blocks they read.
+
 HDFS (the Hadoop Distributed File System, modeled on Google's GFS) is a shared-nothing distributed filesystem that splits files into large blocks and replicates each block across the local disks of many commodity machines, with a central NameNode tracking block locations. These choices suit batch processing because they provide cheap, massively scalable, fault-tolerant storage (lost replicas are re-replicated automatically), and block placement enables "bringing computation to the data" by scheduling tasks where their input already resides. It favors high-throughput sequential scans of huge files over low-latency random access.
 
 **Q: How is a workflow of multiple MapReduce jobs constructed and managed?**
 Complex computations rarely fit in a single map-and-reduce pass, so they're built as a *workflow*: the output directory of one job on HDFS becomes the input of the next, chaining jobs together. Because there's no built-in notion of a multi-job pipeline in basic MapReduce, scheduling tools like Oozie, Airflow, and Luigi orchestrate the dependencies — deciding when each job can start (after its inputs are fully written), handling retries, and managing the overall DAG of jobs — which is one of the awkwardnesses that dataflow engines later eliminated by representing the whole workflow as a single job.
+
+**Q: What does "transparency" mean as a Unix design principle, and how does it carry over to MapReduce?**
+**Short:** Transparency means any pipeline stage's output can be inspected without altering the rest of the pipeline.
+
+Transparency means that because every Unix tool reads and writes the same uniform line-based format, you can stop a pipeline at any stage and redirect or view its intermediate output without touching the tools before or after it — there's no hidden internal state to dig for, the intermediate result is just more lines of text. The same property survives in MapReduce: because each job's intermediate output between stages is itself just data sitting on the distributed filesystem (or, in a dataflow engine, addressable state in the DAG), you can inspect a workflow's midpoint or stop it after any single step to sanity-check it, exactly the way you'd pipe a Unix command chain into `less` partway through. The practical payoff is debugging by inspection rather than by adding instrumentation: a wrong final answer can be tracked down by looking at progressively earlier stages until the bad one is found.
+
+**Q: Why does the book say GROUP BY and a join use the same underlying mechanism in MapReduce?**
+**Short:** Both rely on the shuffle grouping same-key records at one reducer before the reducer processes them.
+
+Both operations depend on the identical machinery: the shuffle partitions and sorts records by a key so that everything sharing that key ends up at the same reducer, and the reducer then iterates over that grouped collection. A join's reducer combines two datasets' records sharing a key; a GROUP BY's reducer folds one dataset's records sharing a key down to an aggregate — the grouping step itself doesn't know or care which of the two it's about to do. One direct consequence is that GROUP BY inherits the same hot-key skew risk a join has (a `GROUP BY user_id` on a celebrity account overloads one reducer exactly like a join on that key would), so the same skewed/sharded mitigation applies to both.
+
+**Q: What is the "sushi principle" and why does it favor Hadoop's schema-on-read approach?**
+**Short:** Kleppmann cites Johnson and Adler's "sushi principle" — raw data is better than cooked data — favouring HDFS's schema-on-read.
+
+Kleppmann cites Bobby Johnson and Joseph Adler's "sushi principle" — raw data is better than cooked data (Strata+Hadoop World, 2015) — to explain why HDFS's habit of storing files in whatever format they arrive, with structure imposed only when a job reads them, is valuable compared to an MPP database's schema-on-write requirement. Keeping the original, unprocessed data around means a new job can always be written to reinterpret it a different way as requirements change; data that has already been transformed and loaded into a database's fixed schema has permanently lost whatever information the loading process happened to discard. This is why Hadoop's tolerance for messy, semi-structured, or evolving data formats is treated as a feature of the storage model, not just a byproduct of being schema-less.
+
+**Q: What are the tradeoffs between fully materializing intermediate state to disk and pipelining it in memory?**
+**Short:** Materializing to disk is safe and simple to recover but slow; pipelining in memory is fast but memory-limited.
+
+Full materialization — writing every step's complete output to the (replicated) distributed filesystem, as MapReduce does — makes fault recovery simple, since a later job can just re-read what's already durably sitting on disk, and it safely handles intermediate results too large to fit in memory. Pipelining — keeping intermediate state in memory and handing it directly to the next operator, as dataflow engines prefer — is much faster because it skips the disk round-trip between every step, but it gives up that simple recovery story (a lost partition can't just be re-read, it must be recomputed or tracked another way) and it requires enough memory to hold the intermediate data, spilling to local disk or failing outright if it doesn't fit. Neither approach is strictly better: a dataflow engine still falls back to materializing when an intermediate result is genuinely too large to pipeline.
+
+**Q: How does a superstep work in the Pregel/bulk synchronous parallel (BSP) model?**
+**Short:** Each superstep processes prior messages, updates vertex state, sends new messages, then all vertices barrier-sync.
+
+In superstep *i*, every vertex processes whatever messages were sent to it during superstep *i − 1*, updates its own state based on them, and may send new messages along its outgoing edges to its neighbors, which are delivered at the start of superstep *i + 1*. The framework enforces a synchronization barrier between supersteps — no vertex begins superstep *i + 1* until every vertex has finished superstep *i* — which is what "bulk synchronous" refers to: all vertices advance through the same superstep number in lockstep, and the whole graph stays resident in memory across the entire sequence rather than being re-read each round. A vertex that has nothing left to do can vote to halt and is only woken again if a later message arrives; the computation as a whole terminates once every vertex has halted with no messages still in flight, which is how PageRank's per-page rank values are propagated one hop per superstep until they converge.
 
 ---
 

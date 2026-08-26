@@ -1340,6 +1340,8 @@ Because acks=1 acknowledges as soon as the leader writes the message, before any
 The ISR is the set of replicas, including the leader, that are fully caught up with the leader's log within a configured lag tolerance. Durability is defined relative to the ISR because acks=all waits for every ISR member to have the message, so any of them can be elected leader after a failure without losing acknowledged data. A follower that falls too far behind is removed from the ISR so it doesn't hold up writes, and it can rejoin once it catches up.
 
 **Q: How do at-most-once, at-least-once, and exactly-once each fall out of the design?**
+**Short:** Delivery semantics fall out of ack settings and offset-commit timing, not fixed broker properties.
+
 They are configurations, not fixed properties: at-most-once uses a weak ack (0 or 1) and commits the offset before processing, so a crash skips a message (may lose, never duplicates); at-least-once uses acks=all and commits after processing, so a crash before commit reprocesses the message (no loss, may duplicate); exactly-once adds an idempotent producer plus a transaction that commits the offset and the output together atomically (no loss, no duplicate). At-least-once is the common default because loss is usually the bigger concern and consumers can be made idempotent.
 
 **Q: Why is offset commit timing what decides at-least-once vs at-most-once?**
@@ -1349,9 +1351,13 @@ Because the offset records how far the consumer has progressed, and whether you 
 Because each partition is an independent append-only log with its own monotonically increasing offsets, and there is no coordination of order across partitions, which live on different brokers. Messages within one partition are strictly ordered, but two messages on different partitions have no defined relative order. To keep related messages ordered, you route them to the same partition via a partition key so they share one ordered log.
 
 **Q: Why did the design reject a general-purpose database for storage in favor of an append-only log?**
+**Short:** A general database can't optimize for both the sequential-append and sequential-scan pattern of a message queue.
+
 Because a message queue's access pattern is a firehose of sequential appends plus long sequential scans, and a general database cannot be optimized for both write-heavy and read-heavy patterns at once — its B-tree indexes and in-place updates add write amplification that throttles append throughput. An append-only write-ahead log split into segment files instead exploits fast sequential disk I/O and the OS page cache, and makes retention as cheap as deleting whole old segment files.
 
 **Q: Why is appending to a log on disk fast even on a rotational hard drive?**
+**Short:** Appending and scanning are purely sequential disk access, which rotational disks handle at near-SSD speed.
+
 Because appending and scanning are purely sequential access, which is what disks are good at — a rotational disk is slow only at random seeks (head movement), while sequential streaming throughput is high, sometimes rivaling random SSD access. On top of that, the OS page cache keeps recently written data in RAM, and since consumers usually read near the tail (just-written data), many reads are served from memory without touching disk, and the broker can send those bytes with zero-copy.
 
 **Q: Why is the message offset assigned by the broker instead of by the producer?**

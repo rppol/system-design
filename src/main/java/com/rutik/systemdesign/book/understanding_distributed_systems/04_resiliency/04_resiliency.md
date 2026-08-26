@@ -1643,15 +1643,21 @@ A gray failure is a component that is degraded but not dead — slow, or failing
 It assigns each customer a random 2-of-8-node subset, and the number of distinct subsets is C(8,2) = (8·7)/(2·1) = 28 virtual shards versus only 4 physical shards from plain sharding. A poison-pill customer that kills its 2 nodes fully takes down only customers assigned the *exact* same pair — about 1/28 of them — while anyone overlapping on just one node keeps a healthy second node and routes around the poison via client-side retry. So blast radius collapses from "a whole physical shard of customers" to a tiny fraction.
 
 **Q: What are the three states of a circuit breaker and how does it transition between them?**
+**Short:** Closed passes requests through and counts failures, Open fails fast without calling the downstream, and Half-open lets a probe through to decide whether to close again.
+
 Closed (normal: requests pass through, failures are counted), Open (tripped: requests fail fast without calling the downstream, serving a fallback), and Half-open (probing: a few trial requests are allowed after a cool-down). It goes Closed → Open when the failure rate crosses a threshold; Open → Half-open when the cool-down timer expires; Half-open → Closed if the probes succeed, or Half-open → Open if a probe fails. The breaker's purpose is to fail fast and stop wasting threads (and retry pressure) on a downstream that's clearly down, breaking the cascade's feedback loop.
 
 **Q: What is the difference between load shedding and load leveling?**
+**Short:** Load shedding rejects excess requests immediately for synchronous work; load leveling buffers them in a queue to be absorbed later, for asynchronous work.
+
 Load shedding *rejects* excess requests immediately (503) when you're past capacity, for synchronous workloads that need an answer now; load leveling *buffers* excess in a queue and drains it at the consumer's pace, for asynchronous workloads that can wait. Shedding drops excess, leveling defers it. Shedding's trap is that rejecting still costs something; leveling's trap is that an unbounded queue under sustained overload grows forever and becomes a hidden outage — so bound the queue and monitor backlog age.
 
 **Q: What is the constant-work (static stability) pattern and why does it improve resiliency?**
 Constant work means doing the same amount of work in good times and bad — for example pushing the *full* configuration/state every cycle instead of sending deltas only when something changes. It improves resiliency by eliminating the fragile "failure mode": there's no special recovery/catch-up path that only runs during emergencies (and is therefore untested and likely broken), because recovery is just the next normal full-state push. The cost is over-provisioning for worst-case work all the time, bought in exchange for predictability and static stability on last-known-good state.
 
 **Q: Why are configuration changes such a common cause of outages?**
+**Short:** A bad configuration has a delayed blast radius — dormant until it is read or a process restarts — and it usually ships without the testing and staged rollout code gets.
+
 Because a bad config often has a *delayed* blast radius — it sits dormant until the code reads it or a process restarts, so the change looks successful and then the whole fleet fails hours later with no recent deploy to blame — and because teams push config straight to production without the testing, review, and canarying they give code. The fix is to treat config like code: validate against a schema before applying, version it, and roll it out gradually through a health-gated pipeline.
 
 **Q: According to the Yuan et al. study, what causes most catastrophic distributed-system failures?**
@@ -1661,18 +1667,24 @@ Incorrect handling of non-fatal errors — errors the system detected but then m
 Exponential backoff alone still synchronizes clients: if many clients fail at the same instant they all compute the same backoff and retry in one wave, re-killing a recovering downstream. Jitter randomizes the delay to smear the retries out; full jitter picks a uniform random delay in [0, backoff]. AWS found full jitter both reduces downstream load and completes work faster than plain backoff, because the retries arrive spread uniformly over the window instead of as a synchronized spike.
 
 **Q: Why is an infinite default timeout dangerous, and how should you pick a timeout?**
+**Short:** A call with no timeout against a gray-failing downstream pins a thread forever until the pool is exhausted; size the timeout from the downstream's measured high-percentile latency.
+
 A no-timeout call against a slow (gray-failing) downstream ties up a thread forever, and once a bounded thread pool is fully blocked the service can't accept *any* request — a single slow dependency takes down the whole service. Always set a timeout, and pick it from the downstream's observed latency distribution — a high percentile like p99.9 — so normal slow responses still succeed but genuinely stuck calls are cut. Too short aborts healthy requests; too long fails to protect.
 
 **Q: What is a cascading failure and what single property makes it possible?**
 A cascading failure is one that spreads across a system through a positive feedback loop, like one database replica dying, its load rerouting to the survivor, overloading and killing it too. The defining property is a feedback loop *between failure and load*: a failure that increases the load on other components, where that increased load causes them to fail. Without that loop the failure is contained; the resiliency patterns (circuit breakers, load shedding, bulkheads) exist largely to break the arrow from failure back to more load.
 
 **Q: Why is the availability of a service the product of its dependencies' availabilities?**
+**Short:** If a request needs all N hard dependencies and each is independently available with probability A, the service can only be available A^N of the time.
+
 Because if a service needs *all* N hard dependencies to serve a request and each is independently available with probability A, the service is available only when all N are, which is A^N — always lower than any single one. Ten hard dependencies at 99.99% give 0.9999^10 ≈ 99.9%, so you lose a whole nine just by depending on them. This is why high availability comes from *reducing hard dependencies* (degrade around soft ones, constant work, control-plane splits) more than from perfecting any single component.
 
 **Q: What does 99.99% availability mean in concrete downtime, and how much does each nine cost?**
 99.99% (four nines) allows about 52.6 minutes of downtime per year, or roughly 8.6 seconds per day. Each additional nine cuts the allowed downtime by 10×: 99.9% is 8.76 hours/year, 99.99% is 52.6 minutes/year, and 99.999% is just 5.26 minutes/year. The steep, order-of-magnitude cost of each nine is why you pick an availability target deliberately rather than chasing more nines everywhere.
 
 **Q: What four conditions must hold for redundancy to actually increase availability?**
+**Short:** Managing the redundancy must cost less availability than it adds, faults must be reliably detected, the system must run degraded without the component, and it must recover full redundancy.
+
 The complexity of managing the redundancy must not cost more availability than it adds; the system must reliably detect the faulty component; the system must be able to operate (degraded) without that component; and the system must be able to repair and return to full redundancy. If any fails, redundancy adds a failure mode without a net gain — for instance, a buggy failover that occasionally kills both replicas, or a system with no spare capacity so losing one node overloads the rest.
 
 **Q: Why does redundancy only help for uncorrelated faults, and how do AZs and regions differ?**
@@ -1682,12 +1694,16 @@ Because redundant copies that fail *together* provide no redundancy — two repl
 Retry transient failures — connection errors, timeouts, HTTP 503, and 429 (honoring Retry-After) — because a second attempt may succeed. Never retry deterministic client errors like 4xx (400, 401, 404): the request is malformed or unauthorized and will fail identically forever, so retrying just wastes load. And only retry idempotent operations, because a request may have succeeded before its acknowledgment was lost, so retrying a non-idempotent action (like a payment) can double-apply it unless you use idempotency keys.
 
 **Q: How does a cellular architecture limit blast radius, and how do you scale it?**
+**Short:** Each cell is a complete, load-tested, size-capped copy of the stack with each account mapped to one cell, so a failure is contained there; you scale by adding cells, not growing them.
+
 Each cell is a complete, self-contained instance of the whole stack with a fixed, load-tested maximum size, and a thin routing layer maps each account to a cell — so any fault (bug, poison request, bad deploy, overload) is contained to one cell while all other cells keep serving. You scale by adding more cells at the known-good size rather than growing a cell, which means you never operate beyond a scale you've validated. The tradeoffs are the shared routing layer (a potential SPOF, so keep it dumb and reliable) and reduced cross-cell resource pooling.
 
 **Q: What race condition breaks distributed rate limiting, and how do you fix it?**
 The read-modify-write race: two server instances read the same shared counter simultaneously, both see it under the limit, both allow, and both write back — silently breaching the limit. The fix is an atomic increment (Redis INCR or an atomic Lua script) so the read-check-increment is indivisible. Separately, if the shared store is down you should usually fail *open* (allow requests, with a conservative local fallback) rather than fail closed, so the rate limiter doesn't become a SPOF that takes down the service it protects.
 
 **Q: What is the trap in load leveling, and how do you avoid it?**
+**Short:** The trap is an unbounded queue: leveling absorbs bursts, but under sustained overload the backlog grows forever, so bound the queue and shed once it is full.
+
 The trap is an unbounded queue: load leveling absorbs *bursts*, but under a *sustained* overload where producers outpace consumers, the queue grows forever — memory fills and, worse, backlog age climbs until you're processing requests users already abandoned, all while everything still looks "up." Avoid it by bounding the queue depth (and shedding/rejecting when it's full, combining leveling with shedding) and by monitoring the *age* of the oldest item, not just the depth, as the true measure of how far behind you are.
 
 **Q: What is the bulkhead pattern and what failure does it prevent?**

@@ -1155,6 +1155,8 @@ Because a remote broker adds a network round trip to every event append, which c
 Every command carries a unique `transaction_id` idempotency key, and the state machine records which command IDs it has already processed. Before producing events it checks whether events for that `transaction_id` already exist; if so it returns the prior result without emitting new events, making the duplicate a no-op. Combined with the immutable event log, this makes the whole pipeline safe to retry end to end — client retries, Saga retries, follower catch-up — without ever double-applying a transfer.
 
 **Q: What is the trade-off between a synchronous and asynchronous transfer API?**
+**Short:** Synchronous blocks until commit for simplicity; asynchronous returns immediately for higher throughput and tail latency.
+
 A synchronous call blocks until the transfer's events are majority-committed and returns the final status — simple for the caller but it pins a connection for the full, variable commit latency, especially for cross-partition Sagas. An asynchronous call returns 202 Accepted with the `transaction_id` immediately and the caller polls or receives a callback when the Saga completes — higher throughput and better tail-latency isolation, at the cost of a two-step client protocol and exposing transfer status. At 1M TPS the async face is usually preferred for cross-partition transfers.
 
 **Q: How does event sourcing prevent a double-spend on a transfer?**

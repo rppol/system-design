@@ -1,8 +1,19 @@
 # Designing Data-Intensive Applications (DDIA)
 
-> Martin Kleppmann · O'Reilly · "The big ideas behind reliable, scalable, and maintainable
-> systems." A chapter-by-chapter, in-depth summary — read this folder in order and you have
-> read the book.
+> Martin Kleppmann · **1st edition, O'Reilly 2017** · "The big ideas behind reliable,
+> scalable, and maintainable systems." A chapter-by-chapter, in-depth summary — read this
+> folder in order and you have read the book.
+
+> **Which edition this folder summarizes, and why that matters.** Every page here summarizes
+> the **1st edition (2017)**, and every chapter byline says so. A **2nd edition** (Kleppmann
+> & Riccomini) shipped in **March 2026** and is re-chaptered: 1e's Chapter 1 splits in two,
+> everything from 1e's Chapter 2 onward shifts by one, and Part III gains a chapter — so a
+> `## 7.3` heading below points at 1e's Chapter 7 (Transactions), which is **not** Chapter 7
+> in a 2e copy. 2e also substantially rewrote the consistency-and-consensus material and cut
+> most of the MapReduce coverage. Nothing here has been "updated" to match 2e, and nothing
+> should be: a summary is answerable to its source, and editing Kleppmann's 2017 claims into
+> 2026 ones would be fabrication attributed to a named author. Covering 2e is a separate
+> piece of work — either a chapter-mapped 1e→2e delta page or a sibling `..._2e/` folder.
 
 ---
 
@@ -25,7 +36,7 @@ Most of the book is spent making those guarantees precise and showing what they 
 
 ---
 
-## The Three Parts (ASCII Map)
+## The Three Parts (Part Map)
 
 ```mermaid
 flowchart TD

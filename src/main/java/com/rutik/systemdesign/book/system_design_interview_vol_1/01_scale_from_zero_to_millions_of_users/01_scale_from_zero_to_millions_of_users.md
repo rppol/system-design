@@ -1282,9 +1282,13 @@ The three main challenges are traffic redirection, data synchronization, and tes
 Collect host-level metrics, aggregated-level metrics, and key business metrics. Host-level metrics are CPU, memory, and disk I/O; aggregated-level metrics capture the performance of an entire tier such as the database or cache tier; and key business metrics include daily active users, retention, and revenue. Together they reveal both system health and business insight.
 
 **Q: What is the difference between LRU, LFU, and FIFO cache eviction?**
+**Short:** LRU evicts the least recently accessed item and is the book's default; LFU evicts the least frequently accessed; FIFO evicts the oldest inserted item regardless of access.
+
 LRU (Least Recently Used) evicts the item accessed least recently and is the most popular default; LFU (Least Frequently Used) evicts the item accessed the fewest times; and FIFO (First In First Out) evicts the oldest inserted item regardless of access. You pick the policy that matches your access pattern when the cache fills and must remove something to admit a new item.
 
 **Q: What is the final recap checklist for scaling to millions of users?**
+**Short:** Keep the web tier stateless, build redundancy at every tier, cache aggressively, run multiple data centers, put static assets on a CDN, shard the data tier, split tiers into services, and automate monitoring.
+
 Keep the web tier stateless, build redundancy at every tier, cache data as much as you can, support multiple data centers, host static assets in a CDN, scale the data tier by sharding, split tiers into individual services, and monitor the system with automation tools. Each item corresponds to one technique introduced in the chapter, and together they form the incremental scaling playbook.
 
 ---

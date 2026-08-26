@@ -1,6 +1,6 @@
 # Preface & Book Map
 
-> DDIA (Kleppmann) · Front matter · the lens through which to read every chapter
+> DDIA (Kleppmann, 1st ed., O'Reilly 2017) · Front matter · the lens through which to read every chapter
 
 ## Chapter Map
 
@@ -263,6 +263,7 @@ Because the tool landscape changes constantly and the categories blur (Redis is 
 Different access patterns need different engines: OLTP databases for point reads/writes, search indexes for full-text, caches for hot reads, stream processors for real-time, batch systems for analytics. One tool optimized for all of these would be optimized for none. So applications compose specialized tools — and that composition creates the central problem: keeping them consistent. The whole book follows from this premise.
 
 **Q: If you compose several data stores, who is responsible for the consistency between them?**
+**Short:** The application code composing the stores is responsible — no single store can see the others.
 Your application code is. No individual product can guarantee that the database, the cache, and the search index agree with each other, because none of them knows about the others. The application that writes to all of them owns the contract that they stay in sync — which is why Part III spends so much effort on dataflow and exactly-once semantics.
 
 **Q: What does the book mean by "maintainability", and what three sub-properties make it up?**

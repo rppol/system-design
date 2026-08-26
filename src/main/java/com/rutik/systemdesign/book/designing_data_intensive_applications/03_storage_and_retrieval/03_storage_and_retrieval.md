@@ -1,6 +1,6 @@
 # Chapter 3: Storage and Retrieval
 
-> Part I — Foundations of Data Systems · DDIA (Kleppmann) · builds on Ch 2, leads to Ch 4
+> Part I — Foundations of Data Systems · DDIA (Kleppmann, 1st ed., O'Reilly 2017) · builds on Ch 2, leads to Ch 4
 
 ## Chapter Map
 
@@ -38,10 +38,51 @@ is about which index structure to pay for, given your workload.
 The simplest index for a log-structured store: keep an in-memory hash map from key to the
 **byte offset** in the data file. Write = append to file + update the hash map; read = look up
 the offset, seek, read. Bitcask (Riak's engine) works exactly this way: extremely fast
-reads/writes as long as all keys fit in RAM. To bound disk usage, break the log into
-**segments** and run **compaction** — throw away duplicate keys, keeping only the latest value
-per key — then merge segments. Limits: the key set must fit in memory, and **range queries are
-inefficient** (you can't scan a key range, only point-lookup each key).
+reads/writes as long as all keys fit in RAM, and is well suited to situations where the value
+for each key is updated frequently — there may be many writes during the lifetime of a key,
+but there aren't too many distinct keys, so all of them fit in memory. To bound disk usage,
+break the log into **segments** — close a segment file once it reaches a certain size, and
+make subsequent writes to a new segment file — and run **compaction** — throw away duplicate
+keys, keeping only the latest value per key — then merge segments, which can be done in a
+background thread while still serving reads and writes from the old segment files, and after
+the merge is complete, switching reads to use the new merged segment and deleting the old ones.
+
+Making this real requires resolving several practical issues the naive description glosses
+over:
+
+- **File format.** A binary format that encodes the length of the string in bytes, followed by
+  the raw string (no need for escaping), is faster and simpler than a text format like CSV.
+- **Deleting records.** To delete a key, append a special deletion record to the data file —
+  often called a **tombstone**. When log segments are merged, the tombstone tells the merging
+  process to discard any previous value for the deleted key.
+- **Crash recovery.** If the database is restarted, the in-memory hash maps are lost, and in
+  principle you could restore each segment's map by reading the entire segment file from
+  beginning to end — but that could take a long time on a large database, making server
+  restarts painful. Bitcask speeds up recovery by storing a snapshot of each segment's hash
+  map on disk, which can be loaded into memory more quickly.
+- **Partially written records.** The database may crash at any time, including halfway through
+  appending a record to the log. Bitcask files include checksums, allowing corrupted parts of
+  the log to be detected and ignored.
+- **Concurrency control.** As writes are appended to the log in a strictly sequential order, a
+  common implementation is to have only one writer thread — data file segments are append-only
+  and otherwise immutable, so they can be read concurrently by multiple threads.
+
+An append-only design turns out to be good for several reasons: appending and segment merging
+are sequential write operations, which are generally much faster than random writes,
+especially on magnetic spinning-disk hard drives and, to a lesser extent, on SSDs too;
+concurrency and crash recovery are much simpler if segment files are append-only or immutable
+— for example, you don't have to worry about a crash happening while a value was being
+overwritten, leaving a file with a mix of the old and new value spliced together; and merging
+old segments avoids the problem of data files getting fragmented over time.
+
+**Limits of the hash-table index.** The hash table must fit in memory, so if you have a very
+large number of keys, keeping all of them in memory could use too much RAM — you could in
+principle maintain a hash map on disk, but a disk-based hash map is difficult to make perform
+well: it requires a lot of random access I/O, is expensive to grow when it becomes full, and
+hash collisions require fiddly logic. And **range queries are not efficient** — you can't
+easily scan over all keys between, say, `kitty00000` and `kitty99999`, because that means
+looking up each key individually in the hash map, one point lookup at a time, rather than
+being able to jump straight to the range's start and scan sequentially.
 
 ### SSTables and LSM-trees
 
@@ -303,6 +344,31 @@ WAL (**redo log**): the split-a-page operation touches multiple pages, and a cra
 would corrupt the tree, so the WAL lets recovery finish or undo it. Concurrency needs
 **latches** (lightweight locks) on pages.
 
+### B-tree optimizations
+
+Because B-trees have been around so much longer than LSM-trees, there have been many
+optimizations developed over the years, of which Kleppmann names several:
+
+- **Copy-on-write instead of a WAL.** Instead of overwriting pages in place and maintaining a
+  WAL for crash recovery, some databases (LMDB) use a copy-on-write scheme: a modified page is
+  written to a different location, and a new version of the parent pages in the tree is
+  created, pointing at the new location. This is also useful for concurrency control, since
+  readers can continue using an old version of the tree without needing latches.
+- **Abbreviating keys.** Rather than storing the entire key, you can save space in pages by
+  abbreviating the key — especially in pages higher up the tree, where all you need is enough
+  information to act as boundaries between key ranges. Packing more keys into a page allows the
+  tree to have a higher branching factor, and thus fewer levels.
+- **Sequential leaf layout.** Many B-tree implementations try to lay out the tree so that leaf
+  pages appear in sequential order on disk, but it's difficult to maintain that order as the
+  tree grows — by contrast, since LSM-trees rewrite large segments of storage during merging,
+  it's easier for them to keep sequential keys close together on disk.
+- **Sibling pointers.** Additional pointers have been added to the tree — for example, each
+  leaf page may have references to its sibling pages to its left and right, which allows
+  scanning keys in order without jumping back to parent pages.
+- **Fractal-tree variants.** B-tree variants such as fractal trees borrow some log-structured
+  ideas to reduce disk seeks, blurring the once-sharp line between the two families the rest
+  of this section draws.
+
 ### Comparing B-trees and LSM-trees
 
 The defining difference is **where the work goes**:
@@ -508,15 +574,62 @@ yet **row-oriented** storage forces the engine to load every column of every row
 **Column-oriented storage** stores all values of *one column* together (column by column
 instead of row by row), so a query reads only the columns it needs — slashing disk I/O.
 
-- **Column compression:** values within a column are similar, so they compress extremely well.
-  **Bitmap encoding** of a column with few distinct values (e.g. `country`, `product_id`)
-  turns it into one bitmap per distinct value; these bitmaps are tiny and support fast `WHERE
-  product_id IN (...)` via bitwise OR. Compression also lets more data fit in CPU cache and
-  uses memory bandwidth efficiently (vectorized processing).
-- **Sort order:** you can sort the rows of a column store (consistently across all columns) by
-  a chosen key. Sorting helps compression (long runs of repeated values) and speeds range
-  queries on the sort key. **C-Store/Vertica** keep *several* differently-sorted copies of the
-  data (redundant, like multiple secondary indexes) so each query uses the best sort order.
+### Column compression
+
+Values within a column are similar, so they compress extremely well. **Bitmap encoding** of a
+column with few distinct values relative to the number of rows (e.g. `country`, `product_id`)
+turns it into one bitmap per distinct value — bit *i* set means row *i* has that value. If the
+number of distinct values is small (say, a few hundred) compared to the number of rows, the
+bitmaps can be further compressed with **run-length encoding**: since a query like `WHERE
+product_sk IN (30, 68, 69)` (Kleppmann's example) tends to produce long runs of consecutive 0s
+or 1s within a bitmap, run-length encoding — storing "0 repeated N times" rather than N
+individual zero bits — makes the bitmap even more compact, and it can be much faster than
+formats that don't have run-length encoding, sometimes fitting the compressed bitmap for a
+column in L1 cache. These techniques let you support fast `WHERE product_id IN (...)` queries
+by loading the relevant bitmaps and computing their bitwise `OR`, with no row scan at all.
+
+### Memory bandwidth and vectorized processing
+
+For data warehouse queries that need to scan over millions of rows, a big bottleneck is the
+bandwidth for getting data from disk into memory — but that's not the only bottleneck. Once
+data is in memory, developers of analytic databases also want to make efficient use of the
+bandwidth between memory and CPU cache, avoid branch mispredictions and bubbles in the CPU
+instruction processing pipeline, and use SIMD (single instruction, multi-data) instructions in
+modern CPUs. Besides reducing the volume of data loaded from disk, column-oriented storage
+also uses CPU cycles more efficiently: the query engine can take a chunk of compressed
+column data that fits comfortably in the CPU's L1 cache and iterate through it in a tight
+loop (i.e. with no function calls). A CPU can execute such a loop much faster than code that
+requires a lot of function calls and conditions for each record being processed, since each
+of those involves branch mispredictions and bubbles in the pipeline. Column compression
+allows more rows from a column to fit in the same amount of L1 cache — and operators such as
+the bitwise `AND` and `OR` described above can be designed to operate directly on such chunks
+of compressed column data. This technique is known as **vectorized processing**.
+
+### Sort order in column storage
+
+You can sort the rows of a column store (consistently across all columns) by a chosen key —
+even though the data is stored column-wise, rows still need to be sorted in the same order
+across all columns, or the values within one row could get mixed up. The database
+administrator can choose the columns by which the table should be sorted, using their
+knowledge of common queries. If queries often target date ranges, such as the previous
+month, it might make sense to make `date_key` the first sort key; then the query optimizer
+can scan only the rows from the last month, which is much faster than scanning all rows.
+Sorting also helps compression: if the primary sort column has many distinct values, but
+there are runs of the same value adjacent to each other, then a secondary sort column will
+be mostly sorted too, and long runs of repeated values compress well — the second-lowest
+sort key can still have long runs of identical values, whereas an unsorted column with
+random ordering would not.
+
+**Several different sort orders.** A single sort order limits you to fast scans only when a
+query happens to filter on a prefix of that sort key. **C-Store**, and its commercialized
+descendant **Vertica**, use a different approach: since a column store doesn't have a single
+row that needs to move together, different replicas of the data can be stored sorted in
+different ways, so that when processing a query, the query optimizer can select the version
+of the table that best fits the query pattern. Having multiple sort orders in a column-
+oriented store is a bit similar to having multiple secondary indexes in a row-oriented store
+— but the row-oriented store keeps every row in one place and requires an index pointing back
+to it, whereas the column store doesn't need that at all, because the different sort orders
+each hold a full redundant copy of the data.
 - **Writing to column storage:** in-place updates are hard (inserting a row means rewriting all
   columns). The solution is **LSM-style**: buffer writes in an in-memory row store, then merge
   into the column files in bulk — same idea as the LSM-tree memtable.
@@ -614,6 +727,14 @@ whether you want write throughput (LSM) or read predictability (B-tree).
 - **Column-oriented storage** — values stored column-by-column.
 - **Bitmap encoding** — compressing low-cardinality columns into per-value bitmaps.
 - **Materialized view / data cube** — precomputed, cached aggregates.
+- **Tombstone** — a special deletion marker appended to a log-structured store; tells merges
+  to discard the deleted key's earlier values.
+- **Copy-on-write** — a B-tree update strategy that writes modified pages to a new location
+  instead of overwriting in place, avoiding the need for a separate WAL.
+- **Run-length encoding** — compressing a repeated run of identical values into one count
+  instead of storing each occurrence, effective on the long runs bitmap-encoded columns have.
+- **Vectorized processing** — evaluating operators over cache-resident chunks of compressed
+  column data in a tight loop, avoiding per-record function-call and branch overhead.
 
 ---
 
@@ -696,6 +817,7 @@ LSM-trees optimize writes and B-trees optimize reads. LSM-trees turn all writes 
 Write amplification is the number of physical writes caused by one logical write, and it limits sustainable write throughput while wearing out SSDs. B-trees write each datum at least twice — once to the WAL and once to the page — plus extra writes when pages split. LSM-trees write once sequentially but then rewrite the same data repeatedly during compaction as segments merge. Both pay it; LSM usually still sustains higher write throughput because its writes are sequential and its compaction is tunable.
 
 **Q: Why does an LSM-tree need Bloom filters, especially for keys that don't exist?**
+**Short:** Without a Bloom filter, a lookup for a missing key must check every SSTable level in turn.
 Because an LSM read that misses the memtable must check SSTable segments from newest to oldest, and a key that doesn't exist anywhere forces it to check *every* segment before concluding "not found" — extremely slow under not-found-heavy patterns like cache misses. A Bloom filter is a compact probabilistic structure that answers "this key is definitely not in this SSTable" cheaply, letting the read skip segments that can't contain the key and avoid the full scan.
 
 **Q: Why are all writes in a log-structured store appends, and why is that fast?**
@@ -735,7 +857,28 @@ Because their access patterns conflict: OLTP needs low-latency point reads/write
 The main speedup is *not* avoiding disk reads — the OS page cache already serves hot data from RAM in disk-backed databases. It's that an in-memory database avoids the overhead of encoding/decoding its in-memory data structures into a disk-friendly byte format. It can also offer data models that are awkward on disk, like Redis's sets and priority queues. Durability is added separately via append-only logs, periodic snapshots, or replication to other nodes.
 
 **Q: What is a materialized view (or data cube), and what is its tradeoff?**
+**Short:** A materialized view precomputes a query result on disk, trading write-time cost and rigidity for instant reads.
 A materialized view is a precomputed, on-disk copy of a query's result (often an aggregate) that is refreshed when underlying data changes, so repeated queries read the cached result instantly instead of recomputing it; a data cube generalizes this to a grid of aggregates summarized along several dimensions at once. The tradeoff is flexibility: the cube/view answers the precomputed rollups very fast but can't easily answer queries that need a dimension it didn't materialize, and it adds maintenance cost on writes.
+
+**Q: How does a Bitcask-style hash index handle deletes and crash recovery?**
+**Short:** Deletes append a tombstone record; crash recovery replays or loads a saved snapshot of each segment's hash map.
+Deleting a key means appending a special deletion marker called a **tombstone** to the log, rather than removing anything in place; when segments are later merged, the tombstone tells the merge process to drop any earlier value for that key. Crash recovery could in principle rebuild each segment's in-memory hash map by replaying the segment file from start to end, but that's slow on a large database, so Bitcask instead persists a snapshot of each segment's hash map on disk and loads that snapshot back into memory on restart, which is much faster than a full replay.
+
+**Q: Why is a single-writer-thread design a natural fit for a log-structured hash index?**
+**Short:** Because writes are strictly sequential appends, one writer thread avoids coordinating concurrent appenders.
+Since data file segments are append-only and otherwise immutable, writes only ever happen at the end of the current segment in a fixed order, so a single writer thread can perform them without needing to coordinate with other writers over where in the file to write next. Multiple reader threads can safely read the immutable, already-written parts of the segments concurrently, because nothing there ever changes underneath them — only the newest segment being actively appended to needs any care.
+
+**Q: Name two of the B-tree optimizations the book describes beyond the basic write-ahead log and latches.**
+**Short:** Copy-on-write pages avoid a WAL, and abbreviated keys raise the branching factor.
+Kleppmann lists several: using a copy-on-write scheme (write a modified page to a new location and update parent pointers, as LMDB does) instead of a WAL, which also helps concurrency because readers can keep using an old tree version without latches; abbreviating keys, especially in upper-level pages where only enough information to bound a key range is needed, which packs more entries per page and raises the branching factor; laying out leaf pages sequentially on disk where possible; and adding sibling pointers so a range scan can move left-to-right across leaves without climbing back up to a parent page.
+
+**Q: What is run-length encoding, and why does it pair so well with bitmap-encoded columns?**
+**Short:** Run-length encoding stores a repeated run as one count instead of many bits, shrinking already-sparse bitmaps further.
+Run-length encoding compresses a bitmap by storing "0 repeated N times" instead of N individual zero bits, which is effective because a bitmap built from a low-cardinality column tends to have long runs of consecutive identical bits — most rows do *not* have a given `product_id`, so the bitmap for that value is mostly zeros. Compressing those runs can shrink a column's bitmaps enough that they fit in the CPU's L1 cache, which is also what makes vectorized bitwise `AND`/`OR` operations over them fast.
+
+**Q: What is vectorized processing, and what CPU-level problem does it solve that reducing disk I/O alone does not?**
+**Short:** Vectorized processing runs tight loops over cache-resident compressed column chunks, avoiding per-record branch mispredictions.
+Even after column storage cuts disk I/O by reading only needed columns, a query engine that calls a function and evaluates conditions for every individual record pays a cost in branch mispredictions and pipeline bubbles on the CPU. Vectorized processing instead takes a chunk of compressed column data that fits in L1 cache and iterates over it in a tight loop with no per-record function calls, letting operators like bitwise `AND`/`OR` run directly over the compressed chunks — using the CPU's cache and instruction pipeline far more efficiently than a naive row-at-a-time evaluator.
 
 ---
 

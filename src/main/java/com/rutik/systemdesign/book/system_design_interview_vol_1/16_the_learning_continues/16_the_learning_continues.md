@@ -370,9 +370,13 @@ Three designs use fan-out: notification (Ch 10), news feed (Ch 11), and chat (Ch
 Pick push/polling when the client is often offline or delivery is bursty and third-party-mediated, and WebSocket when you need a low-latency bidirectional live channel. Chapters 10 and 12 take opposite sides: the notification system (Ch 10) uses server push through APNs/FCM because phones sleep and you cannot hold a socket open to every device, while the chat system (Ch 12) holds a persistent WebSocket per active client for instant two-way messaging. The deciding factor is connection lifetime and who initiates delivery.
 
 **Q: In how many of the twelve designs does consistent hashing appear, and for what job each time?**
+**Short:** Roughly four: introduced in Ch 5, then placing keys in Ch 6's key-value store, sharding cache and database in Ch 8's URL shortener, and sharding trie storage in Ch 13.
+
 Consistent hashing appears in roughly four designs: it is introduced in Ch 5, then reused to place keys in the Ch 6 key-value store, to shard the cache and database in Ch 8's URL shortener, and to shard trie storage in Ch 13's autocomplete. Each time the job is the same — add or remove nodes while moving the minimum number of keys and avoiding hotspots — which is exactly why it is worth mastering as a primitive rather than a one-off.
 
 **Q: Which chapters reuse the Snowflake-style unique ID generator, and why?**
+**Short:** Introduced in Ch 7 and reused in Ch 8 (base-62 short URLs), Ch 11 (time-sortable feed ordering), and Ch 12 (message IDs that also establish per-conversation order).
+
 Unique ID generation is introduced in Ch 7 and reused wherever the system needs coordination-free, often time-sortable identifiers: Ch 8 derives short URLs from unique IDs via base-62, Ch 11 orders feed entries by time-sortable IDs, and Ch 12 assigns message IDs that also establish per-conversation ordering. The recurring need is a globally unique key generated without a central coordinator, with the high bits holding a timestamp so IDs sort chronologically.
 
 **Q: How do you map a company blog post onto SDI-1 primitives when you have never seen the system?**
@@ -382,6 +386,8 @@ Ask three questions: what is the dominant read/write shape, how does it stay con
 Its value is teaching pattern recognition — the ability to read real architectures and decode them into primitives you already know. The twelve designs gave you a vocabulary; this chapter shows every production system is a recombination of that vocabulary and hands you the reading list to practice on. Skipping it leaves you with twelve memorized answers instead of a transferable decoding skill, which is what actually distinguishes a strong candidate.
 
 **Q: What is the difference between fan-out-on-write and fan-out-on-read, and which design forces a hybrid?**
+**Short:** Fan-out-on-write precomputes each recipient's timeline at post time (cheap reads, costly writes); fan-out-on-read builds it on demand. Ch 11's celebrity problem forces the hybrid.
+
 Fan-out-on-write precomputes and pushes each new item into every recipient's timeline at post time, making reads cheap but writes expensive; fan-out-on-read assembles the timeline on demand at read time, making writes cheap but reads expensive. The news feed (Ch 11) forces a hybrid: pure write fan-out explodes for a celebrity with tens of millions of followers, so you precompute for normal users and pull-merge posts from celebrities at read time. The chapter's celebrity problem is the canonical reason no single strategy wins.
 
 **Q: Which SDI-1 designs are dominated by CDN long-tail economics, and what does that mean?**
@@ -391,6 +397,8 @@ YouTube (Ch 14) and Google Drive (Ch 15) are dominated by CDN economics because 
 Uneven load distribution — a few keys or users receiving vastly more traffic than the average — is the shared cause. In the news feed it is the celebrity with millions of followers; in a group chat it is a huge channel; in a key-value store it is a hot partition. The mitigations rhyme: special-case the hot entity (pull instead of push for celebrities), replicate or split the hot key, or add caching in front of it. Recognizing it as one primitive lets you reuse the same three fixes.
 
 **Q: Which designs use DAG-style pipelines, and what stages does each run?**
+**Short:** Three: the Ch 9 crawler's fetch to parse to dedup to store, Ch 13's sampled analytics pipeline feeding trie updates, and Ch 14's upload to transcode to package to distribute.
+
 Three designs use multi-stage pipelines: the web crawler (Ch 9) runs fetch → parse → dedup → store; the search autocomplete system (Ch 13) runs a sampled analytics pipeline that aggregates query logs into trie updates; and YouTube (Ch 14) runs upload → transcode into multiple formats → package → distribute. Google's MapReduce paper is the canonical batch-DAG reference. In every case the win is decoupling stages so each scales and retries independently.
 
 **Q: How does the "Scaling Memcache at Facebook" article extend a specific SDI-1 chapter?**

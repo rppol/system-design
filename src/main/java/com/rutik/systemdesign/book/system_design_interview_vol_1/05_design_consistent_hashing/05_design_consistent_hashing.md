@@ -1002,9 +1002,13 @@ Only mildly: lookup goes from O(log n) to O(log(n·k)) because there are more po
 The server just clockwise of the other owns a near-empty arc between them, so it holds almost no keys while its neighbor holds a normal share — a partition-size imbalance. This is exactly issue 1 of the basic ring, and it is why you use many virtual nodes: with hundreds of points per server, one unlucky near-collision is diluted across the rest.
 
 **Q: Why can't you avoid the storm by re-sharding with modulo during a low-traffic window?**
+**Short:** A modulo reshard remaps nearly every key whatever the hour, so the cache still goes cold — and it does nothing for unplanned failures, which do not wait for a quiet window.
+
 Because a modulo reshard still remaps nearly every key, so even at low traffic the cache goes effectively cold and warms back up slowly — and it does nothing for *unplanned* failures, which do not wait for a quiet window. Consistent hashing avoids the storm by construction for both planned and unplanned membership changes, which is why it is preferred over scheduling around the problem.
 
 **Q: Which real systems use consistent hashing, and for what?**
+**Short:** Dynamo, DynamoDB and Cassandra partition data with it, Discord routes entity ownership, Akamai picks the CDN edge, and Google's Maglev balances network flows.
+
 Amazon Dynamo and DynamoDB and Apache Cassandra use it for data partitioning (with virtual nodes / a token ring); Discord uses it to route which instance owns which entity; Akamai uses it to pick which CDN edge cache serves an object; and Google's Maglev uses it for network load balancing with minimal flow disruption. All exploit the same property: membership changes disturb only a small, local slice.
 
 **Q: How do virtual nodes let you support heterogeneous (unequal-capacity) servers?**

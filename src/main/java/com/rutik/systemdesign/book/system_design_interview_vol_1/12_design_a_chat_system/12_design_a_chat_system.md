@@ -1188,6 +1188,8 @@ Because copying a message into every member's inbox means the write cost grows w
 User A sends the message to chat server 1, which obtains a message_id from the ID generator, pushes the message to the message sync queue, and persists it in the key-value store. Then delivery branches on the recipient's status: if User B is online the message is forwarded to chat server 2 (where B holds a WebSocket) and delivered, and if B is offline a push notification is sent from the PN servers. Persisting before delivery is what guarantees no message is lost when the recipient is offline.
 
 **Q: How does the single-server thought experiment justify splitting into tiers?**
+**Short:** 1M connections at ~10 KB each is ~10 GB, which fits one server — but that server is a single point of failure, so the design splits into chat, presence, API, and notification tiers.
+
 It shows that 1 million concurrent connections at about 10 KB each is roughly 10 GB of memory, which technically fits on one modern server — but a single server is a single point of failure that takes the entire product down if it dies. So the design acknowledges the memory would fit, then rejects the monolith and splits into chat, presence, API, and notification servers plus a KV store, each scaling independently with no SPOF.
 
 **Q: How does multi-device synchronization keep every device in sync?**
@@ -1197,6 +1199,8 @@ Each device maintains its own WebSocket connection and a cur_max_message_id, the
 Service discovery recommends the best chat server for a client based on criteria like geographical location and server capacity, and Apache ZooKeeper is the common implementation. ZooKeeper keeps a registry of all available chat servers and picks the best one for a connecting user. It is also what enables chat-server failover — the available-server list lets a client be handed a healthy server when its current one dies.
 
 **Q: Describe the four-step login flow.**
+**Short:** The load balancer routes the login to an API server, the API server authenticates, ZooKeeper service discovery returns the best chat server, and the client opens a WebSocket to it.
+
 First the user tries to log in and the load balancer routes the request to an API server; second the API server authenticates the user; third service discovery (ZooKeeper) finds the best chat server, say server 2, and returns its info; fourth the user opens a WebSocket connection directly to chat server 2. From that point the user is pinned to that stateful chat server for the session.
 
 **Q: Why is the chat service stateful while login and profile services are stateless?**
@@ -1215,9 +1219,13 @@ Generic data — user profiles, settings, and friends lists — goes in a robust
 For chat-server failure, ZooKeeper holds the list of available chat servers, so a client whose server goes offline can be handed a new healthy server to connect to rather than being orphaned. For message delivery failures, retry and queueing are used — a message that fails to send is queued and retried until it goes through. Together they keep both connections and messages recoverable through transient failures.
 
 **Q: What is the WebSocket upgrade, and why does running on ports 80/443 matter?**
+**Short:** A WebSocket begins as an HTTP request with an Upgrade header answered by 101 Switching Protocols; ports 80 and 443 matter because firewalls and proxies let them through.
+
 A WebSocket connection starts as an ordinary HTTP request carrying an Upgrade header; the server replies 101 Switching Protocols and the same TCP socket becomes a full-duplex WebSocket, so no separate port or connection is needed. Running over ports 80 and 443 matters because those are the standard web ports, so the connection passes through firewalls and proxies that would block an exotic protocol on a custom port. This is a big part of why WebSocket became the universal real-time transport.
 
 **Q: What are the main follow-up extensions to discuss if time remains?**
+**Short:** Media files with compression and thumbnails, end-to-end encryption where the server relays ciphertext, client-side caching, geographically distributed caching, and error handling with failover.
+
 Supporting media files (with compression, cloud storage for blobs, and thumbnails), end-to-end encryption (WhatsApp-style, where the server relays ciphertext it can't read), client-side caching to cut data transfer, faster load times via Slack-style geographically distributed caching, and error handling with ZooKeeper-driven chat-server failover plus retry/queue message resend. These show breadth beyond the core design. Media and encryption are the two most common deep-dive requests.
 
 ---

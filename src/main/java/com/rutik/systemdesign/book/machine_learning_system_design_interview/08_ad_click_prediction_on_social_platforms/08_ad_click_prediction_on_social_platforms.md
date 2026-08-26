@@ -1023,12 +1023,14 @@ A click can arrive minutes to days after the impression, so labeling an impressi
 Accuracy is useless because at ~1% CTR a model predicting "no click" for everything scores ~99% accuracy while being worthless. AUC is better since it measures ranking, but it is invariant to monotonic rescaling, so a model outputting `2 × true_pCTR` everywhere has identical AUC yet is wildly miscalibrated. Since the auction bills on the absolute probability, AUC's blindness to calibration disqualifies it as the sole metric. Log loss and calibration metrics catch what AUC cannot.
 
 **Q: Why does plain logistic regression underperform on CTR, and what's the first thing you add?**
+**Short:** Logistic regression is linear and can't learn feature interactions, so the first fix is feature crossing.
 Logistic regression is linear — each feature contributes additively and independently — so it cannot represent feature interactions like "young users click gaming ads at 5× the rate." The first fix is feature crossing, but hand-building crosses explodes combinatorially and yields extremely sparse columns. That combinatorial pain is exactly what motivates models that learn crosses automatically — GBDT paths, FM latent vectors, DCN cross layers, DeepFM's FM branch.
 
 **Q: Explain the GBDT+LR architecture and why Facebook combined the two.**
 GBDT acts as an automatic feature transformer whose leaf indices are a learned cross representation, and those one-hot leaf indices feed an online logistic regression. GBDT captures nonlinear interactions on dense features but can't update online, while LR is cheap, calibrated, and online-trainable but linear. Combining them gets GBDT's automatic crossing plus LR's continuous freshness: refresh the LR on the stream while rebuilding the slower GBDT less often. It was Facebook's 2014 production design and the bridge from hand-crafted to fully learned crosses.
 
 **Q: Compare DCN and DeepFM honestly — when would you pick each?**
+**Short:** DeepFM's crosses are pairwise via FM inner products; DCN's cross network reaches explicit higher-order crosses.
 Both learn feature crosses automatically over shared embeddings in a single joint training pass, but DeepFM's explicit crosses are pairwise (2nd-order via FM inner products) while DCN's cross network captures explicit higher-order crosses up to its depth. Pick DeepFM when pairwise interactions dominate and sparsity is extreme, since FM shares statistics through latent vectors and is very parameter-efficient for pairs. Pick DCN (v2) when higher-order crosses demonstrably pay off. Both beat GBDT+LR on sparse-ID-heavy data; a strong answer names both and states the tradeoff.
 
 **Q: What is normalized cross-entropy and why use it instead of raw log loss?**
@@ -1050,9 +1052,11 @@ The cross layer computes `x_{l+1} = x_0 · (x_l^T · w_l) + b_l + x_l`, multiply
 Map each ID to a dense embedding vector rather than a one-hot column, and use the hashing trick to bound the table size. A one-hot of a billion IDs is impossible and new IDs appear constantly, so hashing each ID into a fixed number of buckets `B` (e.g. 1e6) and embedding the bucket keeps memory bounded and handles unseen IDs for free. The cost is collisions — distinct IDs sharing a bucket share an embedding — so tune `B` to trade memory against collision noise, and give hot IDs dedicated slots.
 
 **Q: Name the post-hoc calibration techniques besides the downsampling recalibration.**
+**Short:** Besides recalibration: Platt scaling fits a logistic map, isotonic regression a flexible monotonic one.
 Platt scaling fits a logistic `σ(a·s + b)` on a held-out set to map raw scores to probabilities; isotonic regression fits a non-parametric monotonic mapping that is more flexible but data-hungry; temperature scaling divides logits by a learned scalar. These are applied after training as a calibration layer, separate from the `q = p/(p+(1-p)/w)` correction that specifically undoes negative downsampling. They matter because the auction needs probabilistically meaningful pCTR.
 
 **Q: What is catastrophic forgetting in this system and how do you mitigate it?**
+**Short:** Catastrophic forgetting is fine-tuning on the latest data erasing older but still-valid learned patterns.
 Catastrophic forgetting is when aggressive incremental fine-tuning makes the model forget older but still-valid patterns as it chases the latest data — a model fine-tuned only on the last hour forgets seasonal or long-tail-advertiser behavior. Mitigate by mixing a replay buffer of older data into each fine-tune, or by scheduling periodic full retrains from scratch to purge accumulated drift. It is the core fine-tune-cadence-versus-stability tradeoff of the continual-learning pipeline.
 
 **Q: What is point-in-time correctness and why does it bite CTR models hard?**
@@ -1065,12 +1069,14 @@ GBDT captures nonlinearities and feature interactions automatically — each roo
 Include ad position as a training feature so the model attributes position's effect to position rather than to relevance, then neutralize it at serving by fixing it to a constant (e.g. the top slot) for every candidate. An ad's position affects its click rate independent of how relevant it is, so if you don't model it the model learns "being on top" instead of relevance. Feeding position in during training and holding it fixed at inference lets the learned relevance signal drive the auction cleanly.
 
 **Q: Why use multiple objectives (click, conversion, hide) instead of maximizing pCTR alone?**
+**Short:** Real systems combine click, conversion, and hide predictions, since maximizing pCTR alone surfaces clickbait.
 Because pure click maximization surfaces clickbait and outrage creatives that spike hide/report rates and hurt retention, so real systems predict click, conversion, and negative feedback and combine them, e.g. `score = pCTR × value − λ·p(hide)`. Click alone ignores whether the click converts or whether the user is harmed. A multi-objective score lets the auction favor ads that are both likely to be clicked and valuable while penalizing ones users hide, protecting long-term engagement.
 
 **Q: What is budget pacing and why is it deliberately outside the CTR model?**
 Budget pacing is a control/optimization problem that decides how fast to spend an advertiser's daily budget over time, and it sits beside the CTR model as an input to the auction, not inside the model. The CTR model owns only the probability; the auctioneer combines pCTR with the bid and pacing state to decide winners and prices. Naming it shows you know the ML boundary — pacing is a non-ML neighbor that would muddy the model if folded in, and it belongs in the auction/control layer.
 
 **Q: Do the scale numbers force any design decision, or are they just context?**
+**Short:** At ~1e11 impressions/day negatives must be downsampled and recalibrated; QPS forces precomputed features.
 They force two decisions directly: with ~1e11 impressions/day, raw training data is untrainable, so negatives must be downsampled and then recalibrated; and with ~1M+ QPS under a tens-of-milliseconds budget, heavy features must be precomputed in a feature store and the per-candidate model must be cheap. So the back-of-envelope estimate isn't decoration — it is why downsampling and a feature store appear in the design at all.
 
 ---

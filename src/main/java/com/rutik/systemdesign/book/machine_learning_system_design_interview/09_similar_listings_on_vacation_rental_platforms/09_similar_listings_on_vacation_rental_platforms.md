@@ -894,6 +894,7 @@ Booked sessions end in a reservation and receive the booked-listing-as-global-co
 Because 32 dimensions are enough to separate markets and resolve within-market structure while keeping storage and ANN latency cheap. A 4.5M × 32 float table is only a few hundred MB, and approximate nearest-neighbor queries over it stay in the low-millisecond range needed to render inside a listing page. Larger dimensions add cost and overfitting risk without proportional gains for this behavioral-similarity task.
 
 **Q: Walk through the four terms of the adapted skip-gram objective.**
+**Short:** The objective sums window co-clicks, random negatives, a booked-listing global positive, and same-market negatives.
 The objective maximizes four sums: window co-click positives `log σ(v_c · v_l)`, random negatives `log σ(−v_d · v_l)`, the booked-listing global positive `log σ(v_{l_b} · v_l)`, and same-market hard negatives `log σ(−v_m · v_l)`. The first two are vanilla skip-gram with negative sampling; the third injects the booking objective; the fourth sharpens within-market discrimination. For exploratory sessions the third (booked) term is dropped.
 
 **Q: How is the similar-listings carousel served at request time?**
@@ -909,15 +910,18 @@ Because the ANN index returns nearest vectors regardless of whether the listing 
 Because feedback loops inflate offline metrics: recommending similar listings makes them co-clicked more, which reinforces their embedding proximity without any real user benefit. So a lower average rank can partly reflect the system rewarding its own past recommendations. Guard against it by gating every launch on an A/B test measuring carousel CTR and book-through, not on offline geometry alone.
 
 **Q: What is the two-tower alternative and when would you reach for it?**
+**Short:** A content tower embeds listing attributes into the same space, giving even brand-new listings a real vector.
 A two-tower / content model learns a tower mapping listing *attributes* (price, type, amenities, location) into the same embedding space, so any listing — including brand-new ones — gets a real learned vector from its features. You reach for it when cold-start composition (averaging neighbors) is not accurate enough, or when you want a hybrid of behavioral and content signal. It is the natural upgrade path from the pure session-embedding design.
 
 **Q: How would you extend this to personalize for logged-in users?**
 Learn user-type and listing-type embeddings in the same space from long-term booking sessions, as in the second half of the Airbnb paper. Short-term listing embeddings capture in-session, anonymous similarity; user-type embeddings capture cross-session, long-term preference, and you rank by similarity between the user-type vector and candidate listings. This layers logged-in personalization on top of the anonymous session-embedding base without discarding it.
 
 **Q: What biases live in click-session training data, and how do you handle them?**
+**Short:** Position and selection bias make clicks reflect what the ranker showed, not true similarity; debias by weighting.
 Position and selection bias dominate: clicks favor whatever the search ranker showed near the top, so the model can learn "shown together" instead of "genuinely similar." Handle it with position-debiasing, up-weighting rarer co-clicks, or logging exposure to correct for what the user actually saw. Seasonality is a second effect, mitigated by retraining daily on a recent window so the embeddings track shifting substitutability.
 
 **Q: Why does the model learn geographic clustering "for free," and is that enough?**
+**Short:** Users shop within a market, so co-clicks cluster listings by city automatically, with no explicit geo signal.
 Because users shop within a market, co-clicks overwhelmingly occur among same-city listings, so listings from the same market naturally end up close and random negatives (other cities) sit far — geography falls out of the click structure automatically. But it is not enough: the carousel needs to rank listings *within* a city, and coarse geo clusters leave those indistinguishable. Same-market hard negatives are added precisely to resolve the within-market structure that free clustering misses.
 
 **Q: What happens to a listing that is deactivated or permanently booked out?**

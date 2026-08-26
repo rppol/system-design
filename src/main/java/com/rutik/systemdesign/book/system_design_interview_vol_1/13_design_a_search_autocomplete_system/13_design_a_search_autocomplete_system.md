@@ -965,6 +965,8 @@ Limiting the maximum prefix length and caching the top-k at every node. Capping 
 Insert a filter layer between the Trie Cache and the API servers that strips blocked entries from the top-k before it is returned. Physically deleting a query from the Trie DB is asynchronous and slow, so relying on it would leave toxic suggestions visible for hours. The filter removes them from user-facing results immediately, while the durable cleanup in the Trie DB happens in the background on its own schedule.
 
 **Q: What are the two ways to store the trie in the Trie DB?**
+**Short:** A document store holding the whole serialized trie as one blob, or a key-value store flattening it to prefix mapped to its top-k list so a read is a single key lookup.
+
 A document store or a key-value store. In a document store you serialize the entire weekly-built trie into one blob and save it as a document (e.g. MongoDB), which suits the rebuild-and-swap model. In a key-value store you flatten the trie into a hash map from prefix to its top-k list (`"be" → [best, bet, bee, beer, bear]`), so a read is a single key lookup. Both persist the trie so it survives cache eviction or restart.
 
 **Q: Why use AJAX and browser caching, and what does `cache-control: private, max-age=3600` mean?**
@@ -986,12 +988,16 @@ Because the trie is built by a weekly (or at best tighter) batch pipeline that f
 It is a two-column `(query, frequency)` aggregate recording how many times each query has been searched, and it is built by the data gathering service incrementally as searches arrive. If `twitch`, `twitter`, `twitter`, `twillo` come in, the table ends up `twitch:1, twitter:2, twillo:1` — each new query is inserted or its count incremented. These counts are the popularity signal that determines suggestion ranking and the frequencies stored at trie word nodes.
 
 **Q: Why limit the maximum prefix length, and is anything lost?**
+**Short:** Users almost never type a long prefix before selecting, so capping at about 50 characters makes the prefix lookup O(1) instead of O(p) and loses practically nothing.
+
 Because real users almost never type a very long prefix before selecting a suggestion, so capping length at ~50 characters covers essentially all usage while bounding the prefix walk to a small constant — making "find the prefix node" O(1) instead of O(p). Practically nothing is lost: queries longer than the cap are vanishingly rare, and the payoff is a constant-time prefix lookup that keeps the read path within budget at peak QPS.
 
 **Q: What is the space cost of caching the top-k at every node, and why is it acceptable?**
 Every trie node stores up to k (e.g. 5) query strings plus their frequencies in addition to its character and child pointers, which multiplies the trie's memory footprint substantially. It is acceptable because autocomplete is read-dominated and latency-critical while being rebuilt only weekly, so trading memory for O(1) reads is the right call. Memory is comparatively cheap, and the alternative — traversing and sorting subtrees at 48k QPS — is simply infeasible.
 
 **Q: What is the role of the Trie Cache versus the Trie DB?**
+**Short:** The Trie Cache is the distributed in-memory weekly snapshot the query service reads for near-instant lookups; the Trie DB is the persistent copy that survives eviction and restart.
+
 The Trie Cache is a distributed in-memory copy of the current trie (a weekly snapshot) that the query service reads for O(1), near-instant lookups; the Trie DB is the persistent store that survives cache eviction and restarts. Requests normally hit only the cache; on a cache miss the API server reloads the trie from the Trie DB into the cache and then serves. Workers write each freshly built trie to both.
 
 **Q: How are the data-gathering write path and the query read path decoupled, and why does it matter?**

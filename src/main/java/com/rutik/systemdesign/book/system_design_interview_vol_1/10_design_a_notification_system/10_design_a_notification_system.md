@@ -1024,6 +1024,8 @@ Because per-channel queues isolate failures and let each channel scale independe
 It persists every notification to a notification log database on ingest and retries on failure. Because the record is durably stored before delivery is attempted, a worker crash mid-send doesn't lose the notification — the log still has it and a retry re-processes it. The log doubles as an audit trail answering whether a given notification was ever sent and what happened to it.
 
 **Q: How are duplicate notifications suppressed?**
+**Short:** By deduplicating on the event ID: an ID already seen is discarded, which is what makes at-least-once delivery behave as effectively-once across retries and re-queues.
+
 By deduplicating on the event ID. Each notification carries an event ID; when an event arrives, the system checks whether that ID has been seen before, discards it if it has, and otherwise sends it and records the ID as seen. This is the mechanism that makes at-least-once delivery behave as effectively-once, since retries and re-queues reuse the same event ID.
 
 **Q: How do you handle a device token that has become invalid?**
@@ -1036,6 +1038,8 @@ It moves the database and cache out of the notification server, adds multiple au
 For deliverability — commercial providers offer a better delivery rate and better analytics. Getting email into the inbox rather than the spam folder depends on sender reputation, IP warming, SPF/DKIM/DMARC, and bounce/complaint handling, all of which commercial services like SendGrid or Mailchimp have already solved and continuously maintain. Running your own SMTP means owning all of that plus a fleet of IPs whose reputation you must nurse, rarely worth it except at the largest scale.
 
 **Q: What are the two inputs a provider needs to send an iOS push, and what's in the payload?**
+**Short:** A device token and a payload — a JSON dictionary under the reserved aps key holding alert, badge, and sound — POSTed to APNs over HTTP/2.
+
 A device token and a payload. The device token is the opaque per-app-per-device identifier that addresses the push; the payload is a JSON dictionary wrapped under the reserved `aps` key containing `alert` (the visible title and body), `badge` (the app-icon number), and `sound` (the sound to play). The provider POSTs the token plus payload to APNs over HTTP/2, and APNs delivers to the device.
 
 **Q: What is queue depth and why is it the key monitoring metric?**
@@ -1069,6 +1073,8 @@ By client applications and by server-side business logic. A client app might sch
 Event tracking measures how notifications perform — open rate, click rate, and engagement — by emitting delivery, open, and click events to an analytics service. Delivery alone tells you the message left the building; opened and clicked tell you whether it worked, which is what the business actually cares about and what feeds back into deciding what to send next. It closes the loop from "we sent it" to "did it matter."
 
 **Q: What are the five pillars a production notification system needs beyond a naive provider call?**
+**Short:** Reliability with log-plus-retry and dedup, security via appKey/appSecret, tracking and monitoring, respecting per-channel user opt-out, and rate limiting per user.
+
 Reliability (log plus retry, at-least-once with dedup), security (appKey/appSecret so only authenticated clients send), tracking and monitoring (queue depth as the scaling signal plus open/click analytics), respecting user settings (per-channel opt-in/opt-out checked before sending), and rate limiting (cap per user to avoid overwhelming them and stay under provider quotas). These are the checklist that turns the high-level fan-out design into something shippable.
 
 **Q: Why is a stateless notification server important to the improved design?**

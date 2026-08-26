@@ -892,12 +892,18 @@ Ask for a hint — the book explicitly says don't hesitate to do so — and keep
 It means thinking out loud, bouncing ideas off them, inviting reactions to your blueprint, and adjusting based on their feedback — co-designing rather than performing a monologue. A good interviewer works with you like a colleague at a design review, so a subtle nod or a follow-up question is signal to use. This collaborative behaviour is scored directly and is the antidote to the narrow-mindedness and stubbornness red flags.
 
 **Q: List the book's "Dos" for a system design interview.**
+**Short:** Clarify before designing, say your thinking out loud, offer multiple approaches, detail the most critical components first, treat the interviewer as a teammate, and never give up.
+
 Always ask for clarification and don't assume your assumption is correct; understand the requirements; remember there's no single right or best answer; let the interviewer know what you're thinking; suggest multiple approaches; after agreeing on the blueprint, detail the most critical components first; bounce ideas off the interviewer as a teammate; and never give up. The through-line is clarify, communicate, and collaborate.
 
 **Q: List the book's "Don'ts" for a system design interview.**
+**Short:** Don't arrive unprepared, don't jump to a solution before clarifying requirements, don't over-detail one component early, don't think in silence, and don't assume you are done until told.
+
 Don't be unprepared for typical questions; don't jump into a solution without clarifying requirements; don't go into too much detail on a single component early; don't hesitate to ask for hints when stuck; don't think in silence; and don't assume the interview is done once you give the design — you're not done until the interviewer says so. Most reduce to the same failure: designing before scoping, or communicating too little.
 
 **Q: Why should you walk through concrete use cases in Step 2?**
+**Short:** Tracing one real request end to end through the box-and-arrow diagram grounds the abstract design, surfaces missing components, and confirms your model matches the requirements.
+
 Because tracing a real request (like "post a tweet" or "open the news feed") end-to-end through your box-and-arrow diagram grounds the abstract design and surfaces missing components — where fan-out happens, where the timeline is cached. It also lets the interviewer confirm your mental model matches the requirements and often reveals edge cases you then fold in. It's the cheapest way to validate a blueprint before committing deep-dive time to it.
 
 **Q: How is over-engineering different from a genuinely ambitious design?**
