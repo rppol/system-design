@@ -76,6 +76,11 @@
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
   --tabbar-h: 58px;              /* [NAV] bottom tab bar height (< 900px) */
   --rail-w: 208px;               /* [NAV] left rail width (>= 900px) */
+  /* [NAV] How much of the viewport the rail owns. Anything that does viewport
+     math — 100vw, left:0, a fixed overlay centring a card — must subtract this
+     or it centres on the VIEWPORT while the content column starts --rail-w in.
+     0 below the rail breakpoint, where there is no rail. */
+  --nav-inset: 0px;
   /* Bar/meter TRACK, distinct from the glass SURFACE tokens. Never use
      --glass-2 as a track: it is near-white in light mode. */
   --track: var(--glass-brd-hi);
@@ -1087,7 +1092,7 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
 /* [E1] generic ephemeral toast — same visual language as the [D] nudge, but
    auto-dismissing with no button (one-shot confirmations). */
 .toast {
-  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
   z-index: 80; max-width: min(92vw, 420px); padding: 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
@@ -1904,6 +1909,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 /* ---------- 15. Confetti, motion & a11y ------------------------------------ */
 
 .confetti { position: fixed; inset: 0; pointer-events: none; z-index: 50; overflow: hidden; }
+
+/* [NAV] Overlays that CENTRE a card start at the content column, not at the
+   viewport edge, so the card is centred on what you were looking at. The
+   diagram lightbox (.mermaid-overlay) and .confetti are deliberately excluded:
+   both are meant to cover the whole viewport, rail included. */
+.help-overlay, .pause-sheet, .moment, .boss-intro, .palette-overlay { left: var(--nav-inset); }
 .confetti i { position: absolute; top: -12px; width: 9px; height: 9px; border-radius: 2px; animation: fall 2.2s linear forwards; }
 @keyframes fall { to { transform: translateY(105vh) rotate(var(--rot, 360deg)); opacity: 0.2; } }
 
@@ -2215,7 +2226,10 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 
 /* the path screen escapes main's 780px column — the grid wants the landscape */
 .path-screen {
-  --pw: min(1560px, calc(100vw - 48px));
+  /* 100vw knows nothing about body's padding-left, so without --nav-inset this
+     screen is --rail-w too wide and its negative margin-inline centres it on the
+     viewport — dragging its left edge under the rail. */
+  --pw: min(1560px, calc(100vw - var(--nav-inset) - 48px));
   width: var(--pw);
   margin-inline: calc((100% - var(--pw)) / 2);
 }
@@ -2678,7 +2692,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 
 /* same-day streak nudge: dismissible glass bar, bottom of viewport */
 .nudge-toast {
-  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 14px; z-index: 80; max-width: min(92vw, 420px);
   padding: 12px 12px 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
@@ -3201,6 +3215,7 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 /* --- left rail (>= 900px) ------------------------------------------------ */
 .rail { display: none; }
 @media (min-width: 900px) {
+  :root { --nav-inset: var(--rail-w); }
   body { padding-left: var(--rail-w); }
   body.nav-hidden { padding-left: 0; }
   .topbar .brand { display: none; }        /* the rail carries the wordmark */
@@ -3213,6 +3228,7 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
     border-right: 1px solid var(--glass-brd);
   }
   body.nav-hidden .rail { display: none; }
+  body.nav-hidden { --nav-inset: 0px; }   /* quiz mode reclaims the gutter */
 }
 .rail-brand {
   font-weight: 800; letter-spacing: -0.02em; font-size: 1.0625rem;
