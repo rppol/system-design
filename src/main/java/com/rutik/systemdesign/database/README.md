@@ -170,8 +170,8 @@ search_engines
 elasticsearch_internals
   elasticsearch_internals.md  senior, principal
 graph_databases
-  graph_databases.md  -
-  graph_query_languages.md  -
+  graph_databases.md  senior
+  graph_query_languages.md  senior
 time_series_databases
   time_series_databases.md  -
 vector_databases
@@ -232,7 +232,7 @@ This section is exhaustive by design — 31 modules spanning storage internals, 
 The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the emerging-database frontier (NewSQL, in-memory), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (23 modules)
+### Senior Path (24 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -249,6 +249,7 @@ The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phas
 | 12 | [redis_internals](redis_internals/redis_internals.md) | module page only |
 | 13 | [wide_column_databases](wide_column_databases/wide_column_databases.md) | module page only |
 | 15 | [elasticsearch_internals](elasticsearch_internals/elasticsearch_internals.md) | module page only |
+| 16 | [graph_databases](graph_databases/graph_databases.md) | 2 files |
 | 18 | [analytical_databases_and_olap](analytical_databases_and_olap/analytical_databases_and_olap.md) | module page only |
 | 19 | [vector_databases](vector_databases/vector_databases.md) | 2 files |
 | 22 | [embedded_and_edge_databases](embedded_and_edge_databases/embedded_and_edge_databases.md) | module page only |
@@ -260,7 +261,7 @@ The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phas
 | 30 | [database_performance_tuning](database_performance_tuning/database_performance_tuning.md) | 2 files |
 | 31 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | module page only |
 
-**Not in this path** (11 of 34, Full Path only): `mysql_innodb_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `newsql_and_distributed_sql`, `in_memory_databases`, `lakehouse_and_table_formats`, `database_caching_patterns`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`
+**Not in this path** (10 of 34, Full Path only): `mysql_innodb_internals`, `search_engines`, `time_series_databases`, `newsql_and_distributed_sql`, `in_memory_databases`, `lakehouse_and_table_formats`, `database_caching_patterns`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior backend / database-heavy interview** actually probes: the storage-and-concurrency vocabulary everything else depends on, PostgreSQL as the default RDBMS, the two NoSQL stores and the vector-search topic that come up most, and the distributed-systems and selection-framework questions that close almost every round. Same learning order, a strict subset of the Full Path.

@@ -203,8 +203,8 @@ microservices
 distributed_transactions
   distributed_transactions.md  senior, principal
 observability
-  observability.md  principal
-  continuous_profiling.md  -
+  observability.md  senior, principal
+  continuous_profiling.md  senior
 security_and_auth
   security_and_auth.md  principal
 resilience_patterns
@@ -269,7 +269,7 @@ This section is exhaustive by design — 18 modules spanning the full architectu
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 23 case studies. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (18 modules)
+### Senior Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -289,10 +289,11 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 15 | [microservices](microservices/microservices.md) | module page only |
 | 16 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
 | 17 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
+| 18 | [observability](observability/observability.md) | 2 files |
 | 20 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
 | 25 | [stream_processing](stream_processing/stream_processing.md) | module page only |
 
-**Not in this path** (7 of 25, Full Path only): `geospatial_indexing`, `observability`, `security_and_auth`, `cell_based_architecture`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`
+**Not in this path** (6 of 25, Full Path only): `geospatial_indexing`, `security_and_auth`, `cell_based_architecture`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns senior time.

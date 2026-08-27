@@ -156,8 +156,8 @@ stdlib_datetime_and_logging
 testing_with_pytest
   testing_with_pytest.md  senior, principal
 packaging_and_project_tooling
-  packaging_and_project_tooling.md  principal
-  supply_chain_and_publishing.md  principal
+  packaging_and_project_tooling.md  senior, principal
+  supply_chain_and_publishing.md  senior, principal
 the_import_system
   the_import_system.md  senior
 dataclasses_enums_and_data_modeling
@@ -182,7 +182,7 @@ This section is exhaustive by design — 21 modules spanning pure Python interna
 The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-phase-learning-path). Use it for genuine mastery: deep CPython internals (metaclasses, descriptors, packaging/tooling, `dis`/profiling), the full concurrency toolkit (`threading`/`multiprocessing` alongside `asyncio`), stdlib depth (strings/bytes/regex, file I/O, datetime/logging), and Pythonic design patterns. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (18 modules)
+### Senior Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -204,8 +204,9 @@ The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-
 | 19 | [asyncio_and_event_loop](asyncio_and_event_loop/asyncio_and_event_loop.md) | 3 files |
 | 20 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) | module page only |
 | 23 | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) | module page only |
+| 24 | [packaging_and_project_tooling](packaging_and_project_tooling/packaging_and_project_tooling.md) | 2 files |
 
-**Not in this path** (6 of 24, Full Path only): `file_io_and_serialization`, `c_extensions_and_native_interop`, `functional_programming`, `design_patterns_in_python`, `stdlib_datetime_and_logging`, `packaging_and_project_tooling`
+**Not in this path** (5 of 24, Full Path only): `file_io_and_serialization`, `c_extensions_and_native_interop`, `functional_programming`, `design_patterns_in_python`, `stdlib_datetime_and_logging`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior Python interview** actually probes, anchored on the modules this section already flags as highest-yield (language core, the GIL, and asyncio). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.

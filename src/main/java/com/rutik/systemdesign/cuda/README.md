@@ -186,7 +186,7 @@ gpu_computing_foundations
   gpu_computing_foundations.md  senior
 gpu_hardware_architecture
   gpu_hardware_architecture.md  senior
-  blackwell_and_rubin_architecture.md  -
+  blackwell_and_rubin_architecture.md  senior
 cuda_toolkit_and_compilation
   cuda_toolkit_and_compilation.md  -
 cuda_programming_model_and_kernels
@@ -258,7 +258,7 @@ The complete curriculum in the order above — see [6-Phase Learning Path](#4-6-
 | # | Module | Files |
 |---|--------|-------|
 | 1 | [gpu_computing_foundations](gpu_computing_foundations/gpu_computing_foundations.md) | module page only |
-| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) | module page only |
+| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) | 2 files |
 | 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) | module page only |
 | 5 | [warps_and_simt_execution](warps_and_simt_execution/warps_and_simt_execution.md) | module page only |
 | 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) | module page only |
