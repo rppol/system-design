@@ -549,15 +549,6 @@ function applyMode(mode, save = true) {
     b.setAttribute("aria-checked", b.dataset.mode === mode ? "true" : "false"));
 }
 
-function closeThemePop() {
-  const pop = document.getElementById("themePop");
-  if (pop) { pop._release?.(); pop.remove(); }
-  const tb = document.getElementById("themeBtn");
-  if (tb) tb.setAttribute("aria-expanded", "false");
-}
-
-// Shared theme-radio option markup — single source used by both the topbar
-// popover and the <=640px More sheet, so the two stay identical.
 function themeOptionsHTML() {
   const mode = curMode();
   const modeSeg =
@@ -572,42 +563,6 @@ function themeOptionsHTML() {
   return modeSeg + colors;
 }
 
-function toggleThemePop() {
-  if (document.getElementById("themePop")) { closeThemePop(); return; }
-  const pop = document.createElement("div");
-  pop.className = "theme-pop"; pop.id = "themePop";
-  pop.setAttribute("role", "radiogroup"); pop.setAttribute("aria-label", "Theme");
-  pop.innerHTML = `<div class="tp-h">Theme</div>` + themeOptionsHTML();
-  document.body.appendChild(pop);
-  const tb = document.getElementById("themeBtn");
-  if (tb) tb.setAttribute("aria-expanded", "true");
-  pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
-    applyTheme(b.dataset.theme);
-    pop._radioSync?.();
-  }));
-  pop.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
-    applyMode(b.dataset.mode);
-    pop.querySelectorAll(".mode-opt").forEach((x) => x.setAttribute("aria-checked", x === b ? "true" : "false"));
-  }));
-  wireRadioGroup(pop);
-  pop._release = trapFocus(pop, { initial: '[aria-checked="true"]', restoreTo: tb });
-  const dismiss = (e) => {
-    if (e.type === "keydown") {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();                         // don't also close the reader
-    } else if (pop.contains(e.target) || e.target.closest?.("#themeBtn")) return;
-    closeThemePop();
-    document.removeEventListener("pointerdown", dismiss, true);
-    document.removeEventListener("keydown", dismiss, true);
-  };
-  document.addEventListener("pointerdown", dismiss, true);
-  document.addEventListener("keydown", dismiss, true);
-}
-
-/* ---------- [E1] streak detail popover ---------- */
-// Same glass-popover pattern as the theme picker, anchored under the topbar
-// flame chip instead of fixed to a corner (the chip isn't in the same spot in
-// every layout width).
 function closeStreakPop() {
   const pop = document.getElementById("streakPop");
   if (pop) { pop._release?.(); pop.remove(); }
@@ -628,6 +583,8 @@ function toggleStreakPop() {
     <div class="sp-row"><span>Current</span><b>${p.streak || 0} day${(p.streak || 0) === 1 ? "" : "s"}</b></div>
     <div class="sp-row"><span>Longest</span><b>${p.longestStreak || 0} day${(p.longestStreak || 0) === 1 ? "" : "s"}</b></div>
     <div class="sp-row"><span>Freezes held</span><b>${ICON("snow", "i-snow")} ${p.freezes || 0}</b></div>
+    <div class="sp-row"><span>Total XP</span><b id="xpVal">${p.totalXP || 0}</b></div>
+    <div class="sp-row"><span>Level</span><b>Lv ${levelFromXP(p.totalXP)} &middot; ${esc(titleForLevel(levelFromXP(p.totalXP)))}</b></div>
     <div class="sp-rule">Earn one freeze every 7-day streak milestone, up to 3. A freeze auto-covers a single missed day.</div>
     ${lastFreezes.length ? `<div class="sp-sub">Last used</div><div class="sp-dates">${lastFreezes.map((d) => `<span>${fmtDate(d)}</span>`).join("")}</div>` : ""}
   `;
@@ -1563,7 +1520,9 @@ function updateLevelRing() {
   const ring = el("#lvlRingFg");
   if (!ring) return;
   const pct = ((state.progress.totalXP || 0) % 250) / 250;
-  const r = 9, circ = 2 * Math.PI * r;
+  // [NAV] the ring moved from the 22px header chip to the 58px Progress card,
+  // so read the radius off the element rather than hard-coding the old one.
+  const r = parseFloat(ring.getAttribute("r")) || 9, circ = 2 * Math.PI * r;
   ring.setAttribute("stroke-dasharray", circ.toFixed(1));
   ring.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(1));
   // Give the chip a spoken meaning: the ring's fill is otherwise tooltip-only.
@@ -1626,189 +1585,367 @@ function goalRing() {
     </div>`;
 }
 
+/* ---------- [NAV] sub-navigation + breadcrumb primitives ------------------
+   A sub-nav selection is a REAL route (see dispatch), not local state, so
+   back/forward and reload land where you were. Both primitives route through
+   guardedNav so a live deck still prompts before it is abandoned. */
+function subnavHTML(items, active) {
+  return `<nav class="subnav" aria-label="Views">${items.map((i) =>
+    `<button class="subtab${i.id === active ? " on" : ""}" data-route="${i.route}"
+       aria-current="${i.id === active ? "page" : "false"}">${esc(i.label)}${
+      i.n ? ` <span class="sub-n">${i.n}</span>` : ""}</button>`).join("")}</nav>`;
+}
+function wireSubnav() {
+  document.querySelectorAll(".subnav .subtab").forEach((b) => b.addEventListener("click", () => {
+    if (b.classList.contains("on")) return;
+    guardedNav(() => go(b.dataset.route));
+  }));
+}
+// parts: [{ label, route }] — the LAST part is the current page and carries no route.
+function crumbHTML(parts) {
+  return `<nav class="crumb" aria-label="Breadcrumb">${parts.map((p) => p.route
+    ? `<button class="crumb-seg" data-route="${p.route}">${esc(p.label)}</button>`
+    : `<span class="crumb-seg cur" aria-current="page">${esc(p.label)}</span>`)
+    .join(`<span class="crumb-sep" aria-hidden="true">&rsaquo;</span>`)}</nav>`;
+}
+function wireCrumb() {
+  document.querySelectorAll(".crumb-seg[data-route]").forEach((b) =>
+    b.addEventListener("click", () => guardedNav(() => go(b.dataset.route))));
+}
+
+/* ---------- [NAV] Practice — the drilling destination ---------------------
+   Owns #/topics/<section>, #/quiz/*, and #/interview/<section>. The Interview
+   view is what finally gives renderInterviewIntro a permanent door: before
+   this, #/interview/<section> had no card anywhere in the app. */
+const PRACTICE_VIEWS = ["sections", "due", "weak", "interview"];
+function practiceTabs() {
+  const n = dueReviews().length;
+  return [
+    { id: "sections", label: "Sections", route: "#/practice" },
+    { id: "due", label: "Due", route: "#/practice/due", n },
+    { id: "weak", label: "Weak", route: "#/practice/weak" },
+    { id: "interview", label: "Interview", route: "#/practice/interview" },
+  ];
+}
+
+function renderPractice(view) {
+  state.inQuiz = false;
+  refreshStats();
+  if (!PRACTICE_VIEWS.includes(view)) view = "sections";
+  const p = state.progress, secs = state.index.sections;
+  let body = "";
+
+  if (view === "sections") {
+    // Sorted by mastery ASCENDING, not alphabetically: the number is already
+    // computed and the weakest section is the one worth opening. A never-started
+    // section has no mastery to be low, so it sorts AFTER the scored ones rather
+    // than masquerading as the weakest thing you know.
+    let lastMastery = {};
+    try { lastMastery = JSON.parse(localStorage.getItem("sd_last_mastery")) || {}; } catch { /* first visit */ }
+    const curMastery = {};
+    const rows = Object.keys(secs).map((s) => {
+      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
+      return { s, acc: st.seen ? st.correct / st.seen : null };
+    }).sort((a, b) => (a.acc === null) - (b.acc === null) || ((a.acc ?? 0) - (b.acc ?? 0)));
+    const suggested = state.today && state.today.section;
+    body = `<div class="grid practice-grid">${rows.map(({ s, acc }) => {
+      const pct = acc === null ? null : Math.round(acc * 100);
+      if (pct !== null) curMastery[s] = pct;
+      const deltaClass = (pct !== null && lastMastery[s] != null && lastMastery[s] !== pct) ? " mastery-delta" : "";
+      const passChip = (p.awards && (p.awards["interview_" + s] || p.awards["panel_" + s]))
+        ? `<span class="c-chip pass sm">Passed</span>` : "";
+      return `<button class="tile${s === suggested ? " suggested" : ""}${deltaClass}" data-section="${s}">
+          <span class="tname">${esc(label(s))}${passChip}</span>
+          <span class="tmeta">${secs[s]} Qs &middot; ${pct === null ? "new" : pct + "% mastery"}</span>
+          ${pct === null ? "" : `<span class="tbar"><i style="width:${pct}%"></i></span>`}
+        </button>`;
+    }).join("")}</div>`;
+    safeSet("sd_last_mastery", JSON.stringify(curMastery));
+  }
+
+  if (view === "due") {
+    const due = dueReviews();
+    if (!due.length) {
+      body = `<p class="hm-empty">Nothing due. Reviews appear here the day they come round &mdash; answer a blitz to start scheduling them.</p>`;
+    } else {
+      const rounds = Math.ceil(due.length / deckLen());
+      const bySec = {};
+      due.forEach(([, r]) => { bySec[r.section] = (bySec[r.section] || 0) + 1; });
+      const tomorrow = toISO(isoAdd(new Date(todayISO() + "T00:00:00"), 1));
+      const dueTomorrow = Object.values(p.reviews || {}).filter((r) => r.due === tomorrow).length;
+      body = `<div class="topic-card">
+          <div class="eyebrow good">Spaced repetition</div>
+          <h2>${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it</h2>
+          <p class="msg">Resurface what you have missed before it fades.</p>
+          <div class="due-chips">${Object.entries(bySec).sort((a, b) => b[1] - a[1])
+          .map(([s, n]) => `<span class="due-chip">${esc(label(s))} <b>${n}</b></span>`).join("")}</div>
+          ${dueTomorrow ? `<p class="due-tomorrow">+${dueTomorrow} due tomorrow</p>` : ""}
+          <button class="cta" id="pracReview">Start review<small>${Math.min(due.length, deckLen())} questions &middot; ~${estMinutes(Math.min(due.length, deckLen()))} min</small></button>
+        </div>`;
+    }
+  }
+
+  if (view === "weak") {
+    const weak = weakSections();
+    const conf = p.confusions || {};
+    let topPair = null;
+    for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
+    body = weak.length
+      ? `<div class="weak-list">${weak.slice(0, 8).map((w) => {
+        const pct = Math.round(w.acc * 100);
+        return `<div class="weak-row"><span class="wr-name">${esc(label(w.s))}</span>
+            <span class="tbar"><i style="width:${pct}%"></i></span>
+            <span class="wr-pct">${pct}%</span></div>`;
+      }).join("")}</div>
+        <button class="cta" id="pracWeak">Drill the bottom three<small>${deckLen()} questions from your lowest-mastery sections</small></button>`
+      : `<p class="hm-empty">Answer at least five questions in a section and its mastery shows up here.</p>`;
+    if (topPair) {
+      const [ma, mb] = topPair.k.split("|");
+      body += `<button class="review-card confuse" id="pracConfuse">
+          <div><div class="eyebrow warn">Confusion spotted</div>
+          <h2>You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}</h2>
+          <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right &mdash; drill the pair.</p></div>
+          <span class="review-go warn">Drill &rarr;</span>
+        </button>`;
+    }
+  }
+
+  if (view === "interview") {
+    const awards = p.awards || {};
+    const cards = Object.keys(secs).sort().map((s) => {
+      const tier = tierOf(s);
+      const passed = awards["interview_" + s] || awards["panel_" + s];
+      const open = tier === "silver" || tier === "gold";
+      const stateTxt = tier === "gold" ? "Panel unlocked &mdash; 12 advanced questions, one HP bar."
+        : tier === "silver" ? "Interviewer unlocked &mdash; core to advanced escalation."
+          : "Locked. Reach Silver (20 seen at 70%) to face the interviewer.";
+      return `<button class="iv-card${open ? "" : " locked"}" data-section="${s}"${open ? "" : " disabled"}>
+          <span class="iv-name">${esc(label(s))}${passed ? ` <span class="c-chip pass sm">Passed</span>` : ""}</span>
+          <span class="iv-state">${stateTxt}</span>
+          ${open ? `<span class="review-go">${tier === "gold" ? "Panel" : "Enter"} &rarr;</span>` : `<span class="c-chip lock">Silver</span>`}
+        </button>`;
+    }).join("");
+    body = `<p class="prac-lede">A sealed twelve-question interview per section, with follow-ups drawn from the module graph. Pass it and the section carries a plaque.</p>
+      <div class="iv-grid">${cards}</div>`;
+  }
+
+  app.innerHTML = `
+    <div class="hero"><h1>Practice</h1><p>Everything that puts a question in front of you.</p></div>
+    ${subnavHTML(practiceTabs(), view)}
+    ${body}`;
+  wireSubnav();
+  announce("Practice — " + view);
+  document.querySelectorAll(".practice-grid .tile").forEach((b) => {
+    b.addEventListener("click", () => go("#/topics/" + b.dataset.section));
+    b.addEventListener("pointerenter", () => prefetchBank(b.dataset.section), { once: true });
+    b.addEventListener("focus", () => prefetchBank(b.dataset.section), { once: true });
+  });
+  el("#pracReview")?.addEventListener("click", startReview);
+  el("#pracWeak")?.addEventListener("click", startWeakSpots);
+  const cf = el("#pracConfuse");
+  if (cf) {
+    const conf = p.confusions || {};
+    let top = null;
+    for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!top || n > top.n)) top = { k, n };
+    if (top) cf.addEventListener("click", () => startConfusionDrill(top.k));
+  }
+  document.querySelectorAll(".iv-card[data-section]").forEach((b) =>
+    b.addEventListener("click", () => go("#/interview/" + b.dataset.section)));
+  wireReveals();
+}
+
+/* ---------- [NAV] Today — a fixed three-slot contract ---------------------
+   Home used to emit up to twelve blocks of similar weight, which pushed the
+   primary CTA below the fold exactly on the days the coach had most to say.
+   Every derivation renderHome ever ran is still run here — dueReviews,
+   weakSections, rustiestSection, resumeSummary, confusions, fading, quests.
+   Only the PRESENTATION BUDGET changed: one primary action, at most two
+   waiting rows, and one disclosure for the remainder. Nothing is deleted. */
+function weekChartHTML() {
+  const start = weekStart(todayISO());
+  const today = todayISO();
+  const hist = state.progress.history || [];
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const iso = toISO(isoAdd(start, i));
+    days.push({ iso, xp: hist.filter((h) => h.date === iso).reduce((s, h) => s + (h.xp || 0), 0),
+      label: new Date(iso + "T00:00:00").toLocaleDateString("en-US", { weekday: "narrow" }) });
+  }
+  const max = Math.max(DAILY_XP_GOAL, ...days.map((d) => d.xp));
+  return `<div class="side-card"><h3 class="side-h">This week</h3>
+    <div class="wk-chart">${days.map((d) => {
+    // A zero-activity day is a 3px stub, never height:0 — the day must still
+    // read as a day, or the week silently loses its shape.
+    const h = d.xp ? Math.max(6, Math.round((d.xp / max) * 62)) : 3;
+    return `<div class="wk-col" title="${d.iso}: ${d.xp} XP">
+        <span class="wk-bar${d.iso === today ? " today" : ""}" style="height:${h}px"></span>
+        <span class="wk-lbl">${d.label}</span></div>`;
+  }).join("")}</div></div>`;
+}
+
 function renderHome() {
   state.inQuiz = false;
   refreshStats();
-  const section = pickSection();
-  const coachMsg = state.today && state.today.message;
-  const streak = state.progress.streak || 0;
-  const freezes = state.progress.freezes || 0;
-  const freezeBit = freezes > 0
-    ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">${ICON("snow", "i-snow")} ${freezes}</span>` : "";
-  const rd = state.progress.reading || {};
-  const readToday = rd.day === todayISO() ? (rd.count || 0) : 0;
-  const readChip = readToday > 0
-    ? ` <span class="read-chip" title="Modules you've read today${rd.streak > 1 ? ` · ${rd.streak}-day reading streak` : ""}">${ICON("scroll", "i-scroll")} ${readToday} read${rd.streak > 1 ? ` &middot; ${rd.streak}d` : ""}</span>` : "";
-  const streakLine = (streak > 0
-    ? `You're on a <b>${streak}-day</b> streak. Keep it alive.${freezeBit}`
-    : `Start your streak today &mdash; just 5 minutes.${freezeBit}`) + readChip;
-  // Resume card: a same-day snapshot of an interrupted blitz (above review).
-  const resume = resumeSummary();
-  const resumeCard = resume
-    ? `<button class="review-card resume" id="resumeBtn">
-         <div><div class="eyebrow">Unfinished blitz</div>
-         <h2>Resume your blitz</h2>
-         <p class="msg">${resume.done}/${resume.total} done${resume.combo >= 2 ? ` &middot; ${resume.combo}x combo alive` : ""}. Pick up where you left off.</p></div>
-         <span class="review-go">Resume &rarr;</span>
-       </button>`
-    : "";
+  const p = state.progress, section = pickSection();
+  const streak = p.streak || 0, freezes = p.freezes || 0;
   const due = dueReviews();
-  /* [D] coach: reboarding protocol — a >2-day gap replaces the suggested card
-     and suppresses the separate due-review card below (its CTA already covers it). */
   const reboard = reboardingInfo();
-  // [E1] review backlog plan: a rounds-to-clear estimate + up to 3 per-section
-  // chips + a "+N due tomorrow" whisper, so the backlog reads as a plan, not
-  // just a number.
-  let reviewCard = "";
-  if (due.length && !reboard) {
+  const resume = resumeSummary();
+  const whyChip = state.today && WHY_CHIP[state.today.why];
+  const flash = deckMode() === "flash";
+
+  /* --- slot 1: exactly one primary action. Same precedence renderHome always
+     used: reboarding card > review-due > the coach's suggested section. --- */
+  let primary;
+  if (reboard) {
+    primary = {
+      eyebrow: "Coach", cls: "",
+      title: `It&rsquo;s been ${reboard.days} days.`,
+      body: reboard.dueCount
+        ? `Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting; the oldest ${Math.min(reboard.dueCount, deckLen())} take about ${estMinutes(deckLen())} minutes.`
+        : `Doesn&rsquo;t matter &mdash; the reviews kept your place. Nothing waiting, so ${esc(label(section))} picks up the rotation.`,
+      cta: reboard.dueCount ? "Start review" : `Start &mdash; ${deckLen()} questions`,
+      ctaSub: `${reboard.dueCount ? Math.min(reboard.dueCount, deckLen()) : deckLen()} questions &middot; ~${estMinutes(deckLen())} min`,
+      run: () => (reboard.dueCount ? startReview() : startBlitz(section)),
+    };
+  } else if (due.length) {
+    const take = Math.min(due.length, deckLen());
     const rounds = Math.ceil(due.length / deckLen());
-    const bySec = {};
-    due.forEach(([, r]) => { bySec[r.section] = (bySec[r.section] || 0) + 1; });
-    const chips = Object.entries(bySec).sort((a, b) => b[1] - a[1]).slice(0, 3)
-      .map(([s, n]) => `<span class="due-chip">${esc(label(s))} <b>${n}</b></span>`).join("");
-    const tomorrow = toISO(isoAdd(new Date(todayISO() + "T00:00:00"), 1));
-    const dueTomorrow = Object.values(state.progress.reviews || {}).filter((r) => r.due === tomorrow).length;
-    reviewCard = `<button class="review-card" id="reviewBtn">
-         <div><div class="eyebrow good">Spaced repetition</div>
-         <h2>${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it</h2>
-         <p class="msg">Resurface what you've missed before it fades.</p>
-         ${chips ? `<div class="due-chips">${chips}</div>` : ""}
-         ${dueTomorrow ? `<p class="due-tomorrow">+${dueTomorrow} due tomorrow</p>` : ""}</div>
-         <span class="review-go">Review &rarr;</span>
-       </button>`;
+    primary = {
+      eyebrow: "Spaced repetition", cls: "good",
+      title: `${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it`,
+      body: `${take} of them come up in this round &mdash; every one is a question you have already answered, resurfaced on the day it was about to fade. About ${estMinutes(take)} minutes.`,
+      cta: "Start review", ctaSub: `${take} questions &middot; ${flash ? "flashcards" : "multiple choice"}`,
+      run: () => startReview(),
+    };
+  } else {
+    primary = {
+      eyebrow: whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today", cls: "",
+      title: esc(label(section)),
+      body: `${esc((state.today && state.today.message) || `${deckLen()} questions pulled from your ${label(section)} notes.`)} All ${deckLen()} are new to this round &mdash; about ${estMinutes(deckLen())} minutes.`,
+      cta: `Start &mdash; ${deckLen()} questions`, ctaSub: `~${estMinutes(deckLen())} min &middot; ${flash ? "flashcards" : "multiple choice"}`,
+      run: () => startBlitz(section),
+    };
   }
-  const worst = weakSections().filter((x) => x.acc < 0.7)[0];
-  const weakCard = worst
-    ? `<button class="review-card weak" id="weakBtn">
-         <div><div class="eyebrow warn">Targeted practice</div>
-         <h2>Drill your weak spots</h2>
-         <p class="msg">Lowest mastery: <b>${esc(label(worst.s))}</b> at ${Math.round(worst.acc * 100)}%. Focus a round there.</p></div>
-         <span class="review-go warn">Drill &rarr;</span>
-       </button>`
-    : "";
-  const rusty = rustiestSection();
-  const rustyNote = rusty
-    ? `<button class="rusty-note" id="rustyBtn">${ICON("clock")} <b>${esc(label(rusty.s))}</b> is getting rusty &mdash; ${rusty.days} days since you practiced it. Refresh it &rarr;</button>`
-    : "";
-  /* [A2] confusion drill card: the pair you mix up most (count >= 3) */
-  const conf = state.progress.confusions || {};
-  let topPair = null;
-  for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
-  let confCard = "";
-  if (topPair) {
-    const [ma, mb] = topPair.k.split("|");
-    confCard = `<button class="review-card confuse" id="confuseBtn">
-         <div><div class="eyebrow warn">Confusion spotted</div>
-         <h2>You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}</h2>
-         <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right &mdash; drill the pair.</p></div>
-         <span class="review-go warn">Drill &rarr;</span>
-       </button>`;
-  }
-  /* [A2] fading-this-week card: >=5 questions due within 7 days whose module retention < 0.5 */
-  const mstats = moduleStats(state.progress);
-  const t7 = (() => { const d = new Date(todayISO() + "T00:00:00"); d.setDate(d.getDate() + 7); return d.toLocaleDateString("en-CA"); })();
+
+  /* --- slot 2 + 3: the waiting rows, ranked. Top two are shown; everything
+     below folds into ONE disclosure so the count is visible without the
+     stack. Rank order is fixed: unfinished blitz > gauntlet > debrief >
+     fading > confusion > weak > rusty. --- */
+  const rows = [];
+  if (resume) rows.push({ id: "resume", mark: "&#9654;", short: "unfinished blitz",
+    title: "Resume your blitz", sub: `${resume.done}/${resume.total} done${resume.combo >= 2 ? ` &middot; ${resume.combo}x combo alive` : ""}. Pick up where you left off.`,
+    run: resumeDeck });
+  const g = loadGauntlet();
+  rows.push(g && g.sealed
+    ? { id: "gauntlet", mark: "&#9670;", short: "gauntlet practice",
+      title: `Gauntlet sealed &middot; ${g.score}/${(g.qids || []).length}`, sub: "Today's run is scored and closed. Replay it as unscored practice.", run: () => go("#/gauntlet") }
+    : { id: "gauntlet", mark: "&#9670;", short: "the daily gauntlet",
+      title: "Today's Gauntlet", sub: "Sealed &middot; 10 questions, one attempt, one score.", run: () => go("#/gauntlet") });
+  if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Friday debrief",
+    title: "Debrief ready", sub: "Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.", run: () => go("#/debrief") });
+
+  const mstats = moduleStats(p);
+  const t7 = toISO(isoAdd(new Date(todayISO() + "T00:00:00"), 7));
   const fadingIds = [], fadingMods = new Set();
-  for (const [id, rv] of Object.entries(state.progress.reviews || {})) {
+  for (const [id, rv] of Object.entries(p.reviews || {})) {
     if (!rv.due || rv.due > t7) continue;
     const ms = mstats[rv.module];
     if (ms && ms.retention < 0.5) { fadingIds.push(id); fadingMods.add(rv.module); }
   }
-  const fadingCard = fadingIds.length >= 5
-    ? `<button class="review-card fading" id="fadingBtn">
-         <div><div class="eyebrow good">Spaced repetition</div>
-         <h2>Fading this week: ${fadingIds.length} questions across ${fadingMods.size} modules</h2>
-         <p class="msg">Retention is slipping on these. Refresh them before they're gone.</p></div>
-         <span class="review-go">Refresh &rarr;</span>
-       </button>`
-    : "";
-  const secs = state.index.sections, p = state.progress;
-  // [E2] mastery-delta shine: compare each section's accuracy to the snapshot
-  // written on the previous Home render; a changed tile runs the shine once.
-  let lastMastery = {};
-  try { lastMastery = JSON.parse(localStorage.getItem("sd_last_mastery")) || {}; } catch { /* first visit */ }
-  const curMastery = {};
-  const tiles = Object.keys(secs).sort().map((s) => {
-    const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
-    const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : null;
-    if (acc !== null) curMastery[s] = acc;
-    const deltaClass = (acc !== null && lastMastery[s] != null && lastMastery[s] !== acc) ? " mastery-delta" : "";
-    const bar = acc === null ? "" : `<span class="tbar"><i style="width:${acc}%"></i></span>`;
-    const passChip = (p.awards && (p.awards["interview_" + s] || p.awards["panel_" + s])) ? `<span class="c-chip pass sm">Passed</span>` : "";  // [C] interviewer plaque
-    return `<button class="tile ${s === section ? "suggested" : ""}${deltaClass}" data-section="${s}">
-        <span class="tname">${esc(label(s))}${passChip}</span>
-        <span class="tmeta">${secs[s]} Qs &middot; ${acc === null ? "new" : acc + "% mastery"}</span>
-        ${bar}
-      </button>`;
-  }).join("");
-  safeSet("sd_last_mastery", JSON.stringify(curMastery));
+  if (fadingIds.length >= 5) rows.push({ id: "fading", mark: "&#9671;", short: "fading questions",
+    title: `Fading this week: ${fadingIds.length} questions across ${fadingMods.size} modules`,
+    sub: "Retention is slipping on these. Refresh them before they are gone.", run: () => startRefresh(fadingIds) });
+
+  const conf = p.confusions || {};
+  let topPair = null;
+  for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
+  if (topPair) {
+    const [ma, mb] = topPair.k.split("|");
+    rows.push({ id: "confuse", mark: "&#8644;", short: "a confusion pair",
+      title: `You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}`,
+      sub: `Missed ${topPair.n}&times; by picking one when the other was right.`, run: () => startConfusionDrill(topPair.k) });
+  }
+  const worst = weakSections().filter((x) => x.acc < 0.7)[0];
+  if (worst) rows.push({ id: "weak", mark: "&#9662;", short: "weak spots",
+    title: "Drill your weak spots", sub: `Lowest mastery: <b>${esc(label(worst.s))}</b> at ${Math.round(worst.acc * 100)}%.`, run: startWeakSpots });
+  const rusty = rustiestSection();
+  if (rusty) rows.push({ id: "rusty", mark: "&#8635;", short: `${esc(label(rusty.s))} going rusty`,
+    title: `${esc(label(rusty.s))} is getting rusty`, sub: `${rusty.days} days since you practiced it.`, run: () => startBlitz(rusty.s) });
+
+  const rowHTML = (r) => `<button class="wait-row" data-row="${r.id}">
+      <span class="wr-mark" aria-hidden="true">${r.mark}</span>
+      <span class="wr-body"><span class="wr-title">${r.title}</span><span class="wr-sub">${r.sub}</span></span>
+      <span class="wr-go">Enter &rarr;</span>
+    </button>`;
+  const shown = rows.slice(0, 2), rest = rows.slice(2);
+  const disclosure = rest.length ? `
+    <details class="more-nudges">
+      <summary>${rest.length} more nudge${rest.length === 1 ? "" : "s"} &mdash; ${rest.map((r) => r.short).join(", ")}</summary>
+      <div class="nudge-body">${rest.map(rowHTML).join("")}${questChipsHTML(ensureQuests())}</div>
+    </details>` : "";
+
+  /* --- right column --- */
+  const weak3 = weakSections().slice(0, 3);
+  const weakCard = weak3.length ? `<div class="side-card"><h3 class="side-h">Weakest sections</h3>
+      ${weak3.map((w) => {
+    const pct = Math.round(w.acc * 100);
+    return `<div class="weak-row"><span class="wr-name">${esc(label(w.s))}</span>
+        <span class="tbar"><i style="width:${pct}%"></i></span><span class="wr-pct">${pct}%</span></div>`;
+  }).join("")}
+      <button class="btn2" id="drill3">Drill the bottom three</button></div>` : "";
+
+  const freezeBit = freezes > 0 ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">${ICON("snow", "i-snow")} ${freezes}</span>` : "";
+  const rd = p.reading || {};
+  const readToday = rd.day === todayISO() ? (rd.count || 0) : 0;
+  const readChip = readToday > 0 ? ` <span class="read-chip">${ICON("scroll", "i-scroll")} ${readToday} read${rd.streak > 1 ? ` &middot; ${rd.streak}d` : ""}</span>` : "";
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-  /* [D] coach: the suggested card becomes either the reboarding card (calm,
-     non-red — "the reviews kept your place") or the normal coach-voice card
-     (eyebrow "Coach · <why-chip>", message = state.today.message). */
-  const whyChip = state.today && WHY_CHIP[state.today.why];
-  const topicCardHTML = reboard ? `
-    <div class="topic-card reboard">
-      <div class="eyebrow">Coach</div>
-      <h2>It&rsquo;s been ${reboard.days} days.</h2>
-      <p class="msg">Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount
-        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ${deckLen()} take about ${estMinutes(deckLen())} minutes.`
-        : `Nothing waiting &mdash; ${esc(label(section))} picks up the rotation.`}</p>
-      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${deckLen()} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, deckLen())} questions &middot; ~${estMinutes(deckLen())} min` : `~${estMinutes(deckLen())} min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
-    </div>` : `
-    <div class="topic-card" data-coach-tpl="${state.today ? esc(state.today.templateId || "") : ""}">
-      <div class="eyebrow">${whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today"}</div>
-      <h2>${esc(label(section))}</h2>
-      <p class="msg">${esc(coachMsg || `${deckLen()} questions pulled from your ${label(section)} notes.`)}</p>
-      <button class="cta" id="startBtn">Start &mdash; ${deckLen()} questions<small>~${estMinutes(deckLen())} min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
-    </div>`;
-  /* [D] coach: Debrief-ready card + live quest chips */
-  const debriefCard = debriefReady() ? `
-    <button class="review-card debrief" id="debriefBtn">
-      <div><div class="eyebrow">Coach</div>
-      <h2>Debrief ready</h2>
-      <p class="msg">Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.</p></div>
-      <span class="review-go">Open &rarr;</span>
-    </button>` : "";
-  const questRow = questChipsHTML(ensureQuests());
+
   app.innerHTML = `
-    <div class="hero">
-      <div class="hero-row">${goalRing()}<div>
-        <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
-        <h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
-    </div>
-    ${skylineSVG(p)}
-    ${gauntletCardHTML()}
-    ${topicCardHTML}
-    ${questRow}
-    ${resumeCard}
-    ${debriefCard}
-    ${reviewCard}
-    ${confCard}
-    ${fadingCard}
-    ${weakCard}
-    ${rustyNote}
-    <div class="section-head-row">
-      <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
-      <button class="c-codex-link" id="codexLink">The Codex &rarr;</button>
-    </div>
-    <div class="grid">${tiles}</div>`;
-  el("#startBtn").addEventListener("click", () => (reboard && reboard.dueCount ? startReview() : startBlitz(section)));
-  /* [C] gauntlet + codex entry points */
-  const gauntBtn = el("#gauntBtn"); if (gauntBtn) gauntBtn.addEventListener("click", () => go("#/gauntlet"));
-  el("#codexLink").addEventListener("click", () => go("#/codex"));
-  if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
-  if (due.length && !reboard) el("#reviewBtn").addEventListener("click", startReview);
-  if (topPair) el("#confuseBtn").addEventListener("click", () => startConfusionDrill(topPair.k));   // [A2]
-  if (fadingCard) el("#fadingBtn").addEventListener("click", () => startRefresh(fadingIds));        // [A2]
-  if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
-  if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
-  if (debriefCard) el("#debriefBtn").addEventListener("click", () => go("#/debrief"));
-  document.querySelectorAll(".tile").forEach((b) => {
-    b.addEventListener("click", () => go("#/topics/" + b.dataset.section));
-    // [E1] warm the bank cache on intent (hover/focus), before the click that needs it.
-    b.addEventListener("pointerenter", () => prefetchBank(b.dataset.section), { once: true });
-    b.addEventListener("focus", () => prefetchBank(b.dataset.section), { once: true });
-  });
+    <div class="today-grid">
+      <div class="today-main">
+        <div class="hero today-hero">
+          <div class="hero-row">${goalRing()}<div>
+            <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
+            <h1>Today's 5-minute blitz</h1>
+            <p>${streak > 0 ? `You're on a <b>${streak}-day</b> streak. Keep it alive.` : `Start your streak today &mdash; just 5 minutes.`}${freezeBit}${readChip}</p>
+          </div></div>
+        </div>
+        <div class="topic-card primary-card">
+          <div class="pc-head">
+            <div class="eyebrow ${primary.cls}">${primary.eyebrow}</div>
+            <div class="deckseg" role="radiogroup" aria-label="Deck mode">
+              <button role="radio" data-deck="quiz" aria-checked="${!flash}">Quiz</button>
+              <button role="radio" data-deck="flash" aria-checked="${flash}">Cards</button>
+            </div>
+          </div>
+          <h1 class="pc-title">${primary.title}</h1>
+          <p class="msg">${primary.body}</p>
+          <button class="cta" id="startBtn">${primary.cta}<small>${primary.ctaSub}</small></button>
+          <button class="btn2 pc-alt" id="pickOther">Pick a different section</button>
+        </div>
+        ${shown.map(rowHTML).join("")}
+        ${disclosure}
+      </div>
+      <aside class="today-side">
+        ${weekChartHTML()}
+        ${weakCard}
+      </aside>
+    </div>`;
+
+  el("#startBtn").addEventListener("click", primary.run);
+  el("#pickOther").addEventListener("click", () => go("#/practice"));
+  el("#drill3")?.addEventListener("click", startWeakSpots);
+  document.querySelectorAll(".deckseg [role=radio]").forEach((b) => b.addEventListener("click", () => {
+    if (b.getAttribute("aria-checked") === "true") return;
+    safeSet("sd_mode", b.dataset.deck === "flash" ? "flash" : "quiz");
+    syncModeBtn();
+    renderHome();
+    if (deckMode() === "flash") coachMark(".deckseg", "Flashcards: recall, then self-grade. Flat 10 XP, no combos or bosses.", "first_cards");
+  }));
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+  document.querySelectorAll(".wait-row").forEach((b) =>
+    b.addEventListener("click", () => byId[b.dataset.row]?.run()));
   wireReveals();
 }
 
@@ -2791,6 +2928,40 @@ function bonusXpSoFar() {
   return Math.max(0, state.sessionXp - correctSoFar * 10);
 }
 
+/* ---------- [NAV] quiz chrome ---------------------------------------------
+   Quiz stays a full-screen MODE with the primary nav suppressed — but it now
+   names itself and names its exit, instead of leaving you nowhere with every
+   nav item inactive. Exiting returns to Practice > <section>, not Home. */
+function quizExitRoute() {
+  const s = state.section;
+  if (state.interview) return "#/topics/" + state.interview.section;
+  return (s && state.index && state.index.sections[s]) ? "#/topics/" + s : "#/practice";
+}
+function deckTitle() {
+  const s = state.section;
+  if (state.interview) return `${label(state.interview.section)} ${state.interview.panel ? "panel" : "interview"}`;
+  if (s === "gauntlet" || s === "gauntlet-practice") return "Daily Gauntlet";
+  if (s === "review") return "Review";
+  if (s === "weakspots") return "Weak spots";
+  if (s === "refresh") return "Refresh";
+  return `${label(s)} blitz`;
+}
+function quizTopBarHTML(unit = "question", comboHTML = comboChipHTML(state.combo)) {
+  const DONE = ["correct", "wrong", "learned"];
+  const answered = state.deck.filter((it) => DONE.includes(it.status)).length;
+  const total = Math.max(1, state.deck.length);
+  const pos = Math.min(answered + 1, total);
+  return `<div class="qtop">
+      <button class="qexit" id="qExitBtn">&larr; Exit</button>
+      <span class="qtop-title">${esc(deckTitle())} &middot; ${unit} ${pos} of ${total}</span>
+      <span class="combo-slot" id="comboSlot">${comboHTML}</span>
+    </div>
+    <span class="qprog" aria-hidden="true"><i style="width:${Math.round((answered / total) * 100)}%"></i></span>`;
+}
+function wireQuizTop() {
+  el("#qExitBtn")?.addEventListener("click", () => guardedNav(() => go(quizExitRoute())));
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
@@ -2847,9 +3018,10 @@ function renderQuestion() {
     : `<div class="qtext">${qInline(q.questionMd || q.question)} ${chip}</div>`;
   const skippable = item.status === "pending" && !item.flip && !state.prime;   // [A2] no skip-teach on flips/prime
   app.innerHTML = `
+    ${quizTopBarHTML("question", comboSlotHTML)}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
-      <span class="qright"><span class="combo-slot" id="comboSlot">${comboSlotHTML}</span><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
     ${bossBanner}
     ${prompt}
@@ -2872,7 +3044,7 @@ function renderQuestion() {
     el("#ddNo").addEventListener("click", () => { state._doubleDown = "declined"; el("#ddBar")?.remove(); });
   }
   el("#nextBtn").addEventListener("click", nextQuestion);
-  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  wireQuizTop();
   /* [C] interviewer stage (avatar + HP bar) / gauntlet practice banner */
   if (state.interview) renderInterviewStage();
   else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
@@ -2925,9 +3097,10 @@ function renderTeach(item) {
   state.qShownAt = performance.now();
   const hasCloze = (q.concepts || []).length > 0;
   app.innerHTML = `
+    ${quizTopBarHTML("question")}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
     <div class="teach-chip">Concept preview &middot; you skipped this &mdash; learn it, we quiz you shortly</div>
     <div class="qtext teach-head">${qInline(q.questionMd || q.question)}</div>
@@ -2938,7 +3111,7 @@ function renderTeach(item) {
     </div>`;
   document.querySelectorAll(".cloze").forEach((c) => c.addEventListener("click", () => c.classList.add("shown")));
   el("#gotItBtn").addEventListener("click", teachDone);
-  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  wireQuizTop();
   /* [C] keep the interviewer stage / practice banner across the teach card */
   if (state.interview) renderInterviewStage();
   else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
@@ -3169,9 +3342,10 @@ function renderCard() {
   // [B] recall-streak chip — accumulated Got-it/Easy grades in a row this deck.
   const streakChip = state._cardStreak >= 2 ? ` <span class="card-streak">${state._cardStreak} in a row</span>` : "";
   app.innerHTML = `
+    ${quizTopBarHTML("card")}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="qright"><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself${streakChip}</div>
     <div class="qtext">${esc(q.question)}</div>
@@ -3181,7 +3355,7 @@ function renderCard() {
       <button class="next show" id="revealBtn">Reveal answer <span class="key-hint">(Space)</span></button>
     </div>`;
   el("#revealBtn").addEventListener("click", revealCard);
-  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  wireQuizTop();
   app.focus({ preventScroll: true });
 }
 
@@ -3685,6 +3859,7 @@ function openMoreSheet() {
         <button class="ghost" id="moreHelp">Keyboard shortcuts</button>
         <button class="primary" id="moreClose">Done</button>
       </div>
+      <p class="more-about">Built from your own repo &middot; ${esc(state.bankInfo || "")}</p>
     </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#moreClose", restoreTo: el("#moreBtn") });
@@ -4129,50 +4304,154 @@ function openPalette() {
   _palette._release = trapFocus(o, { initial: "#palInput" });
 }
 
-function renderProgress() {
+/* ---------- [NAV] Progress — Overview · Codex · Debrief · Awards -----------
+   The sub-nav is what gives renderCodex and renderDebrief permanent addresses;
+   before it, both were reachable only from a conditional card on Home. The
+   four zero-tiles (XP / streak / level / answered) are gone on purpose:
+   cumulative accuracy only ever goes up, so it cannot show decay — the one
+   thing a recall app exists to fight. */
+function progressTabs() {
+  return [
+    { id: "overview", label: "Overview", route: "#/progress" },
+    { id: "codex", label: "Codex", route: "#/codex" },
+    { id: "debrief", label: "Debrief", route: "#/debrief" },
+    { id: "awards", label: "Awards", route: "#/awards" },
+  ];
+}
+
+// Modules whose recall is slipping, scored against the day they were last
+// scheduled. Returns [{ module, section, acc, days, ids }] worst-first.
+function slippingModules(limit = 5) {
+  const p = state.progress, today = new Date(todayISO() + "T00:00:00");
+  const accBy = {};
+  moduleAccStats(p).forEach((m) => { accBy[m.module] = m; });
+  const byMod = {};
+  for (const [id, rv] of Object.entries(p.reviews || {})) {
+    if (!rv.module || !rv.due) continue;
+    const interval = rv.interval || 1;
+    const from = new Date(rv.due + "T00:00:00"); from.setDate(from.getDate() - interval);
+    const days = Math.max(0, Math.round((today - from) / 86400000));
+    const s = byMod[rv.module] || (byMod[rv.module] = { module: rv.module, section: rv.section || rv.module.split("/")[0], days: 0, ids: [] });
+    s.days = Math.max(s.days, days);
+    s.ids.push(id);
+  }
+  const ms = moduleStats(p);
+  return Object.values(byMod)
+    .filter((m) => m.ids.length >= 3 && ms[m.module] && ms[m.module].retention < 0.55)
+    .map((m) => ({ ...m, ret: ms[m.module].retention, acc: accBy[m.module] ? accBy[m.module].acc : null }))
+    .sort((a, b) => a.ret - b.ret)
+    .slice(0, limit);
+}
+
+function renderProgress(view) {
   state.inQuiz = false;
-  refreshStats();
+  if (view === "insights") view = "overview";       // #/insights is an alias, kept live
+  if (view !== "awards") view = "overview";
   const p = state.progress, secs = state.index.sections;
-  const tiles = Object.keys(secs).sort().map((s) => {
-    const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
-    const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : 0;
-    const tier = sectionTier(st);
-    const tierChip = tier ? `<span class="tier ${tier.toLowerCase()}">${tier}</span>` : "";
-    return `<div class="sectiontile">
-        <div class="top"><span class="name">${esc(label(s))}${tierChip}</span>
-        <span class="pct">${st.seen ? acc + "% &middot; " + st.seen + " seen" : "not started"}</span></div>
-        <div class="bar"><span style="width:${acc}%"></span></div>
+  let body = "";
+
+  if (view === "overview") {
+    const xp = p.totalXP || 0, lvl = levelFromXP(xp), toNext = 250 - (xp % 250);
+    const levelCard = `<div class="lvl-card">
+        <div class="lvl-ring-lg">
+          <svg width="58" height="58" viewBox="0 0 58 58" aria-hidden="true">
+            <circle class="lvl-ring-bg" cx="29" cy="29" r="25" fill="none" stroke-width="5"/>
+            <circle class="lvl-ring-fg" id="lvlRingFg" cx="29" cy="29" r="25" fill="none" stroke-width="5" stroke-linecap="round"
+              transform="rotate(-90 29 29)"/>
+          </svg>
+        </div>
+        <div class="lvl-copy">
+          <div class="lvl-title">Lv ${lvl} &middot; ${esc(titleForLevel(lvl))}</div>
+          <div class="lvl-sub">${xp.toLocaleString()} XP &middot; ${toNext} to Lv ${lvl + 1}</div>
+        </div>
       </div>`;
-  }).join("");
-  const due = dueReviews().length;
+
+    // Readiness, in plain words, from numbers already computed.
+    const scored = Object.keys(secs).map((s) => {
+      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
+      return { s, seen: st.seen || 0, acc: st.seen ? st.correct / st.seen : null };
+    });
+    const solid = scored.filter((x) => x.seen >= 10 && x.acc >= 0.8).sort((a, b) => b.acc - a.acc).slice(0, 3);
+    const thin = scored.filter((x) => x.seen >= 5 && x.acc < 0.6).sort((a, b) => a.acc - b.acc).slice(0, 2);
+    const never = scored.filter((x) => !x.seen);
+    const listOf = (a) => a.map((x) => esc(label(x.s))).reduce((acc, cur, i, arr) =>
+      i === 0 ? cur : i === arr.length - 1 ? `${acc} and ${cur}` : `${acc}, ${cur}`, "");
+    const sentence = [
+      solid.length ? `Solid on ${listOf(solid)}.` : "",
+      thin.length ? `Thin on ${listOf(thin)}.` : "",
+      never.length ? `${never.length} section${never.length === 1 ? "" : "s"} you have never opened.` : "",
+    ].filter(Boolean).join(" ") || "Nothing measured yet — answer a blitz and this sentence fills in.";
+
+    // Coverage grid. A never-opened cell is --track, not a faint accent: absence
+    // being VISIBLE is the entire point of this grid.
+    const grid = `<div class="cov-grid">${scored.map((x) => {
+      const pct = x.acc === null ? 0 : Math.round(x.acc * 100);
+      const style = x.seen
+        ? `background: color-mix(in srgb, var(--accent) ${Math.max(14, pct)}%, transparent)`
+        : `background: var(--track)`;
+      return `<span class="cov-cell${x.seen ? "" : " untouched"}" style="${style}"
+          title="${esc(label(x.s))} — ${x.seen ? pct + "% over " + x.seen + " seen" : "never opened"}"></span>`;
+    }).join("")}</div>
+      <p class="ins-cap">One cell per section, mastery by opacity. Flat cells are sections you have never opened.</p>`;
+
+    const slip = slippingModules();
+    const slipHTML = slip.length ? `<div class="slip-list">${slip.map((m) => `
+        <div class="slip-row">
+          <span class="sl-name">${esc(modDisplay(m.module))}</span>
+          <span class="sl-sec">${esc(label(m.section))}</span>
+          <span class="sl-was">${m.acc == null ? "" : `was ${Math.round(m.acc * 100)}% &middot; `}${m.days}d</span>
+        </div>`).join("")}</div>
+      <button class="cta" id="slipCta">Build a session from these<small>${slip.reduce((n, m) => n + m.ids.length, 0)} questions across ${slip.length} modules</small></button>`
+      : `<p class="hm-empty">Nothing slipping. Reviews you answer keep their intervals long.</p>`;
+
+    const mastery = Object.keys(secs).sort().map((s) => {
+      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
+      const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : 0;
+      const tier = sectionTier(st);
+      return `<div class="sectiontile">
+          <div class="top"><span class="name">${esc(label(s))}${tier ? `<span class="tier ${tier.toLowerCase()}">${tier}</span>` : ""}</span>
+          <span class="pct">${st.seen ? acc + "% &middot; " + st.seen + " seen" : "not started"}</span></div>
+          <div class="bar"><span style="width:${acc}%"></span></div>
+        </div>`;
+    }).join("");
+
+    body = `${levelCard}
+      <p class="readiness">${sentence}</p>
+      <h2 class="section-h">Coverage</h2>
+      ${grid}
+      <h2 class="section-h">Slipping</h2>
+      ${slipHTML}
+      ${heatmapHTML(p.history)}
+      <h2 class="section-h">Mastery by section</h2>
+      ${mastery}
+      ${insightsHTML()}
+      <div class="backup-row">
+        <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
+        <div class="backup-actions">
+          <button class="ghost" id="exportBtn">Export backup</button>
+          <button class="ghost" id="importBtn">Import backup</button>
+          <input type="file" id="importFile" accept="application/json,.json" hidden />
+        </div>
+      </div>`;
+  } else {
+    body = `${ledgerStripHTML()}${skylineSVG(p)}`;
+  }
+
   app.innerHTML = `
-    <div class="hero"><h1>Your progress</h1></div>
-    <div class="badges">
-      <div class="badge"><div class="n">${p.streak || 0}</div><div class="l">Streak</div></div>
-      <div class="badge"><div class="n">${p.longestStreak || 0}</div><div class="l">Longest</div></div>
-      <div class="badge"><div class="n">${ICON("snow", "i-snow")} ${p.freezes || 0}</div><div class="l">Freezes</div></div>
-      <div class="badge"><div class="n">${p.totalXP || 0}</div><div class="l">Total XP</div></div>
-      <div class="badge"><div class="n">${due}</div><div class="l">Due review</div></div>
-    </div>
-    ${heatmapHTML(p.history)}
-    ${ledgerStripHTML()}
-    <h2 class="section-h">Mastery by section</h2>
-    ${tiles}
-    ${insightsHTML()}
-    <div class="backup-row">
-      <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
-      <div class="backup-actions">
-        <button class="ghost" id="exportBtn">Export backup</button>
-        <button class="ghost" id="importBtn">Import backup</button>
-        <input type="file" id="importFile" accept="application/json,.json" hidden />
-      </div>
-    </div>
-    <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
-  el("#backHome").addEventListener("click", () => go("#/home"));
-  el("#exportBtn").addEventListener("click", exportProgress);
-  el("#importBtn").addEventListener("click", () => el("#importFile").click());
-  el("#importFile").addEventListener("change", (e) => { if (e.target.files[0]) importProgress(e.target.files[0]); });
-  wireInsights();                                   // [E2] Insights: drill buttons, lazy leeches, heatmap scroll-to-today
+    <div class="hero"><h1>Progress</h1></div>
+    ${subnavHTML(progressTabs(), view)}
+    ${body}`;
+  wireSubnav();
+  announce("Progress — " + view);
+  refreshStats();                                   // repoint the level ring at the card we just drew
+  if (view === "overview") {
+    el("#exportBtn").addEventListener("click", exportProgress);
+    el("#importBtn").addEventListener("click", () => el("#importFile").click());
+    el("#importFile").addEventListener("change", (e) => { if (e.target.files[0]) importProgress(e.target.files[0]); });
+    const sc = el("#slipCta");
+    if (sc) sc.addEventListener("click", () => startRefresh(slippingModules().flatMap((m) => m.ids)));
+    wireInsights();
+  }
   wireReveals();
 }
 
@@ -4203,13 +4482,11 @@ function renderStudy() {
     <div class="study-head"><button class="ghost" id="studyTech" title="Every tool this repo teaches, and where"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/></svg><span>Technologies</span></button><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
     ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
-    <div class="grid">${tiles}</div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
+    <div class="grid">${tiles}</div>`;
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
   el("#studySearch").addEventListener("click", () => openPalette());
   el("#studyTech").addEventListener("click", () => go("#/tech"));
-  el("#studyHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
 
@@ -4436,8 +4713,7 @@ async function renderTech() {
     </div>
     ${bankOn ? `<div id="techFacets" class="tx-facets"></div>` : ""}
     <div id="techShelf" class="tx-shelf"></div>
-    <div id="techList" class="tx-list"></div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="techHome">&larr; Home</button></div>`;
+    <div id="techList" class="tx-list"></div>`;
 
   const listEl = el("#techList"), countEl = el("#techCount"), findEl = el("#techFilter");
 
@@ -4539,8 +4815,22 @@ async function renderTech() {
         ${KINDS.map((k) => `<option value="${esc(k.id)}"${k.id === F.k ? " selected" : ""}>${esc(k.label)}</option>`).join("")}
       </select></label>`;
     const active = F.t.length || F.r.length || F.l || F.k !== defaultKind;
+    /* [NAV] The facets used to leave no on-screen trace of what was filtered:
+       the query string carried the state and nothing said so. An "All n" chip
+       anchors the row, and the breadcrumb names the active cut with its own
+       Clear. */
+    const allN = TIERS.reduce((n, t) => n + (tc.get(t.id) || 0), 0);
+    const allChip = `<button class="tx-chip${F.t.length || F.r.length ? "" : " on"}" data-tier=""
+      aria-pressed="${!F.t.length && !F.r.length}">All <span class="tx-chipn">${allN}</span></button>`;
+    const trail = [...F.t.map((id) => (TIERS.find((x) => x.id === id) || {}).label || id),
+      ...F.r.map((id) => { const t = TIERS.find((x) => x.id === id.split("/")[0]);
+        const r = t && t.roles.find((x) => x.id === id.split("/")[1]); return (r && r.label) || id; })];
+    const crumb = `<div class="tx-crumb">${crumbHTML([{ label: "Tech", route: "#/tech" },
+      ...(trail.length ? [{ label: trail.join(" · ") }] : [])])}
+      ${active ? `<button class="tx-clearlink" id="techClearTop">Clear</button>` : ""}</div>`;
     facetEl().innerHTML = `
-      <div class="tx-chiprow" role="group" aria-label="Problem area">${tierChips}</div>
+      ${crumb}
+      <div class="tx-chiprow" role="group" aria-label="Problem area">${allChip}${tierChips}</div>
       ${roleChips ? `<div class="tx-chiprow tx-rolerow" role="group" aria-label="Within this area">${roleChips}</div>` : ""}
       <div class="tx-facetfoot">${langSel}${kindSel}
         ${active ? `<button class="ghost tx-clear" id="techClear">Clear filters</button>` : ""}</div>`;
@@ -4787,6 +5077,8 @@ async function renderTech() {
     if (i >= 0) list.splice(i, 1); else list.push(v);
   }
   function onFacetClick(e) {
+    const allBtn = e.target.closest("[data-tier='']");
+    if (allBtn) { F.t = []; F.r = []; writeFacets(); repaint(); return; }
     const tierBtn = e.target.closest("[data-tier]"), roleBtn = e.target.closest("[data-role]");
     if (!tierBtn && !roleBtn) return;
     if (tierBtn) {
@@ -4813,7 +5105,8 @@ async function renderTech() {
       writeFacets(); repaint();
     });
     facetEl().addEventListener("click", (e) => {
-      if (!e.target.closest("#techClear")) return;
+      if (e.target.closest(".crumb-seg[data-route]")) { go(e.target.closest(".crumb-seg").dataset.route); return; }
+      if (!e.target.closest("#techClear") && !e.target.closest("#techClearTop")) return;
       F = { t: [], r: [], l: "", k: defaultKind };
       writeFacets(); repaint();
     });
@@ -4879,7 +5172,6 @@ async function renderTech() {
   // counts, and left "Databases 211" on screen while 7 tools matched the query.
   el("#techSec").addEventListener("change", (e) => { secPick = e.target.value; safeSet("sd_tech_sec", secPick); repaint(); });
   findEl.addEventListener("input", () => { shown = { tech: TECH_PAGE, trade: TRADE_PAGE }; repaint(); });
-  el("#techHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
 
@@ -4941,13 +5233,13 @@ function renderBookPicker(section, mods) {
     </button>`;
   }).join("");
   app.innerHTML = `
+    ${crumbHTML([{ label: "Study", route: "#/study" }, { label: label(section) }])}
     <div class="hero"><h1>${esc(label(section))}</h1>
       <p>${groups.length} books &middot; ${mods.length} chapters &middot; pick a book to open its chapter path.</p></div>
-    <div class="grid bookshelf">${tiles}</div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>`;
+    <div class="grid bookshelf">${tiles}</div>`;
+  wireCrumb();
   document.querySelectorAll(".bookcard").forEach((b) =>
     b.addEventListener("click", () => go("#/study/book/" + b.dataset.book)));
-  el("#studyBack").addEventListener("click", () => go("#/study"));
   wireReveals();
 }
 
@@ -5051,6 +5343,14 @@ async function openStudySection(sectionPath) {
   const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
   // [CS] Case studies are read-only: a node's "done" state is whether it's been READ.
   const read = casesMode ? new Set(mods.filter((m) => isModuleRead(m.module)).map((m) => m.module)) : null;
+  // [NAV] Chapter/module meta gets a read-state line: "read 4 days ago" reads
+  // as progress in a way a bare check mark never did.
+  const readDays = (mod) => {
+    const iso = (state.progress.readModules || {})[`${mod}/${modulePage(mod)}`];
+    if (!iso) return "";
+    const d = daysBetweenISO(iso, todayISO());
+    return d <= 0 ? " &middot; read today" : d === 1 ? " &middot; read yesterday" : ` &middot; read ${d} days ago`;
+  };
   const mstats = moduleStats(state.progress);          // [A2] Module Memory Map retention tints
   // "You are here" = last page opened in the reader, if it lives in this section.
   let lastRead = null;
@@ -5093,7 +5393,7 @@ async function openStudySection(sectionPath) {
       retTxt = `est. retention ${Math.round(ms.retention * 100)}%, ${ms.overdue} due`;
       if (ms.overdue > 0) mmCls += " mm-overdue";
     }
-    const metaTxt = casesMode ? "Case study" : `${m.count} Qs`;
+    const metaTxt = casesMode ? "Case study" : `${m.count} Qs${readDays(m.module)}`;
     const ariaCount = casesMode ? "case study" : `${m.count} questions`;
     const leaves = multi ? mFiles.map((fn, k) => {
       const p = `${m.module}/${fn}`;
@@ -5144,8 +5444,27 @@ async function openStudySection(sectionPath) {
   const bookMeta = bookScope ? (BOOK_LABELS[bookScope] || {}) : null;
   const _secId = sectionIdentity(section);
   const _secAccent = _secId ? _secId.accent : "var(--accent)";
+  /* [NAV] The read->recall bridge. Study and the quiz never pointed at each
+     other: you could finish a book and have no door to the questions drawn
+     from it. Prefers the chapters you have actually read; falls back to the
+     whole ${bookScope ? "book" : "section"} when none are read yet. */
+  const readMods = mods.filter((m) => isModuleRead(`${m.module}/${modulePage(m.module)}`));
+  const quizMods = readMods.length ? readMods : mods;
+  const quizQs = quizMods.reduce((n, m) => n + (m.count || 0), 0);
+  const bridgeCard = (!casesMode && quizQs > 0) ? `
+    <button class="review-card bridge" id="studyQuiz">
+      <div><div class="eyebrow">Read, then recall</div>
+      <h2>Quiz this ${bookScope ? "book" : "section"}</h2>
+      <p class="msg">${quizQs} question${quizQs === 1 ? "" : "s"} drawn from ${readMods.length
+        ? `the ${readMods.length} chapter${readMods.length === 1 ? "" : "s"} you have read`
+        : `all ${mods.length} ${bookScope ? "chapters" : "topics"} &mdash; none read yet`}.</p></div>
+      <span class="review-go">Start &rarr;</span>
+    </button>` : "";
   app.innerHTML = `
     <div class="path-screen" style="--tile-accent:${_secAccent}">
+    ${crumbHTML(bookScope
+      ? [{ label: "Study", route: "#/study" }, { label: "Books", route: "#/study/book" }, { label: bookLabel(bookScope) }]
+      : [{ label: "Study", route: "#/study" }, { label: label(section) }])}
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
       <p>${casesMode
         ? `${mods.length} case studies &middot; read-only &mdash; ${singleColumnPath() ? "work through them top to bottom" : "the path snakes across each row"} in the section's suggested order.`
@@ -5178,8 +5497,11 @@ async function openStudySection(sectionPath) {
       </svg>
       ${steps}
     </div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; ${bookScope ? "Books" : "Sections"}</button></div>
+    ${bridgeCard}
     </div>`;
+  wireCrumb();
+  el("#studyQuiz")?.addEventListener("click", () =>
+    startBlitz(section, quizMods.map((m) => m.module)));
 
   insertInterviewControl(section);                 // [C] Face the Interviewer / Panel / lock chip on the path header
 
@@ -5469,7 +5791,6 @@ async function openStudySection(sectionPath) {
     reader.back = [];
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   });
-  el("#studyBack").addEventListener("click", () => go("#/study"));
   document.querySelectorAll(".pathopt").forEach((b) => b.addEventListener("click", () => {
     if (b.classList.contains("on")) return;            // already active
     if (b.dataset.casetier) {                          // [TIERS] case-study level filter
@@ -7192,7 +7513,11 @@ function openReaderTypeMenu(anchorBtn) {
     `<div class="rtp-row"><span class="rtp-lbl">Width</span>${seg("sd_reader_measure", [["narrow", "Narrow"], ["cozy", "Cozy"], ["wide", "Wide"], ["default", "Auto"]], measure)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>` +
-    `<div class="rtp-row"><span class="rtp-lbl">Summaries</span>${seg("sd_reader_short", [["0", "Hidden"], ["1", "Shown"]], shortOn ? "1" : "0")}</div>`;
+    `<div class="rtp-row"><span class="rtp-lbl">Summaries</span>${seg("sd_reader_short", [["0", "Hidden"], ["1", "Shown"]], shortOn ? "1" : "0")}</div>` +
+    /* [NAV] Six independent persisted prefs (three pane widths, immersive,
+       serif, drop-cap) had no reset, so experimenting with the drag grips was
+       a one-way door. One item makes it safe. */
+    `<div class="rtp-row"><span class="rtp-lbl">Layout</span><div class="rtp-seg"><button id="rtpReset">Reset</button></div></div>`;
   panel.appendChild(pop);
   pop.querySelectorAll(".rtp-seg").forEach((s) => {
     if (!s.dataset.k) return;   // the Size seg drives font-size directly (below), not a pref key
@@ -7207,6 +7532,18 @@ function openReaderTypeMenu(anchorBtn) {
   // Size row: bump the font and keep the popover open (no `done()` call).
   pop.querySelectorAll(".rtp-size button[data-fs]").forEach((b) =>
     b.addEventListener("click", () => applyReaderFont(parseInt(b.dataset.fs, 10))));
+  pop.querySelector("#rtpReset")?.addEventListener("click", () => {
+    ["sd_reader_w", "sd_modules_w", "sd_toc_w", "sd_reader_full", "sd_reader_font",
+      "sd_reader_measure", "sd_reader_dropcap", "sd_reader_fs"].forEach((k) => localStorage.removeItem(k));
+    document.documentElement.style.removeProperty("--reader-w");
+    document.documentElement.style.removeProperty("--modules-w");
+    document.documentElement.style.removeProperty("--toc-w");
+    if (reader.full) setReaderFull(false);
+    applyReaderFont(0);
+    applyReaderTypography();
+    restoreReaderWidth();
+    showToast("Reader layout reset.");
+  });
   const release = trapFocus(pop, { restoreTo: anchorBtn });
   pop._release = release;
   setTimeout(() => {
@@ -8230,9 +8567,20 @@ function closeReaderDom() {
 
 // User-initiated close (X / Esc): drop the overlay and restore the underlying
 // screen's hash. (Browser Back is handled in the router, which calls closeReaderDom.)
+// [NAV] Where closing a reader page should land when nothing better is known:
+// the destination that OWNS it. A book chapter returns to that book's chapter
+// list; any other module page returns to its section's study path.
+function ownerHashFor(path) {
+  const mod = splitModulePath(path).mod || "";
+  const seg = mod.split("/");
+  if (seg[0] === "book" && seg[1]) return "#/study/book/" + seg[1];
+  return seg[0] ? "#/study/" + seg[0] : "#/study";
+}
+
 function closeReader() {
+  const back = state.underHash || ownerHashFor(reader.path || "");
   closeReaderDom();
-  if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
+  if (location.hash.startsWith("#/reader")) { history.replaceState(null, "", back); updateNav(); }
 }
 
 /* ============================================================================
@@ -8733,6 +9081,8 @@ function renderDebrief() {
       </div>`).join("") : `<p class="hm-empty">Not enough volume in any section this week or last (5+ answers needed) to compare.</p>`;
 
   app.innerHTML = `
+    <div class="hero"><h1>Progress</h1></div>
+    ${subnavHTML(progressTabs(), "debrief")}
     <div class="hero"><h1>Friday Debrief</h1><p>${esc(headline)}</p></div>
     <h2 class="section-h">This week</h2>
     ${stripHTML}
@@ -8741,9 +9091,9 @@ function renderDebrief() {
     <h2 class="section-h">Moment of the week</h2>
     <p class="moment-week">${momentHTML}</p>
     <h2 class="section-h">Next week</h2>
-    ${questChipsHTML(quests)}
-    <div class="row" style="margin-top:18px"><button class="primary" id="debriefHome">Back to today</button></div>`;
-  el("#debriefHome").addEventListener("click", () => go("#/home"));
+    ${questChipsHTML(quests)}`;
+  wireSubnav();
+  announce("Progress — debrief");
   wireReveals();
 }
 
@@ -8786,6 +9136,7 @@ const quizRoute = (section) =>
 function setQuizHash(section) {
   state.quizHash = quizRoute(section);
   history.replaceState(null, "", state.quizHash);   // silent: no dispatch during play
+  updateNav();                                     // [NAV] but the chrome must still know we are in a mode
 }
 
 // Navigate to a route (adds a history entry). The hashchange listener dispatches.
@@ -8801,21 +9152,86 @@ function redirect(route) {
   onHashChange();
 }
 
-// [E2] mobile bottom tab bar: reflect the current route as the active tab.
-function updateTabbar() {
-  const bar = el("#tabbar");
-  if (!bar) return;
+/* ---------- [NAV] five destinations, one model, two surfaces ----------------
+   Same five on every viewport: a left rail at >=900px, a bottom bar below it.
+   Every one of the app's routes is OWNED by exactly one destination (destOf),
+   so #/gauntlet, #/codex, #/debrief and #/interview/<section> all have a
+   permanent door instead of depending on a conditional card. The icon glyphs
+   live here once and are painted into both surfaces by renderNav(). */
+const NAV = [
+  { id: "today", label: "Today", route: "#/home", icon: `<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>` },
+  { id: "practice", label: "Practice", route: "#/practice", icon: `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>` },
+  { id: "study", label: "Study", route: "#/study", icon: `<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>` },
+  { id: "tech", label: "Tech", route: "#/tech", icon: `<path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>` },
+  { id: "progress", label: "Progress", route: "#/progress", icon: `<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>` },
+];
+const navSvg = (icon, cls) => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg>`;
+
+// Which destination owns this route. Quiz and Reader are full-screen MODES, not
+// destinations — they still resolve to their owner so "exit" knows where to go.
+function destOf(h) {
+  h = h || "#/home";
+  if (h.startsWith("#/study") || h.startsWith("#/reader")) return "study";
+  if (h === "#/tech" || h.startsWith("#/tech?")) return "tech";
+  if (h === "#/progress" || h === "#/codex" || h === "#/debrief" || h === "#/awards" || h === "#/insights") return "progress";
+  if (h.startsWith("#/practice") || h.startsWith("#/topics/") || h.startsWith("#/quiz") || h.startsWith("#/interview/")) return "practice";
+  return "today";                                   // #/home, #/gauntlet, anything unknown
+}
+
+function renderNav() {
+  const rail = el("#rail"), bar = el("#tabbar");
+  if (rail) rail.innerHTML =
+    `<div class="rail-brand" id="railBrand" role="button" tabindex="0" aria-label="LORA — go to today">LORA<span>by Rutik</span></div>
+     <div class="rail-items">${NAV.map((n) =>
+      `<button class="rail-item" data-tab="${n.id}">${navSvg(n.icon, "railicon")}<span>${n.label}</span></button>`).join("")}</div>
+     <div class="rail-foot">
+       <button class="rail-item" id="railAppear">${navSvg(`<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/>`, "railicon")}<span>Appearance</span></button>
+       <button class="rail-item" id="railSearch">${navSvg(`<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>`, "railicon")}<span>Search</span><kbd class="rail-kbd">&#8984;K</kbd></button>
+     </div>`;
+  if (bar) bar.innerHTML = NAV.map((n) =>
+    `<button class="tab" data-tab="${n.id}" aria-label="${n.label}">${navSvg(n.icon, "tabicon")}<span>${n.label}</span></button>`).join("");
+  // guardedNav on every entry point so a live deck is still protected.
+  document.querySelectorAll("#rail [data-tab], #tabbar [data-tab]").forEach((t) =>
+    t.addEventListener("click", () => {
+      const n = NAV.find((x) => x.id === t.dataset.tab);
+      if (n) guardedNav(() => go(n.route));
+    }));
+  const rb = el("#railBrand");
+  if (rb) {
+    const home = () => guardedNav(() => go("#/home"));
+    rb.addEventListener("click", home);
+    rb.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); home(); } });
+  }
+  el("#railAppear")?.addEventListener("click", openMoreSheet);
+  el("#railSearch")?.addEventListener("click", () => openPalette());
+}
+
+// Reflect the current route on BOTH surfaces, and suppress the primary nav for
+// the two full-screen modes (quiz, reader) — which name their own exit instead.
+let _lastDest = null;
+function updateNav() {
   const h = location.hash || "#/home";
-  const active = h.startsWith("#/study") ? "study" : (h === "#/tech" || h.startsWith("#/tech?")) ? "tech" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
-  bar.querySelectorAll(".tab").forEach((t) => {
+  /* The QUIZ suppresses the nav — it is a full-screen mode with its own exit.
+     The READER does not: it is a right-side pane, the underlying screen is
+     still visible beside it, and hiding the rail would reflow that screen out
+     from under it. Immersive/native-fullscreen hides both, in CSS. */
+  const mode = h.startsWith("#/quiz");
+  document.body.classList.toggle("nav-hidden", mode);
+  const active = destOf(h);
+  document.querySelectorAll("#rail [data-tab], #tabbar [data-tab]").forEach((t) => {
     const on = t.dataset.tab === active;
     t.classList.toggle("active", on);
     t.setAttribute("aria-current", on ? "page" : "false");
   });
+  if (!mode && active !== _lastDest) {
+    _lastDest = active;
+    announce((NAV.find((n) => n.id === active) || {}).label || "");
+  }
 }
+const updateTabbar = updateNav;                      // legacy name (QA handle, older call sites)
 
 function onHashChange() {
-  updateTabbar();                                    // [E2] keep the mobile tab bar in sync with the route
+  updateNav();                                    // [E2] keep the mobile tab bar in sync with the route
   if (_navLock) { _navLock = false; return; }       // swallow our own hash restore
   const route = location.hash || "#/home";
   const isReaderRoute = route.startsWith("#/reader/");
@@ -8850,7 +9266,14 @@ function dispatch(route) {
     const frag = at >= 0 ? enc.slice(at + 1) : null;
     if (reader.path === path) return;               // already showing it
     state._readerRouting = true;                    // suppress openReaderPath's own history write
-    if (!document.body.classList.contains("reader-open")) { state.underHash = "#/home"; renderHome(); }
+    /* [NAV] A cold load straight into a reader route used to hard-set underHash
+       to "#/home", so finishing chapter 3 of a twelve-chapter book dropped you on
+       Home with the chapter list gone. Default to the page's OWNING destination
+       instead, and never clobber an underHash we already have. */
+    if (!document.body.classList.contains("reader-open")) {
+      if (!state.underHash || state.underHash.startsWith("#/reader")) state.underHash = ownerHashFor(path);
+      dispatch(state.underHash);
+    }
     openReaderPath(path, null, reader.nav || null, frag);
     state._readerRouting = false;
     return;
@@ -8865,13 +9288,20 @@ function dispatch(route) {
      lingering interviewer/gauntlet skin before the next screen paints. */
   if (!state.inQuiz) { document.body.classList.remove("interview-mode"); state.interview = null; state.gauntlet = null; }
   if (route === "#/gauntlet") { startGauntlet(); return; }
+  /* [NAV] Practice + Progress sub-navs are REAL routes, so back/forward and
+     reload land on the view you were looking at. #/topics/<section> stays the
+     drill-down and #/quiz/* keeps its own guards, both unrenamed. */
+  if (route === "#/practice") { renderPractice("sections"); return; }
+  if (route.startsWith("#/practice/")) { renderPractice(route.slice("#/practice/".length)); return; }
+  if (route === "#/awards") { renderProgress("awards"); return; }
+  if (route === "#/insights") { renderProgress("insights"); return; }
   if (route === "#/codex") { renderCodex(); return; }
   if (route.startsWith("#/interview/")) { startInterview(route.slice("#/interview/".length)); return; }
   if (route.startsWith("#/topics/")) { openTopics(route.slice("#/topics/".length)); return; }
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
   if (route === "#/tech" || route.startsWith("#/tech?")) { renderTech(); return; }   /* [TECH] repo-wide technology index; ?-suffix carries the facet state */
-  if (route === "#/progress") { renderProgress(); return; }
+  if (route === "#/progress") { renderProgress("overview"); return; }
   if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
 }
@@ -9205,6 +9635,8 @@ function renderCodex() {
     return `<div class="cx-shelf"><h2 class="section-h">${esc(label(sec))}</h2><div class="cx-grid">${cards}</div></div>`;
   }).join("");
   app.innerHTML = `
+    <div class="hero"><h1>Progress</h1></div>
+    ${subnavHTML(progressTabs(), "codex")}
     <div class="hero"><h1>The Codex</h1>
       <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p>
       <div class="cx-legend">
@@ -9213,9 +9645,9 @@ function renderCodex() {
         <span class="cx-legkey tarnished"><span class="cx-legdot"></span>fading</span>
         <span class="cx-legkey dim"><span class="cx-legdot"></span>unexplored</span>
       </div></div>
-    ${shelves}
-    <div class="row" style="margin-top:18px"><button class="ghost" id="cxHome">&larr; Home</button></div>`;
-  el("#cxHome").addEventListener("click", () => go("#/home"));
+    ${shelves}`;
+  wireSubnav();
+  announce("Progress — codex");
   document.querySelectorAll(".cx-card").forEach((b) =>
     b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/" + modulePage(b.dataset.mod), prettyMod(b.dataset.mod)); }));
   wireReveals();
@@ -9629,7 +10061,7 @@ async function boot() {
     errorScreen("No question bank found", `Check your connection, or the question bank hasn't been built yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`, () => location.reload());
     return;
   }
-  el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
+  state.bankInfo = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;   // [NAV] shown in the overflow sheet (the .foot line is gone)
   state.progress = loadProgress();
   migrateReadModulesForRename();                   // [SD] pre-rename "<mod>/README.md" read keys
   seedCoachMarksIfVeteran();                     // [E1] a non-empty history means every coach mark is pre-seen
@@ -9643,44 +10075,14 @@ async function boot() {
     brandB.addEventListener("click", goHome);
     brandB.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goHome(); } });
   }
-  el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
-  const studyB = el("#navStudy");
-  if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
-  const techB = el("#navTech");                     // [TECH] repo-wide technology index
-  if (techB) techB.addEventListener("click", () => guardedNav(() => go("#/tech")));
-  // [E2] mobile bottom tab bar (shown only < 640px). Routes through guardedNav so
-  // leaving a live blitz raises the pause sheet, same as the topbar nav.
-  document.querySelectorAll("#tabbar .tab").forEach((t) => t.addEventListener("click", () => {
-    const dest = t.dataset.tab === "study" ? "#/study"
-      : t.dataset.tab === "tech" ? "#/tech"
-        : t.dataset.tab === "progress" ? "#/progress" : "#/home";
-    guardedNav(() => go(dest));
-  }));
-  const helpB = el("#helpBtn");
-  if (helpB) helpB.addEventListener("click", toggleHelp);
+  renderNav();                                      // [NAV] paint the rail + bottom bar from one model
   restoreReaderWidth();
   applyTheme(curTheme(), false);   // don't persist a ?theme= URL override
   applyMode(curMode(), false);     // light/dark surface mode (independent of colour)
-  const tb = el("#themeBtn");
-  if (tb) tb.addEventListener("click", toggleThemePop);
-  const skb = el("#streakChip");                    // [E1] streak detail popover
+  const skb = el("#streakChip");                    // [E1] day chip -> streak/level/XP detail popover
   if (skb) skb.addEventListener("click", toggleStreakPop);
-  const mb = el("#muteBtn");
-  if (mb) mb.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); });
-  syncMuteBtn();
-  const moreB = el("#moreBtn");                     // [W3] <=640px topbar overflow sheet
+  const moreB = el("#moreBtn");                     // [NAV] the header's one overflow door
   if (moreB) moreB.addEventListener("click", openMoreSheet);
-  const modeB = el("#modeBtn");
-  if (modeB) {
-    modeB.addEventListener("click", () => {
-      safeSet("sd_mode", deckMode() === "flash" ? "quiz" : "flash");
-      syncModeBtn();
-      if (!state.inQuiz) renderHome();        // refresh the CTA caption
-      // [E1] first-run coach mark (d): only on the switch INTO flashcards.
-      if (deckMode() === "flash") coachMark("#modeBtn", "Flashcards: recall, then self-grade. Flat 10 XP, no combos or bosses.", "first_cards");
-    });
-  }
-  syncModeBtn();
   // [A2] QA-only debug handle (guarded by ?qa=1): read state + call helpers headlessly.
   // Additive: merges with the [C] and [B] handles instead of clobbering them.
   if (new URLSearchParams(location.search).get("qa") === "1") {
@@ -9688,7 +10090,7 @@ async function boot() {
     // [E1] additive QA surface for friction-kill features.
     Object.assign(window.__qa, { deckLen, loadRecent, errorScreen, showToast, coachMarkSeen: (id) => localStorage.getItem("sd_cm_" + id) === "1" });
     // [E2] additive QA surface: insights derivations + command palette + tab bar.
-    Object.assign(window.__qa, { openPalette, closePalette, forecastData, leechIds, moduleAccStats, fuzzyScore, updateTabbar });
+    Object.assign(window.__qa, { openPalette, closePalette, forecastData, leechIds, moduleAccStats, fuzzyScore, updateNav, destOf, renderNav });
   }
   discardStaleDeck();                              // drop a previous-day resume snapshot
   registerServiceWorker();
