@@ -83,7 +83,12 @@
   --modules-w: 160px;            /* left sidebar width; drag-resizable */
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
   --tabbar-h: 58px;              /* [NAV] bottom tab bar height (< 900px) */
-  --rail-w: 208px;               /* [NAV] left rail width, expanded */
+  /* CONTENT QUANTITIES, not device widths. Every threshold below is derived from
+     these, and because they are rem the thresholds move with the user's font
+     size — raise Android's system font to 1.3x and the layout learns it has less
+     room, which a px breakpoint never does. See style §22 for the full rule. */
+  --measure: 34rem;              /* minimum legible content column */
+  --rail-w: 13rem;               /* [NAV] left rail width, expanded (was 208px) */
   /* A target-size floor (44px at the default root size, scaling with the user's
      font setting), not a device guess — see the sizing rules in style §22. */
   --rail-w-collapsed: 3.75rem;
@@ -314,7 +319,7 @@ svg.icon { width: 15px; height: 15px; vertical-align: -2px; flex: 0 0 auto; }
   to { transform: translate(calc(6vw + var(--par-x, 0px) * 0.8), calc(-8vh + var(--par-y, 0px) * 0.8)) scale(1.08); }
 }
 
-main { flex: 1; width: 100%; max-width: 780px; margin: 0 auto; padding: 30px 22px 48px; }
+main { flex: 1; width: 100%; max-width: 48.75rem; margin: 0 auto; padding: 30px 22px 48px; }
 
 /* screen-enter: new nodes animate on insertion (innerHTML swaps recreate them) */
 #app > * { animation: screen-in 0.42s var(--ease-out) backwards; }
@@ -479,7 +484,7 @@ button:active { transform: scale(0.98); }
 .section-h { margin: 22px 0 10px; font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.01em; }
 
 /* section tiles */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11.25rem), 1fr)); gap: 12px; }
 .tile {
   text-align: left; padding: 14px 16px;
   background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius);
@@ -1005,7 +1010,7 @@ button:active { transform: scale(0.98); }
 .tr-table tbody th { font-weight: 650; white-space: nowrap; }
 .tr-table tbody td { color: var(--muted); }
 
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   /* Below the topbar breakpoint the bar stacks: the segmented control keeps a full
      row, search + section share the next one. */
   .tx-bar .pathswitch { width: 100%; }
@@ -1099,7 +1104,7 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
    auto-dismissing with no button (one-shot confirmations). */
 .toast {
   position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
-  z-index: 80; max-width: min(92vw, 420px); padding: 12px 18px; border-radius: 999px;
+  z-index: 80; max-width: min(92dvw, 420px); padding: 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
   box-shadow: var(--shadow), var(--glass-hilite);
@@ -1130,7 +1135,7 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
 
 /* ---------- 11. Reader ----------------------------------------------------- */
 
-@media (min-width: 900px) {
+@media (min-width: 47rem) {
   body.reader-open main { margin-right: var(--reader-w); transition: margin-right 0.12s ease; }
 }
 #reader {
@@ -1143,7 +1148,7 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
   box-shadow: -24px 0 60px rgba(0, 0, 0, 0.35);
   z-index: 40; display: flex; flex-direction: column; animation: slidein 0.24s var(--ease-out);
 }
-@media (max-width: 899px) { #reader { width: 100%; } }
+@media (max-width: 46.99rem) { #reader { width: 100%; } }
 @keyframes slidein { from { transform: translateX(28px); opacity: 0.4; } }
 
 /* drag-to-resize grip on the pane's left edge */
@@ -1152,7 +1157,7 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
 .reader-grip:hover::after, body.reader-resizing .reader-grip::after { background: var(--accent); }
 body.reader-resizing { cursor: col-resize; user-select: none; }
 body.reader-resizing #reader { animation: none; }
-@media (max-width: 899px) { .reader-grip { display: none; } }
+@media (max-width: 46.99rem) { .reader-grip { display: none; } }
 
 .reader-head {
   display: flex; align-items: center; gap: 8px; padding: 11px 16px;
@@ -1176,7 +1181,7 @@ html.is-apk .reader-close { display: none; }
 .rtp-size { display: none; }
 /* Phones: the head's full control set is wider than the screen — let the row
    scroll horizontally so Contents/immersive/close stay reachable. */
-@media (max-width: 899px) {
+@media (max-width: 46.99rem) {
   .reader-head { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .reader-head::-webkit-scrollbar { display: none; }
   .reader-head > * { flex: 0 0 auto; }
@@ -1235,7 +1240,7 @@ body.native-fs #reader { box-shadow: none; border-left: none; }
    20px side padding as normal mode so toggling fullscreen never re-wraps a
    single line (the 20->28px delta reflowed every line, reading as "fullscreen
    readjusts the text"; env() terms are 0 in the Android WebView). */
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   #reader.full .reader-body {
     padding-left: max(20px, env(safe-area-inset-left));
     padding-right: max(20px, env(safe-area-inset-right));
@@ -1296,7 +1301,7 @@ mark.rd-find-cur { background: var(--accent); color: #05070d; }
    untouched. Moves the cramped top-bar controls into a thumb-reach bottom action
    bar, floats the slim head so it can auto-hide on scroll, and surfaces the Size
    row in the Aa popover. Reader color tokens are never touched. */
-@media (max-width: 639px) {
+@media (max-width: 40rem) {
   /* Slim head floats above the scrolling body so auto-hide reclaims its height
      (a transform on an in-flow child would leave a blank strip instead). */
   html.is-apk .reader-head {
@@ -1354,7 +1359,7 @@ mark.rd-find-cur { background: var(--accent); color: #05070d; }
   html.is-apk #reader.full .reader-bottombar { transform: translateY(100%); }
   html.is-apk #reader.full.head-peek .reader-bottombar { transform: none; }
 }
-@media (max-width: 639px) and (prefers-reduced-motion: reduce) {
+@media (max-width: 40rem) and (prefers-reduced-motion: reduce) {
   html.is-apk .reader-head, html.is-apk .reader-bottombar { transition: none; }
 }
 
@@ -1927,7 +1932,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 /* [NAV] Everything that depends on the BOTTOM BAR being present. The gate was
    640px, which left 641-899px (iPad portrait, every half-width desktop window)
    with no primary navigation at all. */
-@media (max-width: 899.98px) {
+@media (max-width: 46.99rem) {
   main { padding-bottom: calc(40px + var(--tabbar-h)); }
   .toast, .nudge-toast { bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom)); }
   #tabbar { display: flex; }
@@ -1942,7 +1947,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 
 /* Phone-only typography and density (unchanged threshold). */
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   main { padding: 22px 16px calc(40px + var(--tabbar-h)); }
   .topbar { padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top)); }
   .brand { font-size: 1.0625rem; }
@@ -1951,7 +1956,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   .tab { min-width: 0; padding: 0 2px; }
   .tab span { display: block; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .hero h1 { font-size: 1.625rem; }
-  .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+
   .badges { gap: 8px; }
   .badge { min-width: 84px; padding: 10px 14px; }
 }
@@ -2023,7 +2028,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
    `.mesh.m1` (0-2-0), so a bare `.mesh` rule (0-1-0) loses on specificity and
    the pause never applied — every phone kept animating three 110px-blurred
    58vmax circles forever. */
-@media (max-width: 640px) { .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; } }
+/* Rule 9: the drifting aurora is a PERFORMANCE concern, so branch on the signals
+   that actually describe the device's ability and the user's preference — not on
+   a width, which was only ever a proxy for "probably a phone". */
+@media (prefers-reduced-motion: reduce), (update: slow) {
+  .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; }
+}
 .low-power .mesh.m1, .low-power .mesh.m2, .low-power .mesh.m3 { animation: none; }
 
 /* ---------- 16. Graphics & delight (round 2) ------------------------------- */
@@ -2219,7 +2229,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 .reader-top.show { opacity: 1; pointer-events: auto; transform: none; }
 .reader-top:hover { border-color: var(--accent); }
 
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   .help-cols { grid-template-columns: 1fr; }
   .topicbar { flex-wrap: wrap; }
   .filter { min-width: 120px; flex: 1; }
@@ -2699,7 +2709,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 /* same-day streak nudge: dismissible glass bar, bottom of viewport */
 .nudge-toast {
   position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 14px; z-index: 80; max-width: min(92vw, 420px);
+  display: flex; align-items: center; gap: 14px; z-index: 80; max-width: min(92dvw, 420px);
   padding: 12px 12px 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
@@ -2966,7 +2976,7 @@ body.interview-mode #app::before {
 /* heatmap horizontal scroll on narrow screens (JS scrolls it to today) */
 .heatmap-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   .ins-two { grid-template-columns: 1fr; }
   .log-row { grid-template-columns: auto 1fr auto; row-gap: 2px; }
   .log-xp, .log-dur { grid-column: span 1; }
@@ -2976,7 +2986,7 @@ body.interview-mode #app::before {
 .palette-overlay {
   position: fixed; inset: 0; z-index: 92;
   display: flex; align-items: flex-start; justify-content: center;
-  padding: 11vh 16px 16px;
+  padding: 11dvh 16px 16px;
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
   animation: fade 0.16s var(--ease-out);
@@ -3141,7 +3151,7 @@ body.interview-mode #app::before {
 }
 .tx-band:first-child { margin-top: 2px; }
 
-@media (max-width: 640px) {
+@media (max-width: 40rem) {
   .tx-tiergrid { grid-template-columns: 1fr 1fr; }
   .tx-tiercard { padding: 9px; }
   .tx-chip { padding: 6px 10px; }        /* thumb target, not a denser row */
@@ -3220,7 +3230,7 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 
 /* --- left rail (>= 900px) ------------------------------------------------ */
 .rail { display: none; }
-@media (min-width: 900px) {
+@media (min-width: 47rem) {
   :root { --nav-inset: var(--rail-cur); }
   body { padding-left: var(--rail-cur); }
   body.nav-hidden { padding-left: 0; }
@@ -3229,12 +3239,41 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
     position: fixed; left: 0; top: 0; bottom: 0; width: var(--rail-cur); z-index: 39;
     display: flex; flex-direction: column; gap: 2px;
     padding: calc(14px + env(safe-area-inset-top)) 9px 14px;
+    padding-left: calc(9px + env(safe-area-inset-left));   /* notch, landscape */
     background: var(--topbar-bg);
     -webkit-backdrop-filter: blur(22px) saturate(1.7); backdrop-filter: blur(22px) saturate(1.7);
     border-right: 1px solid var(--glass-brd);
   }
   body.nav-hidden .rail { display: none; }
   body.nav-hidden { --nav-inset: 0px; }   /* quiz mode reclaims the gutter */
+}
+
+/* Rule 7: a dual-segment foldable. Cap the content column at the first segment so
+   a card is never bisected by the hinge; the rail already sits left of it. */
+@media (horizontal-viewport-segments: 2) {
+  main { max-width: min(48.75rem, env(viewport-segment-width 0 0)); margin-inline: 0; }
+  .path-screen { --pw: calc(env(viewport-segment-width 0 0) - var(--nav-inset) - 48px); }
+}
+
+/* Rule 4: short-and-wide (a landscape phone, a freeform Android window) gets the
+   RAIL, not the bottom bar — it has width to spare and no height to give away.
+   The rail must earn that height, so it carries the five destinations only and
+   folds Appearance/Search into the header overflow. --nav-inset and the collapsed
+   width mean the rest of the layout needs no special case. */
+@media (orientation: landscape) and (max-height: 30rem) {
+  :root { --nav-inset: var(--rail-w-collapsed); }
+  body { padding-left: var(--rail-w-collapsed); }
+  body.nav-hidden { padding-left: 0; --nav-inset: 0px; }
+  .rail { display: flex; width: var(--rail-w-collapsed); padding-inline: 8px; }
+  body.nav-hidden .rail { display: none; }
+  #tabbar { display: none; }
+  main { padding-bottom: 24px; }
+  .rail-item > span, .rail-kbd, .rail-brand span { display: none; }
+  .rail-item { justify-content: center; padding-inline: 0; }
+  .rail-brand { padding: 4px 0 10px; text-align: center; font-size: 0.9375rem; }
+  /* seven items do not fit; Appearance and Search live in the header ⋯ here */
+  .rail-foot, .rail-toggle { display: none; }
+  .topbar { padding-block: 6px; }
 }
 
 /* --- collapsed rail: icons only, labels out of flow (kept as title/aria-label) */
@@ -3305,7 +3344,9 @@ body.nav-hidden #tabbar { display: none !important; }
 .daychip:hover { color: var(--text); border-color: var(--glass-brd-hi); }
 .daychip b { font-family: var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
 .dc-sep { width: 1px; height: 12px; background: var(--glass-brd-hi); }
-@media (max-width: 420px) { .dc-sep, .dc-lvl { display: none; } }
+/* Rule 6: never hide content by width alone. The level used to disappear from
+   the day chip below 420px; now it truncates and keeps its tooltip instead. */
+.dc-lvl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- sub-navigation (a real route, not local state) ---------------------- */
 .subnav {
@@ -3337,8 +3378,13 @@ body.nav-hidden #tabbar { display: none !important; }
 .btn2:hover { color: var(--text); border-color: var(--glass-brd-hi); background: var(--glass-2); }
 
 /* ---------- 17. [NAV] Today — three slots, never more -------------------- */
-.today-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; align-items: start; }
-@media (max-width: 899.98px) { .today-grid { grid-template-columns: 1fr; } }
+/* Rule 2: container query, not viewport query. This grid lives inside the content
+   column, whose width the rail (expanded or collapsed) already changes — asking
+   the window would give the wrong answer at the same viewport size. */
+.today-grid { container-type: inline-size; }
+.today-cols { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
+@container (min-width: 44rem) { .today-cols { grid-template-columns: 1.35fr 1fr; } }
+
 .today-hero { text-align: left; margin: 0 0 16px; }
 .today-hero .hero-row { justify-content: flex-start; }
 .primary-card { margin: 0 0 16px; }
@@ -3363,7 +3409,9 @@ body.nav-hidden #tabbar { display: none !important; }
 .wr-title { display: block; font-size: var(--fs-md); font-weight: 600; color: var(--text); }
 .wr-sub { display: block; font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
 .wr-go { flex: 0 0 auto; color: var(--accent-text); font-size: var(--fs-sm); font-weight: 700; }
-@media (max-width: 520px) { .wr-go { display: none; } }
+/* Rule 6 again: the "Enter ->" cue used to be deleted below 520px, leaving a row
+   with no signal that it is actionable. Let it shrink to the glyph instead. */
+@media (max-width: 32rem) { .wr-go { font-size: 0; } .wr-go::after { content: "\2192"; font-size: var(--fs-md); } }
 
 .more-nudges { margin: 4px 0 0; }
 .more-nudges > summary {
@@ -3394,7 +3442,7 @@ body.nav-hidden #tabbar { display: none !important; }
 /* ---------- 18. [NAV] Practice ------------------------------------------- */
 .prac-lede { color: var(--muted); margin: 0 0 16px; }
 .weak-list { margin-bottom: 16px; }
-.iv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.iv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 12px; }
 .iv-card {
   display: flex; flex-direction: column; gap: 6px; align-items: flex-start; text-align: left;
   padding: 16px; background: var(--glass); border: 1px solid var(--glass-brd);
@@ -3442,3 +3490,40 @@ body.nav-hidden #tabbar { display: none !important; }
 .tx-crumb .crumb { margin: 0; }
 .tx-clearlink { color: var(--accent-text); font-size: var(--fs-sm); font-weight: 700; padding: 2px 6px; }
 .review-card.bridge { margin-top: 18px; }
+
+/* ============================================================================
+   22. [NAV] Sizing rule — NOTHING IS SIZED TO A DEVICE
+   Every layout decision derives from available space, input type and
+   orientation. Read this before adding a media query.
+
+   1. Name the content quantity, then derive the threshold from it. The two
+      named breakpoints are the ONLY ones:
+        --bp-rail   47rem  = --rail-w (13rem) + --measure (34rem)
+                             "a rail and a legible column both fit"
+        --bp-split  46rem  = the container query on .today-cols
+      Plus one density threshold at 40rem for phone typography, and 32rem for
+      the .wr-go glyph swap. Was SEVEN px thresholds — 420, 520, 639, 640, 899,
+      899.98, 900 — whose near-duplicate pairs were the signature of numbers
+      chosen to dodge device widths rather than derived from content.
+   2. The operands are rem ON PURPOSE. The type scale is already rem; when every
+      threshold was px, raising Android's system font to 1.3x grew the text while
+      the breakpoints stayed put, so the layout still believed it had room it no
+      longer had. That contradiction is the reason for this section.
+   3. Prefer @container to @media for anything inside a pane or card — the rail
+      and the reader's three panes make the content box far narrower than the
+      viewport, and a media query cannot see that.
+   4. Let intrinsic sizing work: repeat(auto-fit, minmax(min(100%, N), 1fr)),
+      clamp(), min()/max()/fit-content. Not a column count per breakpoint.
+   5. Branch on INPUT for ergonomics — (pointer: coarse) sets the 44px floor,
+      (hover: hover) gates hover-only affordances. Never infer touch from width:
+      Android tablets and touch laptops are wide AND coarse.
+   6. Never hide content by width alone. Truncate, wrap, or reflow.
+   7. dvh/svh/lvh, never a bare vh.
+   8. Target minimums (--rail-w-collapsed: 3.75rem = 44px) and env(safe-area-*)
+      are the only absolute quantities allowed. Both come from ergonomics, not
+      from a screen.
+
+   The model to copy is already in this codebase: diagram auto-flip does not
+   guess, it measures the available width with a ResizeObserver and re-renders
+   (mmChartDirective, _mmRO). Layout works the same way.
+   ========================================================================== */

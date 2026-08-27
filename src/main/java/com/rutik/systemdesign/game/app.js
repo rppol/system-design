@@ -1930,7 +1930,7 @@ function renderHome() {
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 
   app.innerHTML = `
-    <div class="today-grid">
+    <div class="today-grid"><div class="today-cols">
       <div class="today-main">
         <div class="hero today-hero">
           <div class="hero-row">${goalRing()}<div>
@@ -1959,7 +1959,7 @@ function renderHome() {
         ${weekChartHTML()}
         ${weakCard}
       </aside>
-    </div>`;
+    </div></div>`;
 
   el("#startBtn").addEventListener("click", primary.run);
   el("#pickOther").addEventListener("click", () => go("#/practice"));
