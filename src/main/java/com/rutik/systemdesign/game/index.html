@@ -14,6 +14,10 @@
     if (!/^(midnight|ocean|forest|ember|fire|rose|orchid|obsidian)$/.test(_t)) _t = "midnight";
     document.documentElement.dataset.theme = _t;
     document.documentElement.dataset.mode = (_m === "light") ? "light" : "dark";
+    // Rail collapsed state, applied pre-paint alongside the theme so the rail
+    // never flashes 208px wide before snapping to 60px on load.
+    document.documentElement.dataset.rail =
+      localStorage.getItem("sd_rail_collapsed") === "1" ? "collapsed" : "expanded";
   </script>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="stylesheet" href="style.css" />

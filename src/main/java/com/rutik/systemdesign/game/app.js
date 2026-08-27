@@ -901,7 +901,7 @@ function toggleHelp() {
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
-      <div><h3>Everywhere</h3>${row("Cmd/Ctrl+K /", "Search everything")}${row("?", "This help")}</div>
+      <div><h3>Everywhere</h3>${row("Cmd/Ctrl+K /", "Search everything")}${row("[", "Collapse the rail")}${row("?", "This help")}</div>
     </div>
     <h2 class="help-h2">How LORA works</h2>
     <div class="help-cols help-mech">
@@ -9193,6 +9193,25 @@ const NAV = [
   { id: "tech", label: "Tech", route: "#/tech", icon: `<path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>` },
   { id: "progress", label: "Progress", route: "#/progress", icon: `<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>` },
 ];
+/* At 208px the rail is a permanent 17% bite out of a laptop screen, and the study
+   graph and the Tech shelf both want the landscape. Collapsed it is icons only;
+   the labels leave the flow but survive as title/aria-label. The flag is applied
+   pre-paint in index.html's boot script so the rail never flashes wide, and it is
+   inert below the rail breakpoint where there is no rail to collapse. */
+const railCollapsed = () => document.documentElement.dataset.rail === "collapsed";
+function setRailCollapsed(on) {
+  document.documentElement.dataset.rail = on ? "collapsed" : "expanded";
+  safeSet("sd_rail_collapsed", on ? "1" : "0");
+  const b = el("#railToggle");
+  if (b) {
+    b.setAttribute("aria-expanded", on ? "false" : "true");
+    const label = on ? "Expand the rail" : "Collapse the rail";
+    b.setAttribute("aria-label", label);
+    b.title = label + " ([)";
+  }
+  announce(on ? "Navigation collapsed" : "Navigation expanded");
+}
+
 const navSvg = (icon, cls) => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg>`;
 
 // Which destination owns this route. Quiz and Reader are full-screen MODES, not
@@ -9208,8 +9227,12 @@ function destOf(h) {
 
 function renderNav() {
   const rail = el("#rail"), bar = el("#tabbar");
+  const collapsed = railCollapsed();
   if (rail) rail.innerHTML =
     `<div class="rail-brand" id="railBrand" role="button" tabindex="0" aria-label="LORA — go to today">LORA<span>by Rutik</span></div>
+     <button class="rail-toggle" id="railToggle" aria-expanded="${!collapsed}" aria-controls="rail"
+       title="Collapse the rail ([)" aria-label="Collapse the rail">
+       ${navSvg(`<polyline points="15 18 9 12 15 6"/>`, "")}</button>
      <div class="rail-items">${NAV.map((n) =>
       `<button class="rail-item" data-tab="${n.id}">${navSvg(n.icon, "railicon")}<span>${n.label}</span></button>`).join("")}</div>
      <div class="rail-foot">
@@ -9230,6 +9253,7 @@ function renderNav() {
     rb.addEventListener("click", home);
     rb.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); home(); } });
   }
+  el("#railToggle")?.addEventListener("click", () => setRailCollapsed(!railCollapsed()));
   el("#railAppear")?.addEventListener("click", openMoreSheet);
   el("#railSearch")?.addEventListener("click", () => openPalette());
 }
@@ -9350,6 +9374,11 @@ document.addEventListener("keydown", (e) => {
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
+  // [ collapses/expands the rail. Guarded on the rail actually being rendered, so
+  // it is inert below the breakpoint and inside the reader.
+  if (e.key === "[" && !typing && el("#rail") && getComputedStyle(el("#rail")).display !== "none") {
+    e.preventDefault(); setRailCollapsed(!railCollapsed()); return;
+  }
   if (document.body.classList.contains("reader-open")) {
     if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {   // find-in-page
       e.preventDefault();

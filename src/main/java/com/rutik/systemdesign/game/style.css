@@ -83,16 +83,27 @@
   --modules-w: 160px;            /* left sidebar width; drag-resizable */
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
   --tabbar-h: 58px;              /* [NAV] bottom tab bar height (< 900px) */
-  --rail-w: 208px;               /* [NAV] left rail width (>= 900px) */
+  --rail-w: 208px;               /* [NAV] left rail width, expanded */
+  /* A target-size floor (44px at the default root size, scaling with the user's
+     font setting), not a device guess — see the sizing rules in style §22. */
+  --rail-w-collapsed: 3.75rem;
+  /* One variable the layout reads, so nothing else needs to know which state the
+     rail is in. --nav-inset follows it, which keeps the F1 fix correct in both. */
+  --rail-cur: var(--rail-w);
   /* [NAV] How much of the viewport the rail owns. Anything that does viewport
      math — 100vw, left:0, a fixed overlay centring a card — must subtract this
      or it centres on the VIEWPORT while the content column starts --rail-w in.
      0 below the rail breakpoint, where there is no rail. */
   --nav-inset: 0px;
+
   /* Bar/meter TRACK, distinct from the glass SURFACE tokens. Never use
      --glass-2 as a track: it is near-white in light mode. */
   --track: var(--glass-brd-hi);
 }
+
+/* Stamped on <html> pre-paint by the boot script, so the rail never flashes
+   wide before collapsing. Higher specificity than :root, so order is irrelevant. */
+:root[data-rail="collapsed"] { --rail-cur: var(--rail-w-collapsed); }
 
 :root[data-theme="orchid"] {
   /* Orchid — lifted purple, purple/pink spectrum */
@@ -3210,12 +3221,12 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 /* --- left rail (>= 900px) ------------------------------------------------ */
 .rail { display: none; }
 @media (min-width: 900px) {
-  :root { --nav-inset: var(--rail-w); }
-  body { padding-left: var(--rail-w); }
+  :root { --nav-inset: var(--rail-cur); }
+  body { padding-left: var(--rail-cur); }
   body.nav-hidden { padding-left: 0; }
   .topbar .brand { display: none; }        /* the rail carries the wordmark */
   .rail {
-    position: fixed; left: 0; top: 0; bottom: 0; width: var(--rail-w); z-index: 39;
+    position: fixed; left: 0; top: 0; bottom: 0; width: var(--rail-cur); z-index: 39;
     display: flex; flex-direction: column; gap: 2px;
     padding: calc(14px + env(safe-area-inset-top)) 9px 14px;
     background: var(--topbar-bg);
@@ -3224,6 +3235,43 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
   }
   body.nav-hidden .rail { display: none; }
   body.nav-hidden { --nav-inset: 0px; }   /* quiz mode reclaims the gutter */
+}
+
+/* --- collapsed rail: icons only, labels out of flow (kept as title/aria-label) */
+:root[data-rail="collapsed"] .rail-item > span,
+:root[data-rail="collapsed"] .rail-kbd,
+:root[data-rail="collapsed"] .rail-brand span { display: none; }
+:root[data-rail="collapsed"] .rail-item { justify-content: center; padding-inline: 0; }
+:root[data-rail="collapsed"] .rail-brand { padding: 4px 0 14px; text-align: center; font-size: 0.9375rem; }
+:root[data-rail="collapsed"] .rail { padding-inline: 8px; }
+:root[data-rail="collapsed"] .rail-toggle svg { transform: rotate(180deg); }
+
+.rail-toggle {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; margin: 0 auto 6px;
+  border-radius: var(--radius-sm); color: var(--faint);
+  background: transparent; border: 1px solid transparent;
+}
+.rail-toggle:hover { color: var(--text); background: var(--glass); border-color: var(--glass-brd); }
+.rail-toggle svg { width: 15px; height: 15px; transition: transform 0.2s var(--ease-out); }
+
+/* The list of destinations is its own scrolling block so a short viewport
+   compresses it instead of pushing the footer group off-screen — a rail that
+   overflows is worse than a tab bar. */
+.rail-items { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+
+/* NO transition on the rail's width or on body's padding-left, deliberately.
+   Chrome LATCHES a transitioned property whose value comes from an unregistered
+   custom property: --rail-cur's computed value flips correctly but
+   `width: var(--rail-cur)` keeps whatever the transition first resolved, so the
+   rail visibly stops collapsing after the first toggle. Registering --rail-cur
+   with @property does not help — it moves the latch onto the variable itself.
+   Measured: with the transition, width sticks at its first value across four
+   toggles; without it, 60/208/60/208 exactly. The chevron and the labels still
+   animate, because neither feeds layout. */
+@media (prefers-reduced-motion: no-preference) {
+  .rail-item > span, .rail-kbd { transition: opacity 0.18s var(--ease-out); }
+  .rail-toggle svg { transition: transform 0.2s var(--ease-out); }
 }
 .rail-brand {
   font-weight: 800; letter-spacing: -0.02em; font-size: 1.0625rem;
