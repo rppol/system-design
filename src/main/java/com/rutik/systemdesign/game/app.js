@@ -539,6 +539,33 @@ function applyTheme(id, save = true) {
   if (save) safeSet("sd_theme", id);
   document.querySelectorAll(".theme-opt").forEach((b) =>
     b.setAttribute("aria-checked", b.dataset.theme === id ? "true" : "false"));
+  syncThemeColor();
+}
+
+// [NAV] The Android/PWA status bar had a hard-coded #06070d that matched no
+// ground once the surfaces were lifted off black. Read the live --bg instead, so
+// it follows every one of the eight themes and both modes. Called from the two
+// functions that can change either.
+function syncThemeColor() {
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (!m) return;
+  // Read the RESOLVED background-color of <html> (which is `background: var(--bg)`),
+  // not the raw --bg token: in light mode --bg is a `color-mix(...)` string, which
+  // is a valid stylesheet value but not something theme-color accepts.
+  const bg = getComputedStyle(document.documentElement).backgroundColor;
+  if (!bg || bg === "rgba(0, 0, 0, 0)") return;
+  // color-mix resolves to `color(srgb ...)`, which theme-color does not accept —
+  // and Chrome's canvas fillStyle now PRESERVES that notation, so a round-trip
+  // through it is not a conversion. Paint one pixel and read the bytes back.
+  let out = bg;
+  try {
+    const cx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    cx.fillStyle = bg;
+    cx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = cx.getImageData(0, 0, 1, 1).data;
+    out = "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+  } catch { /* keep the raw value */ }
+  m.setAttribute("content", out);
 }
 
 function applyMode(mode, save = true) {
@@ -547,6 +574,7 @@ function applyMode(mode, save = true) {
   if (save) safeSet("sd_theme_mode", mode);
   document.querySelectorAll(".mode-opt").forEach((b) =>
     b.setAttribute("aria-checked", b.dataset.mode === mode ? "true" : "false"));
+  syncThemeColor();
 }
 
 function themeOptionsHTML() {

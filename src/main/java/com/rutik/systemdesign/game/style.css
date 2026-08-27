@@ -15,8 +15,16 @@
 :root {
   /* Midnight (default) — lifted blue-navy, pure blue/violet spectrum */
   color-scheme: dark;
-  --bg: #0d1022;
-  --bg-2: #151933;
+  /* GROUNDS ARE DERIVED, NOT AUTHORED. Every theme's ground is a mix of its own
+     --mesh-1 (the most saturated hue it owns; --accent is often a pale tint that
+     barely reads) into one neutral floor. Custom properties substitute lazily, so
+     a theme block overriding --mesh-1 moves its ground with it — there is exactly
+     one place to change how dark or how colourful the app is.
+     Was eight hand-authored pairs, several of which sat on the floor: rose
+     #1b0e16 and fire #190809 read as black, obsidian #050506 WAS black. */
+  --floor: #0a0c12;
+  --bg: color-mix(in srgb, var(--mesh-1) 17%, var(--floor));
+  --bg-2: color-mix(in srgb, var(--mesh-1) 26%, var(--floor));
   --text: #eef2fa;
   --muted: #a3adc4;
   --faint: #6d7890;
@@ -88,8 +96,6 @@
 
 :root[data-theme="orchid"] {
   /* Orchid — lifted purple, purple/pink spectrum */
-  --bg: #170e22;
-  --bg-2: #221533;
   --text: #f5edfa;
   --muted: #c4aed9;
   --faint: #8e7ba6;
@@ -100,13 +106,10 @@
   --mesh-2: #e05fb4;
   --mesh-3: #7b5ce0;
   --mesh-o: 0.28;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="ember"] {
   /* Ember — warm dark (lifted from near-black), glowing red/orange fire spectrum */
-  --bg: #1a100b;
-  --bg-2: #251710;
   --text: #f8efe8;
   --muted: #c9b1a5;
   --faint: #9b867b;
@@ -117,13 +120,10 @@
   --mesh-2: #f59e42;
   --mesh-3: #ec5d7e;
   --mesh-o: 0.30;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="forest"] {
   /* Forest — lifted green, emerald/lime spectrum */
-  --bg: #0e1a13;
-  --bg-2: #16271d;
   --text: #eaf5ee;
   --muted: #a6c9b3;
   --faint: #74907f;
@@ -134,13 +134,10 @@
   --mesh-2: #4ade80;
   --mesh-3: #14b8a6;
   --mesh-o: 0.28;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="ocean"] {
   /* Ocean — lifted navy-blue, cyan + blue spectrum (no green/teal cast) */
-  --bg: #0c1627;
-  --bg-2: #14233a;
   --text: #e8f2fc;
   --muted: #a6c1da;
   --faint: #7089a3;
@@ -151,13 +148,10 @@
   --mesh-2: #38bdf8;
   --mesh-3: #22d3ee;
   --mesh-o: 0.24;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="rose"] {
   /* Rose — soft pink-rose; lighter than the other dark themes and distinctly pink (not tomato-red) */
-  --bg: #1b0e16;
-  --bg-2: #271322;
   --text: #fdeff5;
   --muted: #e2b5c8;
   --faint: #b08296;
@@ -168,13 +162,10 @@
   --mesh-2: #e879f9;
   --mesh-3: #fb7185;
   --mesh-o: 0.32;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="fire"] {
   /* Fire — pure red -> orange -> gold flame (distinct from Ember's muted orange) */
-  --bg: #190809;
-  --bg-2: #251211;
   --text: #fceceb;
   --muted: #d6aba7;
   --faint: #a37c79;
@@ -185,13 +176,12 @@
   --mesh-2: #f97316;
   --mesh-3: #facc15;
   --mesh-o: 0.34;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 :root[data-theme="obsidian"] {
-  /* Obsidian — monochrome: pitch-black + shiny silver in dark, grey-white in light */
-  --bg: #050506;
-  --bg-2: #101114;
+  /* Obsidian — monochrome: near-black + shiny silver in dark, grey-white in light.
+     Lifted off the floor (was #050506/#101114) so --shadow has something to sit
+     on; at pure black the glass borders were the only thing separating anything. */
   --text: #eef0f4;
   --muted: #a8adb8;
   --faint: #71767f;
@@ -202,7 +192,6 @@
   --mesh-2: #8b93a3;
   --mesh-3: #2c333f;
   --mesh-o: 0.20;
-  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 /* Light MODE — applied on top of ANY colour theme via data-mode="light". It
@@ -213,9 +202,13 @@
    pitch-black #000 / #fff in every mode (hard limit, game/CLAUDE.md) — no --rd-*. */
 :root[data-mode="light"] {
   color-scheme: light;
-  --bg: color-mix(in srgb, var(--accent) 7%, #eef1f7);
-  --bg-2: #ffffff;
-  --text: #0e1526;
+  /* Off-white, not white. --bg-2 was #ffffff with pure-white glass over it, so
+     page, card and raised card were three shades of the same white and the whole
+     surface glared. Deriving the glass FROM --bg-2 also lets each theme's accent
+     tint reach the cards, so light mode stops looking identical across all eight. */
+  --bg: color-mix(in srgb, var(--mesh-1) 15%, #eceef4);
+  --bg-2: color-mix(in srgb, var(--mesh-1) 6%, #fbfcfe);
+  --text: #141b2b;
   --muted: #5c6780;
   --faint: #616c86;
   --accent-text: color-mix(in srgb, var(--accent) 58%, #0a1020);   /* darken accent for text on light */
@@ -226,14 +219,16 @@
   --mesh-o: 0.42;
   --grid-line: rgba(15, 23, 42, 0.05);
   --spot: color-mix(in srgb, var(--accent) 10%, transparent);
-  --glass: rgba(255, 255, 255, 0.60);
-  --glass-2: rgba(255, 255, 255, 0.82);
+  --glass: color-mix(in srgb, var(--bg-2) 62%, transparent);
+  --glass-2: color-mix(in srgb, var(--bg-2) 88%, transparent);
   --glass-brd: rgba(13, 23, 44, 0.09);
   --glass-brd-hi: rgba(13, 23, 44, 0.22);
   --glass-hilite: inset 0 1px 0 rgba(255, 255, 255, 0.75);
   --shadow: 0 24px 60px rgba(15, 23, 42, 0.10), 0 4px 16px rgba(15, 23, 42, 0.06);
   --shadow-sm: 0 10px 30px rgba(15, 23, 42, 0.08);
-  --topbar-bg: rgba(255, 255, 255, 0.62);
+  /* derived like the glass, so the topbar and rail carry the theme's tint too —
+     a hard-coded white here clashed with the newly tinted grounds */
+  --topbar-bg: color-mix(in srgb, var(--bg-2) 72%, transparent);
   /* NOTE: no reader token overrides here — the reader is pitch black with
      One Dark prose in every theme (hard limit, game/CLAUDE.md). */
 }
