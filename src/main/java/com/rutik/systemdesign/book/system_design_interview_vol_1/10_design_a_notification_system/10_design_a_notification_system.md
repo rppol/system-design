@@ -1012,15 +1012,23 @@ decoupling that makes every requirement achievable at once.
 ## Interview Questions
 
 **Q: Why is exactly-once delivery impractical, and what does a notification system do instead?**
+**Short:** Exactly-once is unreachable in a distributed system, so the design targets at-least-once delivery and deduplicates by event ID.
+
 Exactly-once is impractical because in a distributed system the send-and-acknowledge path can fail after delivery but before the ack, forcing a retry that duplicates the message. The system instead targets at-least-once delivery — every notification arrives one or more times — and then deduplicates on the event ID: when an event arrives it checks whether that ID was seen before, discarding it if so and sending it if not. This collapses at-least-once into effectively-once for the common duplicate case without pretending true exactly-once is achievable.
 
 **Q: What are the three problems with the naive single-notification-server design?**
+**Short:** A single server is a single point of failure, can only scale vertically, and becomes a bottleneck doing all work synchronously.
+
 Single point of failure, an inability to scale, and a performance bottleneck. One server means one crash stops all notifications on all channels (SPOF); embedding the database, cache, and all processing in that one server means you can only scale vertically (hard to scale); and doing data fetching, rendering, and synchronous third-party calls in one process makes the system move at the speed of its slowest dependency (bottleneck). The fixes are, respectively, a stateless server pool, externalized DB/cache, and per-channel message queues.
 
 **Q: Why does the design use one message queue per notification type instead of a single shared queue?**
+**Short:** Per-channel queues isolate failures and let each channel scale independently, so one provider's outage can't back up every channel.
+
 Because per-channel queues isolate failures and let each channel scale independently. If APNs goes down, iOS pushes pile up in the iOS queue while Android, SMS, and email keep flowing; a single shared queue would let one provider's outage back up and block every channel. Separate queues also mean you can add workers to just the channel that's falling behind, and each channel has very different throughput limits (a Twilio long code does ~1 SMS/sec versus thousands/sec for push).
 
 **Q: How does the system prevent data loss?**
+**Short:** By persisting every notification to a log database before attempting delivery, so a worker crash can be retried from the log.
+
 It persists every notification to a notification log database on ingest and retries on failure. Because the record is durably stored before delivery is attempted, a worker crash mid-send doesn't lose the notification — the log still has it and a retry re-processes it. The log doubles as an audit trail answering whether a given notification was ever sent and what happened to it.
 
 **Q: How are duplicate notifications suppressed?**
@@ -1029,12 +1037,18 @@ It persists every notification to a notification log database on ingest and retr
 By deduplicating on the event ID. Each notification carries an event ID; when an event arrives, the system checks whether that ID has been seen before, discards it if it has, and otherwise sends it and records the ID as seen. This is the mechanism that makes at-least-once delivery behave as effectively-once, since retries and re-queues reuse the same event ID.
 
 **Q: How do you handle a device token that has become invalid?**
+**Short:** Delete or mark the device row once APNs or FCM reports the token invalid, so sends stop going to a dead token.
+
 Prune the stale device row so you stop sending to it. Tokens die when users uninstall the app or log out; APNs and FCM report invalid tokens via feedback, and that signal must delete or mark the corresponding `device` table row. Otherwise you keep paying to push into the void and your delivery metrics get polluted by sends that can never arrive.
 
 **Q: What does the improved design change relative to the naive one, and why?**
+**Short:** It externalizes the database and cache, adds a pool of stateless auto-scaled servers, and adds per-channel message queues.
+
 It moves the database and cache out of the notification server, adds multiple auto-scaled stateless notification servers, and introduces message queues. Externalizing the data stores removes the scaling ceiling; a pool of stateless servers behind a load balancer removes the single point of failure; and per-channel queues decouple the servers from the slow third-party providers so producers never block on delivery. Together they resolve all three naive-design problems.
 
 **Q: Why does the book prefer commercial email providers over in-house SMTP?**
+**Short:** Commercial providers give better deliverability and analytics, since they already manage sender reputation and IP warming.
+
 For deliverability — commercial providers offer a better delivery rate and better analytics. Getting email into the inbox rather than the spam folder depends on sender reputation, IP warming, SPF/DKIM/DMARC, and bounce/complaint handling, all of which commercial services like SendGrid or Mailchimp have already solved and continuously maintain. Running your own SMTP means owning all of that plus a fleet of IPs whose reputation you must nurse, rarely worth it except at the largest scale.
 
 **Q: What are the two inputs a provider needs to send an iOS push, and what's in the payload?**
@@ -1043,33 +1057,53 @@ For deliverability — commercial providers offer a better delivery rate and bet
 A device token and a payload. The device token is the opaque per-app-per-device identifier that addresses the push; the payload is a JSON dictionary wrapped under the reserved `aps` key containing `alert` (the visible title and body), `badge` (the app-icon number), and `sound` (the sound to play). The provider POSTs the token plus payload to APNs over HTTP/2, and APNs delivers to the device.
 
 **Q: What is queue depth and why is it the key monitoring metric?**
+**Short:** Queue depth is how many notifications are waiting, and a rising depth signals workers are falling behind and need scaling.
+
 Queue depth is the number of notifications waiting in a queue, and it's the primary scaling signal because a large or growing depth means workers aren't consuming events as fast as producers create them. The remedy is to add more workers to that specific channel. Watching depth per channel tells you exactly which channel is falling behind and gives early warning of rising delivery latency before users notice.
 
 **Q: How does the design model the relationship between users and their devices?**
+**Short:** As one-to-many, with a separate device table holding multiple device tokens per user so a push reaches every device.
+
 As one-to-many: a `user` table holds one row per user (email, phone, country code) and a separate `device` table holds many rows per user, each with a device token. Because a user can have several devices (phone, tablet, laptop), "send a push to Alice" expands to looking up all of Alice's device tokens and sending to each. Splitting devices into their own table is what makes multi-device push natural.
 
 **Q: How are user opt-outs enforced?**
+**Short:** A per-user, per-channel notification-setting table is checked before every send, skipping channels where opt-in is false.
+
 Via a per-user, per-channel notification-setting table checked before every send. Each row holds a `user_id`, a `channel` (push/SMS/email), and an `opt_in` boolean; if `opt_in` is false for the relevant channel, the notification is not sent on that channel. Some account-safety categories like OTPs or fraud alerts may bypass opt-out, but the default is to respect the setting.
 
 **Q: What is a notification template and why use one?**
+**Short:** A preformatted message body with parameters filled in per send, giving consistent formatting and fewer errors at scale.
+
 A notification template is a preformatted message body with parameters filled in per send, so you author the structure once and inject the specifics like an item name or date. It gives a consistent format across millions of sends, reduces errors, and cuts the time to build each message. The template lives in the cache or DB and the server substitutes the parameters at render time.
 
 **Q: How does the retry mechanism work, and when does it stop?**
+**Short:** A failed send is re-queued for another attempt, and persistent failure after repeated retries alerts developers instead of retrying forever.
+
 When a third-party service fails to send, the failed notification is added back to the message queue and a worker re-attempts delivery. If the same notification keeps failing after repeated retries, the system alerts the developers rather than retrying forever, because persistent failure signals a real problem — a bad token, a provider outage, or a misconfiguration. Combined with the persisted log, retry is what makes "never lose a notification" hold even when providers are flaky.
 
 **Q: How is the notification-sending API secured?**
+**Short:** With an appKey and appSecret pair that restricts sending to authenticated clients, keeping the send API effectively internal-only.
+
 With appKey and appSecret credentials that restrict sending to authenticated, verified clients. A client must present a valid appKey/appSecret pair to use the send API, which keeps it effectively internal-only so that arbitrary or external callers can't spam your users. An open send API is a classic vulnerability — the notification path must always be authenticated.
 
 **Q: Why does rate limiting matter for a notification system, and at what levels does it apply?**
+**Short:** Over-sending drives users to disable notifications entirely, so limits apply both per user and per third-party provider quota.
+
 Rate limiting matters because a user bombarded with notifications will turn them off entirely, permanently losing the channel, so over-sending is self-defeating. It applies at two levels: a per-user product limit (cap how many notifications a user receives per window, reusing the Chapter 4 limiter) and a per-provider limit (stay under APNs, FCM, Twilio, and SES quotas to avoid throttling and drops). The two exist for different reasons and both are needed.
 
 **Q: What does "soft real-time" mean here and why does it matter architecturally?**
+**Short:** Notifications should arrive quickly but tolerate brief delay under load, which is what justifies buffering events in queues.
+
 Soft real-time means notifications should arrive as soon as possible but a small delay under high load is acceptable. This is what legitimizes the message-queue design: because occasional delay is tolerable, the system can buffer events in queues and absorb bursts instead of building a hard-real-time path. A breaking-news spike can pile up briefly in a queue and drain a moment later without violating the requirement.
 
 **Q: What are the two ways notifications get triggered, and how does that affect the design?**
+**Short:** By client applications and server-side business logic, so the API must accept both interactive calls and batch producers.
+
 By client applications and by server-side business logic. A client app might schedule a reminder, while a server-side batch job fires a marketing campaign or the Order service emits "your package shipped." The notification servers therefore must accept both an interactive API call and scheduled/batch producers, which is why the front door is a general authenticated API rather than a single caller-specific interface.
 
 **Q: What role does event tracking play, and what does it measure?**
+**Short:** It measures open rate, click rate, and engagement by emitting delivery, open, and click events to an analytics service.
+
 Event tracking measures how notifications perform — open rate, click rate, and engagement — by emitting delivery, open, and click events to an analytics service. Delivery alone tells you the message left the building; opened and clicked tell you whether it worked, which is what the business actually cares about and what feeds back into deciding what to send next. It closes the loop from "we sent it" to "did it matter."
 
 **Q: What are the five pillars a production notification system needs beyond a naive provider call?**
@@ -1078,6 +1112,8 @@ Event tracking measures how notifications perform — open rate, click rate, and
 Reliability (log plus retry, at-least-once with dedup), security (appKey/appSecret so only authenticated clients send), tracking and monitoring (queue depth as the scaling signal plus open/click analytics), respecting user settings (per-channel opt-in/opt-out checked before sending), and rate limiting (cap per user to avoid overwhelming them and stay under provider quotas). These are the checklist that turns the high-level fan-out design into something shippable.
 
 **Q: Why is a stateless notification server important to the improved design?**
+**Short:** Statelessness lets any server handle any request, so adding servers behind a load balancer scales capacity horizontally.
+
 Because statelessness is what lets you run many notification servers behind a load balancer and scale horizontally. Each server holds no per-request state and owns no data — it validates, fetches from the shared cache/DB, and enqueues — so any server can handle any request and adding servers directly adds capacity while removing the single point of failure. Statefulness would re-introduce the naive design's scaling ceiling.
 
 ---

@@ -1143,6 +1143,7 @@ matters (IS_RUSH_HOUR vs raw HOUR).
 ## Interview Questions
 
 **Q: What is data leakage, and why does it make a model look great offline but fail in production?**
+**Short:** Data leakage means a feature carries label information unavailable at serving time, making offline scores look great before production collapse.
 Data leakage is when a feature carries information about the label that won't be available at prediction time, so the model relies on a signal that vanishes in production. Offline it scores suspiciously high because the leaked feature effectively encodes the answer; in production the leak is gone and accuracy collapses. It's insidious because standard evaluation *rewards* the leak — the better the leak, the better your test score — so nothing flags it. You hunt it with correlation audits, ablation, and skepticism toward any too-good new feature.
 
 **Q: What are the six common causes of data leakage in Huyen's chapter?**
@@ -1150,54 +1151,71 @@ Data leakage is when a feature carries information about the label that won't be
 They are: (1) splitting time-correlated data randomly instead of by time, (2) computing scaling/statistics over the whole dataset before splitting, (3) imputing missing values with whole-dataset statistics, (4) duplicates spanning train and test, (5) group leakage where the same group's records straddle the split, and (6) leakage from the data-generation process. The first three are process-order mistakes (split before computing anything), the middle two are split-boundary mistakes, and the last needs domain knowledge to catch.
 
 **Q: Why must you split time-correlated data by time instead of randomly?**
+**Short:** Random splits let same-day correlated examples appear in both train and test, letting the model peek at the future it must later predict.
 Because a random split lets the model see the future, since same-time examples are correlated and land on both sides. Huyen's example is stock prices: prices across stocks on the same day move together, so a random split puts some of Monday in train and some in test, and the model trivially "predicts" the test half from the train half — yet in production it must forecast a genuinely unseen future day. Splitting by time (train on days 1–N, test on N+1 onward) mirrors real use and removes the leak.
 
 **Q: What is the difference between MNAR, MAR, and MCAR missing values?**
+**Short:** MNAR means the value's absence depends on itself, MAR depends on another observed column, and MCAR has no systematic cause.
 MNAR (Missing Not At Random) means the value is missing because of the value itself — high earners decline to state income, so the blank is informative. MAR (Missing At Random) means it's missing due to another observed variable — one gender tends not to report age, so age is blank because of gender. MCAR (Missing Completely At Random) means no systematic reason at all — a random form glitch. The type matters because it dictates whether deletion biases the data and whether imputation destroys signal.
 
 **Q: Why is deleting rows with missing values dangerous when the data is MNAR?**
+**Short:** Deleting MNAR rows removes a specific kind of example, such as high earners who hid income, biasing the remaining data.
 Because deleting MNAR rows systematically removes a specific kind of example and biases the dataset. If income is missing precisely because the earner is high-income (MNAR), row-deletion strips out the high earners, and the model learns from a skewed low-income remainder — the missingness *was* the signal you just threw away. Row deletion is only safe for MCAR data and a small fraction of rows; otherwise it distorts the distribution the model learns.
 
 **Q: Why should you never impute a missing value with a value the column could really take, like 0 children?**
+**Short:** Imputing with a real possible value like 0 makes unknown cases indistinguishable from genuinely valid ones, erasing the missingness signal.
 Because it makes a genuinely-valid case indistinguishable from an unknown one. Filling a missing "number of children" with 0 means a family that truly has zero children looks identical to a family whose count you simply don't know, and the model conflates "known childless" with "missing." If you must fill, use a value the column can never legitimately hold, or add a separate `was_missing` boolean so the model can learn that missingness itself is predictive.
 
 **Q: Why is scaling a source of data leakage, and how do you prevent it?**
+**Short:** Scaling leaks when min, max, mean, or std are computed over the whole dataset instead of the training split alone before splitting.
 Because the min, max, mean, and std used to scale must be computed on the training set only; computing them over the whole dataset before splitting leaks test-set information into training. The fix is to split first, fit the scaling statistics on the training partition alone, then apply those frozen statistics to validation, test, and production. The same rule covers imputation, normalization, PCA, and feature selection — any statistic learned from the data must come from train only.
 
 **Q: What is group leakage, and how do you prevent it?**
+**Short:** Group leakage occurs when records from the same group, like a patient's two scans, land on both sides of the split, letting the model memorize identity.
 Group leakage is when strongly-correlated records of the same group end up on both sides of the split. Huyen's example is two CT scans of the same patient taken minutes apart landing one in train and one in test — the model recognizes the patient, not the disease, so it looks accurate but doesn't generalize. The scans aren't literal duplicates; they just share group-level information. The fix is a group-aware split that keeps all of a patient's (or user's) records on the same side.
 
 **Q: Why does one-hot encoding fail in production, and what problem does the UNKNOWN bucket introduce?**
+**Short:** One-hot encoding cannot represent categories unseen in training, and its UNKNOWN-bucket fix lumps new legitimate categories in with spam and junk.
 One-hot fails because categories aren't static — new brands, users, and products appear daily, and a category unseen in training matches no column, producing an all-zeros vector the model can't represent. The common patch, an UNKNOWN catch-all bucket, then lumps every genuinely-new category together with all other unseen junk, including spam and fraud — so a promising new brand gets the same encoding as garbage. The more categories you have, the more serving traffic drowns in that undifferentiated bucket.
 
 **Q: How does the hashing trick work, and why is it beloved in continual learning?**
+**Short:** The hashing trick maps categories into a fixed number of slots via hash(category) mod m, giving unseen categories a valid slot with bounded collisions.
 The hashing trick maps each category through a hash function into a fixed space of `m` slots via `hash(category) mod m`, so the feature schema never grows. It's beloved in continual learning because a brand-new category still lands in a valid slot without re-fitting the encoder or growing the vector, letting a continuously-retraining model keep a stable feature schema. Collisions (two categories sharing a slot) are tolerable and bounded — roughly 1% at an 18-bit (`2^18`) space — far cheaper than dumping all new categories into one UNKNOWN bin.
 
 **Q: What is feature crossing, when does it help, and what does it cost?**
+**Short:** Feature crossing combines features to capture their joint interaction, helping linear models at the cost of combinatorial blowup and sparsity.
 Feature crossing combines two or more features to capture their interaction — like crossing marital status with number of children, where the joint state predicts behavior neither column captures alone. It especially helps linear models, which are additive and can't otherwise express interactions, and it speeds trees; DeepFM and xDeepFM learn crosses automatically. The cost is a feature-space blowup — crossing two 100-value features yields up to 10,000 combinations — and resulting sparsity, since most combinations have few examples, inviting overfitting.
 
 **Q: What is the difference between XGBoost's built-in gain importance and SHAP?**
+**Short:** Built-in gain is fast but tree-specific and only global, while SHAP is model-agnostic and gives both global and per-prediction importance.
 Built-in gain measures the total loss/impurity reduction from splits on each feature; it's free with a tree model but model-specific, can be biased toward high-cardinality features, and only gives a global ranking. SHAP is model-agnostic (works for any model) and provides importance at two granularities — the global contribution across the dataset AND the local contribution to each individual prediction. That per-prediction attribution is what makes SHAP a workhorse for both pruning features and explaining single decisions.
 
 **Q: What does the Facebook-ads importance curve teach about pruning features?**
+**Short:** Facebook's ads model shows importance is concentrated: the top 10 features carry about half the total, so the long tail can be pruned cheaply.
 It shows that feature importance is highly concentrated — the top 10 features account for about half of the model's total importance, while the long tail of features contributes single-digit percentages. The lesson is to measure importance and aggressively prune the low-impact tail, which costs almost no accuracy while removing compute, storage, latency, and drift surface. More features are not better past the high-impact head; the tail is mostly cost and noise.
 
 **Q: What are the two aspects of feature generalization?**
+**Short:** Feature generalization has two aspects: coverage, the fraction of examples with a value, and whether train and serve distributions match.
 Coverage — the fraction of examples that actually have a value for the feature — and distribution match between train and serve. Low coverage doesn't disqualify a feature (a 1%-coverage feature can be gold if strongly predictive for that 1%), but coverage that *differs* between train and serve is a red flag. Distribution match means the feature's value distribution must be similar at training and serving time; a feature the serving data pushes outside its trained range won't generalize.
 
 **Q: Explain the day-of-week ETA example of a distribution mismatch.**
+**Short:** A model trained on Monday-through-Saturday data has never seen Sunday's day-of-week value, so its Sunday predictions are unsupported extrapolations.
 A delivery-time model uses day-of-week as a feature but is trained only on Monday-through-Saturday data, then deployed to serve predictions on Sunday. The model has never seen the "Sunday" value, so its Sunday predictions are extrapolations with no training basis — Sunday's traffic, staffing, and demand patterns lie outside the training distribution. It illustrates that even a full-coverage feature fails to generalize when its serve-time value distribution diverges from what training saw, which ties directly to distribution shift in Chapter 8.
 
 **Q: What is the specificity-versus-generalization tradeoff, with the IS_RUSH_HOUR example?**
+**Short:** Specific features like raw HOUR carry more signal but overfit, while general ones like IS_RUSH_HOUR sacrifice signal for better generalization.
 More specific features carry more signal but generalize worse, while more general features carry less signal but transfer better. A raw HOUR feature (0–23) is specific and can capture fine patterns but forces the model to learn 24 behaviors and may overfit hour-specific quirks in the training window. An engineered IS_RUSH_HOUR boolean throws away resolution but captures the robust, transferable pattern ("traffic is bad at rush hour") that generalizes across days and cities and is easier to learn from limited data.
 
 **Q: Are features learned or engineered — and why does the fraud example matter?**
+**Short:** Deep learning learns features for unstructured data, but tabular production systems still hand-engineer their highest-signal features.
 Deep learning learns features for unstructured data (image and text embeddings), but the structured/tabular majority of production systems still engineer their best features by hand. The fraud example is the proof: the comment text is a *learned* embedding, but the highest-signal features — account age, number of prior transactions, address match — are *engineered* by a human who understands the domain. Real systems are hybrids that concatenate learned and engineered features into a vector routinely thousands of columns wide.
 
 **Q: When is discretization worth its boundary-discontinuity cost?**
+**Short:** Discretization helps with limited data or interpretability but creates a hard cliff at each bucket boundary, losing the raw value's smooth ordering.
 It's worth it with limited data or when interpretability (especially for trees) matters more than the raw number's precision. Bucketing a continuous value into a few categories reduces distinct values the model must reason about, improving generalization when data is scarce, and maps cleanly onto human categories and tree splits. The cost is a hard cliff at each boundary — \$34,999 is "low" and \$35,000 is "medium" though nearly identical, while \$35,000 and \$99,999 share the "medium" bucket — losing the smooth ordering the raw number carried.
 
 **Q: Why do transformers need positional embeddings, and what's the difference between learned and sinusoidal ones?**
+**Short:** Transformers have no inherent notion of order, so position must be added via learned embeddings or fixed sinusoidal Fourier features.
 Transformers process all tokens in parallel through self-attention and have no inherent notion of order, so "dog bites man" and "man bites dog" look identical without position added as a feature. Learned positional embeddings treat each position index as a category with its own trainable vector — flexible but capped at the trained length. Fixed sinusoidal (Fourier) features compute position vectors from sines and cosines at varying frequencies, need no training, extend beyond the trained length, and generalize to continuous coordinate inputs like spatial positions.
 
 **Q: What log transform and scaling options exist, and which distributions suit each?**

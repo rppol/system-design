@@ -1248,27 +1248,43 @@ Maps chapters that reuse this same toolbox.
 ## Interview Questions
 
 **Q: Why is putting a B-tree index on latitude and another on longitude too slow for proximity search?**
+**Short:** Each 1-D index returns a huge band of rows, and intersecting two huge bands is far more costly than a spatial index.
+
 Because a database index is one-dimensional, so each index narrows only one axis and returns a huge dataset that must then be intersected. The latitude index returns every business in a wide horizontal band and the longitude index returns every business in a tall vertical band; over 200 M businesses each is millions of rows, and the database can efficiently use only one index before filtering the rest. You need an index that captures both dimensions in a single sortable key, which is exactly what geohash, quadtree, and S2 do.
 
 **Q: What is the geohash boundary problem, and how do you fix it?**
+**Short:** Nearby points across a cell edge can share no geohash prefix, so the fix is to query the center cell plus its 8 neighbors.
+
 Two businesses can be meters apart but on opposite sides of a cell edge, so their geohashes share little or no prefix and a query on the user's own cell misses one of them. The fix is to compute the user's geohash cell plus its 8 neighboring cells and query all 9, then union the results. A business just across any edge lands in exactly one neighbor cell, so the 9-cell union recovers every truly-nearby business regardless of which side of a boundary it fell on.
 
 **Q: Why not shard the geospatial index the way you shard the business table?**
+**Short:** The index is small enough to fit one node, so replicating it avoids scattering 9-cell queries across shards.
+
 Because a radius query near a cell boundary touches the 9 neighbor cells, which would hash to different shards, turning every search into a cluster-wide scatter-gather, and rebalancing shards destroys spatial locality. The escape is that the geospatial index is tiny — only business_id plus a few geohash columns, roughly a few GB — so it fits on one machine. Therefore you replicate the single index table to read replicas to scale the read QPS instead of sharding it.
 
 **Q: How do you choose the geohash precision for a given search radius?**
+**Short:** The book maps each of the five allowed radii to a fixed geohash length: 6 for 0.5 km, 5 for 1-2 km, 4 for 5-20 km.
+
 You pick the geohash length whose cell size roughly covers the requested radius, using a fixed mapping. In the book, 0.5 km maps to length 6 (~1 km cells), 1 km and 2 km map to length 5 (~5 km cells), and 5 km and 20 km map to length 4 (~20-40 km cells). The location service computes the user's geohash at the chosen length and does an exact-column or prefix query, so each of the five allowed radii is served by a precomputed geohash column.
 
 **Q: How does geohash actually encode a latitude/longitude point?**
+**Short:** It recursively halves longitude and latitude, interleaves the resulting bits, and base32-encodes them into a string.
+
 It recursively halves the world and interleaves the resulting longitude and latitude bits, then base32-encodes them. At each step it asks whether the point is in the left/right half for longitude (0 or 1) and the bottom/top half for latitude, recursing into the chosen half; even bit positions hold longitude, odd positions hold latitude. Every 5 interleaved bits become one base32 character, so a shared prefix means the points fell on the same side at every early halving and are therefore spatially close.
 
 **Q: Reproduce the quadtree memory estimate for 200 million businesses.**
+**Short:** Storing 200 million business ids plus tree node overhead totals about 1.71 GB, small enough for one server's memory.
+
 It comes out to roughly 1.71 GB, small enough to hold in memory on one server. With a leaf capacity of ~100 businesses, 200 M businesses need about 2 M leaf nodes, and storing 200 M business ids at 8 bytes each dominates at ~1.6 GB. Internal nodes number about a third of the leaves (~0.67 M), so ~2.67 M total nodes at ~40 bytes of pointers each add ~0.1 GB, for a total near 1.71 GB.
 
 **Q: Why does the book prefer read replicas over sharding for the geospatial index?**
+**Short:** Because the index fits on a single node, replication scales reads without the scatter-gather cost sharding would cause.
+
 Because the index is small enough to fit on a single node, so replication scales the read-heavy workload without the boundary-query pain of sharding. Sharding would scatter a single 9-cell radius query across multiple shards and complicate rebalancing, whereas one read replica answers the whole query locally. You just add replicas to absorb the ~5,000 search QPS, and async replication lag is fine because edits only need to appear by the next day.
 
 **Q: Why does an evenly divided fixed grid fail as a geospatial index?**
+**Short:** No single cell size fits both a dense downtown cell and an empty desert cell, since density varies by orders of magnitude.
+
 Because business density varies by orders of magnitude, so no single cell size works everywhere. A downtown Manhattan cell might hold tens of thousands of businesses (too many to scan) while a desert or ocean cell holds zero (wasted, and forces sparse-area queries to fan out over many empty cells). The fix is an index that adapts resolution to density — geohash chooses precision per query, and quadtree splits deeper only where businesses are dense.
 
 **Q: Walk through the end-to-end search request flow.**
@@ -1277,21 +1293,33 @@ Because business density varies by orders of magnitude, so no single cell size w
 The location service maps the radius to a geohash precision, computes the user's geohash plus its 8 neighbors, looks up business ids for the 9 cells, hydrates details, then filters by exact distance, sorts, and paginates. It first checks Redis (geohash→id lists) and falls back to a read replica on a cache miss; it hydrates each candidate's name/address/rating from a business-object cache. The geohash cells are only a coarse candidate filter, so the final exact-distance filter and distance sort are essential before returning a page plus cursor.
 
 **Q: Why is the geohash 9-cell result only a candidate set that needs a final distance filter?**
+**Short:** Geohash cells are rectangular, so their 9-cell union includes corners outside the requested circular radius.
+
 Because geohash cells are rectangles, so the union of 9 cells forms a square region whose corners extend beyond the circular search radius. Returning the raw cell contents would include businesses outside the requested circle. The location service must compute the real great-circle distance for each candidate, drop those beyond the radius, and sort by distance before paginating, using the cells only to cheaply narrow 200 M businesses down to a small candidate set.
 
 **Q: How do you handle a search that returns too few businesses (a sparse area)?**
+**Short:** Drop the last geohash character to jump to a coarser precision covering roughly 32x more area, then re-query.
+
 You widen the search by removing the last character of the geohash, which jumps up one precision level and covers a ~32× larger area, then query again and repeat until enough businesses are found. This directly satisfies the requirement that the system may broaden the radius when there are not enough nearby results. The same coarser-precision fallback works whether the sparseness is because the area is rural or because the initial radius was small.
 
 **Q: What operational problems make a quadtree harder to run than geohash?**
+**Short:** It must be rebuilt in memory at every server start, taking minutes, and needs blue/green warm-up before serving traffic.
+
 The tree lives in memory, so every server must rebuild it at startup — a few minutes over 200 M businesses — and cannot serve correct results until it finishes. Deploys and scale-ups need a blue/green warm-up where new instances build the full tree and pass health checks before taking traffic. Incremental updates are fiddly too, since a delete can drop a leaf below threshold (needing a merge) and an add can push it over 100 (needing a split), so many systems just rebuild periodically.
 
 **Q: What is Google S2 and when is it the right choice?**
+**Short:** S2 maps the sphere onto a Hilbert curve of cell ids for superior locality and geofencing, at higher operational complexity.
+
 S2 maps the sphere onto a Hilbert space-filling curve of 64-bit cell ids, preserving locality better than geohash and supporting arbitrary-region cover. Its region coverer can approximate any shape — a circle, polygon, or delivery zone — with a small set of cells, which makes it excellent for geofencing (alerting when an entity enters or leaves a region), so Google Maps and Tinder use it. It is mathematically superior but has a steep learning curve and heavier operations, so you reach for it when you need geofencing or arbitrary shapes, not for a simple radius search.
 
 **Q: Why is the proximity service designed as read-heavy, and what does that unlock?**
+**Short:** Searches vastly outnumber business edits, letting the design lean on read replicas, aggressive caching, and relaxed consistency.
+
 Because there are far more searches than business edits — 5,000 search QPS versus rare owner updates — so the whole architecture optimizes reads. This lets you use a relational primary (whose weak write-scaling barely matters), serve searches from read replicas, cache aggressively in Redis, and tolerate replication lag. The next-day-visibility requirement is what makes the stale-but-cheap read path acceptable.
 
 **Q: Why does geohash's prefix-equals-proximity rule break near the equator and prime meridian?**
+**Short:** Those are the top-level halving lines, so adjacent points can land in cells whose geohashes differ in the first character.
+
 Because those are the top-level halving lines, so two physically adjacent points on opposite sides fall into cells whose geohashes differ in the very first character and share nothing. Ordinary cell edges are handled by the 8-neighbor query, and the neighbor algorithm also accounts for these wrap-arounds, but it means proximity in geohash-string space is only an approximation of physical proximity. You should rely on the neighbor computation rather than a naive string-prefix comparison.
 
 **Q: Why split the system into a separate location service and business service?**
@@ -1300,15 +1328,23 @@ Because those are the top-level halving lines, so two physically adjacent points
 Because their workloads scale on completely different axes — the location service is stateless, read-only, and handles ~5,000 QPS of search, while the business service handles a trickle of owner writes plus single-business reads. Splitting them lets you add location-service replicas for search traffic without touching the write path, and scale the write path independently. The load balancer routes by URL path, search to one service and CRUD to the other.
 
 **Q: How are the two database tables scaled differently, and why?**
+**Short:** The large business table shards cleanly by business_id, while the small geospatial index is replicated instead of sharded.
+
 The large business-detail table is sharded by business_id, while the small geospatial index is replicated, not sharded. The business table is 200 M full rows accessed by simple key lookup, which shards cleanly on business_id with no cross-shard range queries. The index is only a few GB and its 9-cell radius queries would scatter across shards, so it stays in one logical table replicated to read replicas.
 
 **Q: How is caching structured, and why is invalidation easy here?**
+**Short:** Redis caches geohash-cell-to-id lists and business objects, and next-day-tolerant visibility lets invalidation rely on TTLs.
+
 Redis holds two families: geohash-cell → business-id lists (keyed per precision 4/5/6) and business_id → full business object, so a search resolves the 9 cells and hydrates details mostly from cache. Invalidation is easy because next-day visibility is acceptable, so a generous TTL suffices — the business service drops or lets expire the affected cell keys and object key on an edit rather than doing surgical eviction. This makes the read path fast without a hard consistency requirement.
 
 **Q: How back-of-the-envelope is the 5,000 QPS figure derived?**
+**Short:** 100 million daily users times 5 searches, divided by roughly 10^5 seconds per day, gives about 5,000 searches per second.
+
 It is 100 M DAU times 5 searches per user per day divided by ~10^5 seconds per day, which equals 500 M searches over ~100,000 seconds, or about 5,000 searches per second. The ~10^5 is 86,400 seconds per day rounded. You then design for a peak multiple of that (roughly 2-3×) as headroom, while treating writes as negligible since businesses are edited rarely.
 
 **Q: What follow-up extensions does the chapter flag, and where do they lead?**
+**Short:** Filtering, richer ranking, and moving objects are flagged, with moving objects leading into the next two chapters.
+
 The main ones are filtering by business type or open-hours, ranking by more than distance (rating, popularity, sponsorship), and supporting moving objects in real time. Filtering and ranking layer additional logic on the geohash candidate set, applied in the query or after hydration. Moving objects break the build-once index assumption and require a high-write location-update pipeline, which is the subject of the Nearby Friends (Ch 2) and Google Maps (Ch 3) chapters that reuse this same geohash/quadtree toolbox.
 
 ---

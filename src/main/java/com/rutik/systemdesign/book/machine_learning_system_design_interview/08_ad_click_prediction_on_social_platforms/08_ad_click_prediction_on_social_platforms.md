@@ -1011,15 +1011,19 @@ pCTR is recalibrated before it ever reaches the auction that pairs it with a bid
 ## Interview Questions
 
 **Q: Why does calibration matter for an ad system when a recommender can get away with just good ranking?**
+**Short:** The pCTR feeds an auction that bills on bid times pCTR, so it must be a numerically honest probability, not just well-ranked.
 Because the pCTR feeds an auction that ranks by `bid × pCTR` and bills advertisers, so the probability must be numerically honest, not just correctly ordered. A recommender only needs relative order to seat a feed, but an ad system multiplies pCTR by a bid to set prices, pace budgets, and compare across campaigns and auctions. If pCTR is systematically 2× too high, ranking among equal bids may survive but every price and budget decision is wrong. That is why log loss and calibration, not AUC alone, are the primary metrics.
 
 **Q: You downsample negatives from 1000:1 to 10:1 to train; what breaks and how do you fix it?**
+**Short:** Downsampling inflates predicted probabilities, so recalibrate with q = p / (p + (1-p)/w) before the auction sees them.
 Downsampling inflates every predicted probability upward, so you must recalibrate with `q = p / (p + (1-p)/w)`, where `w` is the negative-keep rate. The training set now has far more positives than reality, so the model over-predicts CTR by roughly `1/w`. The one-line formula scales it back: with `w = 0.01` and a predicted `p = 0.1`, `q = 0.1/(0.1 + 0.9/0.01) = 0.1/90.1 ≈ 0.0011`. Skipping this makes every pCTR entering the auction about 90× too high.
 
 **Q: What is the delayed-click (delayed-feedback) problem and how do you handle it?**
+**Short:** Clicks can arrive long after impression, so immediate labeling mislabels eventual clickers as negatives; use an attribution window or a delay model.
 A click can arrive minutes to days after the impression, so labeling an impression negative immediately mislabels eventual clickers as negatives. This biases CTR downward and is worst for continual learning, which wants the freshest data but gets the least-mature labels. Fixes: a fixed attribution window (accurate but stale), a delayed-feedback model that models the click-delay distribution so unlabeled impressions aren't hard negatives, or immediate labeling plus a late-click correction that up-weights positives when they arrive.
 
 **Q: Why is accuracy a useless offline metric for CTR, and why isn't AUC enough either?**
+**Short:** Accuracy is trivially gamed by predicting all-negative at low CTR, and AUC ignores calibration since it is invariant to monotonic rescaling.
 Accuracy is useless because at ~1% CTR a model predicting "no click" for everything scores ~99% accuracy while being worthless. AUC is better since it measures ranking, but it is invariant to monotonic rescaling, so a model outputting `2 × true_pCTR` everywhere has identical AUC yet is wildly miscalibrated. Since the auction bills on the absolute probability, AUC's blindness to calibration disqualifies it as the sole metric. Log loss and calibration metrics catch what AUC cannot.
 
 **Q: Why does plain logistic regression underperform on CTR, and what's the first thing you add?**
@@ -1027,6 +1031,7 @@ Accuracy is useless because at ~1% CTR a model predicting "no click" for everyth
 Logistic regression is linear — each feature contributes additively and independently — so it cannot represent feature interactions like "young users click gaming ads at 5× the rate." The first fix is feature crossing, but hand-building crosses explodes combinatorially and yields extremely sparse columns. That combinatorial pain is exactly what motivates models that learn crosses automatically — GBDT paths, FM latent vectors, DCN cross layers, DeepFM's FM branch.
 
 **Q: Explain the GBDT+LR architecture and why Facebook combined the two.**
+**Short:** GBDT's leaf indices become learned cross features fed into an online LR, combining GBDT's auto-crossing with LR's cheap online freshness.
 GBDT acts as an automatic feature transformer whose leaf indices are a learned cross representation, and those one-hot leaf indices feed an online logistic regression. GBDT captures nonlinear interactions on dense features but can't update online, while LR is cheap, calibrated, and online-trainable but linear. Combining them gets GBDT's automatic crossing plus LR's continuous freshness: refresh the LR on the stream while rebuilding the slower GBDT less often. It was Facebook's 2014 production design and the bridge from hand-crafted to fully learned crosses.
 
 **Q: Compare DCN and DeepFM honestly — when would you pick each?**
@@ -1034,21 +1039,27 @@ GBDT acts as an automatic feature transformer whose leaf indices are a learned c
 Both learn feature crosses automatically over shared embeddings in a single joint training pass, but DeepFM's explicit crosses are pairwise (2nd-order via FM inner products) while DCN's cross network captures explicit higher-order crosses up to its depth. Pick DeepFM when pairwise interactions dominate and sparsity is extreme, since FM shares statistics through latent vectors and is very parameter-efficient for pairs. Pick DCN (v2) when higher-order crosses demonstrably pay off. Both beat GBDT+LR on sparse-ID-heavy data; a strong answer names both and states the tradeoff.
 
 **Q: What is normalized cross-entropy and why use it instead of raw log loss?**
+**Short:** NE divides the model's log loss by the log loss of predicting the background CTR, making quality comparable across different base rates.
 Normalized cross-entropy (NE) is the model's average cross-entropy divided by the cross-entropy of always predicting the background (average) CTR, so `NE < 1` means the model beats that trivial baseline. Raw log loss is not comparable across periods with different base rates — a 0.5% CTR day has structurally lower log loss than a 2% day regardless of model quality. NE normalizes away the background level, making model quality comparable across datasets and time. It was Facebook's headline offline metric.
 
 **Q: How does a Factorization Machine estimate an interaction for a feature pair it never saw together?**
+**Short:** FM represents each pairwise weight as an inner product of per-feature latent vectors, letting it share statistics across unseen pairs.
 FM parameterizes each pairwise interaction as the inner product of two per-feature latent vectors rather than a free per-pair weight, so it shares statistics across pairs. A full pairwise-weight matrix needs a parameter per pair, which is unlearnable when most pairs never co-occur in sparse CTR data. Because each feature's latent vector is trained from all pairs it appears in, FM can estimate `<v_i, v_j>` for an unseen pair as long as `i` and `j` each co-occurred with others. Computation is `O(k·n)`, not `O(n²)`.
 
 **Q: Why frame CTR as pointwise binary classification rather than a pairwise or listwise ranking loss?**
+**Short:** The auction needs an absolute calibrated probability, and pairwise or listwise losses only preserve ranking, which breaks calibration.
 Because the auction needs an absolute, calibrated probability, and pairwise/listwise losses optimize only relative order within a request, which destroys calibration. Those losses are free to shift and rescale scores as long as ordering is preserved, so they can't guarantee that `pCTR` means an actual probability. Pointwise log loss is a proper scoring rule minimized only by the true probability, yielding calibrated outputs. It is also trivially parallelizable across candidates for high-QPS serving.
 
 **Q: Why is continual learning a hard serving requirement here rather than a nice-to-have?**
+**Short:** Ad performance drifts hourly, so a model even a day stale is already losing money, forcing fine-tune, evaluate, and rollback-guarded deploys.
 Because ad performance drifts hourly — new campaigns launch, creatives fatigue, events spike — so a day-stale model is already losing money. The system must ingest fresh labeled impressions, fine-tune (or periodically retrain), evaluate on a held-out fresh slice, and deploy behind a rollback guard, all on a few-hour cadence. This is why the model architecture favors components that update online (LR/embeddings) over ones that don't (GBDT rebuilds). Continual learning is a pipeline in the serving diagram, not an afterthought.
 
 **Q: What is the DCN cross layer and how does depth relate to interaction order?**
+**Short:** Each cross layer re-multiplies by the original input, so stacking L cross layers yields explicit feature crosses up to degree L+1.
 The cross layer computes `x_{l+1} = x_0 · (x_l^T · w_l) + b_l + x_l`, multiplying the running vector by the original input `x_0` and adding a residual. Because each layer re-multiplies by `x_0`, stacking `L` cross layers produces explicit feature crosses up to degree `L+1` — layer 1 gives pairwise, layer 2 gives 3-way, and so on. The residual keeps lower-order terms. This is how DCN gets explicit high-order crosses that FM/DeepFM only reach implicitly through their deep branch, and v1 does it with only `O(d)` parameters per layer.
 
 **Q: How do you handle the billions of high-cardinality ad and user IDs as features?**
+**Short:** IDs are mapped to dense embeddings via the hashing trick, which hashes each ID into a fixed number of buckets to bound table size.
 Map each ID to a dense embedding vector rather than a one-hot column, and use the hashing trick to bound the table size. A one-hot of a billion IDs is impossible and new IDs appear constantly, so hashing each ID into a fixed number of buckets `B` (e.g. 1e6) and embedding the bucket keeps memory bounded and handles unseen IDs for free. The cost is collisions — distinct IDs sharing a bucket share an embedding — so tune `B` to trade memory against collision noise, and give hot IDs dedicated slots.
 
 **Q: Name the post-hoc calibration techniques besides the downsampling recalibration.**
@@ -1060,12 +1071,15 @@ Platt scaling fits a logistic `σ(a·s + b)` on a held-out set to map raw scores
 Catastrophic forgetting is when aggressive incremental fine-tuning makes the model forget older but still-valid patterns as it chases the latest data — a model fine-tuned only on the last hour forgets seasonal or long-tail-advertiser behavior. Mitigate by mixing a replay buffer of older data into each fine-tune, or by scheduling periodic full retrains from scratch to purge accumulated drift. It is the core fine-tune-cadence-versus-stability tradeoff of the continual-learning pipeline.
 
 **Q: What is point-in-time correctness and why does it bite CTR models hard?**
+**Short:** It means materializing every feature as of the event's timestamp, since historical-CTR features are the easiest to leak the future through.
 Point-in-time correctness means materializing every feature as of the event's timestamp so training never sees the future. CTR models rely heavily on historical-CTR and count features, which are the easiest to leak — joining "the ad's CTR as computed today" onto a week-old impression leaks future clicks. Offline metrics then look magical and online performance collapses. Offline training must reconstruct the feature store's state at each impression's time, typically via a time-travel feature store.
 
 **Q: How does GBDT compare to logistic regression on CTR features, and where does it fail?**
+**Short:** GBDT auto-crosses dense features via tree paths but splits poorly on sparse high-cardinality IDs and can't update online fast enough.
 GBDT captures nonlinearities and feature interactions automatically — each root-to-leaf path is a learned conjunction of thresholds — and is strong on dense, continuous features like historical CTRs and counts. It fails on high-cardinality sparse categorical IDs, where trees split poorly across millions of one-hot columns, and it can't update online, so retraining the ensemble clashes with the hourly-freshness requirement. That combination of strengths and weaknesses is exactly why GBDT+LR pairs it with an online LR.
 
 **Q: How do you handle position bias in click labels?**
+**Short:** Include ad position as a training feature, then neutralize it at serving by fixing it to a constant so the model learns relevance, not slot.
 Include ad position as a training feature so the model attributes position's effect to position rather than to relevance, then neutralize it at serving by fixing it to a constant (e.g. the top slot) for every candidate. An ad's position affects its click rate independent of how relevant it is, so if you don't model it the model learns "being on top" instead of relevance. Feeding position in during training and holding it fixed at inference lets the learned relevance signal drive the auction cleanly.
 
 **Q: Why use multiple objectives (click, conversion, hide) instead of maximizing pCTR alone?**
@@ -1073,6 +1087,7 @@ Include ad position as a training feature so the model attributes position's eff
 Because pure click maximization surfaces clickbait and outrage creatives that spike hide/report rates and hurt retention, so real systems predict click, conversion, and negative feedback and combine them, e.g. `score = pCTR × value − λ·p(hide)`. Click alone ignores whether the click converts or whether the user is harmed. A multi-objective score lets the auction favor ads that are both likely to be clicked and valuable while penalizing ones users hide, protecting long-term engagement.
 
 **Q: What is budget pacing and why is it deliberately outside the CTR model?**
+**Short:** Budget pacing controls how fast an advertiser's daily budget is spent, a non-ML control problem sitting beside the CTR model in the auction.
 Budget pacing is a control/optimization problem that decides how fast to spend an advertiser's daily budget over time, and it sits beside the CTR model as an input to the auction, not inside the model. The CTR model owns only the probability; the auctioneer combines pCTR with the bid and pacing state to decide winners and prices. Naming it shows you know the ML boundary — pacing is a non-ML neighbor that would muddy the model if folded in, and it belongs in the auction/control layer.
 
 **Q: Do the scale numbers force any design decision, or are they just context?**

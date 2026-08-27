@@ -1634,12 +1634,18 @@ compartments so it never sinks the ship.
 ## Interview Questions
 
 **Q: Why do retries at every layer of a call chain cause a 27× amplification?**
+**Short:** Retries multiply through each layer, so r retries over n layers produce r^n total calls — 3 retries at 3 layers becomes 27 calls.
+
 Because retries multiply through the chain: r retries over n layers produce r^n total calls. With three layers (edge → app → backend) each retrying 3 times, one user request becomes 3 × 3 × 3 = 27 calls to the deepest dependency — delivered exactly when it's overloaded and needs *less* traffic. The fix is to retry at a single level only (usually nearest the user) and let other layers fail fast, plus a retry budget capping retries to a small fraction of requests.
 
 **Q: What is a gray failure, and why is it harder to handle than a crash?**
+**Short:** A gray failure is a component that responds to health checks but fails real traffic, so binary up/down checks miss it.
+
 A gray failure is a component that is degraded but not dead — slow, or failing some requests, not down. It's harder than a crash because a binary health check ("are you responding?") gets a healthy answer, so the load balancer keeps routing traffic to a dying node. This "differential observability" (the node thinks it's fine while clients see it failing) means gray failures evade failover and are the usual seed of a cascading failure; detecting them needs health signals based on real client-observed latency and errors, not liveness pings.
 
 **Q: How does shuffle sharding turn 8 nodes into 28 shards, and why does that shrink the blast radius?**
+**Short:** Assigning each customer a random 2-of-8 node subset yields C(8,2)=28 virtual shards, so a poison customer fully affects only 1/28 of them.
+
 It assigns each customer a random 2-of-8-node subset, and the number of distinct subsets is C(8,2) = (8·7)/(2·1) = 28 virtual shards versus only 4 physical shards from plain sharding. A poison-pill customer that kills its 2 nodes fully takes down only customers assigned the *exact* same pair — about 1/28 of them — while anyone overlapping on just one node keeps a healthy second node and routes around the poison via client-side retry. So blast radius collapses from "a whole physical shard of customers" to a tiny fraction.
 
 **Q: What are the three states of a circuit breaker and how does it transition between them?**
@@ -1653,6 +1659,8 @@ Closed (normal: requests pass through, failures are counted), Open (tripped: req
 Load shedding *rejects* excess requests immediately (503) when you're past capacity, for synchronous workloads that need an answer now; load leveling *buffers* excess in a queue and drains it at the consumer's pace, for asynchronous workloads that can wait. Shedding drops excess, leveling defers it. Shedding's trap is that rejecting still costs something; leveling's trap is that an unbounded queue under sustained overload grows forever and becomes a hidden outage — so bound the queue and monitor backlog age.
 
 **Q: What is the constant-work (static stability) pattern and why does it improve resiliency?**
+**Short:** Constant work does the same amount of work in good times and bad, eliminating untested emergency-only recovery paths.
+
 Constant work means doing the same amount of work in good times and bad — for example pushing the *full* configuration/state every cycle instead of sending deltas only when something changes. It improves resiliency by eliminating the fragile "failure mode": there's no special recovery/catch-up path that only runs during emergencies (and is therefore untested and likely broken), because recovery is just the next normal full-state push. The cost is over-provisioning for worst-case work all the time, bought in exchange for predictability and static stability on last-known-good state.
 
 **Q: Why are configuration changes such a common cause of outages?**
@@ -1661,9 +1669,13 @@ Constant work means doing the same amount of work in good times and bad — for 
 Because a bad config often has a *delayed* blast radius — it sits dormant until the code reads it or a process restarts, so the change looks successful and then the whole fleet fails hours later with no recent deploy to blame — and because teams push config straight to production without the testing, review, and canarying they give code. The fix is to treat config like code: validate against a schema before applying, version it, and roll it out gradually through a health-gated pipeline.
 
 **Q: According to the Yuan et al. study, what causes most catastrophic distributed-system failures?**
+**Short:** The Yuan et al. study found most catastrophic failures came from incorrectly handled, explicitly signaled non-fatal errors.
+
 Incorrect handling of non-fatal errors — errors the system detected but then mishandled — not the original faults themselves. The study found the majority of catastrophic failures were triggered by errors that were explicitly signaled in code, and a large share came from trivial bugs like empty catch blocks, aborting on recoverable conditions, or handlers that themselves threw. Most could have been caught by simply unit-testing the error-handling path, which is the least-tested and therefore most dangerous code in the system.
 
 **Q: Why add jitter to exponential backoff, and what does full jitter do?**
+**Short:** Plain exponential backoff still synchronizes clients into one retry wave; full jitter picks a uniform random delay to spread them out.
+
 Exponential backoff alone still synchronizes clients: if many clients fail at the same instant they all compute the same backoff and retry in one wave, re-killing a recovering downstream. Jitter randomizes the delay to smear the retries out; full jitter picks a uniform random delay in [0, backoff]. AWS found full jitter both reduces downstream load and completes work faster than plain backoff, because the retries arrive spread uniformly over the window instead of as a synchronized spike.
 
 **Q: Why is an infinite default timeout dangerous, and how should you pick a timeout?**
@@ -1672,6 +1684,8 @@ Exponential backoff alone still synchronizes clients: if many clients fail at th
 A no-timeout call against a slow (gray-failing) downstream ties up a thread forever, and once a bounded thread pool is fully blocked the service can't accept *any* request — a single slow dependency takes down the whole service. Always set a timeout, and pick it from the downstream's observed latency distribution — a high percentile like p99.9 — so normal slow responses still succeed but genuinely stuck calls are cut. Too short aborts healthy requests; too long fails to protect.
 
 **Q: What is a cascading failure and what single property makes it possible?**
+**Short:** A cascading failure spreads via a feedback loop where one component's failure raises the load on, and so fails, the others.
+
 A cascading failure is one that spreads across a system through a positive feedback loop, like one database replica dying, its load rerouting to the survivor, overloading and killing it too. The defining property is a feedback loop *between failure and load*: a failure that increases the load on other components, where that increased load causes them to fail. Without that loop the failure is contained; the resiliency patterns (circuit breakers, load shedding, bulkheads) exist largely to break the arrow from failure back to more load.
 
 **Q: Why is the availability of a service the product of its dependencies' availabilities?**
@@ -1680,6 +1694,8 @@ A cascading failure is one that spreads across a system through a positive feedb
 Because if a service needs *all* N hard dependencies to serve a request and each is independently available with probability A, the service is available only when all N are, which is A^N — always lower than any single one. Ten hard dependencies at 99.99% give 0.9999^10 ≈ 99.9%, so you lose a whole nine just by depending on them. This is why high availability comes from *reducing hard dependencies* (degrade around soft ones, constant work, control-plane splits) more than from perfecting any single component.
 
 **Q: What does 99.99% availability mean in concrete downtime, and how much does each nine cost?**
+**Short:** 99.99% availability allows about 52.6 minutes of downtime per year, and each added nine cuts that allowance by 10x.
+
 99.99% (four nines) allows about 52.6 minutes of downtime per year, or roughly 8.6 seconds per day. Each additional nine cuts the allowed downtime by 10×: 99.9% is 8.76 hours/year, 99.99% is 52.6 minutes/year, and 99.999% is just 5.26 minutes/year. The steep, order-of-magnitude cost of each nine is why you pick an availability target deliberately rather than chasing more nines everywhere.
 
 **Q: What four conditions must hold for redundancy to actually increase availability?**
@@ -1688,9 +1704,13 @@ Because if a service needs *all* N hard dependencies to serve a request and each
 The complexity of managing the redundancy must not cost more availability than it adds; the system must reliably detect the faulty component; the system must be able to operate (degraded) without that component; and the system must be able to repair and return to full redundancy. If any fails, redundancy adds a failure mode without a net gain — for instance, a buggy failover that occasionally kills both replicas, or a system with no spare capacity so losing one node overloads the rest.
 
 **Q: Why does redundancy only help for uncorrelated faults, and how do AZs and regions differ?**
+**Short:** Redundant copies that fail together give no protection; AZs replicate synchronously with no data loss, regions replicate asynchronously and can lose recent writes.
+
 Because redundant copies that fail *together* provide no redundancy — two replicas on one machine don't survive its power loss. So copies must sit in independent failure domains. Availability Zones have independent power, cooling, and network yet are single-digit milliseconds apart, so you can replicate *synchronously* across them with no data loss on failover. Regions are geographically distant (tens–hundreds of ms), surviving metro-wide disasters, but their distance forces *asynchronous* replication, so a region failover can lose the last few unreplicated writes.
 
 **Q: Which errors should you retry, and which must you never retry?**
+**Short:** Retry transient errors like timeouts, 503, and 429, but never retry deterministic 4xx client errors, which fail identically every time.
+
 Retry transient failures — connection errors, timeouts, HTTP 503, and 429 (honoring Retry-After) — because a second attempt may succeed. Never retry deterministic client errors like 4xx (400, 401, 404): the request is malformed or unauthorized and will fail identically forever, so retrying just wastes load. And only retry idempotent operations, because a request may have succeeded before its acknowledgment was lost, so retrying a non-idempotent action (like a payment) can double-apply it unless you use idempotency keys.
 
 **Q: How does a cellular architecture limit blast radius, and how do you scale it?**
@@ -1699,6 +1719,8 @@ Retry transient failures — connection errors, timeouts, HTTP 503, and 429 (hon
 Each cell is a complete, self-contained instance of the whole stack with a fixed, load-tested maximum size, and a thin routing layer maps each account to a cell — so any fault (bug, poison request, bad deploy, overload) is contained to one cell while all other cells keep serving. You scale by adding more cells at the known-good size rather than growing a cell, which means you never operate beyond a scale you've validated. The tradeoffs are the shared routing layer (a potential SPOF, so keep it dumb and reliable) and reduced cross-cell resource pooling.
 
 **Q: What race condition breaks distributed rate limiting, and how do you fix it?**
+**Short:** Two instances can read the same counter, both see it under the limit, and both write back, breaching it; fix with an atomic increment.
+
 The read-modify-write race: two server instances read the same shared counter simultaneously, both see it under the limit, both allow, and both write back — silently breaching the limit. The fix is an atomic increment (Redis INCR or an atomic Lua script) so the read-check-increment is indivisible. Separately, if the shared store is down you should usually fail *open* (allow requests, with a conservative local fallback) rather than fail closed, so the rate limiter doesn't become a SPOF that takes down the service it protects.
 
 **Q: What is the trap in load leveling, and how do you avoid it?**
@@ -1707,18 +1729,28 @@ The read-modify-write race: two server instances read the same shared counter si
 The trap is an unbounded queue: load leveling absorbs *bursts*, but under a *sustained* overload where producers outpace consumers, the queue grows forever — memory fills and, worse, backlog age climbs until you're processing requests users already abandoned, all while everything still looks "up." Avoid it by bounding the queue depth (and shedding/rejecting when it's full, combining leveling with shedding) and by monitoring the *age* of the oldest item, not just the depth, as the true measure of how far behind you are.
 
 **Q: What is the bulkhead pattern and what failure does it prevent?**
+**Short:** The bulkhead pattern gives each dependency its own resource pool so one gray-failing dependency can't exhaust threads needed by the rest.
+
 The bulkhead pattern gives each downstream dependency or tenant its own isolated resource pool (thread pool, connection pool, queue) instead of one shared pool, so exhausting one partition can't starve the others. It prevents the thread-pool-exhaustion cascade: with a single shared pool, one slow (gray-failing) dependency piles up blocked threads until none are left for *any* request; with per-dependency bulkheads, that dependency's slowness consumes only its own pool while healthy dependencies keep flowing. Netflix Hystrix is the reference implementation.
 
 **Q: How does thread-pool exhaustion turn one slow dependency into a full outage?**
+**Short:** Blocking calls with no timeout pile up threads waiting on a slow dependency until the bounded pool is exhausted and no request can be served.
+
 A service has a bounded thread pool (e.g. Tomcat's ~200 workers); if each request makes a blocking downstream call with no timeout and that downstream slows down, threads pile up waiting. Once all threads are blocked on the slow dependency, the service can accept no new requests at all — including ones that never touch the slow dependency — so a single degraded downstream takes the whole service down. Timeouts free the threads and bulkheads cap how many one dependency can consume, which is why both are mandatory.
 
 **Q: What is deadline propagation and why does it matter in a call chain?**
+**Short:** Deadline propagation passes the caller's remaining time budget down the call chain so downstream hops stop working on requests already abandoned.
+
 Deadline propagation passes the *remaining* time budget down through a call chain rather than giving each hop a fresh timeout. If A gives B a 1-second budget and B has already spent 700 ms, B should call C with only the remaining ~300 ms — otherwise B keeps working on a request A has already abandoned, wasting resources on doomed work. Propagating the deadline (e.g. via a gRPC deadline or a deadline header) makes the whole chain stop the moment the top-level caller stops caring.
 
 **Q: Why does load shedding still cost the server something, and what should trigger it?**
+**Short:** Rejecting a request still costs a connection accept and a response, so shedding should trigger on saturation signals like in-flight request count.
+
 Rejecting a request is cheaper than serving it, but not free — the server still accepts the connection, reads enough to decide, and sends the 503, so under an extreme flood even the rejections can saturate it. That's why shedding must reject as early as possible (before expensive work) and is often paired with rate limiting to cut the flood upstream. The trigger should be a measured saturation signal — number of concurrent in-flight requests or queue depth/latency — rather than CPU alone, which can mislead.
 
 **Q: How does a token bucket differ from a sliding-window counter for rate limiting?**
+**Short:** A token bucket allows bursts up to its size while enforcing an average refill rate; a sliding-window counter blends two fixed windows more cheaply.
+
 A token bucket holds up to B tokens refilled at rate R per second; each request takes a token and an empty bucket rejects, so it enforces average rate R while allowing bursts up to B. A sliding-window counter approximates a rolling window cheaply by keeping the counts for the current and previous fixed windows and blending them by how far into the current window you are, which is memory-bounded (two integers per client) and accurate enough while avoiding the cost of tracking every request timestamp. Token bucket controls burstiness explicitly; the two-counter window trades a little precision for efficiency.
 
 ---

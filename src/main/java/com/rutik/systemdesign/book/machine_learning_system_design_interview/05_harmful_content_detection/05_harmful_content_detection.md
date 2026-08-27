@@ -960,66 +960,87 @@ with human verdicts looping back as training labels.
 ## Interview Questions
 
 **Q: Why does the book choose early fusion over late fusion for harmful content detection?**
+**Short:** Early fusion catches cross-modal harm like harmful memes and needs only one label per post, unlike late fusion.
 Because only early fusion can catch cross-modal harm like a harmful meme, and it needs just one label per post. Late fusion runs a separate model per modality and combines their scores, so it sees only per-modality numbers and can never learn that a benign image plus a benign caption together form a threat. Early fusion concatenates the modality embeddings before the classifier, letting one model learn the joint interaction — and you only have to label whether the whole post is harmful, not each modality separately.
 
 **Q: Explain the harmful meme argument concretely.**
+**Short:** A harmful meme pairs a benign image with benign text whose combination is harmful, which only early fusion can detect.
 A harmful meme is a benign image plus benign text whose combination is harmful, such as a photo of a doorway with a caption implying a threat. Each unimodal model scores its part as safe, so late fusion, which averages per-modality scores, outputs safe. Early fusion sees the joint (image, text) input and can learn that this specific benign-benign combination is a threat. This single case — the corner where both modalities are individually benign — is the whole reason the book prefers early fusion.
 
 **Q: What is the difference between a multi-task classifier and a multi-label classifier?**
+**Short:** Multi-task uses separate per-category heads with their own losses, while multi-label shares one output layer and one loss.
 A multi-label classifier has one shared output layer of N sigmoids under one loss, while a multi-task classifier has separate per-category heads, each with its own loss, summed together. Multi-task keeps the categories structurally decoupled at the top — separate gradients, separate thresholds, independent extensibility — while sharing the expensive bottom layers. Multi-label entangles all categories in one representation and threshold structure, making per-category tuning hard.
 
 **Q: Why is a multi-task classifier better than training one binary model per category?**
+**Short:** Multi-task computes the expensive shared bottom once and lets data-poor categories borrow representation from data-rich ones.
 Because multi-task computes the expensive shared bottom once and only branches into cheap per-category heads, whereas model-per-category recomputes the whole network N times. Multi-task also needs less labeled data per task: the shared bottom learns from all categories jointly, so a data-poor task like self-harm borrows representation from data-rich tasks like nudity. And each head still gets its own threshold. Model-per-category gives per-category output too but at N times the compute and N separate datasets.
 
 **Q: Why can't the system just use a single binary harmful-vs-not classifier?**
+**Short:** A single binary classifier can't name the violated category, blocking transparency, routing, and per-category thresholds.
 Because a single binary classifier can't say which category was violated, which the design requires. Per-category output is needed to notify the author of the specific policy broken (transparency), to route to the correct enforcement rule, and to set different thresholds per category. A single harmful/not bit collapses terrorism and spam into one decision, so it can neither explain nor tune per policy.
 
 **Q: What is prevalence and what is its blind spot?**
+**Short:** Prevalence is harmful over total impressions, but it weights every harmful view equally, ignoring severity and reach.
 Prevalence is harmful impressions divided by total impressions — the fraction of content views that were of harmful content that slipped through. Its blind spot is that it weights every harmful view equally, ignoring severity and reach: one viral terror video seen by ten million people and ten million low-reach borderline posts seen once each produce the same prevalence despite hugely different real harm. So prevalence must be paired with severity-weighting and absolute harmful-impression counts.
 
 **Q: Why does accuracy mislead here, and what offline metric replaces it?**
+**Short:** Accuracy is misleading under under-1% harm prevalence, so the book uses PR-AUC per category instead.
 Because harmful content is under 1% of posts, a trivial always-safe classifier scores over 99% accuracy while catching nothing. The replacement is the precision-recall curve and PR-AUC computed per category, which focus entirely on the minority harmful class. ROC-AUC is reported too but is inflated by the enormous true-negative count under this imbalance, so PR-AUC is the primary offline metric.
 
 **Q: Why train on user reports but evaluate on human-labeled data?**
+**Short:** Reports give noisy but huge training volume, while hand labels give the clean, trustworthy evaluation set.
 Because reports give huge, free, but noisy volume ideal for training, while a trustworthy test set must be clean, which only trained reviewers provide. User reports are noisy and biased — report-bombing, disagreement on policy, missed harm, over-representation of popular content — so using them for evaluation would give an untrustworthy metric. Hand labeling is too expensive to train on at scale but is exactly what you want for the yardstick.
 
 **Q: What is the proactive rate and why does it matter?**
+**Short:** Proactive rate is the share of harm caught before any user report, showing how much spreads before removal.
 The proactive rate is the fraction of harmful content the system catches before any user reports it. It matters because content removed proactively is removed before it spreads and does damage, whereas reactive removal happens only after users have already seen and objected to it. A high proactive rate is a key public integrity KPI; it measures how much harm the ML prevents versus how much it merely cleans up after.
 
 **Q: What are the two consumers of the detection service at serving time?**
+**Short:** A demoting service handles low-confidence posts by reducing reach, while enforcement removes high-confidence violations.
 A demoting service for low-confidence predictions and a violation-enforcement service for high-confidence predictions. The demoting service reduces the post's distribution and queues it for human review rather than removing ambiguous content. The enforcement service takes confident violations down immediately and notifies the author of the category. Human reviewers' verdicts on the demoted queue feed back as clean training labels, closing the loop.
 
 **Q: What is the valid-appeals rate and what does it measure?**
+**Short:** Valid-appeals rate is the share of takedowns overturned on appeal, measuring over-enforcement by the model.
 The valid-appeals rate is the share of takedowns that are overturned on appeal, meaning the model was wrong to remove them. It measures over-enforcement, or false positives: a rising valid-appeals rate signals the model is too aggressive and is removing legitimate content. It complements prevalence, which measures under-enforcement (harm that slipped through), so together they bound both error directions.
 
 **Q: Why is scoping to harmful content, not bad actors, a meaningful decision?**
+**Short:** Harmful content is scored per post while bad actors need account-level graph and behavioral models, a different system.
 Because a content classifier that scores one post in isolation is architecturally different from a system that scores an account's behavior over time. Harmful content's unit of decision is the post; bad actors (fake accounts, coordinated inauthentic behavior, spam rings) are detected by account-level graph and behavioral models across many posts. The book scopes to content and treats bad actors as a separate system, so the whole design is per-post multimodal classification.
 
 **Q: Which encoders does the book use per modality, and why DistilmBERT for text?**
+**Short:** The book uses DistilmBERT for text, CLIP or SimCLR for images, and VideoMoCo for video, DistilmBERT chosen for being multilingual and fast.
 Text uses DistilmBERT, images use CLIP or SimCLR, and video uses VideoMoCo. DistilmBERT is chosen because it is multilingual — required for a global platform — and distilled, so it is smaller and faster, which matters given the latency budget and billions of posts. All three are pretrained (largely self-supervised), so they give strong representations without needing scarce in-domain harm labels; only the fusion and heads are trained on the labeled data.
 
 **Q: What loss does the multi-task model use, and what is the main training challenge?**
+**Short:** Each head uses binary cross-entropy summed across categories, challenged by severe imbalance between and within tasks.
 Each head uses binary cross-entropy against its category label, and the total loss is the sum of the per-task losses. The main challenge is that the per-task datasets are severely imbalanced and of very different sizes — harm is under 1% overall, and nudity may have far more examples than self-harm. Naively summing lets data-rich easy tasks dominate the gradient, so you apply class weighting, focal loss, resampling, or per-task loss weights to keep rare high-stakes tasks learning.
 
 **Q: Why does late fusion need per-modality labels, and why is that expensive?**
+**Short:** Late fusion trains one model per modality, so each needs its own harm label, far costlier than one label per post.
 Because each modality has its own model, you need labels for whether the text alone, the image alone, and the video alone are harmful to train each one. That is far costlier than one label per post: a human must attribute harm to a specific modality, which is often impossible for combination-harm where no single modality is harmful. Early fusion sidesteps this entirely by needing only a single post-level label.
 
 **Q: How does the multi-task design enable per-category thresholds, and why is that important?**
+**Short:** Each head's own output lets its threshold be tuned separately, since miss-costs like terrorism versus spam differ enormously.
 Because each category has its own head with its own loss and output, you can set a different decision threshold per head. This matters because miss-costs differ enormously: terrorism, where a miss is catastrophic, warrants a very low threshold to maximize recall, while spam, where a miss is mild, can use a higher threshold to protect precision. A multi-label classifier with one shared output forces all categories onto one threshold, an unavoidable bad compromise.
 
 **Q: Why does the design explain the harm category to the user?**
+**Short:** Per-category output enables transparency, meaningful appeals, and routing the post to the correct enforcement rule.
 Because per-category output is needed for transparency, appeals, and correct enforcement routing. Notifying the author which specific policy they violated is required for a fair, auditable process and lets them appeal meaningfully. It also routes the post to the right enforcement rule, since different categories have different actions. This transparency requirement is a key reason a single binary classifier is insufficient.
 
 **Q: How is multilingual content handled?**
+**Short:** A multilingual DistilmBERT text encoder represents all languages in one model, with fairness measured per language slice.
 By using a multilingual text encoder, DistilmBERT, so the same model represents text across languages without a separate model per language. This is essential for a global platform. Fairness must then be measured per language slice, since a multilingual encoder can still over- or under-enforce for particular languages or dialects — a point the book raises under fairness.
 
 **Q: How does the human-in-the-loop feedback loop improve the model over time?**
+**Short:** Human reviewers label the demoted queue, and those clean verdicts feed back as fresh training labels, an active-learning loop.
 Human reviewers process the demoted (low-confidence) queue, and their clean verdicts become fresh, accurate training labels. This is a form of active learning: uncertain content is exactly the most informative to label, so routing it to humans both protects users now and steadily improves the model. Over time the model's boundary sharpens on the borderline cases it was previously unsure about.
 
 **Q: Why does the book pair the PR curve rather than the ROC curve for evaluation under imbalance?**
+**Short:** PR-AUC exposes the real precision drop under 1% prevalence, while ROC-AUC looks inflated by the huge true-negative pool.
 Because the PR curve focuses on the positive minority class, while ROC-AUC is inflated by the enormous true-negative pool under extreme imbalance. With harmful content under 1%, a model can look near-perfect on ROC because it trivially classifies the vast safe majority, yet still have poor precision at useful recall. The PR curve exposes that precision drop honestly, so PR-AUC per category is the primary offline metric.
 
 **Q: What is the right action for borderline content that is distasteful but not clearly violating?**
+**Short:** Borderline content should be demoted, reducing its reach and queuing it for human review rather than being removed outright.
 Reduce its distribution rather than remove it — the demoting path is a deliberate policy, not just a confidence fallback. Auto-removing ambiguous content spikes the valid-appeals rate and erodes trust, while leaving it fully distributed spreads potential harm. Demoting downranks it and can queue it for human review, limiting reach without a wrongful takedown. This is why the serving design has a demoting service distinct from enforcement.
 
 ---

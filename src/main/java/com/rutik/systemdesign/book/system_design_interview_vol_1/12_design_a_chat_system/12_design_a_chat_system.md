@@ -1161,30 +1161,48 @@ failover with retry/queue message resend.
 ## Interview Questions
 
 **Q: Why is WebSocket preferred over long polling for a chat system's receive path?**
+**Short:** WebSocket keeps one persistent bidirectional connection per client, letting the server push instantly, which long polling can't reliably do across a load-balanced fleet.
+
 Because WebSocket is a persistent, bidirectional connection that lets the server push a message the instant it arrives, while long polling can't reliably route messages in a load-balanced fleet. With long polling the server that receives a sender's message is usually not the stateless server holding the recipient's hanging GET, the server can't tell when a client has silently disconnected, and idle users still keep re-establishing connections after each timeout. WebSocket fixes all three by keeping one live connection per client over ports 80/443, at the cost of making the server stateful.
 
 **Q: Why does HTTP work for the sender side but not the receiver side of chat?**
+**Short:** HTTP is client-initiated, so it fits sending a message but the server can't originate a push to deliver an incoming one without polling or WebSocket.
+
 HTTP is client-initiated, so it works for sending (the client is the one starting the request) but the server cannot originate a push to deliver an incoming message to a recipient. Sending a message is a normal request/response, and HTTP with keep-alive even reuses the TCP connection to avoid per-message handshakes. Receiving in real time requires the server to initiate data transfer, which plain HTTP cannot do — hence polling, long polling, or WebSocket.
 
 **Q: Why can't created_at be used to order chat messages?**
+**Short:** Two messages can share the same millisecond timestamp, so ordering instead relies on the unique, monotonic message_id.
+
 Because two messages can be created in the same millisecond, so a timestamp is neither guaranteed unique nor strictly increasing. Ordering must come from a value that is both unique and monotonic, which is the job of message_id. created_at is kept for display, but sequence is determined by message_id.
 
 **Q: Why is a key-value store chosen for chat history instead of a relational database?**
+**Short:** A KV store scales horizontally with low latency for keyed lookups, while a relational database struggles with random access over the huge long tail of old messages.
+
 Because a KV store scales horizontally and gives very low latency, while a relational database handles the long tail of old messages poorly — random access over a gigantic index becomes expensive. Chat history is enormous (roughly 60 billion messages a day at WhatsApp scale) and mostly recent-access, but still needs keyed lookups for search, mentions, and jump-to-message. Proven examples are HBase at Facebook Messenger and Cassandra at Discord.
 
 **Q: What is presence flapping, and how does the heartbeat mechanism prevent it?**
+**Short:** It's an online/offline indicator toggling on a flaky connection; a 5-second heartbeat with a 30-second offline threshold absorbs brief drops.
+
 Presence flapping is the bad UX where a user's online/offline indicator toggles rapidly as a flaky network (like a subway) drops and reconnects the connection every few seconds. The naive approach of marking offline the instant a connection drops causes it. The heartbeat fix has the client send a heartbeat every 5 seconds and only marks the user offline after 30 seconds with no heartbeat, so brief blips are absorbed by the window and the indicator flips offline only on a sustained disconnect.
 
 **Q: Why prefer a local per-channel message-ID generator over a global one like Snowflake?**
+**Short:** Ordering only matters within one conversation, so a simple per-channel sequence suffices without the operational cost of a global generator.
+
 Because ordering only ever matters within a single conversation, so ids unique within a channel are sufficient — and a per-channel sequence is much easier to build and operate than a global 64-bit generator. Snowflake produces globally unique, time-sortable ids across machines but is a whole distributed component; MySQL auto_increment is trivial but unavailable in the NoSQL store used for messages. The local sequence gives correct per-channel ordering with the least effort.
 
 **Q: How does the message sync queue (inbox) model work for small group chat?**
+**Short:** A group message is copied into each member's message sync queue, so every client only needs to read its own inbox for new messages.
+
 When a user sends a group message, the message is copied into each member's message sync queue, which acts as that recipient's inbox. This simplifies the client — each client only reads its own inbox to get new messages — and storing one copy per recipient is cheap when the group is small (WeChat uses this and caps groups at 500). On the receive side, a recipient's inbox aggregates messages from many different senders into one ordered stream.
 
 **Q: Why does fan-out-on-write fail for very large groups?**
+**Short:** Write cost grows with group size, so a message to a 100,000-member group triggers 100,000 inbox writes, which is unaffordable at scale.
+
 Because copying a message into every member's inbox means the write cost grows with membership, so a single message in a 100,000-member group triggers 100,000 inbox writes. That is cheap for a 100-member group but unacceptable at massive scale. Large groups switch to fan-out-on-read — store the message once and let readers pull it — trading read work for far less write amplification.
 
 **Q: Walk through the end-to-end 1-on-1 message flow.**
+**Short:** The sender's chat server assigns a message_id, persists the message, then delivers it directly if the recipient is online or via push notification if offline.
+
 User A sends the message to chat server 1, which obtains a message_id from the ID generator, pushes the message to the message sync queue, and persists it in the key-value store. Then delivery branches on the recipient's status: if User B is online the message is forwarded to chat server 2 (where B holds a WebSocket) and delivered, and if B is offline a push notification is sent from the PN servers. Persisting before delivery is what guarantees no message is lost when the recipient is offline.
 
 **Q: How does the single-server thought experiment justify splitting into tiers?**
@@ -1193,9 +1211,13 @@ User A sends the message to chat server 1, which obtains a message_id from the I
 It shows that 1 million concurrent connections at about 10 KB each is roughly 10 GB of memory, which technically fits on one modern server — but a single server is a single point of failure that takes the entire product down if it dies. So the design acknowledges the memory would fit, then rejects the monolith and splits into chat, presence, API, and notification servers plus a KV store, each scaling independently with no SPOF.
 
 **Q: How does multi-device synchronization keep every device in sync?**
+**Short:** Each device tracks its own cur_max_message_id high-water mark and pulls only messages above it, so devices reconcile independently to the same history.
+
 Each device maintains its own WebSocket connection and a cur_max_message_id, the largest message id it has already received. A message is new for a device when its recipient id equals the logged-in user and its message_id in the KV store exceeds that device's cur_max_message_id. Because message_id is monotonic per channel, each device independently pulls exactly the messages above its high-water mark, so devices offline for different spans all reconcile to the same history.
 
 **Q: What is the role of service discovery, and which tool implements it?**
+**Short:** Service discovery, implemented with Apache ZooKeeper, picks the best chat server for a client by location and capacity, and enables failover.
+
 Service discovery recommends the best chat server for a client based on criteria like geographical location and server capacity, and Apache ZooKeeper is the common implementation. ZooKeeper keeps a registry of all available chat servers and picks the best one for a connecting user. It is also what enables chat-server failover — the available-server list lets a client be handed a healthy server when its current one dies.
 
 **Q: Describe the four-step login flow.**
@@ -1204,18 +1226,28 @@ Service discovery recommends the best chat server for a client based on criteria
 First the user tries to log in and the load balancer routes the request to an API server; second the API server authenticates the user; third service discovery (ZooKeeper) finds the best chat server, say server 2, and returns its info; fourth the user opens a WebSocket connection directly to chat server 2. From that point the user is pinned to that stateful chat server for the session.
 
 **Q: Why is the chat service stateful while login and profile services are stateless?**
+**Short:** A chat server holds each client's persistent WebSocket connection state, while login and profile handle stateless request/response calls any API server can serve.
+
 Because each client keeps a persistent WebSocket to one specific chat server and normally stays pinned to it for the whole session, so that server holds per-user connection state. Login, signup, and profile are request/response features that hold no per-user connection state, so any API server behind the load balancer can serve any request. Statefulness is what forces service discovery and connection management on the chat tier.
 
 **Q: How do a user's friends learn about their online-status changes?**
+**Short:** Presence servers publish a status change to a per-friend-pair channel, and each friend's client receives it over its subscribed WebSocket.
+
 Presence servers use a publish-subscribe model where each friend pair owns a channel, so when a user's status changes it publishes the event to one channel per friend (A-B, A-C, A-D). Each friend's client subscribes to the corresponding channel and receives the update over its real-time WebSocket. This works well for small friend lists but the per-pair channel count explodes for large groups.
 
 **Q: How is online status handled for very large groups where per-pair channels don't scale?**
+**Short:** Status is fetched on entering the group or on manual refresh instead of pushed live, trading instant updates for affordable presence at scale.
+
 Instead of pushing every status change to every member, the system fetches online status only when a user enters the group, or lets the user manually refresh it. Maintaining a channel per friend pair is expensive and slow when a group is huge, so real-time presence is traded for a cheap on-demand read. This keeps large-group presence affordable at the cost of instant updates.
 
 **Q: What data goes in a relational database versus the key-value store?**
+**Short:** User profiles, settings, and friends lists go in a relational database, while enormous recent-access-heavy chat history goes in the key-value store.
+
 Generic data — user profiles, settings, and friends lists — goes in a robust relational database with replication and sharding, because it is modest in volume and relationship-rich. Chat history goes in a key-value store because it is enormous, recent-access-heavy, and needs horizontal scaling with low latency. Matching each data type to the store that fits its access pattern is the core storage decision.
 
 **Q: How does the design handle chat-server failure and message resend?**
+**Short:** ZooKeeper reassigns a client to a healthy chat server on failure, while failed message sends are queued and retried until delivered.
+
 For chat-server failure, ZooKeeper holds the list of available chat servers, so a client whose server goes offline can be handed a new healthy server to connect to rather than being orphaned. For message delivery failures, retry and queueing are used — a message that fails to send is queued and retried until it goes through. Together they keep both connections and messages recoverable through transient failures.
 
 **Q: What is the WebSocket upgrade, and why does running on ports 80/443 matter?**

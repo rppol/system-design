@@ -364,9 +364,13 @@ not twelve answers, but the ability to decode the thirteenth system you have nev
 ## Interview Questions
 
 **Q: Which SDI-1 designs use fan-out, and how do their strategies differ?**
+**Short:** Notification, news feed, and chat all use fan-out, differing in whether delivery is precomputed, pulled, or pushed live.
+
 Three designs use fan-out: notification (Ch 10), news feed (Ch 11), and chat (Ch 12). Notification fans one event out to device tokens across APNs/FCM/SMS/email via queues; news feed chooses between fan-out-on-write (precompute each follower's timeline) and fan-out-on-read (assemble at request time), using a hybrid because celebrities make write fan-out explode; chat fans a group message out to each member's per-device message queue. The shared idea is one-to-many delivery; the difference is whether delivery is precomputed, pulled, or pushed over a live connection.
 
 **Q: When would you pick long polling or push over WebSocket, and which two chapters take opposite sides?**
+**Short:** Chat (Ch 12) picks WebSocket for live two-way messaging; notification (Ch 10) picks push because devices sleep and can't hold a socket open.
+
 Pick push/polling when the client is often offline or delivery is bursty and third-party-mediated, and WebSocket when you need a low-latency bidirectional live channel. Chapters 10 and 12 take opposite sides: the notification system (Ch 10) uses server push through APNs/FCM because phones sleep and you cannot hold a socket open to every device, while the chat system (Ch 12) holds a persistent WebSocket per active client for instant two-way messaging. The deciding factor is connection lifetime and who initiates delivery.
 
 **Q: In how many of the twelve designs does consistent hashing appear, and for what job each time?**
@@ -380,9 +384,13 @@ Consistent hashing appears in roughly four designs: it is introduced in Ch 5, th
 Unique ID generation is introduced in Ch 7 and reused wherever the system needs coordination-free, often time-sortable identifiers: Ch 8 derives short URLs from unique IDs via base-62, Ch 11 orders feed entries by time-sortable IDs, and Ch 12 assigns message IDs that also establish per-conversation ordering. The recurring need is a globally unique key generated without a central coordinator, with the high bits holding a timestamp so IDs sort chronologically.
 
 **Q: How do you map a company blog post onto SDI-1 primitives when you have never seen the system?**
+**Short:** Ask its read/write shape, how it survives node failure, and how it handles real-time, uniqueness, or large objects.
+
 Ask three questions: what is the dominant read/write shape, how does it stay consistent when a node dies, and how does it handle real-time, uniqueness, or large objects. Read-heavy and cacheable points at caching plus CDN; write-heavy to many recipients points at fan-out; node-death recovery points at consistent hashing or quorum replication; push vs pull points at Ch 10 or 12; big files point at blob storage plus CDN. Those questions reduce almost any architecture to the primitives you already studied.
 
 **Q: Why is Chapter 16 valuable even though it introduces no new system design?**
+**Short:** It teaches pattern recognition — decoding real architectures into the same primitives the twelve designs already taught.
+
 Its value is teaching pattern recognition — the ability to read real architectures and decode them into primitives you already know. The twelve designs gave you a vocabulary; this chapter shows every production system is a recombination of that vocabulary and hands you the reading list to practice on. Skipping it leaves you with twelve memorized answers instead of a transferable decoding skill, which is what actually distinguishes a strong candidate.
 
 **Q: What is the difference between fan-out-on-write and fan-out-on-read, and which design forces a hybrid?**
@@ -391,9 +399,13 @@ Its value is teaching pattern recognition — the ability to read real architect
 Fan-out-on-write precomputes and pushes each new item into every recipient's timeline at post time, making reads cheap but writes expensive; fan-out-on-read assembles the timeline on demand at read time, making writes cheap but reads expensive. The news feed (Ch 11) forces a hybrid: pure write fan-out explodes for a celebrity with tens of millions of followers, so you precompute for normal users and pull-merge posts from celebrities at read time. The chapter's celebrity problem is the canonical reason no single strategy wins.
 
 **Q: Which SDI-1 designs are dominated by CDN long-tail economics, and what does that mean?**
+**Short:** YouTube and Google Drive, because popular objects live in edge caches while the rare tail is served from costlier origin.
+
 YouTube (Ch 14) and Google Drive (Ch 15) are dominated by CDN economics because both serve large immutable objects to geographically spread users. Long-tail economics means a small set of popular objects gets most requests and belongs in edge caches, while the rare tail is served from origin — so you optimize edge hit ratio and only pay expensive origin egress for infrequent objects. Netflix's Open Connect, embedding cache appliances inside ISPs, is the production expression of this idea.
 
 **Q: What single primitive underpins the hot-key or celebrity problem across news feed, chat, and key-value stores?**
+**Short:** Uneven load distribution, where a few keys or users get disproportionate traffic, fixed by special-casing, splitting, or caching.
+
 Uneven load distribution — a few keys or users receiving vastly more traffic than the average — is the shared cause. In the news feed it is the celebrity with millions of followers; in a group chat it is a huge channel; in a key-value store it is a hot partition. The mitigations rhyme: special-case the hot entity (pull instead of push for celebrities), replicate or split the hot key, or add caching in front of it. Recognizing it as one primitive lets you reuse the same three fixes.
 
 **Q: Which designs use DAG-style pipelines, and what stages does each run?**
@@ -402,33 +414,53 @@ Uneven load distribution — a few keys or users receiving vastly more traffic t
 Three designs use multi-stage pipelines: the web crawler (Ch 9) runs fetch → parse → dedup → store; the search autocomplete system (Ch 13) runs a sampled analytics pipeline that aggregates query logs into trie updates; and YouTube (Ch 14) runs upload → transcode into multiple formats → package → distribute. Google's MapReduce paper is the canonical batch-DAG reference. In every case the win is decoupling stages so each scales and retries independently.
 
 **Q: How does the "Scaling Memcache at Facebook" article extend a specific SDI-1 chapter?**
+**Short:** It extends Ch 1 and Ch 8's caching material by showing leases and regional cache pools solving thundering-herd at extreme scale.
+
 It extends the caching material in Ch 1 and Ch 8 by showing the look-aside cache at extreme read scale. The chapters teach the basic cache-aside pattern; the article adds the production problems that only appear at scale — leases to prevent thundering-herd and stale sets, regional cache pools, and cross-region consistency. The primitive is unchanged; the article shows what it costs and how it breaks at Facebook's read volume.
 
 **Q: What recurring problem does consistent hashing solve that naive hash-mod-N does not?**
+**Short:** It minimizes key remapping when nodes change, since hash-mod-N forces nearly every key to move as the node count changes.
+
 Consistent hashing minimizes key remapping when the number of nodes changes, whereas hash-mod-N remaps almost every key. With modulo, adding or removing one server changes N and forces nearly all keys to new nodes, causing a cache-stampede or massive data movement; consistent hashing places nodes on a ring so adding or removing one node only moves the keys in its immediate arc. Virtual nodes then even out the load so no single node becomes a hotspot.
 
 **Q: Which SDI-1 design is the canonical read-heavy system, and which are write- or fan-out-heavy?**
+**Short:** The URL shortener (Ch 8) is canonically read-heavy, while notification, news feed, and chat (Ch 10-12) are fan-out-heavy.
+
 The URL shortener (Ch 8) is the canonical read-heavy, highly cacheable system — reads dominate writes by orders of magnitude, so caching and a read-optimized store carry the design. The write- and fan-out-heavy systems are the notification service (Ch 10), news feed (Ch 11), and chat (Ch 12), where a single action must be delivered to many recipients. Contrasting Ch 8 against Ch 10–12 is the sharpest read-vs-write tradeoff in the book.
 
 **Q: Why should you read a company's re-architecture ("why we changed it") posts before its greenfield ones?**
+**Short:** Re-architecture posts document the exact failure mode of the naive design, which is the rarest and most valuable knowledge.
+
 Because re-architecture posts document the exact failure mode of the naive design, which is the highest-value and rarest knowledge. A greenfield post tells you what they built; a rewrite post — Dropbox's Nucleus sync engine, Twitter moving timelines off Ruby — tells you why the obvious first design broke and what constraint forced the change. Interviews reward knowing the failure modes, and those live in the rewrite stories.
 
 **Q: What is the danger of cargo-culting a FAANG architecture in an interview?**
+**Short:** It copies an artifact built for a scale the problem never reaches, instead of copying the reasoning that justified it.
+
 Copying a big-company artifact without its scale justification signals you do not understand why it exists. Facebook built TAO because memcache plus MySQL could not serve the social graph at its read volume; proposing a custom graph store for a system at 1% of that scale is over-engineering. The right move is to copy the *reasoning* — identify the constraint that would force the complex solution — and only reach for it when your estimated scale actually crosses that line.
 
 **Q: What is a company engineering blog's "signature theme," and why track it instead of reading broadly?**
+**Short:** It's the one problem a company writes about better than anyone; tracking it builds deep understanding instead of shallow trivia.
+
 A signature theme is the one problem a company writes about better than anyone — Netflix on resilience and chaos engineering, Stripe on idempotency and payment correctness, Cloudflare on edge networking. Tracking a few signature themes end to end builds deep, transferable understanding of specific primitives, whereas skimming forty blogs yields shallow trivia. Depth on the theme beats breadth because the primitive, not the company, is what transfers to new problems.
 
 **Q: How does Netflix's control-plane/data-plane split map onto an SDI-1 design?**
+**Short:** It maps onto YouTube (Ch 14): AWS runs the control plane while Open Connect CDN appliances form the data plane moving video bytes.
+
 It maps onto YouTube (Ch 14): the control plane (running in AWS) handles metadata, user requests, and orchestration, while the data plane (Open Connect CDN appliances) moves the actual video bytes near users. The SDI-1 chapter teaches serving video from a CDN rather than origin; Netflix's write-up is the production form, separating the system that *decides* from the system that *ships bytes* so each scales on its own axis.
 
 **Q: What does delta (block-level) sync solve, and which design introduces it?**
+**Short:** It transfers only a file's changed blocks instead of the whole file, saving bandwidth; Google Drive (Ch 15) introduces it.
+
 Delta sync transfers only the changed blocks of a file instead of re-uploading the whole file, saving bandwidth and time; Google Drive (Ch 15) introduces it. A large document edited by one character should cost one block, not the whole file, so the client hashes fixed-size blocks, compares against the server, and sends only the differing blocks. Dropbox's sync-engine write-ups are the production reference for getting this correct under concurrent edits and conflicts.
 
 **Q: Why does Snowflake put the timestamp in the high bits of the 64-bit ID?**
+**Short:** So sorting IDs numerically also sorts them chronologically, since the most significant bits encode creation time.
+
 Putting the timestamp in the high bits makes IDs sort chronologically, so ordering by ID is ordering by creation time. The layout is roughly a sign bit, ~41 timestamp bits, ~10 machine bits, and ~12 per-millisecond sequence bits; because the most significant bits are time, a plain numeric sort yields time order, which is exactly what feeds and message logs (Ch 11, Ch 12) need without a separate timestamp column or index.
 
 **Q: What three questions turn an unfamiliar engineering blog post into a known primitive?**
+**Short:** Its read/write shape, its node-failure consistency story, and its real-time, uniqueness, or large-object handling.
+
 Ask the read/write shape, the node-failure consistency story, and the real-time/uniqueness/large-object handling. The read/write shape reveals caching vs fan-out; the failure story reveals consistent hashing vs quorum replication vs a consensus service; the third reveals push vs pull, ID generation, or blob-plus-CDN. Running this loop on every article converts prose you have never seen into the same ten primitives the twelve designs already taught you.
 
 ---

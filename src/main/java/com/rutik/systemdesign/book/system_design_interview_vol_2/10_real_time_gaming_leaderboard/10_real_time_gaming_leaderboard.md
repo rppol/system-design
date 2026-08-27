@@ -1122,69 +1122,113 @@ that the whole design lives or dies on choosing the right data structure for *ra
 ## Interview Questions
 
 **Q: Why use a Redis sorted set for a leaderboard instead of a relational table?**
+**Short:** A sorted set gets a user's rank in O(log n) via its skip list, where SQL must sort or count the table per lookup.
+
 A sorted set answers a user's rank in O(log n) via its skip list, whereas a SQL table must sort or count over the whole table for every rank lookup. The sorted set fuses a hash table (O(1) score lookup) with a skip list (ordered rank/range), so top-10, rank, and the surrounding window are all cheap built-in operations. A relational table works to about a million users and then the per-query sort or `COUNT(*)` above a score dominates. Reach for the sorted set precisely because rank is a first-class operation on it.
 
 **Q: Why does adding an index and LIMIT fix the top-10 query but NOT a specific user's rank in SQL?**
+**Short:** An index lets SQL walk ordered rows for top-10, but a user's rank still needs a scan-cost count of everyone higher.
+
 An index makes top-10 fast because the database walks the ordered index and stops after 10 rows, but a user's rank still requires counting everyone who scores higher. That count, `COUNT(*) WHERE score > X`, traverses a large slice of the index — millions of entries for a mid-table player — because a B-tree can find a value in log time but cannot count preceding values in log time. So top-10 is O(log n) but rank stays a scan. This asymmetry is the exact reason the relational design fails at scale.
 
 **Q: What is the difference between ZRANK and ZREVRANK, and which one does a leaderboard need?**
+**Short:** ZREVRANK ranks by descending score, 0 = highest, which a leaderboard needs; ZRANK ranks ascending, 0 = lowest.
+
 ZREVRANK returns the rank in descending score order (rank 0 = highest score), which is what a leaderboard needs; ZRANK ranks in ascending order (rank 0 = lowest). Using ZRANK by mistake shows the worst player as number one. Every ranking and range call in a leaderboard must use the REV variants (ZREVRANK, ZREVRANGE). It is an easy bug because both return plausible small integers.
 
 **Q: Are Redis sorted-set ranks 0-indexed or 1-indexed, and why does it matter?**
+**Short:** Redis sorted-set ranks are 0-indexed, so the top player is rank 0 and must be shown as rank 1 to users.
+
 They are 0-indexed, so the top player has rank 0 and you must add 1 before showing a human-facing position. The window bounds for the relative view, rank-4 to rank+4, are also 0-indexed offsets into the set. Displaying the raw rank shows the champion as "rank 0," and off-by-one errors in the window are visible bugs. Always translate the 0-indexed engine rank to a 1-indexed display rank.
 
 **Q: What two data structures back a Redis sorted set and what does each provide?**
+**Short:** A sorted set fuses a hash table for O(1) score lookup with a skip list for O(log n) ordered rank and range queries.
+
 A sorted set combines a hash table mapping member to score (O(1) lookup) with a skip list that keeps members ordered by score (O(log n) rank, top-N, and range queries). Every write updates both so they stay in sync, and every read uses whichever is faster. This is exactly the "fast score lookup and fast rank at the same time" pair that a relational table cannot deliver together. The dual structure is the whole reason a sorted set fits a leaderboard.
 
 **Q: How does a skip list achieve O(log n) search?**
+**Short:** Its higher express-lane levels let a search skip most nodes, visiting about log2 n nodes instead of walking all n.
+
 A skip list stacks express-lane levels over a sorted linked list, so a search rides a high level until the next hop would overshoot, then drops down a level and repeats. Because each level skips roughly half the remaining nodes, a search visits about log₂ n nodes instead of walking all n. In a 64-node list that is about 6 hops instead of 62. This is the mechanism that makes rank and range queries cheap where a plain linked list or B-tree count would be linear.
 
 **Q: How do you show a user's rank with 4 players above and below?**
+**Short:** Call ZREVRANK for the user's rank, then ZREVRANGE from rank-4 to rank+4 to fetch the 9-row window around them.
+
 Get the user's rank with ZREVRANK, then call ZREVRANGE from rank-4 to rank+4 WITHSCORES to fetch the 9-row window centered on the user. The first call is O(log n) and the range call returns the surrounding members in order. Remember both the rank and the offsets are 0-indexed. This two-command pattern is the entire "relative rank" feature.
 
 **Q: How is the monthly reset implemented without deleting data?**
+**Short:** Encode the month in the sorted-set key name, so a new month starts fresh while prior months' keys are retained.
+
 Use one Redis key per month, such as leaderboard_feb_2021, so a new month starts a fresh sorted set while the previous month's key is retained. There is no "clear" operation; writes simply start landing in the new key at the month boundary. Old keys can be archived or expired later, and "last month's winners" is just a lookup on the previous key. Encoding the month in the key name is the reset mechanism.
 
 **Q: Why must the score-update API be server-authoritative?**
+**Short:** Only the game server, after validating a win, may call the score-update API, so clients can never set their own points.
+
 Because a client that can set its own points can POST itself straight to rank 1, so only the game server, after validating the win, calls POST /v1/scores. The client never sends a trusted points value. This single design decision removes the entire class of client-side scoring cheats and is why the write endpoint is called by the server, not the app. It also pairs with anomaly detection to catch exploits that slip past validation.
 
 **Q: When should the game server publish win events to a message queue instead of calling the leaderboard directly?**
+**Short:** Use a queue only when multiple consumers need the win events; a direct call is simplest for a single consumer.
+
 Use a queue when multiple consumers — analytics, anti-fraud, notifications, payouts — need the same win events; a direct synchronous call is fine when only the leaderboard consumes them. The direct call gives the lowest latency for real-time updates. A queue like Kafka lets the server publish one event that many services consume independently, and it buffers bursts and survives a down consumer, at the cost of added latency and a broker to operate. For just a leaderboard it is over-engineering; a second consumer flips the decision.
 
 **Q: How much memory does the leaderboard need, and does it fit on one Redis node?**
+**Short:** About 650 MB for 25M users at roughly 26 bytes each, fitting a single Redis node even with a 10x overhead margin.
+
 About 650 MB for 25M daily users at roughly 26 bytes each, which fits comfortably on a single Redis node. Even a 10x blow-up for Redis object and skip-list overhead is about 6.5 GB, still one commodity node, and the peak of ~14,500 writes/s is well within a single core. So on capacity grounds one node is enough. Scaling is then driven by availability and dataset growth, not throughput.
 
 **Q: If it fits on one node, why shard Redis at all?**
+**Short:** One node is a single point of failure and a hard ceiling, so you replicate for availability and shard as data grows.
+
 Because one node is a single point of failure and a hard memory/throughput ceiling, so you replicate for HA and shard when data or QPS outgrows one box. A single node crash erases the live board, which is why you run a primary with replicas plus AOF/RDB persistence. The 25M-DAU board fits in ~650 MB, but the 500M-MAU board with richer data reaches ~65 GB and no longer fits in one node's memory. Sharding is a growth and availability decision, not a first-day one.
 
 **Q: How does fixed score-range partitioning answer a top-10 vs a user-rank query?**
+**Short:** Top-10 hits only the highest score-band shard, but a user's rank needs their local rank plus every higher shard's count.
+
 Top-10 hits only the highest score-range shard, while a user's rank needs the shard-local rank plus the total member counts of every higher-band shard. Each shard owns a contiguous score band and the app routes writes by score. Top players live in the top band, so top-10 is a single-shard query, but a global rank sums ZCARD counts of all higher bands and adds the local ZREVRANK. Its weakness is skew: scores cluster low, so low bands go hot.
 
 **Q: Why does Redis Cluster (hash partitioning) turn top-10 into a scatter-gather?**
+**Short:** Hash slotting scatters the top scores across every shard, so a global top-10 must query all shards and merge the results.
+
 Hash slotting places members on shards by hash, scattering the highest scores across all shards, so a global top-10 must fetch each shard's local top 10 and merge them. You cannot ask one shard for the global leaders because they are spread randomly. The merge over N x 10 candidates is bounded by the slowest shard's latency and grows with shard count. The upside is even load and elastic scaling; the downside is that every ranking query pays the fan-out tax.
 
 **Q: How do you avoid a hot partition when storing a leaderboard in DynamoDB?**
+**Short:** Append a random suffix to the partition key so writes spread across N partitions instead of hammering one.
+
 Write-shard the partition key by concatenating game#month with a random suffix 1..N so writes spread across N partitions instead of hammering one. Without the suffix, all writes for one leaderboard target a single partition and throttle. A global secondary index with score as the sort key lets each partition return members in score order. The tradeoff is that N shards must be scatter-gathered on reads, so more shards means smoother writes but wider read fan-out.
 
 **Q: How does DynamoDB read the top players once writes are sharded?**
+**Short:** Query each write-shard's top members via a score GSI, then merge the partial results into the global top 10.
+
 It scatter-gathers: query each of the N write-shards for its top members via the score GSI, then merge the partials into the global top 10. Because the leaderboard is split across N partitions for write smoothing, no single query sees all the leaders. This is the same scatter-gather shape as Redis Cluster, and a user's rank likewise aggregates counts across all shards. It works, but you are rebuilding by hand the ranking Redis gives for free.
 
 **Q: How do you break ties when two players share the same score?**
+**Short:** Fold an inverted timestamp into the score's fractional part so equal point totals rank the earlier arrival higher.
+
 Break ties by who reached the score first, typically by folding a timestamp into the score's fractional part so equal point totals rank the earlier arrival higher. A raw sorted set otherwise orders equal scores lexicographically by member name, which is arbitrary and unfair. A common encoding keeps integer points dominant and encodes inverted arrival time in the low-order part, so more points always win and earlier timestamps break ties. The sorted set then ranks ties correctly with no extra query.
 
 **Q: Why is serverless (API Gateway + Lambda) attractive for this game, and what breaks?**
+**Short:** It auto-scales for spiky traffic with no fleet to run, but cold starts and per-invocation Redis connections hurt latency.
+
 Serverless auto-scales for spiky game traffic with no servers to run, but cold starts and per-invocation Redis connections hurt latency. API Gateway fronts the endpoints and Lambda runs each request against ElastiCache, so you pay per use and never provision a fleet. The caveats are cold starts (mitigated with provisioned concurrency) and connection exhaustion when each invocation opens its own Redis connection under a burst. Reuse connections across warm invocations and cap concurrency to control it.
 
 **Q: Besides Redis, where does user profile data live and why?**
+**Short:** Profile data lives in a separate store while Redis holds only user_id and score, keeping the sorted set small and fast.
+
 Profile data such as display name, avatar, and country lives in a separate relational or NoSQL store, while Redis holds only user_id and score to stay small and fast. Keeping profiles out of the sorted set is what preserves the ~26-bytes-per-entry figure and the single-node fit. The leaderboard service reads ids and scores from Redis and enriches them with profile data before returning to the client. The profile store is the durable source of truth for user records.
 
 **Q: How do you handle faulty or cheated scores?**
+**Short:** Server authority stops clients setting scores, and anomaly detection flags exploits that slip past validation.
+
 Server authority stops clients from setting their own scores, and anomaly detection flags impossible win patterns for review. Only the game server writes scores after refereeing the match, which removes client-side score spoofing structurally. For exploits that slip past validation, an anomaly detector consumes the win stream and flags superhuman win rates or implausible streaks. This is a natural second consumer of the message-queue win events, running alongside the leaderboard.
 
 **Q: What is the update-QPS estimate and how is it derived?**
+**Short:** About 2,900 average and ~14,500 peak writes/s, from 25M users x 10 games/day over 86,400s times a 5x peak factor.
+
 About 2,900 average and ~14,500 peak, from 25M users times 10 games per day divided by 86,400 seconds, times a 5x peak factor. The 25M x 10 gives 250M updates per day, which is ~2,900/s averaged, and the evening peak multiplier of 5 gives ~14,500/s. A naive one-win-per-user model gives only ~290/s average and ~1,450/s peak. Either way the write load is modest for an in-memory store, so one Redis node suffices on throughput.
 
 **Q: Why can't you get a user's exact rank cheaply in a hash-partitioned cluster?**
+**Short:** Rank depends on counts across all shards, so hash partitioning forces a scatter-gather over every shard to compute it.
+
 Because their rank depends on how many members outscore them across all shards, so you must query every shard for its count of higher scores and sum them. Hash partitioning scatters members randomly, so no single shard knows the global ordering. This makes rank a scatter-gather just like the global top-10, bounded by the slowest shard. It is the price of the even load distribution that hash partitioning buys.
 
 ---

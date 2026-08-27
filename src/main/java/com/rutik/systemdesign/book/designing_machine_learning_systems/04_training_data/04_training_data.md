@@ -727,42 +727,55 @@ Training data, not model architecture, is where most ML performance is won or lo
 Reservoir sampling keeps a sample of k items from a stream of unknown length n in one pass using O(k) memory: fill the reservoir with the first k items, then for the n-th item accept it with probability k/n and, if accepted, have it replace a uniformly random reservoir slot. The newest item is in with probability k/n by construction. An existing item stays in if the n-th item is either rejected or accepted-but-replacing-a-different-slot, giving survival probability 1 − 1/n; by induction k/(n−1) · (1 − 1/n) = k/n, so every item satisfies the invariant at every step. It's the go-to when you can't know or store the full stream.
 
 **Q: Under heavy class imbalance, why prefer PR curves over ROC-AUC?**
+**Short:** PR curves stay sensitive to rare-positive performance, while ROC-AUC's huge negative denominator hides it.
 Because ROC-AUC can look deceptively good on rare-positive data while PR curves stay honest. The ROC's false-positive-rate axis has a huge denominator (all the majority-class negatives), so even many false positives barely move it, hiding poor performance on the rare class. Precision's denominator is predicted positives, so the PR curve remains sensitive to how well the model handles the scarce positives you actually care about. For rare-positive problems, read PR-AUC and pick your threshold from the PR curve.
 
 **Q: What is the single most important rule about resampling for class imbalance?**
+**Short:** Resampling must only touch the training set; validation and test must keep the true distribution.
 Never evaluate on resampled data — validation and test sets must keep the real, imbalanced distribution. Resampling (oversampling, undersampling, SMOTE) is strictly a training-set intervention to help the model learn the rare class. If you rebalance the test set to 50/50, your metrics measure a fantasy world and will be wildly optimistic, and the model will collapse on the true production stream. Resample train; leave evaluation at the natural distribution.
 
 **Q: What are SMOTE's limits — when does it stop working?**
+**Short:** SMOTE degrades in high dimensions because interpolating between sparse, far-apart neighbors becomes meaningless.
 SMOTE degrades in high-dimensional spaces because interpolating between nearest neighbors stops being meaningful. It synthesizes new minority points on the line segment between a minority example and one of its k nearest minority neighbors, which lies inside the true minority region only when points are dense and close. In high dimensions (images, text embeddings) points are sparse and far apart, so the segment cuts through empty or majority space, producing implausible points. SMOTE is best on low-dimensional tabular data.
 
 **Q: How does weak supervision denoise many noisy labeling functions without ground truth?**
+**Short:** Weak supervision learns each labeling function's reliability from their agreement patterns, with no ground truth.
 It models the agreements and disagreements among the labeling functions to estimate each one's reliability, then combines them into a single probabilistic label per example. Each LF (a keyword rule, regex, or DB lookup) is noisy and may conflict or overlap with others; a system like Snorkel learns which LFs to trust from their correlation structure — all without hand labels, though a small held-out set helps validate. The payoff is experts writing LFs in about an hour to replace months of hand labeling.
 
 **Q: Why do feedback-loop lengths matter, and how do recommendations and fraud differ?**
+**Short:** Short feedback loops like clicks enable fast retraining; long ones like chargebacks leave teams flying blind.
 Feedback-loop length — the time from prediction to natural label — controls how fast you can detect and fix model degradation. Recommendations have loops of minutes (a click or non-click arrives this session), so you can retrain and catch drift almost immediately. Fraud detection via chargebacks has loops of months (a fraudulent charge may only be disputed weeks later), so labels arrive slowly and you can't quickly confirm the model is still accurate. Short loops enable fast iteration; long loops force you to operate partly blind.
 
 **Q: What is label multiplicity and how do you fix it?**
+**Short:** Label multiplicity is annotator disagreement, fixed by a precise problem definition and annotator training.
 Label multiplicity is when different annotators produce conflicting labels for the same example, like three annotators finding 3, 4, and 6 entities in one sentence. It grows with the expertise the task requires, because hard cases are genuinely ambiguous. The fix is process, not tooling: write a clear, unambiguous problem definition that resolves the ambiguities, train annotators against it, adjudicate disagreements together, and measure inter-annotator agreement to catch drift. Don't just average conflicting labels — fix the spec.
 
 **Q: What's the difference between weighted sampling and sample weights in the loss?**
+**Short:** Weighted sampling changes inclusion probability; sample weights change an included example's loss contribution.
 Weighted sampling changes the probability an example enters the training set, while sample weights keep every example in the set but change how much each contributes to the loss. Weighted sampling operates at data selection — high-weight examples are drawn more often. Sample weights operate at optimization — a high-weight example moves the gradient more but every example is still present. They produce related emphasis effects at different stages, and confusing them is a common interview trap.
 
 **Q: How does focal loss handle class imbalance, mechanically?**
+**Short:** Focal loss multiplies cross-entropy by (1-p_t)^gamma, crushing easy-example loss so hard ones dominate training.
 Focal loss multiplies cross-entropy by a modulating factor `(1 − p_t)^γ` to down-weight easy examples so training focuses on hard ones. When an example is easy (p_t → 1, confident and correct), `(1 − p_t)^γ` → 0 and its loss is crushed toward zero, so the abundant easy majority examples stop dominating the gradient; when it's hard (p_t small), the factor stays near 1 and the example keeps its loss. The focusing parameter γ tunes the strength (γ = 0 is plain cross-entropy, γ = 2 is common). It came from dense object detection's extreme background-to-object imbalance.
 
 **Q: Why does simple random sampling fail for rare classes, and what fixes it?**
+**Short:** Simple random sampling preserves the population's ratio, which erases rare classes; stratified sampling fixes it.
 Simple random sampling gives every item equal probability, so a class that is 0.01% of the population is ~0.01% of the sample — often zero examples at modest sample sizes, meaning the model can never learn it. It preserves the overall distribution, which is exactly the problem when the interesting class is rare. Stratified sampling fixes it by splitting the population into per-class strata and sampling each separately so no group vanishes; weighted sampling can also over-draw the rare class deliberately.
 
 **Q: When does stratified sampling break down?**
+**Short:** Stratified sampling breaks on multilabel data, where an example can't be assigned to one disjoint stratum.
 Stratified sampling breaks when the data can't be cleanly divided into disjoint groups, most notably multilabel problems. It assumes each example belongs to exactly one stratum (class) so you can sample within each; but a multilabel example — an image tagged both "cat" and "dog," a document in "sports" and "politics" — has no single bucket. With overlapping labels the "divide into groups" premise fails, so you fall back to weighted sampling or other schemes.
 
 **Q: What is importance sampling and where does it show up in RL?**
+**Short:** Importance sampling reweights samples from an easy proxy distribution by p(x)/q(x) to estimate a target's expectation.
 Importance sampling lets you estimate expectations under a target distribution p while actually sampling from an easier proxy q, by reweighting each sample by the ratio p(x)/q(x). The requirement is that q covers p's support (q > 0 wherever p > 0). In reinforcement learning's policy-based methods, the trajectories were generated by an old/behavior policy (q) but you want to evaluate an updated policy (p); rather than re-collecting fresh data after every tiny update, you reuse the old samples reweighted by the policy ratio — the basis of off-policy methods and PPO.
 
 **Q: Why is accuracy the wrong metric for a cancer classifier, and what's the deeper cost issue?**
+**Short:** Accuracy hides a degenerate majority-only predictor and ignores that a missed cancer costs far more than a false alarm.
 Because a model predicting "no cancer" for everyone can score 99.99% accuracy on 99.99%-negative data while catching zero cancers — the imbalance lets a degenerate majority-predictor hide behind a great number. The deeper issue is asymmetric error costs: missing a cancer (false negative) is far worse than a false alarm (false positive) that triggers a follow-up test, yet accuracy treats both errors identically. Use precision/recall/F1 and cost-sensitive learning that encodes the real cost matrix.
 
 **Q: What is data lineage and why does it matter?**
+**Short:** Data lineage tracks each data point's source and labeler, letting teams trace a metric drop to bad data.
 Data lineage is tracking where each data point and its label came from — which source and which labeler produced it. It matters because data is combined from many sources of varying quality, and when metrics degrade you need to attribute the problem. Huyen's example: a team added a new data source, accuracy dropped, and because they tracked lineage they isolated the new source and found it was mislabeled. Without lineage they'd have been debugging a healthy model against poisoned data with no way to tell good data from bad.
 
 **Q: Compare the four methods for handling a lack of labels.**
@@ -778,9 +791,11 @@ Active learning has the model pick the examples most useful to label next, most 
 Because large pretrained language models like BERT learned rich general language representations from abundant self-supervised data, so downstream tasks with scarce labels could reuse them instead of training from scratch. The two modes are zero-shot — apply the pretrained model to your task with no additional training or labels — and fine-tuning — continue training it on a small labeled dataset, needing far fewer labels than from scratch. The "BERT era" made fine-tuning a pretrained model the standard NLP workflow, mirroring ImageNet pretraining in vision.
 
 **Q: What's the risk in treating "recommended but not clicked" as a negative label?**
+**Short:** Treating an unclicked recommendation as an instant negative risks mislabeling users who engage later.
 The risk is mislabeling genuine slow positives as negatives because of timing. A user might click later in the session or come back tomorrow, so an immediate "not clicked = negative" is wrong; you must choose a window (e.g. no click within 10 minutes → negative). Too short a window mislabels users who engage late as dislikes; too long a window delays your labels and lengthens the feedback loop, slowing retraining. It's an explicit trade-off between label accuracy and label latency.
 
 **Q: What distinguishes perturbation and mixup from simple label-preserving augmentation?**
+**Short:** Perturbation adds difficulty for robustness, while mixup blends two examples' inputs and labels into one soft label.
 Simple label-preserving augmentation (crop, flip, rotate, synonym replacement) just multiplies data with transforms that keep the label. Perturbation deliberately adds difficulty — noise injection or crafted adversarial examples (generated with methods like BIM) — to make the model robust rather than merely larger; training on them is adversarial training. Mixup goes further and synthesizes new examples by linearly interpolating two examples and their labels together, so a 60/40 blend of a cat and dog image gets the soft label "60% cat, 40% dog," which smooths decision boundaries and improves generalization.
 
 **Q: Why is data augmentation standard in computer vision but harder in NLP?**
@@ -788,6 +803,7 @@ Simple label-preserving augmentation (crop, flip, rotate, synonym replacement) j
 Because images are continuous — you can crop, flip, rotate, add noise, or nudge pixels slightly and the label reliably survives — whereas text is discrete, so changing a token is a large, discrete move that can flip the label or produce nonsense. A wrong synonym can invert sentiment; you can't add an imperceptible continuous perturbation to a word the way you can to a pixel. So vision has cheap, reliable augmentation (near-universal in pipelines) while NLP relies on subtler techniques — synonym replacement, back-translation, templates — and augmentation there is growing but still comparatively immature.
 
 **Q: Give an example of nonprobability sampling and the bias it introduces.**
+**Short:** Language models trained on convenient Reddit or Wikipedia data inherit that source's demographic and topic bias.
 Language models are commonly trained on data that's easy to collect — Reddit posts, Wikipedia, news articles — which is convenience sampling, not data representative of how the target population actually uses language. The bias is invisible in the lab because train and test share the same skewed source, so metrics look fine, then the model underperforms in production on real users who write nothing like Reddit. Other nonprobability methods (snowball, judgment, quota) similarly bake selection bias into the model, which is why they're a known trap despite being cheap and common.
 
 ---

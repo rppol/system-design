@@ -1104,54 +1104,88 @@ when you must recompute any past balance, stop storing the balance and store the
 ## Interview Questions
 
 **Q: Why does two-phase commit (2PC) block, and why is that fatal at 1M TPS?**
+**Short:** 2PC holds locks across every network round trip, and a dead coordinator leaves participants in-doubt, blocking at scale.
+
 2PC holds the row locks taken during the prepare phase all the way through the commit phase, across every network round trip. Concurrent transactions touching those rows must wait for the whole distributed protocol, so lock hold time is dominated by network latency instead of local work. Worse, if the coordinator dies after participants vote ready but before it sends the commit decision, those participants are in-doubt and cannot unilaterally commit or abort — they block holding locks until it recovers. At a million transfers per second across ~2,000 partitions, that blocking and those synchronous round trips make throughput collapse far below target.
 
 **Q: What is the TCC out-of-order execution trap, and how do you fix it?**
+**Short:** A Cancel that arrives before its Try can be lost; a per-transaction phase-status table makes the late Try see it was cancelled.
+
 It is when a Cancel message arrives before the Try it is meant to undo, because the phases are separate network messages that can reorder. A naive Cancel finds no reservation and does nothing, then the delayed Try lands and reserves a dollar that will never be confirmed or cancelled — money frozen forever or double-applied. The fix is a per-`transaction_id` phase-status table: Cancel records a cancelled marker (an empty compensation) even before Try arrives, and when the late Try lands it consults the table, sees the transaction is already cancelled, and refuses to reserve.
 
 **Q: When would you choose Saga over TCC, and what does each cost?**
+**Short:** TCC parallelizes phases and reserves balance but needs three hand-written methods per operation; Saga is simpler but sequential.
+
 Choose based on whether you can parallelize the phases and how much isolation you need. TCC lets the Try phase run on all participants in parallel and holds a pending-balance reservation (some isolation), but forces you to hand-write three methods per operation — business-logic pollution. Saga runs steps sequentially, so latency adds up with chain length and intermediate states are visible, but it needs only one forward and one compensating transaction per step and no reservation bucket. Short, parallel, isolation-sensitive transfers favor TCC; simpler few-step workflows favor Saga.
 
 **Q: Why does event sourcing satisfy auditors when 2PC, TCC, and Saga cannot?**
+**Short:** An immutable event log lets any historical balance be recomputed by replay, while in-place mutation overwrites the past forever.
+
 Because event sourcing stores an immutable, append-only log of events as the only source of truth, so any historical balance is just a fold of the events up to that time. 2PC, TCC, and Saga all mutate the balance in place — once a row goes from 42 to 41, the 42 is gone and no past value can be reconstructed. An auditor replays the event log to any timestamp and recomputes the exact balance plus the itemized transactions that produced it. Reproducibility is a free consequence of making events, not balances, the source of truth.
 
 **Q: Why does an in-memory Redis sharding design fail for money transfers?**
+**Short:** Redis gives no atomicity across shards and its default async persistence can lose an acknowledged write, risking money created or lost.
+
 Because a transfer touches two wallets on two different shards and Redis provides no atomicity across shards, so a crash between the debit and the credit destroys or creates money. Redis `MULTI`/`EXEC` transactions are per-node only, and its persistence is asynchronous by default, so even an acknowledged single-shard write can be lost on a crash. It is fast and partitions trivially, but for money the missing cross-shard atomicity and durability make it unusable without a real distributed transaction on top.
 
 **Q: What is the difference between a command and an event in event sourcing?**
+**Short:** A command can be rejected by validation; an event is an immutable past-tense fact that already happened and cannot be changed.
+
 A command is an imperative request to change state that can be rejected by validation, while an event is an immutable past-tense fact that already happened and cannot be rejected or changed. For a transfer, `TransferMoney(A→B, $1)` is the command; `MoneyDebited(A, $1)` and `MoneyCredited(B, $1)` are the resulting events. The state machine is the boundary that validates a command against current state and, if valid, emits events. This asymmetry — commands can fail, events cannot — is what makes the append-only log a trustworthy, replayable audit trail.
 
 **Q: What role does Raft play in the event-sourced wallet, and what does it replace?**
+**Short:** Raft replicates each partition's event log so a leader failure elects a follower holding the full log, with no in-doubt window.
+
 Raft makes each wallet partition a replicated consensus group so the event log is durable and highly available without 2PC's blocking. The leader receives commands, produces events, and appends them to its local store; Raft replicates the log to followers, who apply the same events. Because every replica runs the same deterministic state machine over the same log, they all compute identical state (the replicated-state-machine pattern). On leader failure Raft elects a follower that already holds the full committed log, giving automatic failover with no lost events and no in-doubt window.
 
 **Q: Why are snapshots needed, and how do they work with the event log?**
+**Short:** A snapshot bounds rebuild time by caching a fold of the log so far, letting recovery replay only the events since the snapshot.
+
 Snapshots bound the time to rebuild state, because replaying an ever-growing event log from the beginning would take longer and longer as history accumulates. Periodically (every N events or few minutes) the in-memory state is persisted as a snapshot; on restart, follower catch-up, or an audit, you load the latest snapshot and replay only the events after it. The events remain the source of truth — snapshots are just a cached fold and can always be recomputed — so auditing is unaffected and you can still replay from zero if needed.
 
 **Q: Why is the Saga coordinator itself event-sourced in the final design?**
+**Short:** Storing the coordinator's own progress as durable events means a crashed coordinator recovers by replay, closing 2PC's SPOF hole.
+
 So that a coordinator crash loses no progress and recovery is a deterministic replay, closing 2PC's coordinator-SPOF hole. The orchestrator's own state — which steps ran, which compensations fired — is stored as events in its own Raft-replicated, event-sourced log. If it dies mid-Saga, a new instance replays that log and resumes exactly where it left off. There is no in-doubt blocking as in 2PC because the coordinator's decisions are durable and replayable rather than held only in volatile memory.
 
 **Q: What is CQRS and why separate the read and write models here?**
+**Short:** CQRS splits fast sequential event appends on the write side from fast point-lookup materialized views built for balance reads.
+
 CQRS (Command Query Responsibility Segregation) separates the write side (commands producing events) from the read side (query-optimized materialized views), because the two have opposite access patterns. The write path wants fast sequential appends of immutable facts; balance inquiries want fast point lookups. A read model is built by consuming the event stream and maintaining a `wallet → balance` view that inquiries hit directly. The view is eventually consistent but rebuildable from the log at any time, and you can maintain several views (per-currency, statements, fraud analytics) from the same events.
 
 **Q: Why do we need cross-partition atomicity at all — can't we avoid it?**
+**Short:** At 1M TPS wallets must span roughly 2,000 partitions, so a transfer's two wallets are almost always on different nodes.
+
 No, because the back-of-envelope math forces ~2,000 partitions and a transfer's two wallets almost always hash to different ones. At 1M TPS a single node is impossible (2 million balance ops per second ÷ ~1,000 per node ≈ 2,000 nodes), so wallets must be sharded, and once sharded the sender and receiver live on separate partitions. A transfer is therefore inherently a distributed transaction across two nodes that must both commit or both abort — the requirement that drives the entire ladder from 2PC to event sourcing.
 
 **Q: How does TCC differ from 2PC, and what does it buy you?**
+**Short:** TCC's Try/Confirm/Cancel each commit locally at the application layer, so no lock is ever held across a network round trip.
+
 TCC implements the two phases at the application layer with each phase as its own short local ACID transaction, whereas 2PC runs at the database/resource-manager layer (XA) and holds locks across the whole protocol. TCC's Try reserves resources, Confirm applies, Cancel undoes — each committing locally and immediately, so no lock is held across a network round trip and the design is database-agnostic. It also avoids 2PC's in-doubt blocking because participants have already committed locally. The cost is business-logic pollution: you must hand-write and correctly compensate three methods per operation.
 
 **Q: Walk through the back-of-envelope estimate that sizes the wallet service.**
+**Short:** 2M balance ops/s divided by ~1,000 TPS per node yields roughly 2,000 partitions, forcing transfers to cross partition boundaries.
+
 Start from 1,000,000 transfers per second; each transfer is a debit plus a credit, so 2 million balance-account operations per second. A well-tuned single relational node handles roughly 1,000 short OLTP transactions per second, so 2,000,000 ÷ 1,000 ≈ 2,000 partitions. The two conclusions are that partitioning is a day-one requirement (not an optimization) and that, with wallets spread across ~2,000 nodes, transfers span partitions and need cross-partition atomicity. That pair of conclusions is the reason the chapter becomes a distributed-transactions study.
 
 **Q: What is the difference between choreography and orchestration in a Saga?**
+**Short:** Choreography has services react to events with no coordinator; orchestration uses a central orchestrator that drives each step.
+
 Choreography is event-driven with no central coordinator — each service subscribes to events and reacts, so the workflow is implicit and spread across services. Orchestration uses a central orchestrator that explicitly calls each step and, on failure, invokes the compensations in reverse, keeping the workflow in one readable place. Choreography is loosely coupled and good for few-step flows where service autonomy matters; orchestration is easier to reason about and change when there are many steps, at the cost of a coordinator component you must make reliable.
 
 **Q: Why must the event-sourced state machine be deterministic?**
+**Short:** A non-deterministic state machine makes replicas diverge on the same log, breaking both Raft replication and audit replay.
+
 Because reproducibility and replication both depend on the same event log always folding to the same state. If the state machine reads the wall clock, a random number, or external mutable data, replicas that apply the identical log diverge and audit replays produce different balances than production. Determinism makes the state machine a pure function of the event log, which is what lets Raft followers compute identical state (replicated state machines) and lets auditors trust that replaying the log reconstructs exactly what happened.
 
 **Q: Why replace Kafka with a local append-only file for the event store?**
+**Short:** A remote broker adds a network hop to every append; a local sequential append backed by Raft replication avoids that cap on throughput.
+
 Because a remote broker adds a network round trip to every event append, which caps throughput far below 1M TPS. A local append-only file turns each write into a sequential disk append — the fastest thing an SSD does — and memory-mapping it keeps reads and the in-memory state in the page cache. The write path becomes validate-against-in-memory-state, append one record locally, apply to in-memory state, with no per-event network hop. Durability and availability then come from Raft-replicating that local log, not from a shared broker.
 
 **Q: How do you keep commands idempotent so retries don't move money twice?**
+**Short:** Each command's unique transaction_id is checked against already-processed IDs, so a retry returns the prior result instead of new events.
+
 Every command carries a unique `transaction_id` idempotency key, and the state machine records which command IDs it has already processed. Before producing events it checks whether events for that `transaction_id` already exist; if so it returns the prior result without emitting new events, making the duplicate a no-op. Combined with the immutable event log, this makes the whole pipeline safe to retry end to end — client retries, Saga retries, follower catch-up — without ever double-applying a transfer.
 
 **Q: What is the trade-off between a synchronous and asynchronous transfer API?**
@@ -1160,9 +1194,13 @@ Every command carries a unique `transaction_id` idempotency key, and the state m
 A synchronous call blocks until the transfer's events are majority-committed and returns the final status — simple for the caller but it pins a connection for the full, variable commit latency, especially for cross-partition Sagas. An asynchronous call returns 202 Accepted with the `transaction_id` immediately and the caller polls or receives a callback when the Saga completes — higher throughput and better tail-latency isolation, at the cost of a two-step client protocol and exposing transfer status. At 1M TPS the async face is usually preferred for cross-partition transfers.
 
 **Q: How does event sourcing prevent a double-spend on a transfer?**
+**Short:** Commands are validated against current state before any event is written, and a partition's single ordered Raft log stops stale concurrent validation.
+
 The state machine validates each command against the current in-memory state before emitting any event, so a `TransferMoney` command that would overdraw the sender is rejected and no event is written. Because the event log is the single write path and appends are serialized within a partition's Raft group (one leader ordering events), two concurrent transfers cannot both validate against a stale balance — the second sees the effect of the first. Validation-before-event plus a single ordered append point is what enforces no-double-spend without in-place locking.
 
 **Q: Why can't you retrofit reproducibility onto an in-place-mutation wallet later?**
+**Short:** An in-place model overwrites every prior balance, so the history an audit needs was never stored and cannot be recovered later.
+
 Because an in-place model records only the latest balance and overwrites every prior value, so the historical states an auditor needs were never stored and cannot be recovered. Reproducibility requires that the *history* of changes be retained as first-class data, which is exactly what event sourcing does and what `UPDATE balance = balance - 1` destroys. Discovering an audit requirement after shipping the mutable model forces a re-architecture to event sourcing rather than a schema tweak — which is why the chapter treats reproducibility as a day-one, model-selecting requirement.
 
 ---

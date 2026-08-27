@@ -814,12 +814,15 @@ is not a license to skip curation.
 ## Interview Questions
 
 **Q: Why can an ML project with excellent accuracy still get cancelled?**
+**Short:** Huyen argues a project survives only if it moves a business metric, not merely an ML metric like accuracy.
 Because it doesn't move a business metric — accuracy is an ML metric, and businesses fund projects that move revenue, engagement, or retention. Huyen's argument is that an ML project's survival depends on contributing to a business objective; a model that improves F1 but leaves revenue flat is, from the business's view, not worth its cost. The fix is to pin the target business metric during project scoping and measure the model's effect on it directly, usually with an A/B test.
 
 **Q: What is the difference between an ML metric and a business metric, and how tight is the mapping?**
+**Short:** ML metrics measure model quality while business metrics measure business success, and the mapping is real but loose.
 An ML metric measures model quality (accuracy, F1, log loss, latency) while a business metric measures business success (revenue, engagement, churn, cost saved). The mapping between them is real but loose and non-linear: a 1% accuracy gain might raise revenue a lot, a little, or not at all depending on where the model sits in the product. Because you cannot reliably infer business impact from the offline ML metric, you must measure the effect on the business metric directly through online experiments.
 
 **Q: What is Netflix's take-rate and why is it a proxy business metric?**
+**Short:** Take-rate is quality plays divided by recommendations shown, a fast proxy correlating with streaming hours and retention.
 Take-rate is the number of quality plays divided by the number of recommendations a user was shown. It is a proxy because the true business goal (retention/LTV) is too slow to observe, whereas take-rate is measurable in days and correlates with higher total streaming hours and lower cancellation. It lets Netflix evaluate a recommender quickly, as long as they keep verifying that the correlation with the real goal still holds.
 
 **Q: How does ranking a newsfeed purely by engagement cause harm, and what is the fix?**
@@ -827,6 +830,7 @@ Take-rate is the number of quality plays divided by the number of recommendation
 Optimizing engagement alone teaches the model that extreme, outrageous, or misinforming content maximizes clicks, so it promotes exactly that, degrading the product — a case of Goodhart's Law where a measure that becomes a target stops being a good measure. The fix isn't to abandon engagement but to also optimize a competing quality objective, ideally by decoupling objectives into separate quality and engagement models combined with a tunable score.
 
 **Q: Why do ML systems "fail silently," and why does that make reliability different?**
+**Short:** A broken ML model keeps returning confident, wrong predictions with no crash or error, unlike traditional software faults.
 Because a broken ML model keeps returning predictions — confidently wrong ones — with no exception, crash, or error, unlike traditional software that announces a fault with a stack trace. Worse, the ground truth needed to catch the error (did the user actually churn?) often arrives days later or never, so the system can be operationally healthy yet functionally broken. This is why ML reliability must include detecting wrong-but-confident predictions, motivating dedicated monitoring and continual learning.
 
 **Q: What are the three axes of scalability for an ML system?**
@@ -838,6 +842,7 @@ Model complexity/size (the model itself grows until it no longer fits one machin
 Because the classification framing puts one output node per app, so adding a new app changes the model architecture and forces a retrain, whereas the regression framing scores each candidate app from its own features and needs no retraining when apps are added. In regression, the model takes user + context + candidate-app features and outputs a single likelihood score, run once per app and ranked. Same prediction, but the regression frame is adaptable where the classification frame is brittle.
 
 **Q: What does "decoupling objectives" mean and why is it better than a single fused loss?**
+**Short:** Decoupling trains a separate model per goal and blends their scores with a weight tunable at serving time.
 Decoupling objectives means training a separate model per objective and combining their outputs with a tunable weighted score at serving time, instead of training one model on a fused loss like α·quality + β·engagement. It's better because α and β become serving-time knobs you can retune freely without retraining, and you retrain a model only when its own objective changes. It also lets each model use its own data and retraining cadence.
 
 **Q: Why is multilabel classification harder than multiclass classification?**
@@ -845,9 +850,11 @@ Decoupling objectives means training a separate model per objective and combinin
 Because the number of labels per example varies, so you can't just take the top class — you must choose a threshold for how many classes to emit, trading precision against recall, and the right threshold differs per class. Multiclass has exactly one correct class, so argmax suffices. Multilabel also suffers more annotator disagreement about which subset of classes applies, producing noisier labels.
 
 **Q: What are the two ways to implement multilabel classification?**
+**Short:** Multilabel is built as one multi-hot model with per-class thresholds, or as N independent binary classifiers.
 One model producing a multi-hot probability vector that you threshold per class, or N independent binary classifiers, one per class. The multi-hot approach shares features and a single model across classes; the N-binary approach lets each class be tuned independently but multiplies the number of models to maintain. Both require a per-class threshold decision because an example may match zero, one, or many classes.
 
 **Q: How do you handle multiclass classification when there are thousands of classes?**
+**Short:** Huyen recommends hierarchical classification, a tree where one model picks the category and another the sub-category.
 Use hierarchical classification: build a tree of classifiers where a first model picks the broad top-level category and a specialized second model picks the sub-category within that branch. High cardinality is hard because you need enough examples per class and many classes are rare or imbalanced. Splitting the decision into levels means each model faces far fewer classes and needs less data per decision.
 
 **Q: Why does Huyen call ML development an iterative loop rather than a pipeline?**
@@ -855,6 +862,7 @@ Use hierarchical classification: build a tree of classifiers where a first model
 Because almost every step has back-edges to earlier steps: model evaluation sends you back for more data or a re-framing, deployment reveals gaps that send you back to modeling, and monitoring detecting drift sends you back to retrain. The six steps — scoping, data engineering, model development, deployment, monitoring and continual learning, business analysis — are circled repeatedly, not marched through once. Treating it as a straight line is the classic newcomer mistake.
 
 **Q: What are the six steps of the iterative ML process, in order?**
+**Short:** The loop runs scoping, data engineering, model development, deployment, monitoring and continual learning, then business analysis.
 Project scoping, data engineering, model development, deployment, monitoring and continual learning, and business analysis. Scoping sets goals and resources; data engineering ingests and processes data; model development extracts features and trains and evaluates; deployment makes the model accessible; monitoring detects decay and drives continual learning; business analysis evaluates against business goals and feeds the next iteration. The whole thing loops, with business analysis restarting scoping.
 
 **Q: Why is a business problem rarely an ML problem out of the box?**
@@ -862,24 +870,31 @@ Project scoping, data engineering, model development, deployment, monitoring and
 Because the business states a symptom ("customer support is too slow"), not a prediction target, and the real bottleneck might be non-ML — like requests being routed to the wrong department, fixable with better routing rules. To make it an ML problem you must reframe it into a concrete learnable target, such as classifying which department a request belongs to. Diagnosing whether ML even applies, and how to phrase the target, is a design decision that dominates the project's outcome.
 
 **Q: What are the four requirements every production ML system must satisfy?**
+**Short:** Huyen names reliability, scalability, maintainability, and adaptability as the four requirements.
 Reliability, scalability, maintainability, and adaptability. Reliability is correct function under adversity, twisted by ML's silent failures; scalability is cost-effective growth along model complexity, traffic, and model count; maintainability is versioning code, data, and artifacts plus reproducibility and documentation; adaptability is updating for data and requirement shifts without downtime. Each mirrors a classic software requirement but is bent by the presence of data and learned behavior.
 
 **Q: What does maintainability require specifically for ML that plain software doesn't?**
+**Short:** ML maintainability requires versioning data and artifacts alongside code, plus reproducible training runs.
 Versioning data and artifacts, not just code, because an ML system's behavior depends on both code and data, so you must be able to trace a prediction to a specific model, dataset, and code version. It also requires reproducibility so another engineer can re-run training and get the same model, plus documentation and a collaboration culture where contributors jointly locate a problem rather than blaming across team lines. Versioning code alone is insufficient.
 
 **Q: How does adaptability connect to continual learning (Ch 9)?**
+**Short:** Adaptability demands updating for data and business shifts without downtime, which continual learning delivers.
 Adaptability is the requirement that the system keep up with shifting data distributions and business requirements without a full rebuild or downtime, and continual learning is the machinery that satisfies it. Because an ML system is part code and part data, and data drifts fast, the model silently degrades unless it can be updated in place. Scheduled retraining, online updates, and test-in-production — all of Ch 9 — exist to deliver adaptability.
 
 **Q: In the "mind versus data" debate, where does Huyen land and with what caveat?**
+**Short:** Huyen sides with data in production, but insists it must be curated data, not merely abundant data.
 In production, data usually wins — the biggest reliable gains come from more and better data, not a cleverer architecture — but the data must be curated, not merely abundant. The data camp cites "The Unreasonable Effectiveness of Data" and Sutton's Bitter Lesson that compute-and-data-scaling methods beat hand-engineered knowledge; the counterpoint warns that quantity has diminishing returns and biased data hurts. Huyen's practical stance: invest heavily in data and pipelines, but treat "just add data" as false if the data isn't curated.
 
 **Q: Why are ML returns described as slow and compounding, and what mistake does that expose?**
+**Short:** Huyen frames ML returns as slow and compounding, so expecting payoff within one quarter gets projects cut too early.
 Because the first model is expensive and modest, but the data pipelines, infrastructure, and organizational know-how it builds make every later model faster and cheaper — returns compound over years. The mistake it exposes is overpromising a payoff next quarter, which gets projects cut before the compounding kicks in. Survey data shows mature ML organizations deploy new models far faster than newcomers, so ML maturity itself is a business asset to budget for.
 
 **Q: When would you choose N binary classifiers over a single multi-hot multilabel model?**
+**Short:** Choose N binary classifiers when each class needs its own threshold, data, or retraining schedule.
 When you need to tune, retrain, or scale each class independently — separate classifiers let each class have its own threshold, data, and retraining cadence. The trade-off is that you now maintain N models instead of one, multiplying the operational burden along the model-count scalability axis. A single multi-hot model is preferable when the classes share features and you want one artifact to manage.
 
 **Q: Can a regression problem be turned into a classification problem, and when is that useful?**
+**Short:** Yes — a regression target can be bucketized into bands, such as low, medium, or high house-price ranges.
 Yes — you bucketize the continuous target into ranges, turning house-price regression into low/medium/high classification, and conversely a classification can be reframed as predicting and thresholding a score. It is useful when the business only cares about coarse bands rather than an exact value, or when the classification framing has better data or calibration properties. The choice of frame is a design lever, not dictated by the problem.
 
 ---

@@ -1450,9 +1450,13 @@ assumes these fundamentals hold.
 ## Interview Questions
 
 **Q: Why does a service that opens many short-lived connections eventually fail with "cannot assign requested address"?**
+**Short:** Ephemeral port exhaustion: closed sockets sit in TIME_WAIT for about 60s, and if new connections open faster than that drains, the port pool runs out.
+
 It has exhausted its ephemeral ports because thousands of sockets are stuck in TIME_WAIT. The endpoint that actively closes a TCP connection holds the socket in TIME_WAIT for 2×MSL (commonly 60 s on Linux) to let stray segments die and guarantee the final ACK; each such socket ties up an ephemeral port from the ~28k–64k range. If new connections open faster than the old ones drain, the port pool runs dry. The fix is connection pooling / keep-alive to stop opening so many connections — not blindly shrinking the timer.
 
 **Q: Why does latency limit TCP throughput even on a very fast link?**
+**Short:** Throughput is capped at WindowSize/RTT, since the sender can have only one window of unacked data in flight before waiting a round-trip for ACKs.
+
 Because throughput is bounded by WindowSize / RTT — the sender can only have one window of unacknowledged data in flight before it must wait a full round-trip for ACKs. On a 30 ms RTT path a 64 KB window tops out at about 17 Mbps regardless of whether the link is 100 Mbps or 10 Gbps, since the pipe sits idle waiting for ACKs. Filling a high bandwidth-delay-product ("long fat") pipe requires a much larger window, which is why TCP window scaling exists.
 
 **Q: A service that was healthy went completely down at midnight with no deploy — what's the classic cause?**
@@ -1461,6 +1465,8 @@ Because throughput is bounded by WindowSize / RTT — the sender can only have o
 An expired TLS certificate. Certificates carry an expiry date, and when one lapses, every TLS handshake fails and the service is totally unreachable even though the servers and code are fine — the failure is triggered by a timer, not a change. The remedy is to automate certificate rotation (ACME / Let's Encrypt / cert-manager) and alert well before expiry (e.g. 30 days out), treating "days to cert expiry" as a monitored metric.
 
 **Q: What is the DNS TTL tradeoff?**
+**Short:** A short TTL enables fast failover and propagation at the cost of more queries, while a long TTL cuts load but leaves clients using stale IPs longer.
+
 A short TTL gives fast failover and change propagation but generates more DNS queries and latency, while a long TTL reduces load via cache hits but leaves clients resolving to stale/dead IPs until their caches expire. You cannot force-expire caches you don't control, so the TTL is a promise made in advance. A common operational move is to lower a long TTL shortly before a planned migration so caches are short-lived when you flip the record.
 
 **Q: How do idempotency keys give exactly-once processing when delivery is only at-least-once?**
@@ -1469,27 +1475,43 @@ A short TTL gives fast failover and change propagation but generates more DNS qu
 The client attaches a unique key per logical operation and reuses it across retries; the server records each processed key with its response and, on seeing a duplicate key, returns the stored response instead of re-executing. So even if a POST arrives twice (because a lost response triggered a retry), the effect — like charging a card — happens exactly once. Storing the key and doing the work should be atomic so a crash can't leave one without the other.
 
 **Q: What is the difference between a safe and an idempotent HTTP method, and why does it matter for retries?**
+**Short:** A safe method like GET has no side effects; an idempotent one like PUT gives the same result on repeat, so only those can be retried freely, unlike POST.
+
 A safe method has no side effects (GET, HEAD) so it's purely read-only; an idempotent method produces the same result whether called once or many times (GET, PUT, DELETE). All safe methods are idempotent, but PUT and DELETE are idempotent without being safe. It matters because safe and idempotent requests can be retried freely after a timeout, whereas POST is neither — retrying it can create duplicate resources, so it needs an idempotency key.
 
 **Q: Why is exactly-once delivery impossible over an unreliable network?**
+**Short:** A sender can't tell a lost message from a lost acknowledgment, so its only option is to retry, which risks delivering the message twice.
+
 Because a sender can never distinguish "the message was lost" from "the message arrived but the acknowledgment was lost," so its only recovery is to retry — which can deliver the message twice (at-least-once). Guaranteeing "at most once" instead means giving up on lost messages, and you can't have both simultaneously. What is achievable is exactly-once processing: make the effect idempotent via dedup so duplicates are harmless even though delivery duplicates them.
 
 **Q: Walk through the TCP three-way handshake and its cost.**
+**Short:** Client sends SYN, server replies SYN-ACK, client sends ACK; data can piggyback on that ACK, costing one round-trip before the first byte is processed.
+
 The client sends SYN with an initial sequence number, the server replies SYN-ACK (acknowledging the client's SYN and sending its own), and the client sends ACK — after which both are ESTABLISHED and data flows. The client can piggyback its first data on that third packet, so the effective setup cost is one round-trip before the first request byte is processed. This fixed 1-RTT tax per new connection is why keep-alive and connection pooling matter, and why QUIC folds setup into fewer round-trips.
 
 **Q: What's the difference between flow control and congestion control in TCP?**
+**Short:** Flow control uses the receiver's advertised window to protect the receiver from overload; congestion control uses cwnd to protect the shared network.
+
 Flow control protects the receiver from being overwhelmed, using the receiver's advertised receive window (rwnd) to bound how many unacknowledged bytes the sender may have in flight. Congestion control protects the shared network, using the sender-side congestion window (cwnd) governed by slow start and AIMD to avoid overloading routers. The sender is limited by min(cwnd, rwnd); people confuse them because both throttle the sender, but one guards the endpoint and the other guards the path.
 
 **Q: How do slow start and AIMD shape a TCP connection's sending rate?**
+**Short:** Slow start doubles cwnd each RTT until a threshold or loss, then congestion avoidance adds about 1 MSS per RTT and halves cwnd on loss, forming a sawtooth.
+
 Slow start begins with a small congestion window (~10 MSS today) and doubles it every RTT — exponential growth — until it hits a threshold or a loss. Then congestion avoidance takes over with AIMD: additive increase of about 1 MSS per RTT, and multiplicative decrease (halving cwnd) on each loss, producing the classic sawtooth. A loss detected by timeout is treated as severe, collapsing cwnd back to 1 and restarting slow start, which is why lossy paths underperform their raw capacity.
 
 **Q: Why does TLS use both asymmetric and symmetric encryption instead of just one?**
+**Short:** Asymmetric crypto solves key exchange between strangers but is slow, so TLS uses it only to set up a symmetric session key, then encrypts traffic with fast AES.
+
 Because the two have opposite strengths, and TLS wants both. Asymmetric (public/private key) crypto solves key distribution — letting two strangers agree on a secret without a pre-shared key — but is far too slow for bulk data; symmetric crypto (AES) is very fast but needs both sides to already share a key. TLS uses asymmetric crypto only during the handshake to establish a symmetric session key, then encrypts all traffic symmetrically, getting secure key exchange and fast bulk encryption at once.
 
 **Q: What is forward secrecy and how does TLS provide it?**
+**Short:** Forward secrecy means a leaked long-term key can't decrypt past traffic; TLS achieves it with ephemeral ECDHE keys generated fresh per session and discarded.
+
 Forward secrecy means that compromising the server's long-term private key in the future cannot decrypt traffic captured in the past. TLS achieves it with ephemeral key exchange (ECDHE): a fresh key pair is generated for each session and discarded afterward, so the session key can't be reconstructed later even if the long-term key leaks. Without it, an attacker who recorded your encrypted traffic today could decrypt it all after stealing the private key later.
 
 **Q: How many round-trips does the TLS 1.3 handshake take, and what's the 0-RTT caveat?**
+**Short:** TLS 1.3 completes in one round-trip, and 0-RTT resumption sends data with the first packet, but that early data is replayable so must stay idempotent-only.
+
 TLS 1.3 completes in one round-trip because the client includes its key share in the first ClientHello, letting the server respond with everything needed to derive the session key (TLS 1.2 needed two). On resumption, TLS 1.3 supports 0-RTT, sending application data with the very first packet. The caveat is that 0-RTT early data is replayable by an attacker, so it must be used only for idempotent requests, never for operations like a payment.
 
 **Q: Walk through DNS resolution from a cold cache.**
@@ -1498,24 +1520,38 @@ TLS 1.3 completes in one round-trip because the client includes its key share in
 The OS stub resolver asks a recursive resolver, which on a cache miss queries a root name server (which points to the TLD servers for, say, .com), then the .com TLD server (which points to the authoritative server for the domain), then the authoritative server, which returns the A record IP. The recursive resolver caches the answer per its TTL and returns it. On a warm cache the whole walk collapses to a single cached lookup, which is why DNS is usually instant.
 
 **Q: Why is DNS a common hidden single point of failure?**
+**Short:** Every request first resolves a name through DNS, so an unreachable DNS provider takes down healthy services, as the 2016 Dyn attack showed.
+
 Because every request first resolves a name through DNS, so if a service's authoritative DNS provider becomes unreachable, clients can't find the service even though its servers are perfectly healthy. The 2016 Dyn DDoS attack demonstrated this: flooding one DNS provider took Twitter, GitHub, Reddit, and others dark simultaneously. Mitigations include using multiple DNS providers for redundancy and recognizing shared dependencies as correlated-failure risks.
 
 **Q: In what sense is DNS an eventually-consistent key-value store?**
+**Short:** DNS maps names to records but caches at every hop, so a record change propagates only as caches expire per TTL, leaving clients briefly inconsistent.
+
 DNS maps keys (domain names) to values (records) but is cached at every hop, so a changed record only propagates as caches expire per their TTLs. That means different clients can see different answers for a while, and record changes are never instantaneous. It trades strong consistency for enormous scalability and availability. This is why record changes aren't instantaneous and why TTL directly governs how quickly the world converges on the new value.
 
 **Q: Which HTTP status codes are safe to retry, and which aren't?**
+**Short:** Retry transient 5xx errors and 429 with backoff on idempotent requests; never retry other 4xx codes, since those mean the request itself was wrong.
+
 Retry transient 5xx server errors (500, 502, 503, 504) with exponential backoff, and retry 429 (Too Many Requests) after honoring Retry-After — but only when the request is idempotent. Do not retry other 4xx codes (400, 401, 403, 404): they indicate the request itself is wrong, so retrying repeats the same failure and wastes the callee's capacity. The first digit tells you the class; 4xx (except 429) is the client's fault and won't improve on retry.
 
 **Q: How do HTTP/2 and HTTP/3 differ in handling head-of-line blocking?**
+**Short:** HTTP/2 still suffers TCP-level head-of-line blocking from one lost segment; HTTP/3's QUIC avoids it via independent per-stream sequencing over UDP.
+
 HTTP/2 removes application-level HOL blocking by multiplexing streams, but still suffers TCP-level HOL blocking. Because TCP is one ordered byte stream, a single lost segment stalls every multiplexed stream until it's retransmitted. HTTP/3 runs over QUIC (on UDP), whose independent per-stream sequencing means a lost packet stalls only its own stream. So on lossy or mobile networks HTTP/3 avoids the transport HOL blocking that still limits HTTP/2.
 
 **Q: What does keep-alive fix in HTTP/1.1, and what limitation remains?**
+**Short:** Keep-alive reuses one TCP connection across requests, avoiding repeated handshakes, but requests on that connection still serve serially, one at a time.
+
 Keep-alive reuses one TCP connection for multiple requests, so you pay the TCP (and TLS) handshake once instead of per request. The remaining limitation is that a keep-alive connection still serves requests serially — one response must finish before the next begins on that connection — so browsers open a pool of about six connections per origin to fake concurrency. HTTP/2's multiplexing is what finally removed the need for those parallel connections.
 
 **Q: What changes to a REST API are backward-compatible, and how do you ship a breaking change?**
+**Short:** Additive changes like new optional fields or endpoints are backward-compatible; breaking changes ship under a new version run alongside the old one.
+
 Backward-compatible (additive) changes — adding an optional field, a new endpoint, or a new optional parameter — are safe because tolerant-reader clients ignore what they don't understand. Breaking changes — removing or renaming a field, changing its type, or making an optional field required — break existing clients. You ship those under a new version (URL versioning like /v2/ or header versioning), run old and new side by side, deprecate the old with a timeline, and remove it only after clients migrate.
 
 **Q: What do UDP and QUIC give you that plain TCP doesn't, and when would you choose them?**
+**Short:** UDP is bare and connectionless for building custom reliability; QUIC adds reliability, independent streams, and folded-in TLS with 1-RTT setup over UDP.
+
 UDP is a bare connectionless transport with no handshake, ordering, or congestion control, so you build exactly the reliability you need. That suits real-time media, DNS, or custom protocols where TCP's setup tax and strict ordering hurt. QUIC, built on UDP and used by HTTP/3, adds back reliability with independent streams (no cross-stream HOL blocking), folds in TLS for a 1-RTT (or 0-RTT resumed) setup, and supports connection migration — making it strong for modern, mobile, high-latency web traffic.
 
 **Q: What are Vitillo's four reasons for building a distributed system, and what do they cost?**
@@ -1524,18 +1560,28 @@ UDP is a bare connectionless transport with no handshake, ordering, or congestio
 Vitillo gives four, each with a named example. Some applications are **inherently distributed** — the web is one, and there was never a single-node alternative to pick instead. Some need **high availability** and resilience to single-node failures, like Dropbox replicating your data across nodes. Some face **workloads too big to fit on one node**, no matter how powerful, like Google's tens of thousands of search requests per second. And some have **performance requirements physically impossible on a single node**, like Netflix streaming high-resolution video from a datacenter near you. What every one of them costs is the same: you accept an unreliable network as the only channel between nodes — messages can be lost, delayed, duplicated, or reordered, and you can't tell a slow node from a dead one. The first reason is the one people forget, because it isn't a design decision at all; the other three are, and where none of them applies a single machine is simpler.
 
 **Q: What does IP guarantee, and what does TCP add on top?**
+**Short:** IP guarantees only best-effort, unordered host-to-host delivery; TCP adds ordering, retransmission, flow control, and congestion control on top of it.
+
 IP guarantees only best-effort host-to-host delivery: packets are routed by address but may be lost, duplicated, reordered, or corrupted, and are capped at the link MTU (~1500 bytes on Ethernet). TCP adds a reliable, ordered, process-to-process byte stream using sequence numbers (order and dedup), positive ACKs plus retransmission on timeout (recover losses), flow control (protect the receiver), and congestion control (protect the network). Everything TCP provides is a guarantee it had to build back on top of IP's unreliability.
 
 **Q: Why is a loss detected by fast retransmit much cheaper than one detected by an RTO timeout?**
+**Short:** Fast retransmit resends within about one RTT and only halves cwnd, while an RTO timeout collapses cwnd to 1 MSS and restarts slow start, costing far more.
+
 A loss caught by three duplicate ACKs triggers fast retransmit, which resends the missing segment within about one RTT and only halves the congestion window, so the connection keeps most of its speed. A loss that falls through to the retransmission-timeout (RTO) instead is read as severe congestion: cwnd collapses all the way to 1 MSS and slow start restarts, costing many RTTs to recover. This is why bursty loss is far more damaging to throughput than the same loss rate spread evenly, and why SACK — which lets the sender resend only the truly missing ranges — matters.
 
 **Q: Why is offset/limit pagination a poor default for large, mutating collections, and what's better?**
+**Short:** Offset/limit shifts under concurrent inserts and deletes, causing skipped or duplicated rows; cursor-based pagination stays stable by keying off the last item seen.
+
 Because offset/limit re-scans from the start each page and, when rows are inserted or deleted between requests, shifts every subsequent offset — so clients skip or duplicate rows and deep offsets get slow. Cursor-based pagination instead returns an opaque cursor pointing at the last item seen and fetches "the next N after this key," which maps to an efficient indexed key-range scan and is stable under concurrent inserts. Cursors are the right default for large collections that change while being paged.
 
 **Q: What is the leaky-abstraction risk in RPC-style APIs like gRPC?**
+**Short:** RPC disguises a remote call as a local function call, hiding that it can be slow, fail, time out, or be retried and duplicated unlike a true local call.
+
 RPC frames a remote call as if it were a local function invocation, which hides that the call can be slow, fail, time out, or be retried and duplicated — none of which a local call does. Treating it as local leads to missing timeouts, no retry/idempotency handling, and surprise latency when the network or callee misbehaves. gRPC's benefits (binary Protobuf payloads, HTTP/2 streaming, generated stubs) are real, but you must still design for partial failure exactly as you would with REST.
 
 **Q: What is head-of-line blocking, and where does it appear across the stack?**
+**Short:** Head-of-line blocking is one stalled item blocking everything behind it, appearing in HTTP/1.1 and HTTP/2's TCP layer, and eliminated by HTTP/3's QUIC.
+
 Head-of-line blocking is when one stalled item blocks everything queued behind it. It appears in HTTP/1.1 at the application layer (a slow response blocks the connection, so browsers open ~6 connections per origin), in HTTP/2 at the transport layer (one lost TCP segment stalls all multiplexed streams because TCP is a single ordered stream), and is finally eliminated in HTTP/3 by QUIC's independent per-stream sequencing, where a lost packet stalls only its own stream. Recognizing which layer the blocking lives at tells you which fix applies.
 
 ---

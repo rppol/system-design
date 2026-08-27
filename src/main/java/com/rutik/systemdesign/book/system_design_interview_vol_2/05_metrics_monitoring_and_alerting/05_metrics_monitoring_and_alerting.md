@@ -1159,33 +1159,53 @@ alerts that bury the signal in a pager storm.
 ## Interview Questions
 
 **Q: What is the difference between the pull and push models for metrics collection, and when do you need each?**
+**Short:** Pull scrapes targets on an interval and needs service discovery; push has agents send, fitting short-lived jobs.
+
 Pull means the collector scrapes each target's `/metrics` endpoint on an interval (Prometheus); push means an agent on each source sends metrics to the collector (CloudWatch, Graphite). Pull needs a service-discovery system to know what to scrape but gives free health-checking and easy `curl` debugging; push is essential for short-lived/batch jobs that exit before a scrape and for firewalled/edge sources, but it risks overloading the collector and needs a separate heartbeat. There is no absolute winner — many systems support both (Prometheus adds a Pushgateway for batch jobs).
 
 **Q: Why is a purpose-built time-series database better than MySQL or Cassandra for this workload?**
+**Short:** A TSDB gives write-optimized ingest, ~12x compression, and built-in downsampling that general stores lack.
+
 A TSDB is write-optimized, compresses points ~12×, and does automatic downsampling and retention, none of which a general store gives you. A relational DB collapses under ~10M row-inserts/s and stores each point in dozens of bytes; a wide-column NoSQL store can sustain the writes (OpenTSDB runs on HBase) but you would have to build compression, downsampling, retention, and a metrics query language yourself. TSDBs (Prometheus, InfluxDB, OpenTSDB) provide all of that plus PromQL/Flux natively.
 
 **Q: What is cardinality, and how does a cardinality explosion take down a TSDB?**
+**Short:** Cardinality is the count of distinct label combinations; one unbounded tag like user_id can multiply it into billions.
+
 Cardinality is the number of distinct time series — the count of unique metric-name-plus-tag-set combinations. Each tag value multiplies it, so adding a high-cardinality tag like `user_id` or `request_id` turns thousands of series into billions, each needing its own index entry and storage stream, which blows past RAM and OOMs the TSDB. The rule is to tag only low-cardinality dimensions (host, region, service, status_code) and never unbounded identifiers.
 
 **Q: How does delta-of-delta encoding compress timestamps to almost nothing?**
+**Short:** It stores only the change in the interval between timestamps, so a regular scrape interval encodes to about a bit.
+
 It stores the change in the interval between timestamps rather than each full timestamp, so a regular scrape interval encodes to about 1 bit per point. You keep the first timestamp in full, then the delta (e.g. +10s), then the delta-of-delta (the change in that delta); for a perfectly regular series every delta-of-delta is 0, which is a single bit. Only when the interval jitters do you spend a few extra bits.
 
 **Q: How does XOR value encoding (Gorilla) work, and what compression does it achieve?**
+**Short:** XORing each value with the previous leaves mostly zero bits, shrinking a 16-byte point to about 1.37 bytes.
+
 XOR encoding stores each value XORed with the previous value, exploiting that adjacent metric values are usually close so their XOR is mostly leading and trailing zero bits. You store only the small run of meaningful middle bits plus a tiny header, and identical consecutive values XOR to all-zeros (1 bit). Combined with delta-of-delta timestamps, Gorilla shrinks a 16-byte raw point (8-byte timestamp + 8-byte value) to about 1.37 bytes — roughly a 12× reduction.
 
 **Q: Why put Kafka between the metrics collector and the time-series database?**
+**Short:** Kafka buffers metrics durably so a TSDB outage or slowdown doesn't drop data, and it absorbs bursty write traffic.
+
 Kafka decouples ingestion from storage and, most importantly, holds metrics durably when the TSDB is down or falling behind, so nothing is dropped and the backlog drains on recovery. Without it, a TSDB outage means blind spots exactly during an incident; with it, collectors keep publishing to Kafka's on-disk log. It also absorbs bursty push traffic and lets one stream feed the TSDB writers, a Flink aggregator, and archival simultaneously.
 
 **Q: Why is deduplication essential in the alerting system?**
+**Short:** Without it, a firing rule re-sends the same alert on every evaluation tick, causing a pager storm.
+
 Because a firing rule is re-evaluated on every interval and would re-send the same alert every tick without dedup, producing a pager storm. Deduplication collapses repeated instances of the same alert (same rule + same labels) into a single notification — notify once when it starts firing, then stay silent (or re-notify only on a long interval) until it resolves. This is the difference between one page and a hundred, and prevents the alert fatigue that makes people mute the pager.
 
 **Q: What does the `for:` duration in an alert rule do, and what breaks without it?**
+**Short:** It requires a condition to hold continuously before firing, suppressing pages from momentary blips.
+
 The `for:` duration requires a condition to hold continuously for that period (e.g. 5 minutes) before the alert fires, which suppresses flapping on transient blips. Without it, a single 1-second threshold crossing pages someone, so a momentary CPU spike or a one-sample latency blip generates noise. The alert sits in a Pending state during the window and only transitions to Firing if the condition persists; if it clears first, it silently returns to Inactive.
 
 **Q: Walk through the states an alert moves through.**
+**Short:** An alert moves Inactive to Pending to Firing to Resolved, paging only once the for: duration has fully elapsed.
+
 An alert goes Inactive → Pending → Firing → Resolved. When the condition first becomes true it enters Pending (not yet notified); if it holds for the full `for:` duration it transitions to Firing and a notification is sent; if it clears before that, it returns to Inactive without paging anyone. When a firing condition later clears, it becomes Resolved (optionally sending a "resolved" notification) and clears. While Firing it stays firing across evaluations, deduplicated so it does not re-page.
 
 **Q: What is the retention and resolution (rollup) policy, and why not keep everything at full resolution?**
+**Short:** Data is stored at decreasing resolution as it ages — 7 days raw, 30 days per-minute, a year per-hour — to control cost.
+
 Data is kept at decreasing resolution as it ages: 7 days raw, 30 days at 1-minute, 1 year at 1-hour. Keeping 10M series at raw resolution for a year is astronomically expensive and nobody queries year-old data at 1-second granularity, so downsampling trades resolution for a massive storage reduction — from ~8,640 points/series/day raw down to 24 at hourly. Recent debugging needs full detail; long-term capacity trends need only coarse points.
 
 **Q: What runs the downsampling, and how does it help queries as well as storage?**
@@ -1194,18 +1214,28 @@ Data is kept at decreasing resolution as it ages: 7 days raw, 30 days at 1-minut
 Batch rollup jobs run on a schedule, reading higher-resolution data, computing an aggregate (avg/min/max/count) per coarser bucket, writing the lower-resolution series, and letting the raw data expire per the retention policy. Beyond shrinking storage, downsampling speeds long-range queries: a 1-year dashboard reads ~8,760 hourly points per series instead of billions of raw ones. It implements the 7-day/30-day/1-year resolution ladder.
 
 **Q: What are the three places aggregation can happen, and what does each trade off?**
+**Short:** Client-side is cheapest but least flexible, ingestion-time risks late data, and query-side is most precise but costliest.
+
 Aggregation can happen client-side (agent averages before sending), at ingestion (a Flink stream job), or query-side (store raw, aggregate on read). Client-side is cheapest but least flexible and hides spikes; ingestion-time is cheap to store but breaks on late-arriving data; query-side is the most precise and flexible but pays full storage and scan cost. The practical answer is hybrid: keep raw while data is hot, then downsample as it ages.
 
 **Q: What is the late-arriving data problem in ingestion-time aggregation?**
+**Short:** A point that arrives after its stream window has closed is either dropped or forces a costly recomputation.
+
 It is when a metric point arrives after the stream window it belonged to has already closed and emitted its aggregate, so the point is either dropped or forces an expensive recomputation. Metrics are timestamped at the source and can arrive out of order due to network delay or a buffering push agent, so a 1-minute window that already emitted its average will miss a point that shows up 90 seconds late. You must pick an allowed-lateness/watermark policy or keep raw data and aggregate on query.
 
 **Q: Why does the design put a dedicated query service (with a cache) between the TSDB and its consumers?**
+**Short:** It caches repeated dashboard queries and decouples alerting and visualization from the specific TSDB engine.
+
 Because dashboards and alert rules issue the same range queries repeatedly, and a cache in front of the TSDB serves those from memory, sharply cutting load on the storage engine. The query service also decouples visualization and alerting from the specific TSDB — they call its API rather than raw PromQL against one engine — so the storage layer can change without touching the read tiers. It is the single read gateway both alerting and visualization go through.
 
 **Q: Why use PromQL/Flux instead of SQL for metrics queries?**
+**Short:** They make time-window aggregation, counter rate calculation, and downsampling first-class operators that SQL lacks.
+
 Because SQL has no first-class time-window alignment, rate-of-change over monotonic counters, or gap interpolation, so expressing a windowed p99 or a per-second rate is verbose and slow. Metrics-native languages make time-range aggregation, `rate()` over counters, and downsampling first-class operators — e.g. PromQL's `avg by (pool)(rate(cpu_seconds_total[5m]))`. That specialization for time-series access patterns is exactly why TSDBs ship their own query language.
 
 **Q: What data model does a metric use, and what identifies a unique time series?**
+**Short:** A series is identified by its metric name plus its full tag set, with each point carrying a timestamp and value.
+
 A metric is a time series where each data point has a metric name, a set of tags/labels, a timestamp, and a value — e.g. `CPU.load host=webserver01,region=us-west 1613707265 32.5`. A time series is uniquely identified by its metric name plus its full tag set, so the same name with different tags (`host=web01` vs `host=web02`) is a different series. This layout makes writes appends to the end of a series and makes timestamp/value delta-compression highly effective.
 
 **Q: Why should the visualization tier be bought (Grafana) rather than built?**
@@ -1214,15 +1244,23 @@ A metric is a time series where each data point has a metric name, a set of tags
 Because a high-quality dashboard system — rich graph types, templating, alert overlays, sharing, permissions — is a large product on its own, and Grafana already solves it and connects to Prometheus, InfluxDB, Graphite, and most TSDBs as data sources. Building a bespoke graphing UI yields something worse than Grafana that needs perpetual maintenance. The engineering effort belongs on the parts that are genuinely your problem: ingestion and alerting.
 
 **Q: Why must a monitoring system be more available than the systems it watches, and how is that achieved?**
+**Short:** It must not share its targets' failure domain, achieved via stateless collectors, a Kafka buffer, and persistent alert state.
+
 Because a monitoring system that is down when its targets break leaves you blind during the exact moment you need visibility, so it must not share its targets' failure domain. This is achieved by making collectors stateless and auto-scaled, buffering ingestion through Kafka so a TSDB outage does not drop metrics, persisting alert state so an alert-manager restart does not re-page or forget firing alerts, and running the monitoring stack in independent infrastructure. High availability of the monitoring path is a hard requirement, not a nice-to-have.
 
 **Q: What is the estimated write load, and why does it make writes the hard part of the design?**
+**Short:** About 10M metrics scraped every 10 seconds yields roughly 1M writes per second, dwarfing what row-based databases sustain.
+
 With 1,000 pools × 100 machines × ~100 metrics = ~10M distinct metrics, a 10-second scrape interval is ~1M writes/s and a 1-second interval is ~10M writes/s — a steady, massive, append-only write stream. Reads, by contrast, are low but spiky (nobody looks until a dashboard opens or an incident starts). This write-heavy/read-spiky asymmetry is exactly what TSDBs optimize for and what general-purpose databases handle badly, which is why the storage engine choice dominates the design.
 
 **Q: What is the alert store and why does it need to be persistent?**
+**Short:** It durably records each alert's state so an alert-manager restart doesn't forget firing alerts and re-page everyone.
+
 The alert store is a durable store (e.g. Cassandra) holding each alert's current state — pending/firing/resolved, when it started, and what has been notified. It must be persistent so an alert-manager restart or failover does not forget in-flight alerts and re-page everyone, and so deduplication and firing status survive across restarts. Without it, the alerting tier is stateless in a bad way: every restart risks a self-inflicted pager storm.
 
 **Q: What is the Facebook Gorilla alternative to a Kafka-buffered ingestion path?**
+**Short:** Gorilla keeps roughly the last 26 hours of data entirely in RAM, serving hot queries without a Kafka hop.
+
 Gorilla is an in-memory TSDB that keeps the most recent ~26 hours of data entirely in RAM with a write-behind to durable storage, avoiding the Kafka hop for the hot path. Since most queries and all alert evaluations touch only very recent data, serving them from memory is faster; the tradeoff is that the in-memory tier is complex and must handle its own durability and cross-region replication. It is the "we are at Facebook scale and need the last day in microseconds" specialization, whereas the Kafka buffer is the simpler, more operable default.
 
 ---

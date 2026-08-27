@@ -1193,51 +1193,83 @@ consistency-vs-latency tradeoff under the caller's control.
 ## Interview Questions
 
 **Q: In the CAP theorem, why can't a real distributed system be CA (consistency + availability)?**
+**Short:** Network partitions are unavoidable in any real deployment, so a system must choose between consistency (CP) and availability (AP) when one occurs.
+
 Because network partitions are unavoidable, so partition tolerance is mandatory, leaving only CP or AP as real choices. Cables cut, switches fail, and packets drop in any real deployment; a "CA" system has no defined behavior the moment a partition occurs, and one always eventually does. The honest design decision is therefore whether to sacrifice availability (CP) or consistency (AP) when a partition hits — never to claim you kept all three.
 
 **Q: When a partition splits the replicas, what does a CP system do versus an AP system?**
+**Short:** A CP system blocks writes on the isolated side to stay consistent, while an AP system keeps accepting writes and reconciles divergence after the partition heals.
+
 A CP system blocks writes to keep every replica consistent, while an AP system keeps accepting writes and reconciles the divergence after the partition heals. In the CP case, nodes on the reachable side refuse writes so no replica falls behind — good for bank systems where a wrong balance is unacceptable, at the cost of unavailability. In the AP case (Dynamo, Cassandra), writes continue on the reachable nodes and are synchronized to the isolated node once it rejoins, trading temporary inconsistency for continuous availability.
 
 **Q: In quorum consensus, does W=1 mean the write is sent to only one replica?**
+**Short:** No, the write still goes to all N replicas; W=1 only means the coordinator waits for one acknowledgment before returning success.
+
 No — the write is still sent to all N replicas; W=1 only means the coordinator waits for one acknowledgment before calling the write successful. W is the number of acks the coordinator blocks on, not the number of copies made. This is the most common quorum misread: raising W increases how many (and thus how slow) the replicas it waits for, improving consistency at the cost of latency, but the data always propagates to all N.
 
 **Q: What does the condition W + R > N guarantee, and why?**
+**Short:** It guarantees the write and read replica sets overlap in at least one node, by pigeonhole arithmetic, so a read always sees the latest write.
+
 It guarantees strong consistency because the write set of W replicas and the read set of R replicas must overlap in at least one node holding the latest value. It is pigeonhole arithmetic: if W + R exceeds N, the two subsets cannot be disjoint, so any read touches at least one replica that received the most recent write. For example with N=3, W=2, R=2 (sum 4 > 3) the sets always share a node; with W=1, R=1 (sum 2 ≤ 3) they can miss each other and the read may be stale.
 
 **Q: What is the difference between a lost-update conflict and a vector-clock sibling conflict, and when does last-write-wins fail?**
+**Short:** A sibling conflict is two genuinely concurrent versions where neither vector clock dominates, and last-write-wins fails by silently discarding one of them.
+
 A vector-clock sibling conflict is two genuinely concurrent versions where neither clock dominates the other, and last-write-wins fails because it silently discards one of them. LWW picks the higher timestamp, which drops a real concurrent update and depends on synchronized wall clocks that drift. Vector clocks instead detect that neither version is an ancestor of the other so the client can merge both (as Dynamo merges two shopping carts) rather than losing a write.
 
 **Q: What is a vector clock and how does it distinguish a conflict from an ancestor?**
+**Short:** A vector clock is a set of [server, version] pairs; one version is an ancestor of another only if every one of its counters is less than or equal to the other's.
+
 A vector clock is a set of [server, version] pairs attached to a data item; version X is an ancestor of Y if every counter in X is ≤ the matching counter in Y, otherwise they conflict. If X is an ancestor, Y supersedes it and X can be discarded with no conflict. If some counter is larger in X and some larger in Y — neither dominates — the two are siblings that must be reconciled, which is exactly the D3([Sx,2],[Sy,1]) versus D4([Sx,2],[Sz,1]) case.
 
 **Q: Walk through the vector-clock worked example from D1 to the reconciled D5.**
+**Short:** D3 and D4 both descend from D2 but each carries a counter the other lacks, so they conflict and a client merges them into D5, which dominates both.
+
 A single item starts as D1([Sx,1]), is updated on Sx to D2([Sx,2]), then diverges into D3([Sx,2],[Sy,1]) on Sy and D4([Sx,2],[Sz,1]) on Sz, which conflict and are merged into D5([Sx,3],[Sy,1],[Sz,1]). D3 and D4 both descend from D2 but each carries a counter the other lacks (Sy versus Sz), so neither is an ancestor. A client reads both siblings, reconciles them, and writes back on Sx, producing D5 whose clock dominates both and resolves the conflict.
 
 **Q: What is the difference between a strict quorum and a sloppy quorum, and why use sloppy?**
+**Short:** A strict quorum needs acks from the exact designated replicas, while a sloppy quorum borrows the next healthy ring nodes to keep writes available during an outage.
+
 A strict quorum requires W/R acks from the exact replica set for a key, whereas a sloppy quorum uses the first W (or R) healthy servers on the ring, skipping down ones. Sloppy quorum is used to improve availability: rather than blocking a write because a designated replica is down, the coordinator borrows the next healthy node so the write still succeeds. The borrowed data is later returned to the rightful replica through hinted handoff once it recovers.
 
 **Q: How does hinted handoff work, and what problem does it solve?**
+**Short:** A stand-in node temporarily serves a down replica's writes with a hint of the true owner, then replays and deletes the hint once that replica recovers.
+
 When a replica is down, another server temporarily processes its requests and keeps a hint recording who the data belongs to, then pushes the data back when the down node recovers. It solves temporary failures: paired with sloppy quorum, it keeps writes succeeding during a brief outage without permanently misplacing the data. The stand-in stores the writes plus a hint of the intended owner, replays them on recovery, and then deletes the hint, restoring consistency.
 
 **Q: Why is gossip preferred over all-to-all multicast for failure detection?**
+**Short:** All-to-all multicast costs roughly N-squared messages per round, while gossip spreads heartbeats to random peers at close to linear cost.
+
 Gossip is preferred because all-to-all multicast costs on the order of N² messages per round and does not scale, while gossip spreads heartbeats to random peers in roughly linear cost. Each node increments its own heartbeat counter and periodically sends its membership list to a few random nodes, which propagate it further. A node whose counter stops increasing past a threshold is marked down and that fact gossips out — achieving cluster-wide detection without every node pinging every other node.
 
 **Q: Why shouldn't one node's report be enough to mark another node as down?**
+**Short:** A single missed heartbeat could be a transient link blip, so gossip requires multiple independent peers to see the stale counter before declaring a node down.
+
 Because a momentary network blip between two nodes is not a real node failure, so at least two independent sources should confirm before marking a node down. A single node seeing a missed heartbeat may just have a transient link problem, and evicting a healthy node triggers needless rebalancing and data movement. Gossip naturally provides multiple confirmations: several peers observe the stale heartbeat counter before the node is declared offline and the verdict is propagated.
 
 **Q: How does a Merkle tree minimize the data transferred during anti-entropy repair?**
+**Short:** Comparing root hashes first and recursing only into subtrees whose hashes differ makes the data synced proportional to the divergence, not the whole dataset.
+
 It lets two replicas compare root hashes and recurse only into subtrees whose hashes differ, so the data synced is proportional to the differences, not the total data. If the roots match, the replicas are identical and nothing transfers; if they differ, the comparison walks down only the divergent branches to find the specific out-of-sync buckets. With, say, one million buckets over one billion keys (1,000 keys per bucket), a few differing keys move only their buckets instead of the whole billion.
 
 **Q: Build the 4-bucket Merkle-tree comparison — how are only the divergent buckets found?**
+**Short:** Comparing root, then children, then leaves top-down walks only the branch containing the mismatched bucket, so only that one bucket needs to sync.
+
 The key space is split into buckets (4 here), each key hashed, one hash node made per bucket, and the tree built up to a root; comparing top-down isolates the differing bucket. If replica B diverges only in bucket 2, then bucket 2's leaf hash differs, which makes the left-subtree hash differ, which makes the root differ. Comparing root, then children, then leaves walks only the left branch and pinpoints bucket 2, so replicas A and B sync just that bucket and leave buckets 1, 3, and 4 untouched.
 
 **Q: Trace the write path in the storage engine.**
+**Short:** A write is appended to the commit log for durability, applied to the in-memory memtable, and flushed to an immutable SSTable once the memtable fills.
+
 A write is first appended to the commit log on disk, then written to the in-memory memtable, and when the memtable fills past a threshold it is flushed to an immutable SSTable. The commit log gives durability so the write survives a crash before the flush; the memtable keeps recent writes fast in RAM; and the flush turns a batch of memtable entries into one sequential, sorted, immutable SSTable. This is the LSM-tree write path, modeled on Cassandra.
 
 **Q: Trace the read path and explain the bloom filter's role.**
+**Short:** The memtable is checked first, and on a miss a bloom filter prunes which SSTables cannot contain the key so only real candidates are read from disk.
+
 The read checks the memtable first and returns immediately on a hit; on a miss it consults a bloom filter to find which SSTables might contain the key, reads those, and returns the result. The bloom filter is a probabilistic membership test that can say "definitely not here" or "maybe here" but never gives a false negative, so it safely prunes SSTables that cannot hold the key. Without it, a memtable miss would require scanning every SSTable on disk; with it, the read touches only the few candidate files.
 
 **Q: Why does replication walk clockwise to the next N unique servers rather than the next N ring positions?**
+**Short:** With virtual nodes, the next N ring positions can map to fewer than N distinct machines, so replication skips repeats to guarantee N copies on N different servers.
+
 Because with virtual nodes the next N ring positions can map to fewer than N distinct physical servers, so choosing unique servers is what guarantees N real copies. Several virtual nodes may belong to the same machine, and if two replicas of a key landed on the same box, a single machine failure would lose two copies at once. Walking clockwise while skipping positions whose physical server is already chosen ensures the N replicas sit on N different machines, ideally in different data centers.
 
 **Q: What are the three consistency models, and which one do Dynamo and Cassandra choose?**
@@ -1246,9 +1278,13 @@ Because with virtual nodes the next N ring positions can map to fewer than N dis
 Strong consistency returns the most recent write on every read, weak consistency may return a stale value, and eventual consistency is a weak form where replicas converge given enough time — the model Dynamo and Cassandra choose. Strong consistency requires blocking replicas until they agree, which hurts availability, so a highly available store instead accepts temporary divergence. Eventual consistency lets inconsistent values enter and pushes reconciliation to the client, which is why vector clocks and anti-entropy are part of the design.
 
 **Q: How does consistent hashing provide heterogeneity across differently-sized servers?**
+**Short:** Assigning a more capable server proportionally more virtual nodes gives it a proportionally larger share of ring positions and keys.
+
 By assigning each server a number of virtual nodes proportional to its capacity, so a more powerful machine owns more ring positions and receives a larger share of keys. A server twice as capable gets roughly twice the virtual nodes and therefore twice the key range, without any manual sharding. This lets a cluster mix machine sizes while keeping load balanced, and it is the same mechanism that gives automatic incremental scaling when nodes join or leave.
 
 **Q: Why does the single-server key-value store fail to scale even with compression and hot/cold tiering?**
+**Short:** Compression and hot/cold tiering only delay a fixed capacity ceiling and leave the machine a single point of failure, so growth requires distributing across servers.
+
 Because both optimizations only delay a fixed capacity ceiling and leave the server as a single point of failure. Compression trades CPU for RAM and hot/cold tiering keeps the working set in memory with the tail on disk, but data and traffic keep growing past what one machine can hold or serve. The only way to store big data with high availability is to distribute it across many servers, which is what motivates the entire distributed design.
 
 **Q: What are the two downsides of vector clocks, and how serious is the second in practice?**
@@ -1257,6 +1293,8 @@ Because both optimizations only delay a fixed capacity ceiling and leave the ser
 Vector clocks add client-side conflict-resolution complexity and their [server, version] list grows unbounded, requiring truncation that can blur ancestry — but Amazon reported never hitting the truncation problem in production. Clients must implement the merge logic for siblings, and every server that touches an item adds a pair, so a threshold drops the oldest pairs when the clock grows too long. Dropping pairs can make descendant relationships inaccurate, yet the Dynamo paper notes this never caused issues in practice, so a truncation threshold is a safe default.
 
 **Q: Why must data replicas be placed across multiple data centers rather than within one?**
+**Short:** Nodes in one data center tend to fail together from shared power or network outages, so replicas must span data centers for availability to hold.
+
 Because nodes in the same data center tend to fail together from power outages, network failures, or natural disasters, so co-locating all N replicas makes the high-availability promise hollow. If every copy sits in one facility, a single power loss or fire takes down all of them at once. Spreading replicas across data centers connected by high-speed networks means users still reach their data through another data center when one goes completely offline, at the cost of some cross-DC latency.
 
 **Q: What responsibilities does every node carry in this decentralized design, and why does that matter?**

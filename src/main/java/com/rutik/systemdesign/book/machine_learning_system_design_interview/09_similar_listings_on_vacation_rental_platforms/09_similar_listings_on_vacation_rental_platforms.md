@@ -864,33 +864,43 @@ enough to render inside the listing page.
 ## Interview Questions
 
 **Q: Why add the eventually-booked listing as a global context to every window in a session?**
+**Short:** It injects the real booking objective into a click-trained model by pulling every listing in the session toward the one that was booked.
 Because clicks are the training signal but bookings are the real objective, so injecting the booked listing as a positive for every central listing steers the click-trained geometry toward what converts. In a booked session, the eventually-booked listing `l_b` is treated as an in-window positive for every central listing regardless of position, adding a `log σ(v_{l_b} · v_l)` term. This pulls every listing on the path to booking toward the booked one, so the embedding encodes "co-clicked on the way to booking this," not just "co-clicked." Exploratory (non-booked) sessions simply omit the term.
 
 **Q: Why are random negatives insufficient, and what do same-market hard negatives fix?**
+**Short:** Random negatives are almost always from another city and trivially easy, so same-market hard negatives are added to teach within-market distinctions.
 Random negatives are almost always from a different city, so they are trivially far and teach only coarse geographic separation, leaving listings within a market indistinguishable. Users shop within one market, so the carousel needs *within-market* discrimination, which random negatives never exercise. Adding hard negatives sampled from the central listing's own market forces the model to separate superficially-similar, geographically-close listings — the fine structure the similar-listings carousel actually depends on. Omitting them yields embeddings that cluster by city but are mushy inside each city.
 
 **Q: How do you produce an embedding for a brand-new listing with zero clicks?**
+**Short:** Compose it by averaging the embeddings of its 3 nearest same-type, similar-price listings within about 10 miles, with no retraining needed.
 Compose it as the average of the embeddings of its 3 nearest comparable listings — same listing type, same price bucket, within about 10 miles — with no retraining required. Skip-gram never saw the new listing, and it can't earn clicks until it is recommended, a structural cold-start deadlock. Averaging nearby comparable vectors places it in a sensible neighborhood so it is immediately both recommendable and usable as a query; the next daily retrain later replaces it with a genuinely learned vector once it has clicks.
 
 **Q: What is the offline metric, and why "average rank of the booked listing"?**
+**Short:** It is the mean rank the embedding assigns the eventually-booked listing over held-out sessions, which should fall as the session nears booking.
 It is the mean rank the embedding assigns to the eventually-booked listing over held-out booked sessions, and lower is better. Similarity has no labels, so booked sessions act as ground truth: at each click you rank candidates by embedding similarity to the viewed listing and record where the eventually-booked listing lands, then average. A good embedding ranks the booked listing near the top even before booking, and the average rank should *drop* as the session nears the booking — direct evidence the space captures booking intent. Recall@k and MRR are weak here because there is essentially one relevant listing per session.
 
 **Q: Why frame this as session-based item embeddings instead of collaborative filtering?**
+**Short:** Most listing-page traffic is anonymous, and collaborative filtering needs a user dimension that doesn't exist for those visitors.
 Because most listing-page traffic is anonymous or first-visit, and collaborative filtering / matrix factorization need a user dimension that does not exist. Item embeddings learn only a listing space from click sequences, so at inference you embed the *listing* being viewed, not the viewer — no user vector required. This still captures the wisdom-of-the-crowd signal (people who viewed A viewed B) but in a form that works for logged-out users and answers "given this listing, what's similar" directly.
 
 **Q: What is the word2vec analogy that makes this work?**
+**Short:** A click session is treated as a sentence and each listing as a word, so skip-gram learns listing vectors the way it learns word vectors.
 A click session is a sentence and each clicked listing is a word, so skip-gram learns listing vectors exactly as it learns word vectors. Words in similar contexts (king/queen) get nearby vectors; listings co-clicked in similar sessions get nearby vectors. Because sessions are locally coherent — people compare like-for-like within a shopping session — the shallow skip-gram network bakes behavioral substitutability into the embedding geometry, and "similar" becomes a distance query.
 
 **Q: How does negative sampling avoid the full-softmax cost?**
+**Short:** It replaces the full softmax over millions of listings with a few cheap binary sigmoid decisions against a handful of random negatives.
 It replaces the O(vocabulary) softmax normalization with a few O(k) binary sigmoid terms per positive pair. Instead of normalizing `P(context | central)` over 4.5M listings, it maximizes `log σ(v_c · v_l)` for the true context and `log σ(−v_d · v_l)` for a handful of random negatives `d`. Each term is a cheap logistic decision — pull the true context closer, push random listings away — so training scales to hundreds of millions of sessions.
 
 **Q: How are click sessions constructed and segmented from raw logs?**
+**Short:** Raw click streams are cut into sessions on an inactivity gap of about 30 minutes, then split into booked and exploratory sessions.
 Raw per-user click streams are cut into sessions on an inactivity gap — start a new session when consecutive clicks are more than about 30 minutes apart. Each session is the time-ordered list of clicked listing IDs. Sessions are further split into booked (ended in a booking) and exploratory (no booking), which drives the global-context trick. Very short (length-1) sessions and bounce clicks are dropped since they carry no co-click signal.
 
 **Q: What is the difference between booked and exploratory sessions in training?**
+**Short:** Booked sessions add the booked-listing global-context positive term, while exploratory sessions omit it but still teach co-click substitutability.
 Booked sessions end in a reservation and receive the booked-listing-as-global-context positive term; exploratory sessions never booked and omit it. Both contribute the standard window co-click positives and negatives, so exploratory sessions still teach substitutability. But only booked sessions carry the revealed final choice, so only they can pull listings toward the booking objective via the global `l_b` term.
 
 **Q: Why choose a small embedding dimension like 32?**
+**Short:** 32 dimensions separate markets and within-market structure while keeping the embedding table small and nearest-neighbor queries fast.
 Because 32 dimensions are enough to separate markets and resolve within-market structure while keeping storage and ANN latency cheap. A 4.5M × 32 float table is only a few hundred MB, and approximate nearest-neighbor queries over it stay in the low-millisecond range needed to render inside a listing page. Larger dimensions add cost and overfitting risk without proportional gains for this behavioral-similarity task.
 
 **Q: Walk through the four terms of the adapted skip-gram objective.**
@@ -898,15 +908,19 @@ Because 32 dimensions are enough to separate markets and resolve within-market s
 The objective maximizes four sums: window co-click positives `log σ(v_c · v_l)`, random negatives `log σ(−v_d · v_l)`, the booked-listing global positive `log σ(v_{l_b} · v_l)`, and same-market hard negatives `log σ(−v_m · v_l)`. The first two are vanilla skip-gram with negative sampling; the third injects the booking objective; the fourth sharpens within-market discrimination. For exploratory sessions the third (booked) term is dropped.
 
 **Q: How is the similar-listings carousel served at request time?**
+**Short:** It is served by an embedding lookup, an ANN k-NN query, and a business-rule filter, with no online model forward pass at request time.
 It is a lookup, a k-NN query, and a filter — no online model forward pass. On a listing view, fetch the viewed listing's embedding, query an ANN index (FAISS/ScaNN/HNSW) for the top candidates by similarity, then re-rank and filter for availability on the viewed dates, same region, active status, and dedup. This keeps the online path within the page's tens-of-milliseconds budget while the heavy training runs offline.
 
 **Q: How often are embeddings retrained, and why not real-time?**
+**Short:** Embeddings are retrained daily in an offline batch, since behavioral substitutability drifts slowly and doesn't need real-time updates.
 Embeddings are retrained daily in an offline batch on a recent window of sessions. Behavioral substitutability drifts slowly and with seasonality, so daily granularity tracks it well while avoiding the cost and instability of continuous training. The online path only reads a precomputed table and ANN index, so freshness comes from the batch cadence, not from live updates.
 
 **Q: Why must you filter the ANN results, and what do you filter on?**
+**Short:** The ANN index ignores bookability, so results must be filtered for availability, region, and active status before reaching the carousel.
 Because the ANN index returns nearest vectors regardless of whether the listing is bookable, so serving them unfiltered surfaces unavailable listings. Re-ranking filters out listings that are booked out for the viewed dates, deactivated, outside the viewed region, or the viewed listing itself, and dedups. This turns raw geometric similarity into a list of genuinely bookable, relevant options.
 
 **Q: Why can offline average-rank improve while online CTR does not, and how do you guard against it?**
+**Short:** Feedback loops let recommending a listing inflate its own offline rank, so every launch must be gated on an A/B test of carousel CTR.
 Because feedback loops inflate offline metrics: recommending similar listings makes them co-clicked more, which reinforces their embedding proximity without any real user benefit. So a lower average rank can partly reflect the system rewarding its own past recommendations. Guard against it by gating every launch on an A/B test measuring carousel CTR and book-through, not on offline geometry alone.
 
 **Q: What is the two-tower alternative and when would you reach for it?**
@@ -914,6 +928,7 @@ Because feedback loops inflate offline metrics: recommending similar listings ma
 A two-tower / content model learns a tower mapping listing *attributes* (price, type, amenities, location) into the same embedding space, so any listing — including brand-new ones — gets a real learned vector from its features. You reach for it when cold-start composition (averaging neighbors) is not accurate enough, or when you want a hybrid of behavioral and content signal. It is the natural upgrade path from the pure session-embedding design.
 
 **Q: How would you extend this to personalize for logged-in users?**
+**Short:** Learn user-type and listing-type embeddings in the same space from long-term booking sessions, layering personalization on the base design.
 Learn user-type and listing-type embeddings in the same space from long-term booking sessions, as in the second half of the Airbnb paper. Short-term listing embeddings capture in-session, anonymous similarity; user-type embeddings capture cross-session, long-term preference, and you rank by similarity between the user-type vector and candidate listings. This layers logged-in personalization on top of the anonymous session-embedding base without discarding it.
 
 **Q: What biases live in click-session training data, and how do you handle them?**
@@ -925,6 +940,7 @@ Position and selection bias dominate: clicks favor whatever the search ranker sh
 Because users shop within a market, co-clicks overwhelmingly occur among same-city listings, so listings from the same market naturally end up close and random negatives (other cities) sit far — geography falls out of the click structure automatically. But it is not enough: the carousel needs to rank listings *within* a city, and coarse geo clusters leave those indistinguishable. Same-market hard negatives are added precisely to resolve the within-market structure that free clustering misses.
 
 **Q: What happens to a listing that is deactivated or permanently booked out?**
+**Short:** Its stale embedding must be dropped from the ANN index and it must be filtered from the carousel at serve time so it is never shown.
 Its stale embedding should be dropped from the ANN index and it must be filtered from any carousel at serve time, since a nearest-neighbor query would otherwise still return it. Serving an unbookable listing wastes a carousel slot and frustrates users. Index maintenance during the daily rebuild plus the online availability/active filter together keep gone listings out of results.
 
 ---

@@ -1052,9 +1052,11 @@ feedback loops and position bias — so precision@k and mAP filter out clearly-w
 ## Interview Questions
 
 **Q: Why not just optimize for clicks in a video recommender, and what does the book optimize instead?**
+**Short:** The book rejects raw clicks, which reward clickbait, and instead maximizes the number of relevant videos watched.
 Optimizing clicks rewards clickbait — sensational thumbnails and titles that get the click but leave the user feeling cheated, eroding long-term trust. The book instead maximizes the **number of relevant videos**, where relevance is inferred from strong implicit signals (watched past a threshold) plus explicit likes/shares. Completed-videos and total-watch-time objectives are also rejected because they bias toward short and long videos respectively; "relevant videos" aligns best with sustained engagement.
 
 **Q: What is the single biggest structural reason a recommender uses two stages instead of one model?**
+**Short:** A single heavy model can't score billions of videos within 200 ms, so cheap retrieval narrows candidates first.
 You cannot run a heavy, accurate model over billions of videos per request within a ~200 ms budget. So candidate generation uses a cheap, high-recall retriever (dot-product ANN) to narrow billions to a few thousand, and only then does a heavy ranking model score those thousands with high precision. The funnel spends a tiny per-item budget on everything and a large per-item budget on the few survivors, which is the only way to get both quality and latency.
 
 **Q: Compare matrix factorization and the two-tower network for candidate generation.**
@@ -1070,6 +1072,7 @@ With the loss summed over only the engaged (observed) pairs, unobserved entries 
 WALS exploits the squared loss's structure: with the video factor fixed, the loss is convex in the user factor with a closed-form least-squares solution, and vice versa, so it alternates and converges in a few iterations. Crucially, with one factor fixed every row solves independently, making it **embarrassingly parallel** across a billion-user matrix. SGD is more general (any differentiable loss) but converges slower, is learning-rate-sensitive, and is harder to parallelize; WALS wins precisely because weighted MF uses squared loss.
 
 **Q: How does the two-tower network solve cold start when matrix factorization cannot?**
+**Short:** Two-tower embeddings come from features, so new users and videos get embeddings without any interaction history.
 MF keys embeddings on an ID's position in the interaction matrix, so an ID it never saw during training has no vector — a new user or new video is invisible. The two-tower computes embeddings from **features** (a new user still has demographics and context; a new video still has category, title, duration), so both get usable embeddings immediately. The new video becomes retrievable the moment it is indexed, and the new user gets a feature-based embedding instead of a popularity-only fallback.
 
 **Q: Why do offline recommender metrics like precision@k systematically mislead?**
@@ -1077,6 +1080,7 @@ MF keys embeddings on an ID's position in the interaction matrix, so an ID it ne
 Because the logged data only contains feedback on videos the *current* system already showed, offline metrics reward a new model for agreeing with the incumbent, not for matching the user's true preferences — a great video the current system never surfaced has no positive label. Feedback loops and position/selection bias further skew the labels. So offline metrics can crown a model that loses in production; only an online A/B test measures true impact, with offline metrics used to cheaply cut clearly-worse candidates.
 
 **Q: What scoring primitive do both matrix factorization and the two-tower use, and what differs?**
+**Short:** Both score pairs by dot product of embeddings; MF looks them up while two-tower computes them from features.
 Both score a `<user, video>` pair by the **dot product** of a user embedding and a video embedding in a shared space. The difference is how the embeddings are produced: MF looks them up from factored matrices learned on the interaction data (no features), while each two-tower embedding is computed by a neural network from that side's features. Keeping the towers separate is what lets video embeddings be precomputed and ANN-searched at serving time.
 
 **Q: Why can't you use the ranking model for retrieval too?**
@@ -1084,12 +1088,15 @@ Both score a `<user, video>` pair by the **dot product** of a user embedding and
 The ranking model scores a `<user, video>` pair *jointly* using cross features, so its output cannot be factored into an independent user vector and video vector — you would have to run it for every user-video pair, billions per request, which is impossible in 200 ms. The two-tower's separation of towers lets you precompute all video embeddings once and retrieve via ANN with only the user tower online. Retrieval trades joint accuracy for scalability; ranking trades scalability for accuracy on a small candidate set.
 
 **Q: What are cross features and why does the ranking model use them but the two-tower doesn't?**
+**Short:** Cross features capture user-video interactions; only the jointly-scored ranking model can compute them.
 Cross features capture interactions between user and video attributes — does the video's language match the user's, has the user watched this channel before, is the category in the user's top-watched list. The ranking model scores the pair jointly, so it can compute these; the two-tower must keep user and video encodings separate (to precompute and ANN-search video embeddings), so it cannot form pairwise cross features. This is exactly why ranking is more precise but cannot scale to the full catalog.
 
 **Q: How does the design handle a brand-new video with zero interactions?**
+**Short:** The video tower embeds it from metadata immediately, and exploration traffic gathers its first signals.
 The video tower embeds it from metadata (category, title, tags, duration), so it enters the ANN index and is retrievable immediately — no interactions required. On top of that, **exploration traffic** deliberately shows the new video to some users to gather its first real engagement signals. This is the two-tower's structural advantage over MF, which has no column for an unseen video and can only fall back to popular/trending.
 
 **Q: What are the three families of recommender, and what is each one's key weakness?**
+**Short:** Content-based lacks serendipity, collaborative filtering suffers cold start, and the book's hybrid combines both.
 Content-based filtering recommends by video-feature similarity to the user's past — it handles new videos but gives no serendipity (traps users in a bubble). Collaborative filtering recommends from similar users' behavior — it is serendipitous and feature-free but weak on cold start. The hybrid (the book's choice) combines them: collaborative-style retrieval for serendipity plus a content-aware ranker for precision and cold-start coverage.
 
 **Q: What does the re-ranking stage do that the ranking model does not?**
@@ -1097,6 +1104,7 @@ Content-based filtering recommends by video-feature similarity to the user's pas
 Re-ranking applies business and policy rules the model should not or cannot learn directly: removing region- or legally-restricted videos, boosting freshness, enforcing diversity (not ten cooking videos in a row), demoting misinformation/clickbait via integrity filters, deduping, and removing already-watched videos. It adjusts the model's relevance ordering for constraints that are rules, not learned preferences.
 
 **Q: Why does candidate generation union multiple sources instead of relying on one retriever?**
+**Short:** Unioning personalized, popular, and trending sources raises recall and covers cold-start users the retriever misses.
 A single retriever misses cases; unioning the personalized two-tower ANN with popular and trending sources raises recall and provides graceful fallbacks. Popular/trending especially cover cold-start users who have no history for the personalized retriever, and trending keeps the feed timely and gives new videos exposure. The union is deduplicated before ranking.
 
 **Q: How is the training label for the "relevant videos" objective actually created?**
@@ -1104,9 +1112,11 @@ A single retriever misses cases; unioning the personalized two-tower ANN with po
 It is **natural labeling** from the interaction log: a `<user, video>` pair is positive if the user watched beyond a relevance threshold (a large fraction of the video) or gave an explicit positive signal like a like or share, and negative otherwise. No human annotation is needed, but the labels inherit implicit-feedback noise and bias — notably, a video the user never saw is not a true negative, just never shown.
 
 **Q: What is diversity as an offline metric and why measure it alongside precision?**
+**Short:** Diversity measures average pairwise dissimilarity among recommendations, guarding against near-identical picks.
 Diversity is the average pairwise dissimilarity among the recommended videos (e.g. one minus average embedding cosine similarity). A recommender can score high on precision by returning ten near-identical videos, which is a poor experience, so diversity guards against redundancy. It is complementary, not a substitute — high diversity with low relevance is useless, so it is read together with precision@k and mAP.
 
 **Q: Why is CTR an imperfect online metric, and how is it used safely?**
+**Short:** CTR can be inflated by clickbait, so the book always reads it alongside watch time and explicit feedback.
 CTR (clicks per recommendation) is easy to measure but carries the clickbait caveat — a model can inflate CTR with sensational thumbnails while actual watch time and satisfaction fall. So CTR is never read alone; it is paired with watch time, completed videos, and explicit feedback. A CTR gain accompanied by a watch-time drop signals clickbait rather than a genuine improvement.
 
 **Q: How do position and selection bias corrupt a recommender, and what mitigates them?**

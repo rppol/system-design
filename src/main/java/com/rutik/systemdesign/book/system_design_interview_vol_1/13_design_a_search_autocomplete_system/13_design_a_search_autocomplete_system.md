@@ -938,30 +938,48 @@ Search autocomplete is a **read-latency system built on top of a data-structure 
 ## Interview Questions
 
 **Q: Why cache the top-k queries at every trie node instead of computing them on each request?**
+**Short:** Pre-computing the top 5 at every node turns each query into a single O(1) read instead of a per-request traversal and sort.
+
 Because it turns the query from a subtree traversal-and-sort into a single O(1) read. Without the cache, answering a prefix means walking every descendant node and sorting them by frequency (O(c) + O(c log c)), which explodes when the prefix is short and its subtree is huge. Storing the pre-computed top 5 on every node means a request just walks to the prefix node and returns its list. The cost is memory — every node now carries up to five query strings — but for a read-dominated, latency-critical system rebuilt only weekly, that space-for-time trade is exactly right.
 
 **Q: Why is the naive `SELECT ... WHERE query LIKE 'prefix%' ORDER BY frequency LIMIT 5` too slow at scale?**
+**Short:** `LIKE 'prefix%'` forces a full prefix scan and then sorts every match, which blows the 100 ms budget at billions of rows and 48k QPS.
+
 Because `LIKE 'prefix%'` is a prefix scan that matches a huge number of rows for a common short prefix, and `ORDER BY frequency` then sorts all of them to find the top 5. On a small table it is instant, but over billions of rows at ~48,000 peak QPS the scan-and-sort blows past the ~100 ms latency budget and the database becomes the bottleneck. A trie replaces the scan with a short walk and (with cached top-k) removes the sort entirely.
 
 **Q: Why rebuild the trie weekly instead of updating it in real time on every search?**
+**Short:** Billions of daily queries barely shift the top suggestions, so live updates add enormous write load for almost no benefit.
+
 Because there are billions of queries per day and the top suggestions barely change from hour to hour, so live updates add enormous write load for essentially no benefit. Updating a shared trie on every keystroke would create lock contention against a structure being read at 48k QPS. The pipeline instead aggregates logs weekly and has workers build a fresh trie offline, then swaps it in — keeping the write load entirely off the read hot path. Products needing more freshness simply shrink the aggregation window.
 
 **Q: Why does sharding the trie by first character fail, and what fixes it?**
+**Short:** English letter frequencies are wildly uneven, so a shard-map manager built from historical distribution balances load instead.
+
 It fails because first-letter frequencies are wildly uneven — far more queries start with `a`, `e`, `s`, `t` than `x`, `q`, `z` — so the popular-letter shards are overloaded while others sit idle. The fix is a shard-map manager: a lookup service that assigns prefixes to shards based on the historical query distribution, giving hot letters like `s` their own shard and folding several cold letters (`u`–`z`) onto one. It balances bytes and QPS per shard instead of per letter.
 
 **Q: How do you get ~24,000 QPS from 10M DAU, and what number do people forget?**
+**Short:** Multiply DAU by searches per day by the ~20 characters per query, since every keystroke fires its own request.
+
 You multiply DAU × searches/day × characters/query because every keystroke is a request: 10M × 10 × 20 = 2 billion requests/day, divided by 86,400 seconds ≈ 24,000 QPS. The forgotten factor is the ~20× keystroke amplification — typing a 20-character query fires ~20 requests (`q=d`, `q=di`, `q=din`, …), not one. Omitting it undercounts traffic by 20× and massively under-provisions the read tier. Peak is about double, ~48,000 QPS.
 
 **Q: Why is updating a single trie node in place so expensive?**
+**Short:** Changing one word's frequency can reorder the cached top-5 at every ancestor node up to the root, an O(depth) cascade per edit.
+
 Because the cached top-k means changing one word's frequency can change the top-5 of every ancestor node on the path back to the root, forcing a re-sort at each. Bumping `beer` from 10 to 30 may reorder the cached lists at `bee`, `be`, `b`, and the root. One change is O(depth) ancestor updates, and a rebuild window has millions of such changes — far more work than just building a new trie from scratch and swapping it in.
 
 **Q: What is the time complexity of the naive top-k trie algorithm and where is the worst case?**
+**Short:** O(p) to walk the prefix plus O(c) to traverse and O(c log c) to sort, worst when a short prefix's subtree is nearly the whole trie.
+
 It is O(p) + O(c) + O(c log c): O(p) to walk the prefix, O(c) to traverse the c-node subtree collecting completions, and O(c log c) to sort them by frequency. The worst case is a very short prefix (say one character) whose subtree is nearly the whole trie, so c is enormous and every keystroke traverses and sorts a huge structure. This is precisely why the design caps prefix length and caches the top-k, collapsing the whole query to O(1).
 
 **Q: What are the two optimizations that make trie lookups fast, and what does each buy?**
+**Short:** Capping the max prefix length makes the walk O(1), and caching each node's top-5 removes the traverse-and-sort entirely.
+
 Limiting the maximum prefix length and caching the top-k at every node. Capping prefix length (~50 chars) bounds the walk to a small constant, dropping "find the prefix node" from O(p) to O(1). Caching the pre-computed top 5 on every node removes the traverse-and-sort, dropping the answer step to O(1). Together the whole get-top-k operation becomes O(1), at the cost of extra memory for the cached lists on every node.
 
 **Q: How do you remove hateful or policy-violating suggestions quickly?**
+**Short:** A filter layer between the Trie Cache and API servers strips blocked entries immediately while deletion from the Trie DB stays asynchronous.
+
 Insert a filter layer between the Trie Cache and the API servers that strips blocked entries from the top-k before it is returned. Physically deleting a query from the Trie DB is asynchronous and slow, so relying on it would leave toxic suggestions visible for hours. The filter removes them from user-facing results immediately, while the durable cleanup in the Trie DB happens in the background on its own schedule.
 
 **Q: What are the two ways to store the trie in the Trie DB?**
@@ -970,21 +988,33 @@ Insert a filter layer between the Trie Cache and the API servers that strips blo
 A document store or a key-value store. In a document store you serialize the entire weekly-built trie into one blob and save it as a document (e.g. MongoDB), which suits the rebuild-and-swap model. In a key-value store you flatten the trie into a hash map from prefix to its top-k list (`"be" → [best, bet, bee, beer, bear]`), so a read is a single key lookup. Both persist the trie so it survives cache eviction or restart.
 
 **Q: Why use AJAX and browser caching, and what does `cache-control: private, max-age=3600` mean?**
+**Short:** AJAX keeps the page from reloading per keystroke, and `private, max-age=3600` caches suggestions in the user's own browser for one hour.
+
 AJAX lets the browser fetch suggestions asynchronously so the page never reloads and the input stays responsive per keystroke. Browser caching exploits the fact that suggestions change slowly: `private` means only the user's own browser may cache the response (not a shared proxy/CDN, since results may be personalized), and `max-age=3600` means it stays valid for 3600 seconds — one hour — so repeated prefixes within that hour are answered locally with zero network cost.
 
 **Q: What is data sampling in this system and why is it needed?**
+**Short:** Logging only 1 in N requests cuts analytics volume by a factor of N while preserving the same popularity ranking.
+
 Data sampling means logging only 1 out of every N search requests rather than all of them. At ~2 billion requests/day, logging everything wastes enormous storage and processing power, and the popularity ranking is statistical, so a representative sample yields the same ordering. Sampling cuts analytics-log volume by a factor of N while preserving the frequency signal the trie is built from.
 
 **Q: How would you support multiple languages?**
+**Short:** Store Unicode code points in trie nodes instead of restricting children to a-z, leaving the trie and top-k caching unchanged.
+
 Store Unicode characters in the trie nodes instead of restricting children to a–z. Each node's children are then keyed by Unicode code points, so any script — Latin, Cyrillic, CJK, and so on — fits the same structure. The trie mechanics, top-k caching, and pipeline are all unchanged; only the alphabet (and thus the fan-out per node) grows beyond 26.
 
 **Q: How do you serve different top queries per country?**
+**Short:** Build a separate trie per country from its own search logs and serve each from CDN edges near that market.
+
 Build a separate trie per country from that country's own search logs, since popular completions differ by market, and serve each region's trie from CDNs at edge locations near its users. Users in a given country hit a nearby CDN holding their country's trie, which both returns locally-relevant suggestions and cuts network latency compared to reaching a central data center.
 
 **Q: Why can't this design handle real-time trending suggestions, and how would you approach it?**
+**Short:** The weekly batch pipeline can't surface a query spiking right now; trending needs a separate recency-weighted streaming path.
+
 Because the trie is built by a weekly (or at best tighter) batch pipeline that fundamentally cannot surface a query spiking right now, like breaking news or a viral term. To approach it you would build a separate streaming path: reduce the working set with sharding so hot recent data is small, change the ranking to weight recency so new searches rise fast, and process searches as a stream using tools like Kafka, Spark Streaming, Storm, or Cassandra. The honest interview answer states the batch limitation rather than pretending the design covers it.
 
 **Q: What is the frequency table and how is it built?**
+**Short:** A two-column query-frequency table built incrementally by the data gathering service as each search arrives.
+
 It is a two-column `(query, frequency)` aggregate recording how many times each query has been searched, and it is built by the data gathering service incrementally as searches arrive. If `twitch`, `twitter`, `twitter`, `twillo` come in, the table ends up `twitch:1, twitter:2, twillo:1` — each new query is inserted or its count incremented. These counts are the popularity signal that determines suggestion ranking and the frequencies stored at trie word nodes.
 
 **Q: Why limit the maximum prefix length, and is anything lost?**
@@ -993,6 +1023,8 @@ It is a two-column `(query, frequency)` aggregate recording how many times each 
 Because real users almost never type a very long prefix before selecting a suggestion, so capping length at ~50 characters covers essentially all usage while bounding the prefix walk to a small constant — making "find the prefix node" O(1) instead of O(p). Practically nothing is lost: queries longer than the cap are vanishingly rare, and the payoff is a constant-time prefix lookup that keeps the read path within budget at peak QPS.
 
 **Q: What is the space cost of caching the top-k at every node, and why is it acceptable?**
+**Short:** Each node stores up to k query strings plus frequencies, roughly quadrupling trie size, acceptable given weekly rebuilds and heavy read traffic.
+
 Every trie node stores up to k (e.g. 5) query strings plus their frequencies in addition to its character and child pointers, which multiplies the trie's memory footprint substantially. It is acceptable because autocomplete is read-dominated and latency-critical while being rebuilt only weekly, so trading memory for O(1) reads is the right call. Memory is comparatively cheap, and the alternative — traversing and sorting subtrees at 48k QPS — is simply infeasible.
 
 **Q: What is the role of the Trie Cache versus the Trie DB?**
@@ -1001,6 +1033,8 @@ Every trie node stores up to k (e.g. 5) query strings plus their frequencies in 
 The Trie Cache is a distributed in-memory copy of the current trie (a weekly snapshot) that the query service reads for O(1), near-instant lookups; the Trie DB is the persistent store that survives cache eviction and restarts. Requests normally hit only the cache; on a cache miss the API server reloads the trie from the Trie DB into the cache and then serves. Workers write each freshly built trie to both.
 
 **Q: How are the data-gathering write path and the query read path decoupled, and why does it matter?**
+**Short:** Workers publish a freshly built trie to the cache and DB offline, and the read path only ever consumes that published artifact.
+
 They are decoupled through the trie artifact: workers build the trie offline from aggregated logs and publish it to the cache/DB, while the query path only ever reads that published trie. This matters because the write path is slow and heavy (aggregating billions of logs) and the read path must be fast and constant-time at 48k QPS — letting the two contend on a shared live structure would sacrifice read latency. The separation is the backbone that keeps reads O(1) while the corpus is continuously rebuilt.
 
 ---

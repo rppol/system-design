@@ -826,18 +826,28 @@ Designing YouTube reduces to two flows built on reused cloud primitives. **Uploa
 ## Interview Questions
 
 **Q: Why can't YouTube just serve every video from the CDN, and what does the arithmetic show?**
+**Short:** At this scale CDN egress for every view works out to roughly $150,000 a day, so only the popular head is served from CDN and the tail from origin.
+
 Because serving everything from the CDN costs roughly \$150,000 per day at this scale, which is unaffordable. The estimate is 5M DAU × 5 videos watched × 0.3 GB × \$0.02/GB (CloudFront) = \$150K/day, about \$54M/year. Since video popularity is long-tailed, the fix is to serve only the popular head from the CDN and the cold tail from cheaper origin storage on demand, with region-aware distribution so videos aren't pushed to CDNs where nobody watches them.
 
 **Q: What is the difference between a container and a codec?**
+**Short:** A container packages video, audio, and metadata together by file extension, while a codec is the algorithm that compresses the video.
+
 A container is the basket that packages the video stream, audio stream, and metadata together, identified by the file extension like .avi, .mov, or .mp4. A codec is the compression/decompression algorithm that shrinks the raw video while preserving quality, such as H.264, VP9, or HEVC. The same .mp4 container can hold different codecs, and the same codec can sit in different containers, so they are independent choices.
 
 **Q: Why model transcoding as a DAG instead of a linear pipeline?**
+**Short:** A DAG lets independent tasks like inspection, encoding, thumbnail, and watermark run concurrently instead of serialized in a fixed order.
+
 Because a DAG expresses which tasks are independent (run in parallel) and which have dependencies (must wait), while letting each creator supply a different graph. Inspection, encoding, thumbnail, and watermark have no dependency on each other, so a DAG scheduler fans them out across workers concurrently, cutting wall-clock time. A linear pipeline would serialize them and hard-code one workflow for everyone; Facebook's streaming video engine uses the DAG model for exactly this flexibility and parallelism.
 
 **Q: What is a pre-signed upload URL and why use one?**
+**Short:** A short-lived, scoped URL the API server mints so a client can upload exactly one video to exactly one storage location.
+
 A pre-signed URL is a short-lived, scoped URL the API server mints so a client can upload one specific object to one specific storage location. The client requests it from the API servers, receives it, then uploads the video directly to storage using it. This means the client never holds blanket storage credentials, so only authorized users upload and only to the right location; AWS S3 calls it an upload URL.
 
 **Q: Why split video on GOP boundaries specifically?**
+**Short:** A GOP is independently decodable, so splitting there lets chunks transcode and upload in parallel and lets a failed transfer resume from one chunk.
+
 Because a GOP (Group of Pictures) is a chunk of frames that is independently playable and decodable, usually a few seconds long. Splitting on GOP boundaries lets each chunk be transcoded and uploaded in parallel by different workers, and lets a failed upload or transcode resume from the last good chunk instead of restarting the whole 1 GB file. Cutting at arbitrary byte offsets would produce chunks that can't be decoded on their own.
 
 **Q: How do the two parallel processes in the upload flow work?**
@@ -846,15 +856,23 @@ Because a GOP (Group of Pictures) is a chunk of frames that is independently pla
 One process uploads the actual video bytes (original storage, then transcoding servers, then transcoded storage and CDN), while the other updates the video metadata (title, size, format) in the DB and cache at the same time. They run in parallel so the user can fill in the metadata form while the potentially 1 GB file is still transferring, and neither flow blocks the other. They meet only at the shared metadata store.
 
 **Q: What is the difference between streaming and downloading a video, and why does it matter?**
+**Short:** Streaming starts playback after the first chunk arrives and downloads the rest in the background, which matters because videos run 300 MB to 1 GB.
+
 Downloading fetches the entire file before playback can begin, while streaming loads a small portion, starts playback immediately, and keeps downloading the rest while you watch. Streaming matters because videos are 300 MB to 1 GB, so waiting for a full download would be unacceptable. Videos are streamed from the nearest CDN edge server, and adaptive bitrate lets the client drop quality on a weak network rather than stalling.
 
 **Q: What are the components of the resource manager and how does the task scheduler work?**
+**Short:** A task queue, worker queue, and running queue, with the task scheduler pairing the highest-priority task to the optimal available worker.
+
 The resource manager has a task queue, a worker queue, a running queue, and a task scheduler. The task scheduler pulls the highest-priority task from the task queue, picks the optimal worker from the worker queue, instructs that worker to run the task, binds the task/worker pair into the running queue, and removes it once the job finishes. This pairing of the best task with the best available worker is what keeps the transcoding fleet efficiently utilized.
 
 **Q: How do message queues improve transcoding throughput?**
+**Short:** Inserting a queue between stages lets encoding pull independent jobs and run in parallel instead of waiting on the previous stage to finish.
+
 Message queues decouple the pipeline stages so a downstream stage no longer waits on the upstream one. Before a queue, the encoding module had to wait for the download/split module to finish; after inserting a queue between them, encoding workers pull independent jobs and process them in parallel. This loose coupling lets each stage scale and run independently, which is the core parallelism-everywhere optimization.
 
 **Q: What does the preprocessor do?**
+**Short:** It splits video into GOP-aligned chunks, generates the DAG from client config files, and caches segmented data for reliable retries.
+
 The preprocessor splits the video into GOP-aligned chunks, generates the DAG from client configuration files, caches segmented data in temporary storage, and handles splitting for old clients that can't split themselves. Caching the GOP chunks and metadata gives reliability: if encoding fails, the system retries from the persisted data instead of from the raw file. It sits at the front of the transcoding architecture, feeding the DAG scheduler.
 
 **Q: How does the system protect uploaded videos from piracy?**
@@ -863,9 +881,13 @@ The preprocessor splits the video into GOP-aligned chunks, generates the DAG fro
 Through three layers: DRM systems (Apple FairPlay, Google Widevine, Microsoft PlayReady), AES encryption with an authorization policy so the video is decrypted only on authorized playback, and visual watermarking that burns an identifying overlay onto the video. These are combined rather than chosen exclusively, so content is protected both cryptographically and visibly. Encryption plus DRM controls who can watch; the watermark deters redistribution.
 
 **Q: How is temporary storage organized during transcoding?**
+**Short:** Small, frequently accessed metadata is cached in memory while bulky video and audio chunks go to BLOB storage, both freed after processing.
+
 Temporary storage uses different systems by data type, size, access frequency, and lifespan: small, frequently accessed metadata is cached in memory, while large video/audio chunks go to BLOB storage. All temporary data is freed once the video's processing completes. This split keeps hot metadata fast for the workers while cheaply holding the bulky chunk data that only needs to survive until the pipeline finishes.
 
 **Q: How does the system handle an API server failure versus a metadata DB master failure?**
+**Short:** A failed stateless API server is simply bypassed by routing to another one, while a failed DB master is handled by promoting a slave.
+
 API servers are stateless, so a failed one is simply bypassed and the request is routed to another server; the tier scales horizontally the same way. A metadata DB master failure is handled by promoting a slave to become the new master, since the DB is stateful and its data must be preserved. The general rule is that stateless services reroute while stateful services replicate and fail over.
 
 **Q: How does the system decide when to retry versus abort on error?**
@@ -874,21 +896,33 @@ API servers are stateless, so a failed one is simply bypassed and the request is
 It classifies errors as recoverable or non-recoverable: a recoverable error, like a segment failing to transcode, is retried a few times and only returns an error code if it still fails, while a non-recoverable error, like a malformed video, stops the associated tasks immediately and returns an error code. This avoids wasting compute retrying something that can never succeed while still absorbing transient failures. Retries are cheap because the preprocessor cached the chunks.
 
 **Q: What are the streaming protocols mentioned, and how do you choose one?**
+**Short:** MPEG-DASH, Apple HLS, Microsoft Smooth Streaming, and Adobe HDS, chosen by which encodings and players the target client supports.
+
 The protocols are MPEG-DASH (Dynamic Adaptive Streaming over HTTP), Apple HLS (HTTP Live Streaming), Microsoft Smooth Streaming, and Adobe HDS (HTTP Dynamic Streaming). Each supports a different set of video encodings and playback players, so the choice depends on which the target client supports. For example, you would use HLS for Apple devices; there is no single universal protocol, so the client's capabilities drive the selection.
 
 **Q: Why is transcoding necessary at all?**
+**Short:** Raw video is too large to store and stream efficiently, devices support different formats, and adaptive bitrate needs multiple renditions.
+
 Because raw video is enormous and must be compressed for storage and delivery, different devices and browsers support different formats, and adaptive-bitrate playback needs multiple resolutions and bitrates. Transcoding converts one raw upload into many compressed, device-compatible versions so the video plays smoothly everywhere and adjusts quality to the viewer's network. Without it you would store huge files that many clients couldn't play and couldn't adapt to slow connections.
 
 **Q: How would you scale the API tier and the database as the service grows?**
+**Short:** Scale the stateless API tier horizontally behind the load balancer, and scale the database through replication and sharding.
+
 Scale the API tier horizontally because the API servers are stateless, so you just add servers behind the load balancer and any request can hit any of them. Scale the database with replication for read scaling and availability and with sharding to partition metadata across nodes for write and storage scaling. The stateless-versus-stateful distinction is what makes the API tier trivial to scale and the database the harder problem.
 
 **Q: What changes when designing live streaming instead of on-demand video?**
+**Short:** Live streaming needs real-time transcoding on arriving segments rather than a full uploaded file, leaving far less room for offline parallelism.
+
 Live streaming has a much higher latency requirement, needs real-time transcoding, and has no full file uploaded upfront since it works on segments as they arrive. That leaves far less room for the offline parallelism the on-demand pipeline relies on, and error handling must be fast because you can't rebuild the whole video after the fact. The upload/transcode/serve shape is similar, but the tight real-time constraints make it a distinct design rather than a tweak.
 
 **Q: How are inappropriate or copyright-violating videos taken down?**
+**Short:** Some are caught by ML content classifiers at upload time, and others are found afterward through user reports and flagging.
+
 Videos that violate copyright, contain pornography, or are otherwise illegal are removed either at upload time or after the fact. Some are caught during upload by ML content classifiers, while others are discovered later through user reports and flagging. Combining automated detection at ingest with human reporting afterward covers both the content that models can catch immediately and the cases that only surface once people watch it.
 
 **Q: Roughly how much new storage does YouTube add per day in this design, and how is it estimated?**
+**Short:** About 150 TB per day, from 5M DAU times a 10% upload rate times one 300 MB video, before transcoding multiplies it further.
+
 About 150 TB of new video per day, before transcoding multiplies it into multiple resolutions. The estimate is 5M DAU × 10% who upload × 1 video × 300 MB average = 150 TB/day. Transcoding into several resolutions and codecs multiplies the stored bytes further, which is part of why the cost-saving section limits how many encoded versions are generated for unpopular videos.
 
 ---

@@ -1105,6 +1105,7 @@ validation) in steps 5–6. Chapters 2–11 are this framework instantiated nine
 Pick a measurable prediction target that, when optimized, moves the business goal — e.g. "maximize the predicted number of relevant videos shown" rather than the fuzzy "engagement." The translation is the highest-leverage decision in the design because a wrongly chosen ML objective optimizes the wrong thing perfectly; name several candidates (clicks, completed items, watch time, relevance) and defend one. For engagement, "maximize relevance" usually beats "maximize clicks," which breeds clickbait.
 
 **Q: Why can a model that wins on offline metrics still lose in production, and what do you do about it?**
+**Short:** Offline metrics are a proxy on logged data, so a higher offline score can still lower the live business metric via feedback loops.
 Offline metrics are a proxy measured on logged past data, while the business runs on live user behavior, so the two routinely disagree — a higher offline F1 can lower revenue via feedback loops or a proxy mismatch. Offline metrics are for fast, cheap iteration and model selection; the real goal is measured online. The fix is to validate the offline winner with a shadow deployment and then an A/B test with a significance check before trusting it.
 
 **Q: How do you decide between batch and online prediction?**
@@ -1112,15 +1113,19 @@ Offline metrics are a proxy measured on logged past data, while the business run
 Use batch when the inputs can be enumerated ahead of time and some staleness is tolerable, so you precompute results on a schedule and serve them as a fast lookup; use online when the input arrives at request time and can't be pre-enumerated or freshness is critical, so the model runs per request. Batch is cheap per prediction but stale; online is always fresh but pays per request and needs low-latency infra. Many real systems are hybrid: batch-precompute candidates, then score/re-rank online.
 
 **Q: Why is accuracy a misleading metric, and what should you use instead?**
+**Short:** Under 1% class imbalance, always predicting negative scores 99% accuracy while catching none of the positives.
 Accuracy is misleading under class imbalance: with 1% positives, a model that always predicts "negative" scores 99% accuracy while catching nothing useful. Use precision (of flagged items, how many were right), recall (of real positives, how many you caught), F1 (their harmonic mean), and PR-AUC, which stays honest when positives are rare. Also fix the data itself with resampling or a class-weighted loss.
 
 **Q: What are the seven steps of the ML system design framework, in order?**
+**Short:** Clarify requirements, frame as ML task, prepare data, develop model, evaluate, deploy and serve, then monitor.
 Clarify requirements, frame the problem as an ML task, prepare the data, develop the model, evaluate, deploy and serve, then monitor and maintain infrastructure. It is a talking order and completeness checklist, not a rigid one-pass pipeline — you loop back constantly, e.g. from monitoring to retraining or from an offline/online metric gap back to reframing the objective. Every later chapter in the book instantiates these same seven steps.
 
 **Q: Why should you always start with a simple baseline model?**
+**Short:** A simple baseline like logistic regression sets a fast, debuggable metric floor that added complexity must actually beat.
 A simple baseline (logistic regression, a single decision tree, or GBDT) is fast to build, easy to debug, and establishes a metric floor you must beat before added complexity is justified. Reaching straight for a deep network means you can't tell whether the complexity actually bought anything — and often it doesn't. Increase complexity only when the data volume and the metric gap justify it.
 
 **Q: What is data distribution shift and why is it the dominant production failure mode?**
+**Short:** Data distribution shift is when production data drifts from training data, silently degrading a model's accuracy.
 Data distribution shift is when the data a model sees in production drifts away from its training data, silently degrading accuracy. It comes from train/serve skew (training never matched production) or the world changing after training (new behavior, seasonality, adversaries adapting). It dominates because a model is frozen at training time while its environment keeps moving; the defenses are large representative training data and periodic or continual retraining.
 
 **Q: Which questions should you ask when clarifying requirements?**
@@ -1128,21 +1133,27 @@ Data distribution shift is when the data a model sees in production drifts away 
 Ask about the business objective, the features the system must support, the data (sources, size, whether it's labeled and trusted), constraints (compute budget, on-device vs cloud), scale (users, items, growth), performance (latency, throughput, and the accuracy-vs-latency tradeoff), and privacy/ethics. Then write the resulting assumptions on the board and state them aloud so the interviewer can correct a wrong premise before you build on it. The business objective is the hinge everything else swings on.
 
 **Q: When is machine learning the wrong tool for a problem?**
+**Short:** ML is the wrong tool when explicit business rules already solve the problem or no learnable pattern or data exists.
 ML is wrong when a handful of explicit business rules already solve the problem, when there's no learnable pattern, or when there's no data to learn from and the task isn't repetitive enough to justify the cost. ML fits when there is a pattern that is hard to specify by hand, data exists to learn it, and the problem recurs at scale. Proposing ML for something a `WHERE` clause handles is a red flag, not a strength.
 
 **Q: What is the difference between operational and ML-specific monitoring?**
+**Short:** Operational monitoring tracks system health like latency and CPU; ML-specific monitoring tracks input and output drift.
 Operational monitoring tracks system health — latency (p50/p99), throughput, CPU/GPU utilization, memory, error rates, uptime — and is standard SRE. ML-specific monitoring tracks model health — input feature drift, output/prediction drift, accuracy against a fresh labeled set, prediction distribution, and the deployed model version. Juniors watch only the operational signals; the senior tell is watching input/output drift to catch a rotting model *before* accuracy visibly drops, since ground-truth labels often arrive late.
 
 **Q: What is the difference between hand labeling and natural labeling?**
+**Short:** Hand labeling uses accurate but slow human annotation; natural labeling derives labels from user behavior, free but noisy.
 Hand labeling has humans annotate examples: accurate and clean but slow, expensive, and hard to scale, so it's used for evaluation sets and safety-critical training. Natural labeling derives the label from user behavior — a click is a positive, an ignored impression a negative, a booking a positive: free and abundant but noisy and biased by what the system chose to show. Most large systems train on natural labels and evaluate on a smaller hand-labeled set.
 
 **Q: Why use embeddings instead of one-hot encoding for categorical features?**
+**Short:** One-hot encoding's width equals cardinality and breaks at millions of IDs; embeddings use a fixed-size vector instead.
 One-hot encoding creates one binary column per category, so its width equals the cardinality — unusable for high-cardinality features like millions of user or item IDs, and it produces sparse, memory-heavy inputs. Embeddings map each category to a dense learned vector of fixed size (say 32–64 dims) regardless of cardinality, and place similar categories near each other. Embeddings are the only scalable encoding for huge-cardinality features and are the workhorse for every large-scale system in the book.
 
 **Q: Which ranking metric fits which situation — MRR vs mAP vs nDCG?**
+**Short:** Use MRR for one right answer per query, mAP for binary relevance with several correct items, and nDCG for graded relevance.
 Use MRR (mean reciprocal rank of the first relevant result) when there is essentially one right answer per query. Use mAP (mean average precision) when relevance is binary but several items can be relevant. Use nDCG (normalized discounted cumulative gain) when relevance is graded, since it weights higher grades and discounts by position — nDCG is awkward with purely binary labels. Precision@k and recall@k are simpler top-k summaries usable alongside any of them.
 
 **Q: What are the ways to handle class imbalance?**
+**Short:** Resample the data or use a class-weighted loss, and evaluate with precision, recall, F1, and PR-AUC instead of accuracy.
 Resample the data — oversample the minority class (e.g. SMOTE) or undersample the majority — and/or use a class-weighted loss that penalizes errors on the rare class more heavily. Crucially, also switch metrics: accuracy is meaningless under imbalance, so evaluate with precision, recall, F1, and PR-AUC. Imbalance is common in fraud, harmful-content, and click prediction where positives can be around 1%.
 
 **Q: What model-compression techniques let a large model serve within a tight budget?**
@@ -1154,9 +1165,11 @@ Knowledge distillation trains a small student model to mimic a large teacher's s
 Shadow deployment runs the new model alongside the old one on real requests but serves only the old model's output, logging the new model's predictions to compare offline — zero user risk, but it can't measure user *reaction*. A/B testing actually serves the new model to a slice of live traffic and compares an online business metric against the control with a statistical significance test. Use shadow to catch prediction/latency problems safely, then A/B to prove the model moves the business metric.
 
 **Q: What is the difference between data parallelism and model parallelism in distributed training?**
+**Short:** Data parallelism splits the training data across workers with a replicated model; model parallelism splits the model itself.
 Data parallelism replicates the whole model on each worker, splits the training *data* across workers, and averages gradients each step — the common case, scaling with dataset size. Model parallelism splits the *model itself* across devices, used when a single model is too large to fit in one accelerator's memory. In short: data parallelism handles too-much-data; model parallelism handles too-big-a-model, and very large systems combine both.
 
 **Q: When would you serve a model on-device instead of in the cloud?**
+**Short:** On-device serving fits offline use, private data, and low latency; cloud serving fits large models and instant updates.
 Serve on-device when you need to work offline, keep raw data private (it never leaves the device), or avoid a network round-trip's latency — for example a camera blurring faces without connectivity. The cost is tiny compute, so only small (often compressed) models fit, and updates must be pushed to devices. Cloud serving wins when you need large models, big compute, and instant server-side updates, accepting a network hop and per-request cost.
 
 **Q: How do you choose a loss function for a task?**
@@ -1168,9 +1181,11 @@ Match the loss to the task: cross-entropy (log loss) for classification because 
 Min-max rescales a feature to [0, 1] via `(x − x_min)/(x_max − x_min)`, preserving shape but sensitive to outliers; z-score standardizes to mean 0 and unit variance via `(x − μ)/σ`, a robust unbounded default; log scaling applies `log(x)` to heavily right-skewed features (counts, prices) to compress the long tail. You scale features so distance- and gradient-based models (kNN, SVM, NNs, logistic regression) aren't dominated by large-magnitude features. Tree models don't need scaling.
 
 **Q: How do interleaving and bandits improve on a fixed-split A/B test for ranking?**
+**Short:** Interleaving mixes two rankers' results to see which items users prefer, and bandits adaptively route traffic to the better model.
 Interleaving mixes results from two rankers into a single list and sees which model's items the user prefers, making it far more sensitive than A/B for ranking, so it reaches a conclusion with less traffic. Multi-armed and contextual bandits adaptively route more traffic to the better-performing model as evidence accumulates, balancing exploration and exploitation to decide faster than a fixed 50/50 split. Both cut the time and traffic cost of finding the better model.
 
 **Q: Why keep the test set untouched, and how do you split time-dependent data?**
+**Short:** Keep the test set untouched to get an honest generalization estimate, and split time-dependent data by time, not randomly.
 Keep the test set untouched until the very end so it gives an honest, unbiased estimate of generalization — tuning on it leaks information and inflates your reported metric. For time-dependent data, split by time (train on the past, validate/test on the future) rather than randomly, because a random split lets the model peek at future information and produces optimistic, leaky metrics that collapse in production. The train/validation/test discipline is what makes offline numbers trustworthy.
 
 ---

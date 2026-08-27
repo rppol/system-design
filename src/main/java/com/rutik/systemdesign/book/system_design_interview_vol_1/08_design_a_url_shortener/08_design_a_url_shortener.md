@@ -818,69 +818,113 @@ Two ways to mint the code: **Approach A** hashes the long URL (CRC32/MD5/SHA-1) 
 ## Interview Questions
 
 **Q: Should a URL shortener return HTTP 301 or 302, and what is the tradeoff?**
+**Short:** 301 gets cached by the browser and cuts server load but loses click analytics; 302 keeps every click server-side for tracking.
+
 It depends on whether you value server-load reduction (301) or click analytics (302). A 301 "Moved Permanently" is cached by the browser, so repeat clicks go straight to the long URL and never touch your server — lower load but no analytics. A 302 "Found" is not cached, so every click flows through your server, enabling click tracking at the cost of higher load. Commercial shorteners that sell analytics typically choose 302.
 
 **Q: Why does a 301 redirect hide click analytics?**
+**Short:** The browser caches a 301, so repeat clicks go straight to the long URL client-side and never reach your server to be logged.
+
 Because the browser caches the 301 and future visits go straight to the long URL without hitting your server. Once cached, the redirect happens entirely client-side, so your server never sees the repeat click and cannot log its count, source, or geography. If you need per-click analytics you must serve a 302, which is not cached and therefore routes every click through your server.
 
 **Q: How do you compute the required short-code length for 365 billion URLs with a base-62 alphabet?**
+**Short:** Solve for the smallest n where 62^n exceeds 365 billion; 62^6 falls short but 62^7 clears it, so codes are 7 characters.
+
 Solve 62^n ≥ 365 billion, which gives n = 7. Base-62 has 62 possibilities per character, so n characters yield 62^n codes; 62^6 ≈ 56.8 billion is less than 365 billion (too few), while 62^7 ≈ 3.5 trillion clears it with about 10× headroom. So the short code is 7 characters long.
 
 **Q: What characters make up the base-62 alphabet and why 62?**
+**Short:** 0-9, a-z, and A-Z, chosen over base-64 because base-64's `+` and `/` have special meaning inside URLs.
+
 0-9, a-z, and A-Z — that is 10 + 26 + 26 = 62 URL-safe characters. Base-62 is preferred over base-64 because base-64 adds `+` and `/`, which have special meaning inside URLs and would need escaping. Using only alphanumerics keeps the short code clean and copy-paste-safe.
 
 **Q: Convert the ID 11157 to its base-62 short code.**
+**Short:** 11157 converts to "2TX" by repeated division by 62 and mapping the remainders to digits, then lowercase, then uppercase letters.
+
 It becomes "2TX". Repeatedly divide by 62 and read remainders: 11157 ÷ 62 = 179 r 59, 179 ÷ 62 = 2 r 55, 2 ÷ 62 = 0 r 2; reading bottom-to-top gives 2, 55, 59. Mapping 0-9→digits, 10-35→a-z, 36-61→A-Z makes 2→'2', 55→'T', 59→'X', so the code is 2TX.
 
 **Q: In the hash-plus-collision approach, how do you shorten a 32-character MD5 to 7 characters, and what problem does that create?**
+**Short:** Truncating MD5 to its first 7 characters discards almost all its bits, so different long URLs can collide on the same short code.
+
 You truncate the hash to its first 7 characters, which reintroduces collisions. A full MD5 is 128 bits (32 hex chars) and collision-resistant, but keeping only the first 7 characters discards almost all the bits, so two different long URLs can produce the same 7-char prefix. You then need collision resolution to detect and fix those clashes.
 
 **Q: How does the hash-and-collision approach resolve a collision?**
+**Short:** It appends a predefined string to the long URL and re-hashes, looping until the truncated result is an unused code.
+
 It appends a predefined string to the long URL and re-hashes until the truncated value is unused. Each attempt checks the database (or a Bloom filter) for existence; on a hit it perturbs the input by concatenating the fixed string and hashes again, looping until it finds a free 7-character code. The loop is effectively recursive in the worst case.
 
 **Q: Why not use the full MD5 or SHA-1 hash as the short code?**
+**Short:** A full MD5 (32 hex chars) or SHA-1 (40) is far too long for a short URL, so it must be truncated, reintroducing collisions.
+
 Because a full MD5 is 32 hex characters and SHA-1 is 40 — far too long for a "short" URL. The requirement is a code as short as possible (7 characters), so you must truncate, and the moment you truncate you lose the hash's collision resistance and have to handle collisions explicitly. The full hash avoids collisions but defeats the entire purpose of shortening.
 
 **Q: How does a Bloom filter speed up the hash-collision approach?**
+**Short:** It answers "has this code been used?" from memory, so a definite "not present" skips the database lookup entirely.
+
 It answers "has this short code been used?" from memory, letting most inserts skip the database lookup. A Bloom filter is a compact probabilistic set that gives a definitive "not present" or a "maybe present"; on a "not present" you insert immediately with no DB query, and only a "maybe" falls through to a real database check. This removes most of the per-attempt round-trips the collision loop would otherwise make.
 
 **Q: What is the security downside of the base-62-of-a-sequential-ID approach?**
+**Short:** The codes are sequential, so an attacker can walk consecutive values and enumerate every shortened URL in the system.
+
 The short codes are sequential and therefore guessable and enumerable. Because each code base-62-encodes a monotonically increasing ID, an attacker can walk consecutive codes (2TW, 2TX, 2TY) and scrape every link in the system, exposing URLs meant to be private. Approach A's hash-derived codes avoid this because they are not sequential.
 
 **Q: Why store the URL mapping in a database instead of an in-memory hash table?**
+**Short:** 365 billion entries won't fit in one machine's RAM, and an in-memory table is lost on restart, violating durability.
+
 Because 365 billion entries won't fit in one machine's memory and memory isn't durable. An in-memory hash table is limited by RAM, is lost on restart (violating "URLs must not be lost"), and isn't shared across a stateless web-server fleet. A durable, shardable relational database holds the 36.5 TB, survives crashes, and is visible to every web server.
 
 **Q: What are the two approaches to generating the short code, and how do they differ?**
+**Short:** Hashing and truncating gives a fixed unguessable code but needs collision handling; base-62-encoding an ID is collision-free but sequential.
+
 Hashing the long URL and truncating versus base-62-encoding a unique numeric ID. Approach A gives a fixed 7-char, unguessable code but must resolve truncation collisions with DB checks; Approach B is collision-free and simple but produces predictable, enumerable codes that grow in length and depends on a separate unique-ID generator. The choice is a trade between collision-handling cost and predictability/dependency.
 
 **Q: What do the write and read QPS come out to for 100M URLs/day at a 10:1 read ratio?**
+**Short:** About 1,160 writes per second and 11,600 reads per second, modest numbers that make key-space and read-skew the real challenges.
+
 About 1,160 writes/sec and 11,600 reads/sec. 100 million URLs divided by 86,400 seconds per day is roughly 1,160 writes/sec, and a 10:1 read-to-write ratio makes redirects about 11,600/sec. These are modest numbers, so the design challenge is the read skew and the 365-billion-row key space, not raw throughput.
 
 **Q: How does the system handle the same long URL being submitted twice?**
+**Short:** It looks up the long URL first and returns the existing short code if one already exists, avoiding duplicate rows.
+
 It checks the database first, and if the long URL already exists it returns the existing short URL (idempotency). This avoids creating duplicate rows and gives stable codes for the same input, at the cost of an extra lookup and an index on the long-URL column. Whether to dedup is a product decision, but it saves storage and yields consistent short links.
 
 **Q: Why is the redirect path the one you optimize with a cache?**
+**Short:** Reads outnumber writes about 10:1 and the mapping never changes, so a cached entry serves most redirects and never goes stale.
+
 Because reads outnumber writes about 10:1, so redirects dominate traffic. At ~11,600 reads/sec versus ~1,160 writes/sec, most work is looking up mappings, and since the mapping is immutable (no updates or deletes) a cached entry never goes stale. A cache-aside layer (e.g. Redis) turns most redirects into fast in-memory hits and shields the database.
 
 **Q: What is the full request flow for a redirect?**
+**Short:** User to load balancer to web server, then a cache lookup falling through to the database on a miss, returning a redirect response.
+
 User → load balancer → web server → cache → database, returning a 301/302 with the long URL in the Location header. The web server checks the cache first; on a hit it responds immediately, and on a miss it reads the database, populates the cache, then responds. The browser reads the Location header and navigates to the long URL.
 
 **Q: What does the Location header do in a redirect response?**
+**Short:** It tells the browser the long URL to navigate to, and the browser issues a fresh request there to complete the redirect.
+
 It tells the browser the long URL to navigate to. When the server returns a 301 or 302, it includes `Location: <longURL>`; the browser reads that header and issues a fresh request to the long URL, completing the redirect. Without the Location header the browser would have no destination.
 
 **Q: How do you scale the web tier of a URL shortener?**
+**Short:** Keep web servers stateless so any request can go to any server, making horizontal autoscaling behind the load balancer trivial.
+
 Keep it stateless so you can add or remove servers behind the load balancer and autoscale. Because web servers hold no per-user session state, any request can go to any server, and all shared state lives in the database and cache. This makes horizontal scaling trivial and is the standard "scale the stateless tier" pattern.
 
 **Q: Why does the base-62 approach's short-code length grow over time?**
+**Short:** It encodes a monotonically increasing ID, so as the counter climbs past 62^7 the codes need more digits to represent it.
+
 Because it encodes a monotonically increasing ID, so larger IDs need more base-62 digits. Early IDs fit in a few characters, but as the ID counter climbs past 62^7 the codes lengthen, unlike the hash-and-truncate approach which is always exactly 7 characters. This variable length is one of the tradeoffs of Approach B.
 
 **Q: How does Approach B depend on Chapter 7?**
+**Short:** It needs Chapter 7's distributed unique-ID generator to mint the globally unique numeric ID that gets base-62-encoded.
+
 It needs the distributed unique-ID generator from Chapter 7 to feed the base-62 encoder. Approach B works by minting a globally unique numeric ID per URL and then base-62-encoding it; the uniqueness of that ID is what guarantees no collisions, and producing unique IDs at scale across servers is exactly the Snowflake-style problem Chapter 7 solves.
 
 **Q: What role does a rate limiter play, and where does it come from?**
+**Short:** It throttles abusive shorten requests, from Chapter 4, so a flood of writes can't exhaust the ID space or overload storage.
+
 It throttles abusive shorten requests to protect the write path, and it comes from Chapter 4. Without it, a script could flood POST /shorten to exhaust the ID space, fill storage, and overload the ID generator. A per-IP (or per-API-key) token-bucket or sliding-window limiter filters out excess requests before they reach the application.
 
 **Q: How does the append-only (no update, no delete) requirement simplify the design?**
+**Short:** Since a mapping is immutable once created, a cached entry can never go stale and replicas can never disagree.
+
 It removes almost all consistency and cache-staleness pressure. Since a mapping is immutable once created, a cached `<shortURL → longURL>` entry never becomes wrong, so the cache can serve it indefinitely and replicas never disagree. This is why fixing "no update/delete" in Step 1 pays off as easy caching and consistency in Step 4.
 
 ---

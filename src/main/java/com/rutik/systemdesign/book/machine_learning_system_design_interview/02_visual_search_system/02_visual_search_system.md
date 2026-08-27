@@ -1068,6 +1068,7 @@ is picking the operating point that meets the latency SLA.
 ## Interview Questions
 
 **Q: Why frame visual search as representation learning instead of classification?**
+**Short:** Representation learning maps images to embeddings so open-ended similarity search becomes nearest-neighbor retrieval.
 Because the goal is open-ended similarity retrieval, not assigning one of a fixed label set. Representation learning trains an encoder to map each image to an embedding so that visually similar images are close in vector space, turning "find similar images" into "find nearest neighbors" — which scales to an unbounded, ever-growing catalog where new images appear constantly. A classifier would need predefined classes and couldn't rank arbitrary image-to-image similarity.
 
 **Q: Where do the positive pairs for contrastive training come from, and what are the tradeoffs?**
@@ -1075,9 +1076,11 @@ Because the goal is open-ended similarity retrieval, not assigning one of a fixe
 There are three sources: human labeling (annotators mark similar images — most accurate but expensive and unscalable), interactions as labels (treat clicked/saved results as positives — free and abundant but noisy from position and click bias), and self-supervised augmentation (augment an image and treat the augmented view as its positive — zero labeling cost, guaranteed-similar pair, the SimCLR/MoCo approach the book starts with). Systems typically bootstrap self-supervised, then fine-tune with interaction and human labels.
 
 **Q: How does self-supervised augmentation manufacture a positive without any labels?**
+**Short:** It creates a positive by pairing two random augmentations of the same image, no labels needed.
 It takes a single image, applies two random augmentations (crop, flip, color jitter, blur), and treats the two distorted views as a positive pair. Because both views come from the same source image, they are genuinely similar by construction, so no human annotation is needed. Every other image in the batch supplies negatives for free, which is why SimCLR uses large batches and MoCo maintains a queue of negatives.
 
 **Q: Compare the three ANN families — trees, LSH, and IVF — on how they avoid a full scan.**
+**Short:** Trees partition space, LSH buckets by hash collision, and IVF searches only nearby k-means clusters.
 Trees recursively partition space and descend to the relevant leaf, scanning only nearby points (kd/R-trees axis-aligned, Annoy random-hyperplane forests). LSH hashes points so near ones collide in the same bucket, then scans only the query's buckets across L tables. IVF clusters the corpus with k-means and, at query time, searches only the nprobe clusters nearest the query. All three replace O(N) with a sublinear scan of a candidate subset, trading a little recall for large speedups.
 
 **Q: Why do plain kd-trees fail on high-dimensional embeddings?**
@@ -1085,12 +1088,15 @@ Trees recursively partition space and descend to the relevant leaf, scanning onl
 The curse of dimensionality: in high dimensions almost all points become nearly equidistant from the query, so the tree's pruning breaks down and backtracking must explore nearly every branch, degrading search from O(log N) toward O(N). kd-trees work well only for low dimensions (roughly ≤10–20). For 256-D embeddings you need randomized forests (Annoy), LSH, or IVF, which are designed for high-dimensional data.
 
 **Q: What does the nprobe parameter control in an IVF index, and what happens if it's too low?**
+**Short:** nprobe sets how many IVF clusters are searched; too low risks missing neighbors near cell boundaries.
 nprobe is the number of nearest clusters (Voronoi cells) IVF searches per query, and it's the direct recall-vs-latency dial: higher nprobe searches more cells for higher recall at more cost. If nprobe is too low (e.g. 1), a true nearest neighbor sitting just across a cell boundary in an unsearched cluster is missed — the boundary problem — causing intermittently wrong top results. You tune nprobe by sweeping the recall–latency curve and picking the smallest value that meets a recall floor.
 
 **Q: How does locality-sensitive hashing differ from an ordinary hash function?**
+**Short:** LSH deliberately makes nearby points collide into the same bucket, unlike an ordinary hash.
 An ordinary hash scatters similar inputs to unrelated buckets; LSH is deliberately designed so that near points collide (land in the same bucket) with high probability and far points rarely do. For cosine similarity the classic LSH is a random hyperplane: the hash bit is the sign of the dot product with a random vector, so points at a small angle agree on more hyperplanes and share a bucket. Concatenating m bits and using L independent tables tunes the recall–speed tradeoff.
 
 **Q: Why is exact nearest-neighbor search infeasible at 200 billion images?**
+**Short:** Exact search costs O(N·D) per query, which at 200 billion images takes far longer than milliseconds.
 Exact search is O(N·D) per query — it compares the query to every point. With N ≈ 2×10¹¹ and D ≈ 256 that's ~5×10¹³ operations per query, far beyond a tens-of-milliseconds budget (hours per query even at a billion ops/second). That cost is precisely why the system uses approximate nearest-neighbor search, which trades a small amount of recall for orders-of-magnitude speedup by not scanning most points.
 
 **Q: Why is nDCG a poor evaluation metric for this system, and what's better?**
@@ -1098,6 +1104,7 @@ Exact search is O(N·D) per query — it compares the query to every point. With
 nDCG is designed for graded relevance (relevance scores like 0/1/2/3), but visual-search relevance is essentially binary — an image either is or isn't visually similar — so nDCG degenerates and adds little over simpler metrics, while manufacturing graded labels is expensive and subjective. mAP (mean average precision) and recall@k fit binary relevance well and capture full-ranking quality, which is why the book prefers them, with precision@k and MRR as secondary.
 
 **Q: What does the temperature parameter do in the contrastive loss?**
+**Short:** Temperature scales similarities before softmax; small values sharpen focus on hard negatives.
 Temperature (τ) is a scalar that divides the similarities before the softmax, controlling how sharply the model separates the positive from the negatives. A small τ sharpens the distribution, forcing the model to focus hard on the hardest negatives (heavy penalty for a close negative); a large τ softens it, treating negatives more uniformly. Typical values are small (≈0.05–0.1), and τ materially shapes the geometry of the learned embedding space.
 
 **Q: What are the three services in the prediction pipeline, and what does each do?**
@@ -1105,6 +1112,7 @@ Temperature (τ) is a scalar that divides the similarities before the softmax, c
 Embedding generation service preprocesses the query image and runs the encoder to produce the query embedding; nearest-neighbor service searches the ANN index for the top-k closest corpus embeddings; and re-ranking service applies business logic — filtering near-duplicates so results are varied and removing private/unsafe/policy-violating content — before returning the ranked list. The first is model inference, the second is retrieval infrastructure, and the third is post-processing.
 
 **Q: What preprocessing is applied to images before the encoder, and why must it be identical at serving time?**
+**Short:** Images are resized, scaled, normalized, and RGB-forced identically at train and serve time to avoid skew.
 Resize to a fixed size (224×224), scale pixel values from [0,255] to [0,1], z-score normalize per RGB channel, and force a consistent RGB color mode. It must be byte-for-byte identical at training and serving because any mismatch (different resize interpolation, different normalization stats, or a grayscale/RGBA input) shifts query embeddings into a slightly different space than the corpus, silently collapsing recall — a classic train/serve skew bug.
 
 **Q: How does product quantization let a billion-scale index fit in memory?**
@@ -1124,9 +1132,11 @@ Hard negatives — dissimilar images that look plausibly similar — force the e
 The encoder embeds the query and all n candidates (1 positive + n−1 negatives), computes the query-to-candidate similarities, passes them through a softmax to form a probability distribution, and applies cross-entropy with the positive as the correct class. Minimizing this loss maximizes the query–positive similarity relative to the query–negative similarities, pulling the positive's embedding toward the query and pushing negatives away — the InfoNCE objective.
 
 **Q: When do dot product, cosine similarity, and Euclidean distance give the same ranking?**
+**Short:** When embeddings are L2-normalized, dot product, cosine, and Euclidean distance rank identically.
 When the embeddings are L2-normalized to unit length. In that case maximizing dot product equals maximizing cosine similarity equals minimizing Euclidean distance, so all three induce the same nearest-neighbor ordering. Systems often normalize embeddings precisely so they can use fast dot-product kernels while reasoning in cosine terms; without normalization, dot product is magnitude-sensitive and can rank differently from cosine.
 
 **Q: How does the indexing pipeline differ from the prediction pipeline, and why decouple them?**
+**Short:** The indexing pipeline embeds new images in the background; the prediction pipeline serves queries online.
 The prediction pipeline is per-query, online, latency-critical, and read-only against the index (embed query → search → re-rank). The indexing pipeline is background and throughput-oriented: it embeds newly uploaded images with the same encoder and inserts them into the ANN index so they become searchable. Decoupling them lets search stay fast and available while the corpus grows, and lets index inserts/rebuilds run on their own schedule.
 
 **Q: What is the recall–speed tradeoff, and how do you choose an ANN operating point?**
@@ -1134,6 +1144,7 @@ The prediction pipeline is per-query, online, latency-critical, and read-only ag
 Every ANN method exposes one knob — more trees (Annoy), more tables (LSH), or higher nprobe (IVF) — where more search effort buys higher recall at the cost of latency and memory, approaching exact recall only at exact-search cost. You choose the operating point by sweeping the method's knob to trace the recall–latency curve, then picking the setting that meets the product's latency SLA at an acceptable recall (validated with A/B tests), rather than chasing 100% recall.
 
 **Q: How would you add support for text queries (e.g. "red plaid couch") to this image system?**
+**Short:** Train a shared image-text embedding space, CLIP-style, so text queries search the same image index.
 Train a shared image–text embedding space (CLIP-style) so that a text encoder and the image encoder map into the same space and their embeddings are directly comparable by dot product. Then a text query is embedded by the text encoder and run through the same ANN index of image embeddings. This is exactly the multimodal retrieval problem the book develops in Ch 4 (YouTube video search).
 
 **Q: Why does interaction-derived labeling introduce position bias, and how do you mitigate it?**

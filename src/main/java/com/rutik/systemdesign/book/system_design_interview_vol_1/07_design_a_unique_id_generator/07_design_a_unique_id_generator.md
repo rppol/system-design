@@ -1009,36 +1009,58 @@ Sonyflake, and the ULID/KSUID sortable-ID formats.
 ## Interview Questions
 
 **Q: Why not just use a UUID when the requirement is a 64-bit numeric ID?**
+**Short:** A UUID is 128-bit, usually non-numeric hex, and not time-sortable, violating three of the five stated requirements.
+
 Because a UUID is 128 bits, usually rendered with hex letters, and not time-sortable — it violates three of the five requirements at once. It is coordination-free and collision-safe, but its width doubles storage across every row, foreign key, and index, its hex string is non-numeric, and a v4 UUID has no monotonic relationship to creation time so it scatters inserts randomly across a B-tree. Snowflake keeps the coordination-free property while fitting 64 bits, staying numeric, and sorting by time.
 
 **Q: What happens if a Snowflake node's clock moves backward, and how do you handle it?**
+**Short:** The generator must detect ts less than lastTimestamp and refuse or wait, since minting anyway risks a duplicate ID.
+
 It can mint duplicate or out-of-order IDs, so the generator must detect it and refuse (or wait) rather than continue. The node keeps the last-used timestamp, and if `currentTimeMillis()` is less than it — caused by an NTP correction, a VM live-migration, or a leap second — the safe response is to throw an exception or block until the clock catches back up, because reissuing an already-used millisecond risks a sequence collision. This is why wall clocks alone cannot be trusted for ordering in distributed systems.
 
 **Q: What is the exact 64-bit Snowflake layout and what does each field do?**
+**Short:** 1 sign bit, 41-bit timestamp, 5-bit datacenter, 5-bit machine, and 12-bit per-millisecond sequence, summing to 64 bits.
+
 1 sign bit + 41 timestamp bits + 5 datacenter bits + 5 machine bits + 12 sequence bits, summing to 64. The sign bit stays 0 to keep the ID positive; the 41-bit timestamp (ms since a custom epoch) sits in the high bits so IDs sort by time and lasts ~69 years; the 5+5 bits give 32 datacenters × 32 machines = 1024 identities, fixed at startup; the 12-bit sequence is a per-machine, per-millisecond counter (0–4095) reset every millisecond.
 
 **Q: Why does the timestamp go in the high bits rather than the low bits?**
+**Short:** Numeric comparison is dominated by the most significant bits, so placing time on top makes the whole ID sort by creation time.
+
 Because numeric comparison is dominated by the most significant bits, so putting time on top makes the whole integer sort by creation time. If the sequence or machine ID occupied the high bits instead, IDs would sort by counter or node first and a later record could sort before an earlier one, breaking the "ordered by date" requirement. Field order inside the integer, not just field presence, is what delivers K-sortability.
 
 **Q: What happens when a single machine needs more than 4096 IDs in one millisecond?**
+**Short:** The 12-bit sequence wraps to 0 and the generator busy-waits for the next millisecond instead of colliding.
+
 The 12-bit sequence wraps to 0 and the generator busy-waits until the clock advances to the next millisecond, then resumes. 12 bits give 4096 values per millisecond per node (about 4.096 million IDs/sec), so exceeding it costs a sub-millisecond stall rather than a duplicate. If a node genuinely needs sustained throughput above that ceiling, you retune the bit budget or shard the generator.
 
 **Q: Why does a single-database auto-increment fail to meet the requirements?**
+**Short:** It is a single point of failure, a throughput ceiling, and puts a network round trip plus a row lock on every ID.
+
 It is a single point of failure, a throughput bottleneck, and it puts a network round trip plus a row lock on every ID. If that one database is down, no node anywhere can create a record; it cannot scale horizontally; and under load the counter lock serializes all writers, turning microseconds of arithmetic into a queued millisecond-plus call on every insert. The whole chapter is about removing this shared counter.
 
 **Q: How does Snowflake achieve uniqueness without any coordination on the hot path?**
+**Short:** Each node bakes a unique machine identity in at startup, so local timestamp and sequence state alone guarantee uniqueness.
+
 It bakes a unique machine identity into every ID at startup, so no two live nodes can produce the same value even though they never communicate. Uniqueness comes from the combination of (datacenter + machine) being distinct per node, plus (timestamp + sequence) being distinct per node over time — all local state. The only coordination is assigning each process a unique machine ID once at startup, not once per ID.
 
 **Q: What does "roughly time-ordered" or K-sortable mean, and why not strictly incrementing?**
+**Short:** Later IDs are almost always numerically greater, but gap-free +1 ordering would require the global lock Snowflake avoids.
+
 It means a later-created ID is almost always numerically greater, but IDs are not a gap-free +1 sequence. Guaranteeing strict, gap-free +1 ordering across machines would require a global lock — exactly the bottleneck being avoided — whereas roughly-sorted only needs a shared clock. Within the same millisecond, IDs from different machines order by machine ID rather than true instant, and there are gaps, which is an acceptable trade for coordination-free generation.
 
 **Q: How does multi-master replication generate IDs, and why is it rejected?**
+**Short:** Each of k masters steps auto_increment by k at a distinct offset, but cross-server ordering breaks and resharding risks collisions.
+
 Each of k database masters uses `auto_increment` but steps by k at a distinct offset, so server i emits i, i+k, i+2k and streams never collide. It is rejected because IDs no longer track time across servers (server A's larger number may be older than server B's smaller one), and because k is baked into every server's step size, adding or removing a master risks collisions and forces a painful reconfiguration — it does not scale elastically or across datacenters.
 
 **Q: What is the ticket server approach and its main weakness?**
+**Short:** Flickr's design routes every ID through one central auto_increment counter, making that server a single point of failure.
+
 It is Flickr's design: one dedicated database whose central `auto_increment` counter hands out IDs to every caller. It gives numeric, perfectly-ordered IDs and is simple to build, but it is a single point of failure — if the ticket server dies, all ID generation stops. Running multiple ticket servers to remove the SPOF reintroduces the multi-master synchronization problem of keeping their counters from colliding.
 
 **Q: Why is a custom epoch used instead of the 1970 Unix epoch?**
+**Short:** Starting the 41-bit millisecond counter near the present, not 1970, maximizes the field's roughly 69-year lifespan.
+
 To maximize the usable lifetime of the 41-bit timestamp field. The field holds ms since the epoch and overflows after ~69 years, so starting the count at a recent date (Twitter used Nov 04, 2010) pushes overflow decades further out than starting at 1970, which would already have consumed ~40 years. The epoch must be chosen once and never changed, since it is encoded implicitly in every ID.
 
 **Q: How many machines and how many years does the default layout support, and how do you compute them?**
@@ -1047,24 +1069,38 @@ To maximize the usable lifetime of the 41-bit timestamp field. The field holds m
 1024 machines and about 69 years. The 5-bit datacenter and 5-bit machine fields give 2^5 × 2^5 = 32 × 32 = 1024 identities; the 41-bit millisecond timestamp gives 2^41 ms ≈ 2.199 × 10^12 ms, which is ≈ 2.199 × 10^9 seconds ÷ 86,400 ÷ 365 ≈ 69.7 years. These are the two capacity numbers to state in an interview.
 
 **Q: How would you tune the bit layout for a low-concurrency but long-lived application?**
+**Short:** Shrink the sequence field and grow the timestamp field, trading per-millisecond throughput for more years before overflow.
+
 Shrink the sequence field and grow the timestamp field. A low-concurrency app does not need 4096 IDs per millisecond, so spending fewer bits on the sequence frees bits for the timestamp, extending the years-until-overflow. The fields are a budget that must sum to 63 (plus the sign bit); you reallocate among timestamp, datacenter, machine, and sequence to match how many machines, how many IDs/ms, and how many years you actually need.
 
 **Q: Why does Snowflake have no single point of failure while the ticket server does?**
+**Short:** Each node mints IDs from purely local state, so losing one node never stops any other node from generating IDs.
+
 Because each Snowflake node generates IDs entirely from local state with no shared counter, so losing one node never stops the others. A ticket server routes every ID through one central counter, making that box a SPOF; Snowflake's only shared step is machine-ID assignment at startup, and a node that already holds its ID can keep generating even while partitioned from the coordination service.
 
 **Q: What are the five requirements the ID generator must satisfy?**
+**Short:** Unique, numeric only, fit in 64 bits, ordered by date, and capable of at least 10,000 IDs per second.
+
 IDs must be unique, numeric only, fit in 64 bits, ordered by date, and the system must generate at least 10,000 IDs per second. These five, pinned during the requirements dialogue, are the scorecard against which each candidate is judged, and only Snowflake satisfies all five simultaneously. The "ordered by date, not strictly +1" nuance is what makes a coordination-free design possible.
 
 **Q: How is a Snowflake ID actually assembled from its fields in code?**
+**Short:** `((ts - EPOCH) << 22) | (dc << 17) | (machine << 12) | sequence`, OR-ing each field shifted into its own bit range.
+
 By subtracting the epoch from the timestamp and OR-ing each field shifted into its bit position. Concretely: `((ts - EPOCH) << 22) | (datacenterId << 17) | (machineId << 12) | sequence` — the timestamp shifts left 22 (past the 5+5+12 low fields), datacenter 17, machine 12, and the sequence occupies the lowest 12 bits unshifted. It is a handful of shifts and bitwise ORs over local state, which is why it takes microseconds and no network call.
 
 **Q: Why do time-ordered IDs create a database write hotspot, and is that a bug?**
+**Short:** Monotonically increasing IDs concentrate every new row at the newest B-tree edge and shard, the flip side of time-sortability rather than a bug.
+
 Because monotonically increasing IDs make every new row land at the rightmost edge of a B-tree index and on whichever shard owns the newest key range, concentrating all writes there. It is not a bug but the flip side of time-sortability — the same property that gives great range-scan locality also concentrates inserts. It is the central tension of the design: you can have time-sorted keys or perfectly even write distribution, but not both for free.
 
 **Q: What are ULID and KSUID, and when would you choose them over Snowflake?**
+**Short:** 128-bit and 160-bit coordination-free sortable ID formats, useful when you want no machine-ID allocation step.
+
 They are sortable, coordination-free ID formats (ULID is 128-bit, KSUID is 160-bit) combining a timestamp prefix with random bits. Choose them when you do not want a machine-ID allocation step but still need lexicographically time-sortable IDs — they give UUID-style decentralized generation plus the sortability plain UUIDs lack. The trade is that they exceed 64 bits and are non-numeric, so they fail this chapter's specific constraints but fit systems without them.
 
 **Q: What coordination does Snowflake actually require, and how often?**
+**Short:** Only assigning a unique datacenter-machine ID pair to each process once at startup, never on the per-ID hot path.
+
 Only the assignment of a unique (datacenter, machine) ID to each process, done once at startup, not per ID. In production this is typically handed out by a coordination service like ZooKeeper or etcd so no two live processes share an identity; the cost is a few operations per process lifecycle. Everything else — reading the clock, incrementing the sequence, packing the bits — is local, which is why the hot path needs no network round trip.
 
 ---

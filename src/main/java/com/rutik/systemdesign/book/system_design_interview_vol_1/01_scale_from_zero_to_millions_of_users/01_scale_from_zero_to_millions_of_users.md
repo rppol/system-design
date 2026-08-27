@@ -1225,60 +1225,79 @@ the whole chapter in one breath.
 ## Interview Questions
 
 **Q: Why is vertical scaling (scaling up) insufficient for large-scale applications?**
+**Short:** Vertical scaling hits a hard hardware ceiling and offers no failover, so a single server outage takes the whole app down.
 Vertical scaling has a hard hardware ceiling and provides no failover or redundancy. You cannot add unlimited CPU and memory to a single machine, and if that one server goes down the entire application goes down with it. That is why horizontal scaling — adding more servers behind a load balancer — is the approach used to reach millions of users, even though it is more complex.
 
 **Q: Why must the web tier be stateless before you can autoscale it?**
+**Short:** A stateless web tier keeps session state in a shared store so any server can handle any request, eliminating sticky sessions.
 Because a stateful server pins each user to the one server that holds their session, forcing sticky sessions. If requests could hit any server, authentication would fail on servers lacking that user's session data, so the load balancer must always route a client to the same box. That makes adding or removing servers and handling failures hard. Moving session data to a shared store lets any server serve any request, which is exactly what makes autoscaling clean.
 
 **Q: What is the celebrity (hotspot) problem in sharding, and how do you fix it?**
+**Short:** The celebrity problem is a few hot keys overloading one shard; the fix is dedicating a shard per celebrity, further partitioned if needed.
 It is when excessive access to one shard overloads that server, typically because several very popular keys (celebrities) hash to the same shard. Even hashing on user ID spreads most users evenly but can concentrate a few hot accounts. The fix is to allocate a dedicated shard for each celebrity, and each such shard might even need further partitioning — because it is a data-distribution problem, not something more hardware solves.
 
 **Q: Why can't you perform joins after sharding, and what is the workaround?**
+**Short:** Cross-shard joins are impractical, so the book's workaround is denormalizing data so queries can be answered from a single table.
 Once data is split across multiple shards on different servers, join operations spanning shards are hard and expensive to execute. The common workaround is to de-normalize the database so that queries can be answered from a single table without a join. The book also moves some functionality to a NoSQL data store to further reduce the relational database's load.
 
 **Q: Why is promoting a slave to master not a trivial operation?**
+**Short:** A promoted slave's data can lag the failed master, so recovery scripts must reconcile the missing writes before it is a valid master.
 Because the promoted slave's data might not be up to date — the master could have failed before its latest writes finished replicating. That missing data has to be reconciled by running data recovery scripts before the new master is fully correct. So master failover involves potential data-loss handling, not just repointing writes at a replica.
 
 **Q: When should you choose a NoSQL database over a relational one?**
+**Short:** The book recommends NoSQL for super-low latency, unstructured data, simple serialization, or massive volume; otherwise default to relational.
 Choose NoSQL when your application needs super-low latency, your data is unstructured or non-relational, you only need to serialize and deserialize data (JSON, XML, YAML), or you must store a massive amount of data. For most applications the relational database is still the better default because it has stood the test of time and supports joins. NoSQL categories include key-value, graph, column, and document stores.
 
 **Q: In a master-slave setup, why do you typically have more slaves than masters?**
+**Short:** Reads vastly outnumber writes, so provisioning more read slaves than write masters lets reads parallelize across the replica pool.
 Because most applications have a much higher ratio of reads to writes, and slaves serve reads while the master serves writes. Provisioning many read replicas lets read queries be processed in parallel across them, improving performance, while a single (or few) master absorbs the comparatively small write volume. It also adds reliability and availability since data exists in multiple copies.
 
 **Q: What is a read-through cache and what happens on a cache miss?**
+**Short:** On a hit the cache returns data immediately; on a miss the web server queries the database and writes the result into the cache.
 A read-through cache is checked first on every request; on a hit it returns the cached data immediately. On a miss, the web server queries the database, stores the returned result in the cache, and then sends it to the client, so the next identical request becomes a hit. This offloads repeated expensive database reads to fast in-memory lookups.
 
 **Q: Why is a single cache server a problem, and how do you mitigate it?**
+**Short:** A lone cache server is a single point of failure; the book's fix is multiple cache servers across data centers plus memory overprovisioning.
 A single cache server is a single point of failure whose loss can cause a catastrophic outage, and being in-memory it loses all data on restart. Mitigate by running multiple cache servers across different data centers to remove the SPOF, and overprovision the required memory by a certain percentage to give a buffer as usage grows. Important data should also live in a persistent store, not only the cache.
 
 **Q: What is the role of private IPs when you introduce a load balancer?**
+**Short:** Private IPs let the load balancer reach web servers over an internal network while keeping those servers unreachable from the internet.
 Private IPs let the load balancer and web servers communicate securely within the same network while keeping web servers unreachable from the internet. Clients only ever hit the load balancer's public IP; the LB forwards traffic to web servers over private IPs, which are reachable only between servers in the same network. This improves security by hiding the web servers from direct external access.
 
 **Q: How does a message queue decouple producers from consumers?**
+**Short:** The queue buffers jobs between producers and consumers, so each can post or read work and scale independently without the other being online.
 It sits between them as a durable in-memory buffer, so a producer can publish a message even when no consumer is available, and a consumer can read messages even when the producer is unavailable. Producers publish jobs (e.g., photo-processing tasks) and workers consume them asynchronously. This lets producers and consumers be scaled independently based on load.
 
 **Q: How does making the web tier stateless change how you scale it?**
+**Short:** With state moved to a shared store, any web server can serve any request, which is what makes autoscaling the tier straightforward.
 It lets any HTTP request go to any web server, because each server fetches state from a shared data store instead of holding it locally. This removes the need for sticky sessions, makes the system simpler and more robust, and makes autoscaling — adding or removing servers with traffic — straightforward. State is kept in a shared store (often NoSQL for easy scaling), out of the web servers.
 
 **Q: What is resharding, when is it needed, and what technique helps?**
+**Short:** Resharding moves data when a shard fills up or grows unevenly, and consistent hashing is the technique that minimizes what must move.
 Resharding is updating the sharding function and moving data across shards when the current layout no longer works. It is needed when a single shard can no longer hold more data, or when some shards fill up faster than others due to uneven distribution (shard exhaustion). Consistent hashing is the commonly used technique to minimize data movement during resharding.
 
 **Q: What is a sharding key and what makes a good one?**
+**Short:** A sharding key like user_id routes queries to the right shard, and the book says a good one must distribute data evenly across shards.
 A sharding key (partition key) is one or more columns that determine how data is distributed across shards, such as user_id with a hash like user_id % 4. It lets you route queries to the correct shard efficiently. The most important criterion for choosing it is that it must distribute data evenly, so no single shard becomes a hotspot.
 
 **Q: How does a CDN speed up content delivery, and what does TTL do?**
+**Short:** A CDN serves static assets from the edge server nearest the user, caching each asset locally until its TTL header expires.
 A CDN caches static content (images, video, CSS, JS) on geographically dispersed edge servers, so the server closest to the user delivers the asset, and the closer the user is the faster it loads. On the first request the CDN fetches from origin and caches it with a Time-to-Live (TTL) header that defines how long the asset stays cached; subsequent requests are served from the edge until the TTL expires. This offloads static traffic from origin servers.
 
 **Q: How can you remove or update a file on a CDN before its TTL expires?**
+**Short:** Either invalidate the object via the CDN vendor's API, or serve a new version by adding a version parameter to the asset's URL.
 You either invalidate the CDN object using the APIs the CDN vendor provides, or you use object versioning to serve a different version. Object versioning means adding a parameter such as a version number to the URL, for example image.png?v=2, so clients fetch the new object immediately. This avoids waiting for the TTL to lapse when you must push a change.
 
 **Q: What is the difference between a dirty read risk and cache inconsistency here — why does cache inconsistency happen?**
+**Short:** Cache inconsistency happens because store and cache updates are not wrapped in one transaction, letting the two drift out of sync.
 Cache inconsistency happens because the data-modifying operations on the data store and on the cache are not performed within a single transaction. When the store is updated but the cache is not (or vice versa), the two drift out of sync, and scaling across multiple regions makes maintaining consistency even harder. This is why cache invalidation and expiration policies matter.
 
 **Q: What are the technical challenges of running multiple data centers?**
+**Short:** The three challenges are traffic redirection via geoDNS, cross-center data synchronization, and consistent test/deployment tooling.
 The three main challenges are traffic redirection, data synchronization, and test/deployment. Traffic redirection needs geoDNS to route users to the nearest data center; data synchronization requires replicating data across data centers so failover doesn't route users to a center missing their data; and test/deployment needs automated tooling to keep services consistent and verified across all locations.
 
 **Q: What metrics should you collect to understand a large system, and into what categories do they fall?**
+**Short:** The book groups metrics into host-level (CPU, memory, disk I/O), aggregated tier-level, and key business metrics like DAU and revenue.
 Collect host-level metrics, aggregated-level metrics, and key business metrics. Host-level metrics are CPU, memory, and disk I/O; aggregated-level metrics capture the performance of an entire tier such as the database or cache tier; and key business metrics include daily active users, retention, and revenue. Together they reveal both system health and business insight.
 
 **Q: What is the difference between LRU, LFU, and FIFO cache eviction?**

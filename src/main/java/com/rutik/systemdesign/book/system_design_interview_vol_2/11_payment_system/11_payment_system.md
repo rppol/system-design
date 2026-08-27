@@ -1110,60 +1110,98 @@ money moved exactly once.
 ## Interview Questions
 
 **Q: How do you guarantee a payment is charged exactly once when a user double-clicks Place Order?**
+**Short:** An idempotency key like checkout_id, enforced by a database unique constraint, makes the second click return the first result.
+
 Use an idempotency key — a globally unique ID such as the `checkout_id` — sent with every request and enforced by a unique-key constraint in the database. The first request inserts the row and charges the card; the second identical click carries the same key, hits the unique constraint, and the server returns the stored result of the first request instead of charging again. So both clicks together produce exactly one charge and one confirmation.
 
 **Q: What is the book's formula for exactly-once delivery?**
+**Short:** Exactly-once equals at-least-once retries combined with at-most-once idempotency deduplicating the repeats.
+
 Exactly-once equals at-least-once plus at-most-once — retries plus idempotency. At-least-once means retrying until the operation definitely happens (which alone risks duplicates), and at-most-once means idempotency so a repeat has no additional effect (which alone can't guarantee it happened). Combining a retry loop with an idempotency key deduplicating the repeats yields exactly-once, which cannot be achieved directly in a distributed system.
 
 **Q: Why should a payment amount be stored as a string rather than a float or double?**
+**Short:** Floats can't represent most decimal fractions exactly and round-trip inconsistently across languages, so amounts travel as strings.
+
 Because floating-point types cannot represent many decimal fractions exactly and serialize inconsistently across languages. IEEE-754 gives `0.1 + 0.2 = 0.30000000000000004`, and JSON libraries can turn `19.99` into `19.990000000000002` on round-trip, corrupting money values. Carrying the amount as a string preserves the exact characters end to end, and each service parses it into a fixed-precision decimal or integer cents at the edge.
 
 **Q: Why trust the PSP's webhook rather than the browser redirect to confirm a payment?**
+**Short:** The webhook is a signed server-to-server call that always arrives, while the user-controlled redirect can be lost or forged.
+
 Because the webhook is a signed, authenticated server-to-server call that arrives regardless of what the browser does, while the redirect is user-controlled and unreliable. A user can close the tab, lose connectivity, or even forge the redirect to fake a successful payment. So the redirect is used only for user experience, and the payment status is flipped to SUCCESS only when the trustworthy webhook arrives.
 
 **Q: What is a double-entry ledger and what invariant does it enforce?**
+**Short:** Every transaction writes a balanced debit and credit that must sum to zero, so a non-zero total instantly proves corruption.
+
 A double-entry ledger records every transaction as two balanced rows — a debit and a credit — that always sum to zero. If a buyer pays a seller one dollar, the ledger writes buyer minus one and seller plus one, and total debits equal total credits. The invariant that every transaction and the ledger as a whole net to zero makes corruption instantly detectable: a non-zero sum means money was created or destroyed, which is impossible in correct bookkeeping.
 
 **Q: Why does the platform use a PSP-hosted payment page instead of collecting card details itself?**
+**Short:** A hosted page sends card details straight to the PSP, so raw card numbers never touch the platform and PCI DSS scope collapses.
+
 Because if the platform's servers ever touch a raw card number, the entire infrastructure falls under onerous PCI DSS scope. A hosted payment page is an iframe or JavaScript widget served by the PSP, so the buyer's card details go directly to the PSP and never through the platform. This collapses the platform's PCI compliance obligation to a lightweight self-assessment and removes the raw PAN from its systems entirely.
 
 **Q: Why is a payment system considered a correctness problem rather than a scale problem?**
+**Short:** A million transactions a day is only about 10 TPS, so nothing here is hard because of throughput; it's hard because of correctness.
+
 Because the traffic is tiny — 1 million transactions a day is only about 10 transactions per second, which any single database handles easily. There is no throughput challenge, so every design decision optimizes for never losing, duplicating, or mis-recording money, plus auditability and error recovery. The book states plainly that payment systems don't have high throughput and correctness is the most important consideration.
 
 **Q: What are the three classes of reconciliation mismatch and how is each handled?**
+**Short:** Class 1 auto-adjusts, class 2 goes to finance for a manual patch, and class 3 is investigated and possibly written off.
+
 Class one is understood and system-fixable, so the system auto-adjusts the internal record. Class two is understood but needs a human decision, so it is routed to the finance team to patch via a dashboard. Class three is unclassifiable, so it is investigated manually and, if unresolvable, ultimately written off. A nightly job compares the PSP's settlement file against the internal ledger and triages each mismatch into one of these buckets.
 
 **Q: What is reconciliation and why is it called the last line of defense?**
+**Short:** It's the nightly comparison of the PSP's settlement file against the internal ledger, catching whatever upstream safeguards missed.
+
 Reconciliation is the nightly comparison of the PSP's settlement file against the internal ledger to detect any divergence. Even with idempotency, retries, and careful ordering, a missed webhook or partial settlement can leave the platform's view of the money disagreeing with the PSP's. Reconciliation catches exactly what all the upstream safeguards missed, which is why the book calls it the last line of defense against silent money bugs.
 
 **Q: Walk through the components of the pay-in flow.**
+**Short:** The payment service orchestrates the executor, PSP, wallet, and ledger, crediting the wallet only after the PSP confirms success.
+
 The payment service is the orchestrator: it stores the payment event, runs a third-party risk check, and coordinates everything. The payment executor executes one payment order by calling the external PSP, which talks to the card schemes like Visa and Mastercard. After the PSP confirms success, the payment service updates the wallet (merchant balances) and appends to the ledger (the immutable double-entry money log). The strict order — PSP, then wallet, then ledger — ensures nothing is credited before the money actually moves.
 
 **Q: Why is the payment_order_status updated only from the executor's PSP responses?**
+**Short:** Marking an order SUCCESS on hope, rather than on the PSP's actual response, risks crediting a merchant for money that never moved.
+
 Because the status must reflect what actually happened at the PSP, not what the platform hopes happened. If the system marked an order SUCCESS optimistically, it could credit a merchant and write a ledger entry for money that never moved. The executor advances the enum from NOT_STARTED to EXECUTING to SUCCESS or FAILED strictly based on the PSP's response, so the stored status is always trustworthy ground truth.
 
 **Q: How does idempotency work end to end, from client through PSP?**
+**Short:** A unique-key constraint dedupes client retries, and a registered nonce or token makes the PSP itself dedupe its own retries.
+
 From client to server, the client sends an idempotency key (a UUID, here the checkout_id) and the server enforces it with a database unique-key constraint that returns the prior result on a duplicate. From server to PSP, the previously registered nonce or token carries idempotency, so the PSP itself dedupes and won't charge the card twice for the same token. Together these make the whole path safe to retry.
 
 **Q: What is the PSP integration flow when you cannot use a simple API call?**
+**Short:** Register a payment intent for a token, render the PSP-hosted page with it, then let an async webhook confirm the result.
+
 The payment service first asks the PSP to register the payment intent and receives a token or nonce, which it stores mapped to the internal payment order. It then renders the PSP-hosted page with that token; the buyer enters card details directly on the PSP's page. The PSP processes the payment and reports the result asynchronously via a webhook, and the platform updates the payment status by looking up the order by token.
 
 **Q: How are failed payments handled so none are silently lost?**
+**Short:** Transient failures retry with backoff; once retries are exhausted, the payment moves to a dead letter queue for manual resolution.
+
 Transient failures like timeouts go onto a retry queue and are retried with backoff, which is safe because operations are idempotent. Payments that keep failing after retries are exhausted move to a dead letter queue, a parking lot for stuck payments. On-call engineers get tooling to inspect the DLQ, diagnose the root cause, and manually reprocess, so a failed payment always ends up somewhere a human can see it.
 
 **Q: How do you handle payments that take hours to complete, such as 3DS or a slow bank?**
+**Short:** Never block checkout on it; show a pending state and resolve later via the PSP's webhook, with polling as a fallback.
+
 Show the buyer a pending state and never block the checkout request waiting for the payment to clear. The PSP fires a webhook when the pending payment finally resolves, and a polling fallback against the payment status endpoint reconciles pending payments in case a webhook is lost. Webhook plus polling together make completion robust to either mechanism failing, while the user is free to move on.
 
 **Q: Should internal services communicate synchronously or asynchronously in a payment system?**
+**Short:** Either handles the throughput, but async messaging wins operationally by absorbing PSP latency spikes and decoupling services.
+
 At 10 TPS either works, but asynchronous messaging wins operationally. Queues decouple producers from consumers, absorb PSP latency spikes by letting requests pile up harmlessly instead of timing out the whole call chain, let services scale independently, and provide retry and dead-letter machinery for free. Large platforms like Uber and Airbnb use event-driven communication with Kafka for exactly these reasons, even though scale doesn't force it.
 
 **Q: Why read payment status from the primary database rather than a replica?**
+**Short:** Replication lag can make a replica show a payment as still pending after it has actually succeeded, so status reads hit the primary.
+
 Because asynchronous replication means a replica can lag behind the primary and return a stale status, showing a payment as still pending when it has actually succeeded. For money status that read-your-writes staleness can trigger a wrong retry or confuse the user. Reading payment status from the primary avoids the replication-lag window so the status is always current when it matters.
 
 **Q: Why must the ledger be append-only and immutable?**
+**Short:** Corrections are appended as reversing entries, never edited in place, so the full history can always be replayed and trusted.
+
 Because immutability is what makes the ledger trustworthy as the system of record and the audit foundation. Entries are never updated or deleted; corrections are made by appending a reversing entry, so the full history of every money movement is preserved. This means an auditor or the reconciliation job can replay the ledger from the beginning to today's balances, and no bug or bad actor can quietly rewrite the past.
 
 **Q: What are the main security threats to a payment system and their countermeasures?**
+**Short:** TLS stops eavesdropping and MITM, HMAC stops tampering, tokenization stops data theft, and a nonce or idempotency key stops replay.
+
 Eavesdropping is countered with HTTPS/TLS, data tampering with digital signatures or HMAC, and man-in-the-middle with TLS plus certificate pinning. Data theft is neutralized by tokenization so no raw PAN is stored, replay attacks by the nonce or idempotency key that deduplicates a re-sent request, and fraud by velocity checks, AVS, CVV verification, and risk scoring. Tokenization and the idempotency key do double duty, removing the thing worth stealing and defeating replays.
 
 **Q: How does the pay-out flow differ from the pay-in flow?**
@@ -1172,6 +1210,8 @@ Eavesdropping is countered with HTTPS/TLS, data tampering with digital signature
 The pay-out flow moves money from the platform to sellers and has the same shape as pay-in with two substitutions: the PSP is replaced by a payout provider such as Tipalti, and the flow integrates heavily with accounting, invoicing, and tax reporting. Everything else — orchestration, the double-entry ledger entries, wallet updates, and reconciliation — mirrors the pay-in machinery, which is why the book keeps its treatment brief.
 
 **Q: Why is retrying a payment safe in this design?**
+**Short:** Every operation is idempotent end to end, so a retry hits the same stored result instead of double-charging or double-crediting.
+
 Because every operation is made idempotent, so a retry has no additional effect. The client-to-server path is guarded by the idempotency key and a database unique constraint, and the server-to-PSP path is guarded by the nonce or token that the PSP dedupes on. This is what lets the retry queue aggressively retry transient failures without any risk of double-charging the buyer or double-crediting the seller.
 
 ---

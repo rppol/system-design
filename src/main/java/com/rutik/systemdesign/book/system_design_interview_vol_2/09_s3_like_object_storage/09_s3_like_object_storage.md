@@ -1121,24 +1121,38 @@ statistic — "40% of objects are under 1 MB" — dictates the entire on-disk la
 ## Interview Questions
 
 **Q: Why does an object store separate metadata from data into two services instead of one storage system?**
+**Short:** Metadata and data have opposite scaling shapes — small high-QPS records versus huge byte streams — so one engine can't serve both.
+
 Because the two have opposite scaling profiles: metadata is billions of small records read at very high QPS, while data is petabytes of large byte streams that must be durably placed. One engine can't be good at both, so the API service resolves an object name to a UUID+placement in the small, cacheable metadata store and separately moves bytes in the huge data store. This lets each plane scale on its own axis — the metadata DB horizontally by shard/cache, the data store by adding disks and replication/erasure-coding.
 
 **Q: How do you get six nines of durability from disks with a ~0.81% annual failure rate?**
+**Short:** Three independent replicas cube the 0.81% failure rate down to about 5.3e-7, yielding roughly six nines of durability.
+
 Store three independent copies, so the object is lost only if all three disks fail: 0.0081^3 = 5.31x10^-7, giving durability 1 - 5.31x10^-7 = 99.999947%, which is roughly six nines. The math assumes the failures are independent, which only holds if the copies sit in different failure domains (nodes, racks, data centers). Three copies on the same rack share fate and don't deliver independent failures, so placement must spread replicas across failure domains.
 
 **Q: What is the storage-overhead difference between 3x replication and 4+2 erasure coding, and why choose one over the other?**
+**Short:** Triple replication costs 200% overhead versus 4+2 erasure coding's 50%, both reaching roughly six nines of durability.
+
 Triple replication has 200% overhead (store 3 units per 1 unit of data) while 4+2 erasure coding has 50% overhead (store 6 chunks per 4 data chunks = 1.5x). Both reach roughly six nines, so EC gives comparable durability for about a quarter of the extra storage. The catch is that EC reads may touch multiple nodes and reconstruction burns Reed-Solomon CPU, so you use EC for cold/large/archival data and keep replication for hot/small/latency-sensitive objects.
 
 **Q: Why not store each object as its own file, and what do you do instead?**
+**Short:** With 40% of objects under 1 MB, one-file-per-object exhausts inodes and IOPS, so small objects are packed into large files instead.
+
 Because 40% of objects are under 1 MB, one file per object would exhaust inodes and IOPS and waste most of each final disk block, so billions of tiny files crush the filesystem. Instead you append many small objects contiguously into large multi-GB, append-only files and keep an object mapping table of `object_id → (data_file, start_offset, size)`. To read a tiny object you look up its row, seek to the offset, and read its size in bytes — the disk only ever sees a handful of huge sequential files.
 
 **Q: How does a delete work in a versioned object store, and why is it done that way?**
+**Short:** A delete inserts a tombstone delete marker rather than removing bytes, so earlier versions stay physically present and recoverable.
+
 A delete inserts a new tombstone version called a delete marker rather than removing any bytes. A default GET then sees the delete marker as the latest version and returns "not found," but the earlier versions are still physically present, so the delete is reversible by removing the marker or fetching an explicit older version. Deletes are lazy because reclaiming space would mean editing the big append-only files in place; the actual bytes are reclaimed later by garbage-collection compaction.
 
 **Q: Why does listing objects by prefix break when the object table is sharded by `hash(bucket, object)`, and how do you fix it?**
+**Short:** Hashing by (bucket, object) scatters a bucket's objects across shards, so prefix listing needs scatter-gather or a denormalized listing table.
+
 Because hashing the composite key scatters a single bucket's objects across every shard, so a prefix listing can't go to one place. Two fixes: scatter-gather (query all shards and merge, correct but slow as shards grow), or a denormalized listing table sharded by bucket so a bucket's objects are colocated and a prefix scan is a cheap range scan on one shard. The listing table is updated asynchronously, so it's eventually consistent — acceptable because listing is infrequent and not latency-critical.
 
 **Q: Walk through what happens on an object upload (PUT).**
+**Short:** Upload reserves a metadata row first, streams bytes to the data store for a UUID, then completes the row with that UUID.
+
 The API service authenticates and authorizes via IAM, asks the metadata service to reserve a row keyed by (bucket, object name), then streams the payload to the data store, which persists the bytes and returns a UUID. The API service then completes the metadata row with that UUID plus size and placement, and returns 200 OK with an ETag. Reserving metadata first and completing it only after the bytes land means a failed data write leaves an incomplete row rather than a dangling pointer to nonexistent bytes.
 
 **Q: What are the three ways to decide when a write is acknowledged, and what does each trade?**
@@ -1147,6 +1161,8 @@ The API service authenticates and authorizes via IAM, asks the metadata service 
 Ack after the primary persists is lowest latency but leaves a data-loss window if the primary dies before replicating; ack after all replicas persist is fully durable but couples write latency to the slowest replica; ack after a majority (quorum, W of N with W+R>N) is the balanced middle that tolerates one slow node. The choice is a direct consistency-vs-latency tradeoff. Most systems pick quorum to avoid both the loss window and the slow-replica stall.
 
 **Q: Why is the placement service replicated with Paxos or Raft while the data nodes are not?**
+**Short:** The placement service is consensus-replicated because it owns the authoritative cluster map, while data nodes just persist bytes.
+
 Because the placement service is the cluster's brain — it owns the cluster map and picks primary+replica placement — so if its state is lost or inconsistent the whole cluster is corrupted. Consensus (Paxos/Raft) keeps a small replica set agreeing on one authoritative, consistent map. The data nodes are numerous, dumb workers that just persist bytes and answer heartbeats, so they need durability (replication/EC) but not consensus among themselves.
 
 **Q: Replication protects against a node dying — what protects against silent bit rot, and how?**
@@ -1155,21 +1171,33 @@ Because the placement service is the cluster's brain — it owns the cluster map
 Checksums. A per-chunk (or per-object) checksum such as MD5, SHA-1, CRC32, or HMAC is stored with the data and recomputed on every read; a mismatch means the bytes are present but corrupt, so that copy is treated as lost and served or rebuilt from a healthy replica or from erasure-coding parity. After any reconstruction the rebuilt data is checksum-verified before being returned, so a bad rebuild can't silently propagate. Replication only guarantees the bytes are present, not that they're correct.
 
 **Q: What is the point of multipart upload, and what new problem does it create?**
+**Short:** Multipart upload lets large objects upload as independent parallel parts, so a failed part is retried alone, not the whole object.
+
 It splits a large object into parts that upload independently and in parallel (each returning an ETag), so a failed part is re-sent alone instead of restarting a multi-GB upload, and throughput rises. The flow is initiate (get an uploadId) → upload parts → complete (server assembles parts by the ETag list). The new problem is abandoned parts: if a client never calls complete, the uploaded parts sit in the data store consuming space forever, so a lifecycle rule must garbage-collect incomplete uploads older than N days.
 
 **Q: Why must appends to a data node's read-write file be serialized, and how do you regain throughput?**
+**Short:** Appends to one active file are serialized to keep offsets consistent, so throughput returns by running one file per core or disk.
+
 Because only one active read-write file exists per node and concurrent appends would collide on the same end-of-file offset, so writes to that file are serialized to keep offsets consistent. That single append stream caps write throughput. To parallelize, run one read-write file per core or per disk, so multiple independent append streams proceed at once without conflicting.
 
 **Q: What is a bucket, and how does it differ from a folder?**
+**Short:** A bucket is a globally unique, byte-free metadata container; folders are simulated purely by key-name prefixes.
+
 A bucket is a globally-unique, top-level container for objects and holds no bytes itself — it's pure metadata. Object storage has a flat namespace with no real folders; the appearance of folders comes entirely from key naming plus prefix listing, so `photos/2024/cat.jpg` is one flat key and `photos/2024/` is just a string prefix, not a directory object. Because bucket names are globally unique, creating a bucket also enforces name uniqueness across the whole system.
 
 **Q: How does the object mapping table let you find one 512-byte object inside a multi-GB file?**
+**Short:** An embedded RocksDB-style table maps each object_id to a file, offset, and size for one fast key-value lookup.
+
 It stores, per object, a row `object_id → (data_file, start_offset, object_size)`, so a read looks up the row, seeks to start_offset in that file, and reads object_size bytes. The table is an embedded key-value store on the data node, typically a RocksDB-style LSM/SSTable engine chosen for fast point lookups over billions of small keys. This turns the "millions of tiny objects" problem into a cheap key-value lookup while the disk only handles a few huge sequential files.
 
 **Q: Why is IAM consulted on every single request rather than once at login?**
+**Short:** Authorization is per-resource and per-action, so every request is checked rather than trusting a session set once at login.
+
 Because authorization is per-resource and per-action — a caller may read one bucket but not write another — so every request must be checked against the relevant bucket/object policy, not just authenticated once. There is deliberately no trusted internal path that skips the security gate. Centralizing authentication and authorization in IAM keeps the policy logic in one place and ensures a stateless API service never has to trust a request it didn't verify.
 
 **Q: What sources of garbage does the GC subsystem reclaim, and how does compaction work?**
+**Short:** Compaction copies live objects into a new file, updates their mapping-table offsets, then drops the old file wholesale.
+
 GC reclaims three kinds of dead data: objects hidden behind delete markers or expired by lifecycle policy, abandoned multipart parts, and chunks that failed checksum and were replaced. Because the data files are append-only and become dotted with dead holes, GC compacts them by copying the still-live objects into a new file, updating each object's offset in the mapping table, then deleting the old file wholesale. This turns "delete a range inside a huge file" into "rewrite the file without the dead ranges," reclaiming all the dead space sequentially.
 
 **Q: How does object storage differ from block and file storage, and when do you pick it?**
@@ -1178,6 +1206,8 @@ GC reclaims three kinds of dead data: objects hidden behind delete markers or ex
 Block storage exposes raw volumes with the lowest latency (databases, boot disks); file storage builds a hierarchical filesystem over NFS/SMB for shared files; object storage exposes a flat namespace of immutable objects over HTTP at the lowest cost per GB and highest durability. You pick object storage when data is large, written-once-read-many, and must survive anything — backups, media, archives, data lakes — and you can tolerate higher latency and no in-place edits. The progression block → file → object trades latency and mutability for scale, durability, and cost.
 
 **Q: Why are objects immutable, and what does that buy the storage engine?**
+**Short:** Immutability lets data files stay strictly append-only, which is what makes replication, erasure coding, and checksums cheap.
+
 Objects are immutable — to change one you upload a new object (a new version) rather than editing in place. This lets the data store treat bytes as strictly append-only: writes only ever append to the active file, and sealed files never change, so they're cheap to replicate, erasure-code, and checksum once. In-place mutation would break the append-only invariant and force read-modify-write contention on multi-GB files, so immutability is what makes the whole packing-and-durability scheme practical.
 
 **Q: What role does the cluster map play, and what keeps it consistent?**
@@ -1186,6 +1216,8 @@ Objects are immutable — to change one you upload a new object (a new version) 
 The cluster map is the placement service's model of the whole storage topology — which data centers hold which racks hold which nodes and disks, plus their health from heartbeats — and it's what lets placement spread replicas across independent failure domains. The placement service keeps it consistent by being replicated with a consensus protocol (Paxos/Raft), so a small quorum always agrees on one authoritative map. Data nodes heartbeat into it; a missed heartbeat marks a node down and triggers re-replication of its chunks.
 
 **Q: Why does versioning make storage grow without bound, and how is that controlled?**
+**Short:** Every overwrite keeps the old bytes forever, so lifecycle policies expire or demote non-current versions to bound growth.
+
 Because nothing is ever truly overwritten or hard-deleted — every overwrite keeps the previous version and every delete just adds a delete marker — so bytes accumulate indefinitely. Lifecycle policies control this with rules like "expire non-current versions after 30 days" or "transition objects to a cheaper erasure-coded/cold tier after 90 days." The policy marks versions for removal or demotion, and garbage-collection compaction then physically reclaims or moves the bytes lazily.
 
 ---

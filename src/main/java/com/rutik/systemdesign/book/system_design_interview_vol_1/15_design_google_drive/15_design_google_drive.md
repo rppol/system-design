@@ -1078,27 +1078,43 @@ the client.
 ## Interview Questions
 
 **Q: What is delta sync and why does it matter for a file-sync product?**
+**Short:** Delta sync re-uploads only the blocks a file's edit changed, not the whole file, minimizing sync bandwidth.
+
 Delta sync transfers only the blocks of a file that actually changed, not the whole file. Because a file is split into hash-addressed blocks, editing one paragraph of a 50 MB document changes only one or two blocks — so only those blocks cross the network while the rest, already in cloud storage, are left untouched. In the book's example a file with blocks 1 through 6 is edited in block 2 and block 5, so only `b2'` and `b5'` are uploaded. This is the entire reason block servers exist: it satisfies the bandwidth-efficiency requirement, which matters most on metered mobile connections.
 
 **Q: Why does Google Drive's notification service use long polling instead of WebSocket?**
+**Short:** The channel is one-directional and infrequent, so a persistent bidirectional WebSocket is unneeded overhead.
+
 Because the channel is one-directional and notifications are infrequent, so a persistent bidirectional socket is overkill. The server needs to tell clients "a file changed," but the client does not stream continuous data back over this channel, and the updates are occasional with no bursts. WebSocket earns its keep in real-time bidirectional workloads like chat (Ch 12); Drive's rare server-to-client pushes are a better fit for long polling, where the client parks a request and the server completes it only when there is news.
 
 **Q: How does block-level deduplication save storage, and at what granularity?**
+**Short:** Blocks with identical hashes are stored once per account and referenced by every file version that uses them.
+
 Identical blocks are stored once and referenced by every file or version that uses them, deduplicated at the account level. Two blocks are considered identical if and only if they have the same hash, so when many users upload the same installer, PDF, or logo, the bytes are physically stored a single time. This is one of three storage-saving techniques, alongside capping version counts (weighting recent versions) and moving inactive data to cold storage.
 
 **Q: Why does the metadata layer need strong consistency, and how is it achieved?**
+**Short:** A file must look identical on every device; it's achieved by invalidating the cache on every database write.
+
 Because a file must not appear different on different devices at the same time — if your laptop shows version 5 while your phone shows version 4, the product feels broken. Strong consistency is achieved by keeping the metadata cache and master database identical and invalidating (or updating) the cache on every database write, so a stale cached value is never served after the row changes. In-memory caches default to eventual consistency, so this discipline is what upgrades them to strong consistency.
 
 **Q: How does Drive resolve a sync conflict when two people edit the same file at once?**
+**Short:** First-writer-wins: the earlier update becomes the latest version, and the later one is flagged as a conflict.
+
 The first version processed wins and becomes the file's latest version; the version processed later is flagged as a conflict. The losing user is then shown two versions — their own local copy and the latest server version — and can either merge both files or override one with the other. This first-writer-wins-plus-conflicted-copy policy is deterministic and, crucially, never silently discards an edit the way a plain last-writer-wins overwrite would.
 
 **Q: Why upload through block servers instead of letting the client upload directly to cloud storage?**
+**Short:** Block servers centralize chunking, compression, and encryption in one trusted place instead of duplicating them per client platform.
+
 Because the block servers give you one trusted, centralized implementation of chunking, compression, and encryption. Uploading directly to cloud storage is faster (no extra hop), but it forces you to re-implement that block logic separately on iOS, Android, and web, and it runs encryption on a client that can be hacked or tampered with — a security exposure. The book keeps the block servers despite the extra hop for exactly these maintainability and security reasons.
 
 **Q: Why choose a relational database over NoSQL for metadata?**
+**Short:** Relational databases natively support ACID, making the metadata layer's strong-consistency requirement far easier to guarantee.
+
 Because relational databases natively support ACID properties, which make the strong consistency the metadata layer requires far easier to guarantee. NoSQL stores can be used, but achieving ACID-grade guarantees on top of them is harder, so the relational option is the safer default. The metadata — users, devices, namespaces, files, versions, blocks — is exactly the kind of structured, relationship-heavy data relational engines handle well.
 
 **Q: What is the difference between simple upload and resumable upload?**
+**Short:** Simple upload sends a small file in one request; resumable upload resumes a large file from where it was interrupted.
+
 Simple upload sends a small file in a single request, while resumable upload is used for large files and can restart from where it was interrupted rather than from the beginning. Resumable upload is requested with `uploadType=resumable` and runs in three steps: send an initial request to get the resumable URL, upload the data while monitoring state, and resume from the lost portion if the transfer is disrupted. With a 10 GB per-file limit, resumability is what makes large uploads over flaky connections tolerable.
 
 **Q: How does a client learn that a file changed on another device, online versus offline?**
@@ -1107,33 +1123,53 @@ Simple upload sends a small file in a single request, while resumable upload is 
 If the client is online, the notification service tells it that a file changed elsewhere so it can pull the latest; if the client is offline, the changes are saved in a cache and the client pulls them when it comes back online. Once notified, the client requests the file's metadata from the API servers, downloads the changed blocks from the block servers, and reconstructs the file locally. There is one download algorithm regardless of how the client was told to run it.
 
 **Q: Walk through the upload flow and its two parallel requests.**
+**Short:** One request adds file metadata via API servers; the other sends bytes to block servers, and a storage callback flips status to uploaded.
+
 The client sends two requests in parallel: one to add file metadata and one to upload the file content. The metadata request goes to the API servers, which set the file status to `pending` and notify the notification service that a new file is being added. The content request goes to the block servers, which split, compress, and encrypt the blocks and store them in cloud storage; cloud storage then fires an upload-completion callback to the API servers, which flip the status to `uploaded` and notify clients that the file is fully uploaded. The metadata write is the true commit point.
 
 **Q: Why split files into blocks, and what is the reference block size?**
+**Short:** Hash-addressed blocks let each piece be stored, deduplicated, and synced independently; Dropbox's reference max is 4 MB.
+
 Splitting a file into blocks lets each block be stored, deduplicated, transferred, and downloaded independently, which is what enables delta sync and dedup. Each block is given a unique hash (recorded in metadata), stored as an independent object, and the file is reconstructed by joining its blocks in order. Dropbox's reference maximum block size is 4 MB.
 
 **Q: What are the three techniques for saving storage space?**
+**Short:** Deduplicate identical blocks, cap and weight version history, and move inactive data to cold storage like S3 Glacier.
+
 Deduplicate identical blocks (same hash means stored once), adopt an intelligent versioning strategy (cap the number of versions and weight recent ones), and move infrequently used data to cold storage. Cold storage such as Amazon S3 Glacier costs a fraction of standard storage, so files untouched for months are relocated there. Together these keep costs bounded at 500 PB nominal scale while still serving version history.
 
 **Q: What does the metadata database schema look like?**
+**Short:** Six tables — user, device, workspace, file, file_version, block — where each immutable file_version owns a set of blocks.
+
 It has six tables: user, device, workspace/namespace, file, file_version, and block. A user owns devices and a namespace, a namespace contains files, each file has many immutable file_versions with an `is_latest` flag, and each version is composed of hash-addressed blocks. Keeping versions immutable — appending a new version rather than mutating an old one — is what makes revision history and restore cheap.
 
 **Q: Why are file versions immutable, and how does that help restore?**
+**Short:** An edit appends a new file_version and block set instead of overwriting the old one, so restoring just repoints the latest flag.
+
 Immutable versions mean an edit appends a new file_version row and new block references instead of overwriting the current one, so past versions are never destroyed. Restoring a previous version just points the latest flag at that version's block list — no bytes are re-uploaded because the old blocks are still in cloud storage. This append-only design gives you version history almost for free.
 
 **Q: Reproduce the back-of-the-envelope estimation for Google Drive.**
+**Short:** 50M users at a 10 GB quota gives ~500 PB nominal storage, while uploads run only ~240 QPS average, so storage is the bottleneck.
+
 With 50 million signed-up users each allocated 10 GB, nominal storage is 50M x 10 GB = 500 PB. With 10 million DAU uploading 2 files per day, upload volume is 20 million uploads/day, which is 20,000,000 / (24 x 3600) ~= 240 QPS average, and peak QPS is roughly 2x that, about 480. The takeaway is that storage (500 PB), not request rate (~240 QPS), is the binding constraint, unlike a read-heavy design such as YouTube.
 
 **Q: Why move file storage from your own sharded servers to Amazon S3?**
+**Short:** Sharding files across your own servers risks losing a whole shard's data on failure, while S3 replicates data automatically.
+
 Because sharding files by user_id across your own servers risks losing a shard's data if that server dies, which violates the "data loss is unacceptable" requirement. Amazon S3 provides durable, automatically replicated object storage with same-region replication (survives a data-center failure) and cross-region replication (survives a whole-region outage). Offloading to S3 also removes the storage-capacity ceiling of individual servers.
 
 **Q: What happens to the notification service when a server holding many connections fails?**
+**Short:** All its long-poll connections drop at once, causing a reconnection storm even though no client's data is actually lost.
+
 Every online client keeps a long-poll connection, and a single notification server can hold over 1 million connections, so when it fails all those connections are lost and every affected client must reconnect. Reconnecting any one client is fast, but reconnecting a million clients at once is slow, so it is a reconnection storm rather than lost data. You capacity-plan the notification tier for this re-establishment cost.
 
 **Q: How is a metadata database failure handled for master versus slave nodes?**
+**Short:** A master failure promotes a slave to replace it; a slave failure routes reads to another slave while a replacement is provisioned.
+
 If the master goes down, a slave is promoted to become the new master and a replacement slave node is brought up; if a slave goes down, another slave serves reads while a replacement slave is provisioned. This master/slave replication keeps the metadata layer available through single-node failures. API servers, being stateless, simply have traffic rerouted by the load balancer when one fails.
 
 **Q: How does compression fit into the block-server pipeline?**
+**Short:** Block servers compress each block by file type, such as gzip or bzip2 for text, before encrypting and uploading it.
+
 Block servers compress each block before upload, choosing the algorithm by file type — for example gzip and bzip2 for text, and different algorithms for images or videos where text compressors add little. The full block-server pipeline when adding a file is split into blocks, compress, encrypt, then upload to cloud storage. Compression further reduces the bytes that actually reach cloud storage on top of the delta-sync savings.
 
 **Q: How does long polling actually deliver a change notification?**
@@ -1142,6 +1178,8 @@ Block servers compress each block before upload, choosing the algorithm by file 
 Each client opens a long-poll request to the notification service and waits; when a file change is detected, the service closes the connection, which is how the parked request returns a response carrying "your files changed." Because the connection is now closed, the client immediately sends a new request to re-open the long poll so it is ready for the next change, and meanwhile runs the download flow to fetch the actual updates. The open connection is a parked request completed only when there is news.
 
 **Q: What follow-up improvements does the chapter propose in its wrap-up?**
+**Short:** Uploading directly to cloud storage instead of via block servers, and splitting online/offline presence into its own service.
+
 Two: uploading files directly to cloud storage instead of through block servers, and splitting online/offline presence into its own service. Direct upload is faster but duplicates chunk/compress/encrypt logic across iOS, Android, and web and exposes encryption on a hackable client, so the book keeps block servers. Extracting presence logic from the notification service lets other services reuse it and keeps responsibilities cleanly separated.
 
 ---

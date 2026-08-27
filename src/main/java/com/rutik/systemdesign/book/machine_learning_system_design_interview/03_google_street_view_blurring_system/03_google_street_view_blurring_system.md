@@ -962,63 +962,83 @@ forward-looking extensions.
 ## Interview Questions
 
 **Q: For Street View blurring, would you choose a one-stage or two-stage detector, and why?**
+**Short:** A two-stage detector, since offline batch processing removes latency pressure and rewards accuracy.
 A two-stage detector (Faster R-CNN family), because the pipeline is offline batch so latency is not a constraint and accuracy is paramount. Two-stage detectors add a region-proposal stage before classification, making them more accurate (especially on small/overlapping objects) at the cost of a second network pass and higher latency. That latency cost is irrelevant here since images are processed once and served precomputed, and a missed face is a privacy/legal failure — so the accuracy-first choice dominates. Flip the latency constraint (a self-driving car) and you would instead pick a faster one-stage detector.
 
 **Q: What exactly is mAP, and how does it build up from IoU?**
+**Short:** mAP is the mean Average Precision across classes, built from IoU-thresholded precision-recall curves.
 mAP is the mean, across classes, of Average Precision, where AP is the area under the precision-recall curve for one class at one IoU threshold. IoU scores each predicted box's overlap with ground truth; a threshold (e.g. 0.5) converts IoU + class match into true/false positives; ranking detections by confidence traces a precision-recall curve whose area is AP; averaging AP over classes gives mAP. COCO further averages mAP over IoU thresholds 0.5 to 0.95 to reward tight localization.
 
 **Q: Compute the IoU of ground-truth box (50,50,150,150) and predicted box (70,70,170,170).**
+**Short:** IoU is 0.47 — 6,400 intersection over 13,600 union — a false positive at the 0.5 threshold.
 IoU = 0.47, so at a 0.5 threshold this prediction is a false positive. The intersection is min(150,170)−max(50,70)=80 wide and 80 tall = 6 400 px²; each box is 100×100 = 10 000 px², so the union is 10 000 + 10 000 − 6 400 = 13 600 px²; IoU = 6 400 / 13 600 = 0.47. It is a near-miss — nudging the box to (60,60,160,160) raises IoU to 0.68 and makes it a true positive.
 
 **Q: What is the box-coordinate augmentation trap, and how do you fix it?**
+**Short:** Geometric augmentation must transform box coordinates too, or labels point at empty background.
 When you geometrically transform an image (flip, rotate, translate, scale) you must apply the same transform to every bounding box, or the box no longer wraps the object and the label becomes wrong. For a horizontal flip of a width-W image, the box x-coordinates mirror as x1' = W − x2, x2' = W − x1 (y unchanged). Forgetting this silently trains the model on boxes pointing at empty background, capping accuracy with no error thrown. Photometric transforms (brightness, saturation) change only pixel values and leave boxes untouched — the trap is specific to geometric transforms.
 
 **Q: Why is non-maximum suppression needed, and how does it work?**
+**Short:** NMS keeps only the highest-confidence box per object, discarding others that overlap it too much.
 NMS collapses the many overlapping boxes a detector emits for a single object down to one box per object. It sorts detections by confidence, keeps the highest-confidence box, discards every remaining box whose IoU with it exceeds a threshold (e.g. 0.5), and repeats on what is left. Without NMS the same face is blurred multiple times and false positives inflate, tanking precision. It is applied per class before scoring or blurring.
 
 **Q: Why does object detection use a two-term loss, and what are the two terms?**
+**Short:** Detection sums a classification cross-entropy loss and a smooth L1 box-regression loss.
 Because detection is simultaneously localization (regression) and classification, so the loss sums a box-regression term and a classification term. The classification term is cross-entropy over the class (face / plate / background); the regression term is smooth L1 (Huber) on the box offsets, computed only for positive proposals since background regions have no meaningful box. A weight λ balances them, and the two heads are trained jointly through the shared backbone.
 
 **Q: Why average mAP over IoU 0.5 to 0.95 (COCO-style) instead of just at 0.5?**
+**Short:** Averaging over ten IoU thresholds rewards tight box localization, not just loose overlap.
 Because a single loose threshold like 0.5 rewards boxes that overlap the object but don't tightly enclose it. Averaging AP over ten thresholds (0.50, 0.55, …, 0.95) penalizes loose boxes and rewards tight localization — a detector that matches at 0.5 but not 0.9 scores lower than one whose boxes hug the object. For Street View this matters because the blur should cover the face precisely, not smear surrounding pixels.
 
 **Q: Why is smooth L1 preferred over MSE for the box-regression loss?**
+**Short:** Smooth L1 is quadratic near zero but linear for large errors, so outliers don't dominate training.
 Smooth L1 (Huber) is quadratic for small errors but linear for large ones, so outlier coordinate errors do not dominate the gradient the way squared error would. A few badly placed proposals under MSE would produce huge squared penalties and destabilize training; smooth L1 caps their influence to a linear growth. It keeps regression stable while still being smooth and differentiable near zero.
 
 **Q: How is a detection counted as a true positive versus a false positive?**
+**Short:** A detection is a true positive only if its IoU clears the threshold against an unmatched ground truth.
 A detection is a true positive if its IoU with a same-class ground-truth box meets the threshold and that ground-truth object has not already been matched; otherwise it is a false positive. Each ground-truth object can be matched by at most one detection — extra overlapping detections of the same object count as false positives (which is why NMS matters). Missed ground-truth objects are false negatives that cap recall.
 
 **Q: Why does the offline batch requirement change the whole design?**
+**Short:** With no latency budget, the pipeline can use a heavy, accurate model and precompute all results.
 Because with no per-request latency budget, you are free to use the heaviest, most accurate model and precompute all results. There is no user waiting on the model, so a slow two-stage detector, a deep backbone, and expensive post-processing are all acceptable. The system serves precomputed blurred imagery from a store rather than running the model at request time, which is the opposite of an interactive recommender's constraints.
 
 **Q: What is the difference between offline and online data augmentation?**
+**Short:** Offline augmentation precomputes and stores transformed copies; online generates them per batch.
 Offline augmentation precomputes and stores transformed copies before training; online augmentation generates transforms on the fly per batch during training. Offline costs storage but reduces per-step compute and gives a fixed variety; online costs no storage, adds CPU per step, and gives fresh variants every epoch. Detection pipelines usually favor online augmentation so the model never sees the same augmented image twice.
 
 **Q: How do user reports feed back into the model?**
+**Short:** User-reported misses become hard negatives that feed continual retraining of the detector.
 Reports of unblurred faces or plates are false negatives — the model's misses — and become hard negatives for retraining. These hard-negative examples are the most valuable training data because they target the failure cases rather than the easy, already-solved ones. Combined with new imagery, the annotated set grows and the detector is retrained periodically (continual learning), steadily lifting recall on the privacy-critical tail.
 
 **Q: For a privacy system, should you optimize for precision or recall, and why?**
+**Short:** Optimize for recall, since a missed face is a legal failure while a false blur is a minor annoyance.
 Recall of faces and plates, because a missed object is an unblurred face — a legal/ethical failure — while an over-blur is only a minor annoyance. You tune the confidence threshold toward high recall on the objects of interest, accepting more false blurs, and you monitor user-reported misses as the primary online metric. The asymmetry of costs (illegal miss vs annoying over-blur) drives the operating point.
 
 **Q: Walk through computing AP from a ranked list of detections.**
+**Short:** AP is the area under the interpolated precision-recall curve traced by ranking detections by confidence.
 Rank detections by confidence, label each TP or FP via IoU + class match, then accumulate precision = TP/(TP+FP) and recall = TP/(all ground truth) down the list. Plot precision against recall, interpolate (all-points: precision at recall r = max precision at any recall ≥ r), and integrate the area under that curve. For 5 ground-truth faces with detections TP,TP,FP,TP,FP,TP,FP the interpolated precisions 1.0/1.0/0.75/0.67 over recall bands of 0.2 give AP = 0.20+0.20+0.15+0.134 ≈ 0.68.
 
 **Q: What is the RPN's role in a two-stage detector?**
+**Short:** The RPN proposes candidate object regions from anchors, narrowing what the classifier examines.
 The Region Proposal Network scans the backbone's feature map and proposes a shortlist of candidate object regions (class-agnostic boxes with objectness scores) from a grid of anchors. This narrows the search space so the second-stage classifier only examines promising regions instead of the whole image densely. It is the extra stage that makes two-stage detectors more accurate but slower than one-stage detectors.
 
 **Q: What are anchors and why are they used?**
+**Short:** Anchors are reference boxes of varied scale and shape that the RPN adjusts into proposals.
 Anchors are predefined reference boxes of various scales and aspect ratios tiled across the feature map, which the RPN adjusts (via predicted offsets) into region proposals. They let the network handle objects of different sizes and shapes without regressing boxes from scratch — it only learns deltas from the nearest anchor. This makes localization easier and training more stable.
 
 **Q: How does DETR change object detection, and what does it remove?**
+**Short:** DETR predicts a fixed box set via a transformer and bipartite matching, eliminating NMS.
 DETR (DEtection TRansformer) treats detection as end-to-end set prediction, outputting a fixed set of boxes with a transformer and a bipartite matching loss, which eliminates non-maximum suppression. Because the learned matching already assigns one prediction per object, there are no duplicate overlapping boxes to suppress, removing NMS and the anchor machinery. It trades hand-tuned heuristics for a fully learned, though data-hungry, pipeline.
 
 **Q: Why must you evaluate detection accuracy across demographic slices?**
+**Short:** A single global mAP can hide that the detector misses certain demographics more often.
 Because a single global mAP can hide that the detector misses faces of certain skin tones, ages, or in certain geographies more often, applying privacy protection unequally. A missed face for one group is a discriminatory privacy failure with fairness and legal implications. The fix is to slice mAP by demographic and region and hold each slice to the recall bar, not just the aggregate.
 
 **Q: Why is blurring treated as post-processing rather than part of the ML model?**
+**Short:** The model only detects boxes; a deterministic image operation applies the actual blur.
 Because separating them keeps the ML task clean — the model only detects boxes, and a deterministic image operation (Gaussian blur / pixelation) obscures the boxed regions. This lets you train and evaluate the detector with standard detection metrics (IoU, mAP) independent of the blur, and swap the blur implementation without retraining. The model's output is boxes + labels; the pipeline applies the blur.
 
 **Q: What data do you store beyond images and annotations, and why?**
+**Short:** Capture metadata like timestamp, camera ID, and GPS location, used for slicing and debugging.
 Capture metadata such as timestamp, camera/car ID, GPS location, and road segment, used for slicing evaluation, debugging failures, and prioritizing which routes to recapture or relabel. Annotations are per-image bounding boxes with class labels drawn by human annotators. The metadata is what lets you find, for example, that misses cluster in a particular lighting condition or geography.
 
 ---

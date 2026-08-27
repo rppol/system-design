@@ -931,33 +931,43 @@ model, are the system design.
 ## Interview Questions
 
 **Q: Why frame People You May Know as graph link prediction instead of pairwise classification over hand-crafted features?**
+**Short:** A GNN keeps the graph structure so it captures mutual-friend patterns a flattened feature vector would discard.
 Because the strongest connection signal — shared mutual friends and higher-order graph structure — lives in the graph itself, which a flattened feature vector throws away. A pairwise classifier only sees the graph through features an engineer thought to compute, so structural patterns like triangle-closing or community boundaries are invisible. A GNN consumes the adjacency directly and learns node embeddings from each user's neighborhood, capturing structure the baseline can't. The pairwise model is still a strong baseline the GNN must beat to justify its cost.
 
 **Q: How do you build the PYMK training set without leaking the label?**
+**Short:** Freeze features at snapshot time t and label pairs only by edges that form in the future window (t, t+delta].
 Use graph snapshots: compute every feature from the graph frozen at time t, and label a pair positive only if that edge forms in the future window (t, t+Δ]. Features reflect only what was knowable at t (point-in-time correctness), and labels come strictly from the future, so no feature can be inflated by the edge it's trying to predict. Pairs that don't connect in the window are negatives, subject to sampling. Multiple snapshots at different times multiply the data.
 
 **Q: What is the subtle graph-specific leakage that survives even correct feature snapshotting?**
+**Short:** Message passing over the current adjacency lets a GNN aggregate through the very edge it is predicting.
 Running message passing over the current adjacency, which includes the very edge being predicted. Even if tabular features are frozen at t, if the GNN aggregates z_u using v as a neighbor (and vice versa) the target edge leaks into the embeddings, giving ~0.99 offline AUC and near-zero online lift. The fix is to remove the target edge and all (t, t+Δ] edges from the aggregation graph, so the model predicts the edge from the rest of the structure — point-in-time correctness on the adjacency, not just the features.
 
 **Q: Why must you use hard negatives, not just random negatives, when training PYMK?**
+**Short:** Random negatives are too easy since real PYMK candidates are all friends-of-friends, already the hard case.
 Because random non-connected pairs are almost always in completely different communities (different city, industry, no mutual friends), so the model learns to separate obviously-unrelated people and does nothing useful. At serving time every candidate is a friend-of-friend — i.e. already "hard" — so a model trained only on easy negatives collapses in production. Hard negatives are plausible-but-non-connecting pairs (same company/city, shared friends) that force the model to learn the finer boundary. Mixing random and hard negatives matches training to the serving distribution.
 
 **Q: What does friends-of-friends candidate scoping do to the search space, with numbers?**
+**Short:** FoF scoping cuts about 10^9 candidates per user down to roughly 10^5 to 10^6 via the 2-hop neighborhood.
 It cuts ~10^9 possible partners per user to roughly 10^5–10^6 by restricting candidates to the 2-hop neighborhood. With average degree ~1,000, raw 2-hop reach is about 1,000 × 1,000 = 10^6, and after removing existing connections and de-duplicating overlap it lands around 10^5–10^6 distinct candidates. That's a 1,000–10,000x reduction, turning an O(N^2) ≈ 10^18 all-pairs problem into a bounded per-user graph traversal. FoF works because almost every real new connection shares a mutual friend (triadic closure).
 
 **Q: Why does PYMK precompute recommendations in batch instead of scoring at request time?**
+**Short:** GNN scoring over 10^5 to 10^6 candidates per user is too heavy for synchronous requests, so it runs nightly in batch.
 Because each user has ~10^5–10^6 FoF candidates and there are ~10^9 users, so GNN scoring plus re-ranking synchronously is far too heavy for a low-latency request. A connection graph changes slowly, so a daily-refreshed candidate list isn't meaningfully stale — the clarifying step established that batch is acceptable. So a nightly job generates FoF candidates, scores them with the GNN, ranks, and caches each user's top-N; the request path only does a lightweight re-rank. The tradeoff is staleness until the next refresh.
 
 **Q: What is message passing in a GNN and how does layer count relate to what an embedding captures?**
+**Short:** Each layer aggregates neighbor states into a node's embedding, so K layers encode exactly a K-hop neighborhood.
 Message passing is one GNN layer: each node aggregates its neighbors' states with a permutation-invariant function (mean/sum/max), then updates its own state by combining that message with its previous state. After 1 layer a node's embedding encodes its direct neighbors; after 2 layers it encodes the 2-hop (friends-of-friends) neighborhood — exactly the PYMK signal. K is usually 2–3; more layers reach farther but cause over-smoothing where embeddings converge to the graph average and lose information.
 
 **Q: How does a GNN turn node embeddings into an edge probability?**
+**Short:** It applies a sigmoid to the dot product of the two endpoint embeddings, P(edge) = sigmoid(z_u times z_v).
 It scores the similarity of the two endpoints' embeddings and squashes it to [0,1]: P(edge u–v) = sigmoid(z_u · z_v). The GNN is an encoder producing per-node embeddings, and this dot-product-plus-sigmoid is the decoder mapping any embedding pair to a connection probability. Cosine similarity or a small MLP over the concatenated embeddings are alternatives. The encoder and decoder are trained together with binary cross-entropy against the snapshot labels.
 
 **Q: Why is GraphSAGE preferred over GCN for a billion-user graph?**
+**Short:** GraphSAGE is inductive with neighbor sampling, so it embeds new users and bounds compute; GCN needs the whole graph.
 Because GraphSAGE is inductive and uses neighborhood sampling. Inductive means it learns an aggregator function, so it can embed brand-new users (added constantly) from their features and sampled neighbors without retraining the whole model — GCN is transductive and needs the full graph at train time. Neighborhood sampling bounds per-node fan-out (e.g. 25 neighbors at hop 1, 10 at hop 2), so a hub with 200k connections doesn't blow up compute, and minibatches distribute across workers. That combination is what makes billion-edge training tractable.
 
 **Q: What is over-smoothing and why does it cap GNN depth?**
+**Short:** Over-smoothing is embeddings converging to the graph average past a few layers, which is why depth stays at K=2-3.
 Over-smoothing is when stacking too many message-passing layers makes every node's embedding converge toward the graph average, so nodes become indistinguishable and the embeddings stop being useful. Each layer mixes in a wider neighborhood, and past ~3 layers the mixing dominates the node's own signal. That's why PYMK GNNs stay shallow at K=2–3 — deep enough to reach the friends-of-friends structure, shallow enough to avoid collapse. It's a fundamental limit, not a tuning quirk.
 
 **Q: Which offline metrics fit PYMK and why not nDCG?**
@@ -965,6 +975,7 @@ Over-smoothing is when stacking too many message-passing layers makes every node
 ROC-AUC as the primary classification metric because it's robust to the extreme class imbalance (true edges are ~10^-6 of all pairs) and measures ranking a true future edge above a random non-edge, plus mAP / precision@k / recall@k for the ranked top-N list. nDCG needs graded relevance, but PYMK relevance is binary (an edge either formed or not), so mAP fits more cleanly, and MRR over-weights just the single first hit. All are evaluated on a held-out future window so the number reflects forecasting, not memorization.
 
 **Q: Which online metrics actually judge a PYMK model, and what's the trap?**
+**Short:** Acceptance rate and downstream engagement judge quality; optimizing raw requests-sent alone is the trap.
 Connection requests sent per impression, acceptance rate within X days, and downstream engagement/retention of the new connections. The trap is optimizing requests sent, which a model can inflate by surfacing familiar-looking but unwanted people who then get ignored or reported. Acceptance rate and downstream interaction are the quality signals that map to the real objective — meaningful connections — so those are what you A/B test and optimize, not raw send volume.
 
 **Q: Why does ranking by mutual-connection count create a fairness / cold-start problem?**
@@ -972,15 +983,19 @@ Connection requests sent per impression, acceptance rate within X days, and down
 Because it produces rich-get-richer bias: well-connected users have many friends-of-friends and strong embeddings, so they get suggested more and gain even more connections, while new users with few connections have tiny FoF sets and weak embeddings, get poor suggestions, and are rarely suggested to others. This starves exactly the users who most need recommendations. Mitigations include content/feature-based fallbacks (school, company, location) and deliberate exploration for low-degree users.
 
 **Q: How do you handle mega-hubs (users with hundreds of thousands of connections)?**
+**Short:** Cap and sample hub neighbors during training and candidate generation, and down-weight hub mutuals via Adamic-Adar.
 Cap and sample their neighbors in both training and candidate generation, and down-weight hub mutuals. A hub explodes 2-hop fan-out (making FoF generation and message passing expensive) and appears in almost everyone's candidate set, so it dominates suggestions without being informative. Neighborhood sampling bounds the fan-out during message passing, and weighting common neighbors by 1/log(degree) — the Adamic–Adar idea — makes a shared hub count for much less than a shared low-degree friend, which is the correct signal.
 
 **Q: What is triadic closure and why is it the foundation of PYMK candidate scoping?**
+**Short:** Triadic closure is people with mutual friends tending to become friends, which justifies scoping to friends-of-friends.
 Triadic closure is the tendency for two people who share mutual friends to become friends themselves, closing the triangle. It means the number of mutual connections is the single strongest predictor of a new edge, and — crucially — that almost every real new connection is a friend-of-friend. That's what justifies restricting candidates to the 2-hop neighborhood: FoF scoping discards ~99.99% of the population while losing almost no true future edges, because true edges overwhelmingly fall inside the FoF set.
 
 **Q: What is a strong non-GNN baseline for PYMK besides a feature-based classifier?**
+**Short:** Personalized PageRank, a training-free random walk with restart that captures multi-hop structural proximity.
 Personalized PageRank, i.e. random walk with restart rooted at the user. It ranks candidates by how often a random walk starting from the user lands on them, capturing multi-hop structural proximity with no training required, and is genuinely competitive because it generalizes weighted friends-of-friends. It's a useful baseline to justify the GNN's added cost and a good fallback for users where the GNN struggles. Classical heuristics like common neighbors, Jaccard, and Adamic–Adar are the even simpler structural baselines.
 
 **Q: Why are connections modeled as undirected while the invite is directional, and does it matter?**
+**Short:** The resulting connection is symmetric, but the invite is directional, and modeling that raises acceptance rate.
 A LinkedIn/Facebook connection is symmetric — A connected to B means B connected to A — so the graph is undirected and the model predicts an unordered pair. But the invite act has an inviter and an invitee, and acceptance likelihood depends on who initiates. It matters for optimization: modeling send-vs-accept asymmetry separately can raise the accepted-connection rate rather than just the requests-sent rate, aligning the model with the meaningful-connection objective instead of surfacing people who get invited but never accept.
 
 **Q: How do you keep a PYMK system fresh when the graph gains millions of edges a day?**
@@ -988,6 +1003,7 @@ A LinkedIn/Facebook connection is symmetric — A connected to B means B connect
 Retrain or fine-tune embeddings on fresh snapshots periodically and use incremental recomputation — only re-score users whose neighborhoods actually changed since the last cycle, rather than rescoring all billion users nightly. Because the graph changes incrementally, most users' candidate lists are unaffected on any given day, so bounding recompute to affected 2-hop neighborhoods is far cheaper. The online lightweight re-rank also folds in same-day edges and dismissed suggestions between full refreshes.
 
 **Q: Why is negative sampling necessary at all for graph link prediction?**
+**Short:** True non-edges vastly outnumber real edges, so sampling a manageable negative set is required to train tractably.
 Because true non-edges vastly outnumber edges — with ~10^9 users there are ~10^18 possible pairs but only ~10^12 real edges, so non-edges are ~99.9999% of everything. Training on all of them is both computationally impossible and hopelessly imbalanced. Sampling a manageable set of negatives per positive edge makes binary cross-entropy tractable and balanced, and choosing those negatives well (random plus hard) is what determines whether the model learns a useful decision boundary or a trivial one.
 
 ---

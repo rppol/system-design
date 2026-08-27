@@ -903,21 +903,33 @@ The deep dive is a correctness argument: use **event time** (not processing time
 ## Interview Questions
 
 **Q: What is the difference between event time and processing time, and which does this design use and why?**
+**Short:** Event time is when a click happened, not when it was processed; the design uses it for deterministic, correct replay.
+
 Event time is when the click actually happened (the client timestamp); processing time is when the aggregation server processed it. This design uses event time because it stays correct when events arrive late or out of order and, critically, makes reprocessing deterministic — replaying the same raw data always yields the same counts, which is required to prove a billed number. Processing time is simpler but misattributes delayed events to the wrong minute and gives different answers on replay, so it can't back billing.
 
 **Q: What is a watermark, and what is the tradeoff in choosing its length?**
+**Short:** A watermark is a grace period after a window closes that still accepts late events, trading latency for completeness.
+
 A watermark is an extra grace period after an event-time window's end during which the window still accepts late-arriving events that belong to it. A longer watermark catches more late events (higher accuracy) but delays the window's result (higher latency); a shorter watermark emits sooner but misses more stragglers. Events that fall past even a generous watermark aren't lost — they're corrected end-of-day by the reconciliation batch job, which lets the stream run with short watermarks.
 
 **Q: Why isn't at-least-once delivery good enough here, and how is exactly-once achieved?**
+**Short:** At-least-once can double-bill a click twice, so exactly-once combines deduplication with an atomic result-and-offset commit.
+
 At-least-once can deliver the same click twice, which over-bills the advertiser, so the money path needs exactly-once. Exactly-once combines two mechanisms: deduplication (persist processed record-ids/offsets to durable storage like HDFS/S3 so replayed events are recognized and skipped) and an atomic commit that binds the aggregation-result write to the Kafka-offset commit. Together they eliminate the window in which a crash between emitting a result and committing the offset would replay and double-count events.
 
 **Q: Where exactly does the double-count happen if the result emit and offset commit aren't atomic?**
+**Short:** A crash between emitting the result and committing the offset causes a restart to replay and re-emit the same result.
+
 The gap is between emitting the aggregated result and committing the Kafka offset. If the aggregator emits the result for events 61–100 and then crashes before committing offset 100, it restarts from the last committed offset (say 60), re-reads 61–100, and emits the same result again. Making {result write, offset commit} a single atomic transaction — or making the emit idempotent via a durable dedup marker — closes that window so each event is counted once.
 
 **Q: What is the difference between Lambda and Kappa architecture, and which does the book prefer?**
+**Short:** Lambda runs separate streaming and batch codepaths; Kappa reprocesses by replaying one codepath, which the book prefers.
+
 Lambda runs two parallel paths — a streaming path for fast approximate results and a batch path for slow exact results — which means maintaining two codebases that implement the same logic and tend to drift apart. Kappa uses a single streaming codebase and reprocesses history by replaying the raw event log through that same code. The book prefers Kappa because one codebase removes the sync-divergence bug class, and replay-based recomputation is exactly what the retained raw data enables.
 
 **Q: How is the celebrity-ad (hotspot) problem handled?**
+**Short:** A viral ad's key is salted with a random suffix to spread its clicks across partitions, then summed back in reduce.
+
 Partitioning by `ad_id` sends all of a viral ad's clicks to one partition and one aggregate node, which saturates while others idle. The fix is to allocate more aggregation nodes to hot ads and/or salt the hot key — append a random suffix (`ad_viral#0`, `#1`, ...) so its events fan across several partitions — then re-sum the sub-counts in the reduce step. This trades a slightly more complex reduce for removing the single-node bottleneck.
 
 **Q: Why keep raw data if you already store aggregated data?**
@@ -931,24 +943,38 @@ Raw data is the source of truth that aggregated data can't reconstruct — it en
 The second queue (topic 2) holds the aggregator's output so the aggregation step and the database-write step can each be made exactly-once independently, each tracking its own Kafka offset and replaying safely after a crash. Writing results directly to the DB couples the aggregator to the DB's availability and makes atomic offset/result handling harder. The queues also absorb 50K-QPS bursts in a durable buffer instead of backpressuring upstream.
 
 **Q: Walk through the aggregation service's map, aggregate, and reduce roles.**
+**Short:** Map nodes route events by hashed ad_id, aggregate nodes count per ad per minute, and reduce merges partial results.
+
 Map nodes read raw events, parse/filter them, and route each by `hash(ad_id)` to a specific aggregate node so all of one ad's events converge on one place. Aggregate nodes count clicks per `ad_id` per minute in memory (and, for the ranking query, keep a local top-N heap). The reduce node merges the aggregate nodes' partial outputs — unioning counts, or merging per-node heaps into a global top-100 — and emits the final result to topic 2.
 
 **Q: How is the "top 100 most-clicked ads" query computed in a distributed way?**
+**Short:** Each node keeps a local top-100 heap over its disjoint ad set, and reduce merges those heaps into the global top-100.
+
 Each aggregate node maintains a local min-heap of the top 100 ads it has seen in the window, and the reduce node merges these per-node heaps into a global top 100. This works cheaply because ads are partitioned by `ad_id`, so each ad's full count lives on exactly one node — the per-node heaps cover disjoint ad sets, and merging just takes the top 100 of their union. You never need to ship every ad's count to the reducer, only each node's top 100.
 
 **Q: What are tumbling and sliding windows, and where is each used here?**
+**Short:** Tumbling windows are non-overlapping and used for the per-minute count; sliding windows overlap and power the top-N ranking.
+
 A tumbling window is a fixed-size, non-overlapping window where each event belongs to exactly one window; a sliding window is a fixed-size window that slides over time so windows overlap and it's re-emitted continuously. The per-minute click count uses a 1-minute tumbling window (natural "count per minute"), while the top-100-ads-over-the-last-M-minutes ranking uses a sliding M-minute window recomputed every minute. Hopping and session windows exist too but aren't central to these two queries.
 
 **Q: What is the star-schema filtering approach and what does it trade off?**
+**Short:** A pre-defined filter table lets each click's count fan out into every matching filter bucket, trading write cost for fast reads.
+
 A small dimension table defines pre-set filters (each a `filter_id` like `country=USA` or `ip=...`), and the aggregation service pre-computes a separate count for every filter bucket an event matches. Queries then read one pre-aggregated row per `filter_id` instead of scanning raw data, making filtered queries fast. The tradeoff is higher write/compute cost and storage (each event fans out into N buckets) and support only for pre-defined filters — ad-hoc filters fall back to scanning raw data.
 
 **Q: How does the system recover aggregation state after a node crash?**
+**Short:** A replacement node restores from a periodic state snapshot and replays events from that snapshot's committed offset.
+
 Aggregate nodes periodically snapshot their in-memory state (per-minute counts, top-N heaps) to durable storage, tagged with the Kafka offset the snapshot corresponds to. On failure, a replacement node restores from the last snapshot and replays events from that offset forward — possible because Kafka retains the raw events. The snapshot-plus-committed-offset pairing ensures recovery neither loses nor double-counts the in-flight window.
 
 **Q: What role does the reconciliation batch job play, and what does a mismatch mean?**
+**Short:** A nightly job re-aggregates raw data exactly, and any mismatch means the reconciled number replaces the streaming one for billing.
+
 A nightly batch job re-aggregates the full day's raw events by event time — including everything that arrived past the streaming watermark — and compares its exact result against the streaming aggregate. A match confirms the stream is healthy; a mismatch flags dropped events, a dedup bug, a logic error, or simply late events the watermark missed, and the reconciled batch number replaces the streaming number for billing. Reconciliation is the self-healing net that lets the streaming path be aggressively fast without risking money.
 
 **Q: Do the back-of-envelope numbers point to a read-heavy or write-heavy system, and how is that derived?**
+**Short:** Roughly 10,000 average and 50,000 peak write QPS, derived from dividing daily clicks by seconds in a day, make it write-heavy.
+
 It's write-heavy: 1 billion clicks/day ÷ 86,400 s ≈ 10,000 write QPS on average, peaking around 50,000 (~5x), while reads (dashboards, billing runs) are far less frequent. That drives choosing databases optimized for ingest (Cassandra-style, time-series) rather than read fan-out. Storage math: 1B events × 0.1 KB ≈ 100 GB/day raw, ~3 TB/month, which is cheap enough to justify keeping all raw data.
 
 **Q: Why must you provision enough Kafka partitions up front rather than repartitioning later?**
@@ -957,6 +983,8 @@ It's write-heavy: 1 billion clicks/day ÷ 86,400 s ≈ 10,000 write QPS on avera
 Because partition assignment is `hash(ad_id) % partition_count`, changing the partition count remaps which partition each ad lands on, scattering an ad's events across partitions and breaking the per-ad grouping and ordering the aggregation depends on. Doing this on a live, loaded topic is disruptive and can corrupt in-flight aggregation. Over-provisioning partitions initially avoids the painful live resize.
 
 **Q: What is the latency requirement, and how does it differ from RTB?**
+**Short:** A few minutes of end-to-end latency is acceptable, far looser than RTB's roughly 100-millisecond auction budget.
+
 End-to-end latency of a few minutes is acceptable for the aggregation queries, because they feed dashboards, billing, and bid-pricing signals rather than the live auction. This is deliberately looser than RTB's ~100 ms budget, which decides which ad to show in real time and is a separate system. That minutes-of-slack is precisely what allows windowing, watermarks for late events, and nightly reconciliation.
 
 **Q: Which database types fit the raw and aggregated data, and why?**
@@ -965,9 +993,13 @@ End-to-end latency of a few minutes is acceptable for the aggregation queries, b
 Both tiers are write-heavy, so a Cassandra-style wide-column store fits both; raw data additionally suits cheap object storage (S3/HDFS) in columnar formats (ORC/Parquet/Avro) since it's re-read in bulk sequential scans, not point lookups. Aggregated data is time-series-shaped (keyed by minute) and read occasionally, so Cassandra or a time-series store works — or Druid/Pinot in the buy-it-off-the-shelf stack. The common thread is optimizing for ingest throughput over read fan-out.
 
 **Q: In practice, would you build the custom MapReduce DAG, and what would you use instead?**
+**Short:** In practice you would use Flink or Spark Streaming for aggregation and Druid or Pinot for serving, not a custom DAG.
+
 Usually no — the custom DAG is a teaching model, and in a real company you'd assemble off-the-shelf components. Apache Flink or Spark Streaming replace the aggregation service and provide event-time windows, watermarks, and exactly-once (checkpointing/transactions) as built-in features, while Apache Druid, Pinot, or ClickHouse serve the fast per-minute filtered queries. A realistic stack is Kafka → Flink → Druid/Pinot, with S3/HDFS for raw data and a Spark reconciliation job.
 
 **Q: How does deduplication survive an aggregator restart, step by step?**
+**Short:** Each event's processed status is checked against a durable dedup store before processing, so replays are skipped.
+
 Before processing an event, the node checks a durable dedup store (in HDFS/S3, keyed by record-id/offset) to see if that record was already processed; if so it skips, otherwise it processes and records the marker. Because the marker lives in durable storage that survives the crash, a restarted node that replays uncommitted events recognizes them as already-done and drops them. This is what prevents the classic "crash before offset commit" replay from double-counting.
 
 **Q: Why is keeping raw and aggregated data on different retention schedules sensible?**

@@ -1137,12 +1137,18 @@ inbox.
 POP3 downloads messages to one device and deletes them from the server, so state lives on the client and other devices never see that mail; IMAP keeps every message and all state (read flags, folders) on the server and downloads only on open. Because the server is authoritative, IMAP shows the same mailbox on phone, laptop, and web — exactly what a multi-device product needs. POP3 suits a single device treating mail as a local archive. This server-side-state model is also why the metadata store must be the single source of truth for read/unread status.
 
 **Q: What do SPF, DKIM, and DMARC each verify?**
+**Short:** SPF verifies the sending IP is authorized, DKIM verifies the message wasn't tampered with, and DMARC sets the failure policy.
+
 SPF checks whether the sending server's IP is authorized to send for the domain, via a DNS TXT record listing allowed IPs. DKIM is a cryptographic signature: the sender signs with a private key and the receiver verifies with a DNS-published public key, proving the message wasn't tampered with and really came from the domain. DMARC is a DNS policy that ties SPF and DKIM together, requires them to align with the visible From address, and tells the receiver what to do on failure (none, quarantine, or reject) plus requests reports. Mnemonic: SPF = which servers may send, DKIM = signed and unmodified, DMARC = policy plus reporting.
 
 **Q: Why partition the metadata database by user_id rather than by email_id?**
+**Short:** Partitioning by user_id co-locates a user's whole mailbox on one node, making mailbox reads single-partition instead of scatter-gather.
+
 Because a user only ever reads their own mail, partitioning by user_id co-locates a user's entire mailbox on one node, so "load my Inbox" is a single-partition read with no scatter/gather. Partitioning by email_id (the unique key) instead spreads one user's mail across every node, turning each mailbox open into a fan-out to hundreds of partitions. The rule is to pick the partition key from the dominant access pattern, not from what happens to be unique; email_id and timestamp become clustering keys within the partition.
 
 **Q: How are attachments stored, and how does deduplication work?**
+**Short:** Attachments live in object storage keyed by content checksum, so identical files across many mailboxes are stored exactly once.
+
 Attachments go into object storage (S3-like) and the metadata row holds only a pointer, because attachments are large, immutable, whole-object reads. Deduplication uses the content checksum (e.g. SHA-256) as the object key, so identical files map to the same key and are stored exactly once. A 5 MB memo emailed to 1,000 employees is one stored blob with 1,000 pointers, and reference counting ensures deleting one copy doesn't remove the shared object. Since attachments are the storage monster (~1,460 PB/year), dedup is the biggest cost lever in the design.
 
 **Q: When should you use Elasticsearch versus a native embedded search index for email?**
@@ -1156,12 +1162,18 @@ Use Elasticsearch for small-to-medium deployments where fast delivery and rich f
 Because compute is easy and storage is enormous: 1B users sending 10 emails/day is only ~100K QPS, but 40 emails/user/day at ~50 KB metadata is ~730 PB/year, and 20% of emails carrying ~500 KB attachments is ~4 PB/day or ~1,460 PB/year. Attachments alone are twice the metadata, and neither figure includes the ~3× replication multiplier. So the design centers on attachment object storage with dedup and a partitioned metadata store, not on handling send QPS.
 
 **Q: Why is a message queue placed between the web tier and the SMTP relay workers?**
+**Short:** The outgoing queue decouples the fast web-tier Send response from the slow, failure-prone SMTP relay to recipient servers.
+
 To decouple the latency-sensitive user Send from the slow, failure-prone server-to-server relay. The web tier's job ends when the email is durably enqueued on the outgoing queue, so Send returns fast; SMTP outgoing workers then pull from the queue, scan for spam/virus, and relay, retrying temporarily unreachable recipient servers via an error queue with backoff. Without the queue, one slow recipient server would stall the user's request. The incoming side mirrors this with an incoming queue that absorbs bursts before processing.
 
 **Q: How does a recipient get an email in real time versus when offline?**
+**Short:** An online recipient gets an instant WebSocket push; an offline one simply fetches the waiting mail on next login.
+
 If the recipient is online, a real-time server holding their long-lived WebSocket connection pushes the new email down instantly after it's processed and stored. If they're offline, nothing special happens: the email sits durably in the metadata store and object store, and their client fetches it on the next login through the web-tier sync API. This split keeps push cheap (only for open connections) while guaranteeing offline users lose nothing.
 
 **Q: Why does Base64 encoding of attachments matter for the design?**
+**Short:** Base64 inflates attachments by about 37%, so advertised size limits are encoded sizes and stored copies should be decoded binaries.
+
 Base64 encodes 3 binary bytes as 4 ASCII characters, inflating size ~33% (about 37% with line-wrapping), because email transport is historically text-only and binaries ride inside MIME parts. This means advertised limits like Gmail's 25 MB are encoded sizes, so the real file limit is smaller, and it's a strong reason to store the decoded binary once in object storage rather than the inflated base64 blob inline in metadata rows. Inline base64 would bloat the write-heavy metadata store and waste petabytes on duplicates.
 
 **Q: Why does the traditional file-per-user mail server model (mbox/Maildir) fail at 1 billion users?**
@@ -1170,15 +1182,23 @@ Base64 encodes 3 binary bytes as 4 ASCII characters, inflating size ~33% (about 
 Because storing each mailbox as files on one machine's local disk has no replication (that disk dies, the mailbox is gone), creates IO hotspots (a heavy mailbox saturates one spindle with no way to spread load), offers no search (you'd have to grep the files), and can't scale past a single server's capacity. It also has slow, manual failover. The fix is a distributed stack: partitioned/replicated metadata database, object storage for attachments, and a proper search index, giving replication, horizontal scale, and searchability the file model can't.
 
 **Q: What consistency does a user's own mailbox require, and why isn't global consistency needed?**
+**Short:** Only per-user strong consistency is required, since no operation ever spans two users' mailboxes as a single transaction.
+
 It needs strong consistency within a single user's data so read/unread flags and folder state agree across that user's devices, avoiding bugs like "3 unread" on the phone and "5 unread" on the laptop. It does not need global or cross-user consistency because there is never a transaction spanning two users' mailboxes, an email only affects the sender's Sent folder and the recipient's Inbox as independent per-user writes. This per-user-only consistency requirement is what makes partition-by-user a clean fit.
 
 **Q: Why must spam and virus scanning happen before an email leaves the system, not only on receive?**
+**Short:** Scanning outbound mail before it leaves protects sender reputation, since relayed malware would get your own IPs blacklisted.
+
 Because if your own outgoing workers relay spam or malware, your sending IPs' reputation is destroyed and every user's legitimate mail starts landing in spam or getting rejected. So the SMTP outgoing workers scan messages pulled from the outgoing queue and only relay clean mail. Receiving-side scanning protects your users from inbound threats; sending-side scanning protects your deliverability and reputation. Both are required, at different pipeline stages.
 
 **Q: What is IP warm-up and why is it necessary?**
+**Short:** IP warm-up ramps a new dedicated IP's send volume gradually so ISPs build trust instead of mistaking it for a spammer.
+
 IP warm-up is gradually ramping the daily send volume from a new dedicated IP so ISPs observe a steady, well-behaved sender and build positive reputation. It's necessary because a brand-new IP has no reputation, and a fresh IP suddenly blasting a million emails looks exactly like a spammer, so mail gets throttled or spam-foldered. You also use dedicated (not shared) IPs so strangers' spam can't poison your reputation, and separate marketing from transactional IP pools so campaign complaints can't sink critical mail.
 
 **Q: What is greylisting and how does it filter spam?**
+**Short:** Greylisting temporarily rejects unknown senders, since legitimate servers retry while most spam scripts never do.
+
 Greylisting is a receiver-side tactic where the server temporarily rejects mail from an unknown sender with a "try again later" (SMTP 4xx) response. A standards-compliant legitimate mail server retries a few minutes later and is then accepted, while many spam scripts fire once and never retry, so they're filtered out cheaply. The cost is a small delivery delay on the first email from a new correspondent. It exploits the behavioral difference between real mail servers and fire-and-forget spammers.
 
 **Q: How is conversation threading implemented?**
@@ -1187,6 +1207,8 @@ Greylisting is a receiver-side tactic where the server temporarily rejects mail 
 Each email is tagged with a thread (conversation) id derived from the RFC headers Message-ID, In-Reply-To, and References (or a normalized subject as a fallback), and the metadata store adds a table or clustering keyed by (user_id, thread_id). That makes a whole reply chain a single partition-local read, so opening a conversation fetches all its messages from one node. Threading is a per-user view, since each participant sees the thread within their own mailbox partition.
 
 **Q: How are read/unread status and unread counts handled efficiently?**
+**Short:** Denormalized unread tables and per-folder counters answer unread queries directly instead of scanning and filtering a folder.
+
 By denormalizing rather than scanning and filtering: keep a separate unread table (or per-folder unread partition) so "show unread" is a direct read, and maintain a per-folder unread counter updated on the write path. When a user opens an unread email, the flow flips read=true, moves the row out of the unread structure or decrements the counter, and because state is server-authoritative every device re-reads the same flag on next sync. This avoids scanning a large folder to compute counts on every open.
 
 **Q: Why choose a distributed NoSQL wide-column store over a relational database for email metadata?**
@@ -1195,12 +1217,18 @@ By denormalizing rather than scanning and filtering: keep a separate unread tabl
 Because the workload is petabytes of tiny writes queried only per user, with no cross-user joins or multi-row transactions, which is exactly where relational strengths go unused and its single-instance scaling ceiling hurts. A distributed wide-column store scales horizontally, handles a high volume of small updates, and lets you denormalize one table per access pattern (by-folder, by-read-status), all partitioned by user_id. You'd have to shard a relational DB by user anyway, losing joins, so you'd pay for machinery the workload never uses.
 
 **Q: How do the sending and receiving flows differ, step by step?**
+**Short:** Both flows are symmetric: a queue absorbs load between validation or acceptance and the slow relay or processing work behind it.
+
 Sending goes client → load balancer → web servers (auth, size validation, write to Sent) → outgoing queue → SMTP outgoing workers (spam/virus scan, then relay), with undeliverable mail routed to an error queue for retry. Receiving goes sender's server → SMTP load balancer → SMTP servers (acceptance policy) → incoming queue → mail-processing workers (spam, virus, filter rules) → metadata store, object store, and search index, then a WebSocket push if the recipient is online or a login-time fetch if offline. Both are symmetric and both decouple the tiers with a message queue.
 
 **Q: What are feedback loops (FBLs) and why do they matter for deliverability?**
+**Short:** Feedback loops let ISPs notify senders of spam complaints, so senders can suppress those recipients before reputation degrades.
+
 Feedback loops are agreements where major ISPs notify the sender when a recipient clicks "mark as spam," so the sender can immediately stop mailing those recipients. They matter because complaint rate is a major input to sender reputation, and continuing to mail people who reported you as spam craters that reputation and pushes all your mail toward spam folders. A good sender consumes FBLs and suppresses complainers right away, alongside honoring easy unsubscribe and asking users to whitelist the sender.
 
 **Q: Why can't the real-time WebSocket servers be load-balanced like the stateless web servers?**
+**Short:** A WebSocket connection is pinned to one server, so pushing to it requires connection-aware routing, not stateless round-robin.
+
 Because a WebSocket is a long-lived connection pinned to a specific server, so naive round-robin load balancing would send a push to a server that doesn't hold the recipient's connection, and delivery breaks. Real-time servers need connection-aware routing (so a user's messages reach the server holding their socket) and graceful reconnection handling on failover. The stateless web servers, by contrast, hold no session state and scale by simply adding instances behind the load balancer.
 
 ---

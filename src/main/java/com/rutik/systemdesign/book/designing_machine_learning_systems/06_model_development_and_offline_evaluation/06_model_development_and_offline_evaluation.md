@@ -1076,6 +1076,7 @@ separate a model that *looks* good from one you can *trust* to ship in Ch 7.
 ## Interview Questions
 
 **Q: Why can a model with 90% accuracy be worse than a trivial baseline?**
+**Short:** A zero-rule model that always predicts the majority class can match 90% accuracy while providing no value at all.
 Because a metric is meaningless without a baseline: if 90% of examples belong to one class, a
 zero-rule model that always predicts the majority class also scores 90% while providing zero value.
 Accuracy only becomes informative *relative to* baselines — random, simple heuristic, zero-rule
@@ -1083,6 +1084,7 @@ Accuracy only becomes informative *relative to* baselines — random, simple heu
 must beat.
 
 **Q: What is Simpson's paradox in model evaluation and why does it make slice-based evaluation mandatory?**
+**Short:** Simpson's paradox lets one model beat another on every slice yet lose overall, because each was scored on a different mix of easy and hard examples.
 Simpson's paradox is when one model performs better on *every* slice yet performs worse *overall*
 than another model. In Huyen's example, Model A beats Model B on both Group A (93% vs 87%) and Group
 B (73% vs 69%), but Model B wins overall (83% vs 78%) because each model was evaluated on a different
@@ -1090,6 +1092,7 @@ mix of easy and hard examples. If you chose on the aggregate you'd pick the mode
 every subgroup you actually serve, which is exactly why you must evaluate per slice.
 
 **Q: Why does an ensemble of three 70%-accurate classifiers reach 78.4%, and what assumption is load-bearing?**
+**Short:** Three 70%-accurate classifiers reach 78.4% by majority vote only if their errors are uncorrelated, since correlated errors give no lift.
 Because with a majority vote the ensemble is right whenever at least two of three are right: P(all 3)
 = 0.7³ = 0.343 plus P(exactly 2) = 3 × 0.7² × 0.3 = 0.441, totaling 0.784. The load-bearing
 assumption is that the classifiers make *uncorrelated* errors — if they miss the same examples, the
@@ -1097,6 +1100,7 @@ majority vote reproduces those mistakes and you get no lift, which is why ensemb
 be diverse.
 
 **Q: What is model calibration and why does it matter even when accuracy is high?**
+**Short:** Calibration means predictions assigned probability p should be right about p percent of the time, which matters whenever a system consumes that probability directly.
 Calibration means that among all predictions the model assigns probability p, the event actually
 occurs about p of the time — predicted 70% should happen 70% of the time. A model can be accurate on
 argmax yet badly calibrated, which breaks any system that *consumes the probability*: an ad system
@@ -1114,6 +1118,7 @@ quality because with many parameters the gradient updates are *sparse* — diffe
 different weights, so most updates don't conflict.
 
 **Q: What is the "state-of-the-art trap"?**
+**Short:** The state-of-the-art trap is assuming a benchmark-leading model is best for your problem, when SOTA only means best on someone else's data and metric.
 It's the mistake of assuming the newest, best-on-a-benchmark model is the best choice for your
 problem. SOTA means best on a specific academic benchmark under its metric — not necessarily best on
 your data, within your latency budget, or maintainable enough to deploy. The right question is "does
@@ -1121,6 +1126,7 @@ this model solve *my* problem accurately, cheaply, and fast enough?" — sometim
 even ML.
 
 **Q: What does "start with the simplest model" mean, given that 'simplest' is not 'least effort'?**
+**Short:** Start with the simplest model to reason about and maintain, since low effort to build, like calling pretrained BERT, is not the same as simple.
 It means prefer the model with the fewest moving parts to reason about, deploy, and maintain — because
 simple models deploy first (validating the whole pipeline), serve as baselines, and avoid one-way
 complexity creep. The subtlety is that low *effort* is not the same as *simple*: calling pretrained
@@ -1128,6 +1134,7 @@ BERT from a library is low effort but BERT is a complex model. Judge simplicity 
 maintain in production, not by lines of code to write today.
 
 **Q: How do bagging, boosting, and stacking differ?**
+**Short:** Bagging trains learners in parallel on bootstrap samples to cut variance, boosting trains them sequentially to cut bias, and stacking learns a meta-combiner.
 Bagging trains the same learner in parallel on bootstrap-resampled datasets and votes/averages,
 reducing variance (random forest). Boosting trains weak learners sequentially, each reweighting the
 examples the previous ones got wrong, and combines them by weighted sum, reducing bias (AdaBoost,
@@ -1144,6 +1151,7 @@ version control's demand for immutable history. Tools like DVC store data extern
 checksums to cope.
 
 **Q: How should you avoid human bias when comparing candidate models?**
+**Short:** Comparing candidate models fairly requires giving each an equal tuning budget, since a favored architecture otherwise gets more tuning than the alternatives.
 Compare every candidate under an *equal tuning budget*. An engineer excited about a particular
 architecture unconsciously spends more time tuning it and running experiments on it, so a naive
 comparison pits a well-tuned favorite against under-tuned alternatives — a difference in effort, not
@@ -1151,6 +1159,7 @@ in the models. Only equal experiments and equal search effort make the compariso
 architectures themselves.
 
 **Q: When would you tune a model to minimize false negatives versus false positives?**
+**Short:** Which error to minimize depends on asymmetric costs: fingerprint unlock minimizes false positives, while COVID screening minimizes false negatives.
 It depends on which error is costlier, and the costs are usually asymmetric. Fingerprint unlock
 minimizes false positives, since unlocking for the wrong person is a security breach and a rejected
 legitimate user simply retries. COVID screening minimizes false negatives, since missing a real case
@@ -1158,6 +1167,7 @@ lets an infected person spread the disease while a false positive just triggers 
 Same confusion matrix, opposite tuning.
 
 **Q: What is a perturbation test and what does it catch?**
+**Short:** A perturbation test measures how much performance degrades under deliberately noised input, catching brittleness a clean test set hides.
 A perturbation test evaluates the model on deliberately noised or perturbed inputs — adding
 background noise, dropping features, jittering values — to measure how gracefully performance
 degrades. It catches brittleness that a clean test set hides: Huyen's example is a cough-based COVID
@@ -1199,6 +1209,7 @@ the tuning never touched. Note too that a weaker model tuned well can beat a str
 badly, so tuning is decisive, not cosmetic.
 
 **Q: What is a learning curve and what decision does it inform?**
+**Short:** A learning curve plots performance against training-data volume, revealing whether a model that trails today would overtake others once more data arrives.
 A learning curve plots a performance metric against the amount of training data, revealing whether
 more data would still help and letting you extrapolate performance at the data volume you expect to
 accumulate. It informs the "good now versus good later" tradeoff: a simple model near its ceiling may
@@ -1231,6 +1242,7 @@ without careful learning-rate warmup and scaling. So you can't scale data parall
 there's a batch size beyond which adding machines stops improving the model.
 
 **Q: What is confidence measurement and how does it differ from calibration?**
+**Short:** Confidence measurement is a per-prediction threshold for whether to show a prediction, distinct from calibration's population-level probability accuracy.
 Confidence measurement is a per-prediction usability decision — below what confidence is an individual
 prediction not worth showing, so you surface only confident predictions and suppress or escalate the
 rest. It differs from calibration, which is a population-level property about whether the model's

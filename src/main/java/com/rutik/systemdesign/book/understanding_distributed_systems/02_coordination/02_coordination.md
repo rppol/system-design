@@ -2078,6 +2078,8 @@ is paid in latency and availability.
 ## Interview Questions
 
 **Q: Why is perfect failure detection impossible in an asynchronous network?**
+**Short:** In an asynchronous network no timeout can distinguish a crashed process from one that is merely slow, so no failure detector can be both accurate and complete.
+
 Because there is no way to distinguish a crashed process from a slow one when message delays are unbounded. The only signal is a timeout, and any timeout you pick can be beaten by a process that was merely slower than that timeout or a message still in flight — so a perfect detector (never a false positive, never a missed failure) cannot exist under asynchrony. You can only get perfect detection in a synchronous system, where a known delay bound makes "no response within the bound" definitively mean "dead." Real systems are partially synchronous, so real failure detectors are unreliable by necessity and every higher-level protocol must tolerate a detector that occasionally lies.
 
 **Q: What is the lease-expiry race that produces two leaders, and how do fencing tokens fix it?**
@@ -2086,33 +2088,53 @@ Because there is no way to distinguish a crashed process from a slow one when me
 An old leader gets paused (e.g. a long GC pause), its lease expires from the coordination service's view, a new leader is elected, and then the old leader wakes up still believing it holds the lease because its own clock disagrees — so both write to the shared resource and corrupt it. Fencing tokens fix this by having the coordination service issue a monotonically increasing token with each lease grant; every write includes its token, and the resource remembers the highest token it has seen and rejects any write carrying a smaller one. The new leader's higher token means the resource refuses the zombie old leader's stale writes, killing split-brain without any clock agreement.
 
 **Q: Why does `L(a) < L(b)` NOT imply that a happened before b with Lamport clocks?**
+**Short:** Lamport timestamps only guarantee a happened before b implies L(a) < L(b); concurrent events can get smaller or larger timestamps purely by coincidence.
+
 Because Lamport's guarantee is one-way only: `a → b` implies `L(a) < L(b)`, but the converse is false. Two concurrent events on different processes can have different Lamport timestamps purely by counting accident, with no causal relationship between them, so a smaller timestamp does not prove "happened before." Lamport clocks can safely order events you already know are causally related, but they cannot tell you whether two events are causally related or merely concurrent — for that you need vector clocks, which detect concurrency directly.
 
 **Q: Why isn't "CA" a real choice in the CAP theorem?**
+**Short:** Network partitions are unavoidable in a real distributed system, so the only real choice is being CP or AP during one, not opting out of partitions.
+
 Because you cannot opt out of network partitions — they are a fact of any real network, not a design choice. CAP is often mis-taught as "pick two of three," but since partitions will inevitably happen, the only real decision is what you do when one occurs: sacrifice consistency (be AP) or sacrifice availability (be CP). A "CA" system describes a single node or a fantasy; a distributed system is always choosing CP or AP during a partition. PACELC extends this by noting that even with no partition (the "Else" case), you still trade latency versus consistency on every operation.
 
 **Q: Why does snapshot isolation permit write skew, and why does that matter?**
+**Short:** Snapshot isolation checks each transaction only against its own snapshot, not against concurrent writes to different rows, so two transactions can jointly violate an invariant while each looks valid.
+
 Because SI gives each transaction a consistent snapshot but checks nothing at commit about writes to different rows. Two transactions can each read the same snapshot, each verify an invariant, then each write different rows based on that read, and both commit while together violating the invariant — the classic case being two on-call doctors who each read "2 on call, safe to leave," each remove themselves, and leave zero on call. It's not a lost update (different rows) and each snapshot looked valid, so SI allows it. It matters because SI (often marketed as "repeatable read" or even "serializable") is not serializable; invariant-critical logic needs true serializable isolation via SSI or 2PL, or explicit locking.
 
 **Q: Why is two-phase commit called a blocking protocol?**
+**Short:** A participant that has voted yes must hold its locks and wait for the coordinator's decision, so a coordinator crash after the vote leaves it stuck until recovery.
+
 Because once a participant votes "yes" in the prepare phase, it can neither commit nor abort on its own — it must wait for the coordinator's decision while holding its locks. If the coordinator crashes after collecting votes but before broadcasting the commit-or-abort decision, every prepared participant is stuck: committing risks disagreeing with a "no" vote, and aborting risks disagreeing with others who may already have committed. The prepared participants stay blocked, freezing their rows, until the coordinator recovers and reads its decision log — which is why 2PC guarantees atomicity but sacrifices availability, and why it's unsuitable across systems or organizations.
 
 **Q: Why is a saga described as "ACD without I"?**
+**Short:** A saga gives eventual atomicity, consistency, and durability through compensating transactions, but each step commits immediately so intermediate state is visible, giving up isolation.
+
 Because a saga provides Atomicity (eventually, through compensating transactions), Consistency, and Durability, but not Isolation. Each step commits its local transaction immediately, so the saga's intermediate state becomes visible to other concurrent transactions before the whole saga finishes — allowing dirty reads across the saga and lost updates. You recover partial isolation with countermeasures like semantic locks (a "pending" flag), commutative updates, re-reads, and ordering the riskiest step last, but a saga fundamentally trades away immediate isolation in exchange for availability, loose coupling, and cross-organization workability.
 
 **Q: What is the difference between the wall clock and the monotonic clock, and when do you use each?**
+**Short:** The wall clock can jump due to NTP corrections and is for timestamps only; the monotonic clock only moves forward and must be used for measuring durations.
+
 The wall clock (time-of-day) is human-meaningful but can jump forward or backward due to NTP corrections, leap seconds, or manual changes, so it's for timestamps only. The monotonic clock only ever moves forward at a steady rate with no absolute meaning, so it's for measuring durations. The classic bug is measuring elapsed time by subtracting two wall-clock reads: if NTP steps the clock in between, you can get a negative or wildly wrong latency. The rule is durations use the monotonic clock exclusively; the wall clock is only for "what calendar time did this happen."
 
 **Q: How does a majority quorum guarantee there is at most one leader per term in Raft?**
+**Short:** Any two majorities of a cluster must overlap in at least one server, and since each server votes once per term, two candidates can never both win the same term.
+
 Because any two majorities of an N-node cluster must overlap in at least one server, and each server grants its vote to at most one candidate per term. For two different candidates to both win the same term, both would need a majority, but the shared server in the overlap voted only once — a contradiction. So at most one candidate can gather a majority per term, guaranteeing at most one leader. This same overlap principle underlies log-commit safety (a committed entry is on a majority) and Dynamo's `W + R > N` (the read set overlaps the write set).
 
 **Q: Why must the timeout in a failure detector be a compromise, and what are the two failure modes?**
+**Short:** A short timeout detects failures fast but falsely flags slow-but-healthy processes as dead, while a long timeout avoids false positives but detects real failures slowly.
+
 Because the timeout directly trades detection speed against false positives with no setting that wins both. A short timeout detects real failures fast but flags healthy-but-slow processes as dead (false positives), triggering needless failovers and re-election storms that add load and can cascade. A long timeout avoids false positives but detects genuine failures slowly, extending the window during which requests are routed to a dead node. In practice you choose the timeout from observed latency percentiles, require multiple missed probes before declaring failure, or use an accrual detector that outputs a suspicion level rather than a binary verdict.
 
 **Q: What three properties define consensus, and why is termination the hard one?**
+**Short:** Consensus needs agreement, validity, and termination, and termination is hardest because FLP proves it can't be guaranteed in an asynchronous system with even one crash.
+
 Consensus requires agreement (no two processes decide different values), validity (the decided value was actually proposed by some process), and termination (every non-faulty process eventually decides). Termination is the hard one because it's a liveness property, and the FLP result proves it cannot be guaranteed deterministically in a purely asynchronous system where even one process may crash — you can't distinguish a slow process from a dead one, so you can never be sure everyone will decide. This is why real consensus algorithms like Raft and Paxos assume partial synchrony: they guarantee safety (agreement/validity) always, and liveness (termination) only during synchronous periods.
 
 **Q: How does the outbox pattern solve the dual-write problem?**
+**Short:** The outbox pattern writes the business change and its event into one local database transaction, then a separate relay publishes the event at-least-once from that table.
+
 By writing the business change and an event row into an outbox table within the same single local database transaction, so they commit atomically — either both land or neither does. A separate relay process then reads the outbox and publishes the events to the message broker, marking them sent (or tails the DB change log via CDC). This guarantees the event is published at-least-once whenever the business change committed, eliminating the divergence where a crash between the DB write and the broker publish leaves an order with no event or an event for a rolled-back order. Because the relay can publish then crash before marking sent, consumers must be idempotent to dedup.
 
 **Q: What does the CALM theorem tell you about when coordination can be avoided?**
@@ -2126,6 +2148,8 @@ CALM (Consistency As Logical Monotonicity) states that a program can be computed
 Linearizability requires that operations appear to take effect atomically at some instant between invocation and response, consistent with real-time order — so once a write completes, every subsequent read anywhere sees it or a later value, as if there were a single up-to-date copy. Sequential consistency only requires that each process's operations appear in its program order within some global total order, but that order need not match real time — so a read can return a stale value as long as the global order stays consistent. Linearizability is strictly stronger (and more expensive); the producer/consumer over a queue is the classic sequentially-consistent example where per-process order is preserved without a real-time recency guarantee.
 
 **Q: What does Spanner's TrueTime do, and how does commit wait achieve external consistency?**
+**Short:** TrueTime returns a bounded time interval instead of one instant, and Spanner waits out that uncertainty before releasing commit locks so no later transaction gets an earlier timestamp.
+
 TrueTime is an API backed by GPS and atomic clocks that returns a time interval `[earliest, latest]` with a bounded uncertainty, rather than pretending to a single exact instant. To guarantee external consistency — linearizability across the entire database, so a transaction that commits before another starts in real time gets a smaller timestamp — Spanner performs a commit wait: after choosing a commit timestamp it waits out the uncertainty interval (a few milliseconds) before releasing locks, ensuring no other transaction can commit with an overlapping-yet-earlier timestamp. It spends latency to convert imperfect clocks into a globally consistent order; CockroachDB pursues the same goal on commodity hardware using hybrid logical clocks instead.
 
 **Q: How does a Raft leader know an entry is safe to commit and apply?**
@@ -2134,6 +2158,8 @@ TrueTime is an API backed by GPS and atomic clocks that returns a time interval 
 It appends the entry to its log and replicates it via AppendEntries, and only marks it committed once a majority of servers (including itself) have durably persisted it — at which point it advances its commit index, applies the command to its state machine, and returns to the client. Followers learn the commit index from subsequent AppendEntries and apply the entry to their own state machines. A subtle safety rule is that a leader only counts replicas to directly commit entries from its own current term; older-term entries become committed indirectly once a current-term entry above them commits, preventing a rare overwrite of a committed entry.
 
 **Q: What are op-based and state-based CRDTs, and why do state-based ones tolerate an unreliable network?**
+**Short:** State-based CRDTs merge full replica states with a commutative, associative, idempotent join, so the result is unaffected by message reordering, duplication, or loss.
+
 Operation-based CRDTs (CmRDTs) broadcast the operations themselves, which must be commutative, and require reliable exactly-once (usually causal) delivery — a lost or duplicated op breaks convergence. State-based CRDTs (CvRDTs) periodically exchange full states and merge them with a function that is the least upper bound over a join-semilattice, meaning the merge is commutative, associative, and idempotent. Those three algebraic properties make the merged result independent of message order, batching, and duplication, so a reordered or re-delivered state merges harmlessly — which is exactly why state-based CRDTs converge over an unreliable network without coordination.
 
 **Q: Why does chain replication give better read throughput than a single leader while staying strongly consistent?**
@@ -2152,9 +2178,13 @@ Because writes enter at the head and propagate down the chain, being acknowledge
 Causal consistency guarantees that operations related by happened-before are seen by everyone in that causal order, while concurrent operations may be seen in different orders by different replicas — so you never see an answer before its question, but two independent comments may appear in different orders. It's special because it is the strongest consistency model that can be provided by an always-available system under network partitions: CAP forbids linearizability plus availability under partition, but causal consistency plus availability is achievable. Systems like COPS deliver it by tracking each operation's causal dependencies via vector clocks and delaying an operation's visibility until its dependencies have arrived.
 
 **Q: How does Spanner make two-phase commit non-blocking?**
+**Short:** Spanner replicates each 2PC participant and the coordinator itself via Paxos, so a coordinator crash is survived by another replica reading the replicated decision log.
+
 By making each 2PC participant and the coordinator itself a Paxos-replicated group rather than a single node. Data is sharded into partitions, each replicated by Paxos across zones, so a partition is highly available; cross-partition transactions run 2PC on top of these groups, and the coordinator's decision log is replicated by consensus. When a coordinator replica crashes, another replica reads the replicated decision log and drives the transaction to completion, so prepared participants are never permanently blocked. This is the general fix for 2PC's blocking flaw: replicate the coordinator's state through consensus so its crash is survivable.
 
 **Q: What is the difference between best-effort, reliable, and gossip broadcast?**
+**Short:** Best-effort broadcast can leave some members without a message if the sender crashes; reliable broadcast guarantees delivery to all via re-broadcast; gossip spreads it probabilistically.
+
 Best-effort broadcast simply sends the message to each member, so if the sender crashes partway some members receive it and some never do — no atomicity. Reliable broadcast guarantees all non-faulty processes deliver the same messages even if the sender crashes, typically by having each receiver re-broadcast, which is correct but costs `O(N²)` messages and doesn't scale. Gossip (epidemic) broadcast has each node forward to a small random fanout of peers, spreading the message like an epidemic to all N nodes in `O(log N)` rounds — scalable, robust to failures, and probabilistic rather than certain, which is why it underpins membership and anti-entropy.
 
 **Q: Why should you not implement consensus or leader election yourself, and what should you use instead?**
@@ -2163,9 +2193,13 @@ Best-effort broadcast simply sends the message to each member, so if the sender 
 Because Raft and Paxos are notoriously subtle — commit rules, log reconciliation, membership changes, and the lease/fencing interactions are all easy to get wrong, and hand-rolled versions routinely ship split-brain and data-loss bugs. Instead you should use a battle-tested coordination service like etcd, ZooKeeper, Consul, or Chubby, which has already implemented consensus correctly and exposes safe primitives (leases, watches, atomic compare-and-set, leader election). You build your coordination logic on top of those primitives rather than re-deriving the algorithm, and you still respect the operational gotchas like fencing tokens for locks.
 
 **Q: What is the uncertainty window in 2PC, and why does it hold locks?**
+**Short:** It is the period after a participant votes yes but before hearing the coordinator's decision, during which it must keep its locks since it can neither commit nor abort alone.
+
 The uncertainty window is the interval after a participant has voted "yes" in the prepare phase but before it has received the coordinator's commit-or-abort decision. During this window the participant has durably prepared and surrendered its autonomy — it cannot unilaterally commit (someone might have voted no) or abort (everyone might have voted yes and others may have committed) — so it must hold its locks to preserve the ability to commit. If the coordinator crashes in this window, the participant is blocked holding those locks, freezing the affected rows, until the coordinator recovers and reads its decision log. This is the root of 2PC's blocking behavior and its poor availability.
 
 **Q: How do vector clocks detect whether two events are concurrent?**
+**Short:** If neither event's vector of per-process counters dominates the other entry-wise, the events are concurrent; otherwise the dominating vector marks the later event.
+
 Each process keeps a vector of counters, one per process, incrementing its own entry on each event and taking the element-wise maximum on receiving a message before ticking its own. To compare two events' vectors: if every entry of `V(a)` is ≤ the corresponding entry of `V(b)` with at least one strictly less, then `a → b`; if the reverse, then `b → a`; and if neither vector dominates (each has an entry larger than the other), the events are concurrent. This ability to directly detect concurrency — impossible with a single Lamport scalar — is exactly what conflict-resolving stores need to decide whether two writes conflict or one supersedes the other, at the cost of `O(N)` per timestamp.
 
 **Q: What is the difference between reliable broadcast and the reliable link model, and how are they built?**
@@ -2184,12 +2218,18 @@ Read committed only guarantees you never read uncommitted data (no dirty reads) 
 You choose a saga when the transaction spans heterogeneous systems or organizational boundaries — where 2PC is impractical because a third-party service won't join your protocol, you can't hold its locks, and blocking on a foreign coordinator is unacceptable — or when the work is long-running and holding locks across it would kill availability. A saga decomposes the work into local transactions glued by durable messaging, with compensating transactions to unwind on failure. What you give up is isolation (sagas are ACD without I, so intermediate states are visible and cause anomalies you must mitigate with semantic locks) and immediate consistency (you accept eventual consistency and must make every at-least-once step idempotent).
 
 **Q: What is the log matching property in Raft, and how does it repair a divergent follower?**
+**Short:** If two Raft logs share an entry's index and term they are identical up to that point, so a leader walks backward through a follower's log until it finds a match and overwrites the rest.
+
 The Log Matching Property states that if two logs contain an entry with the same index and term, then those logs are identical in all entries up to that index. Raft enforces it by having each AppendEntries carry the index and term of the entry immediately preceding the new ones; a follower rejects the RPC if its log doesn't have a matching entry at that position. On rejection the leader decrements its next-index for that follower and retries with an earlier entry, walking backward until the logs align, then overwrites the follower's divergent suffix with its own entries. This is how a newly elected leader brings lagging or divergent followers back into consistency with the authoritative log.
 
 **Q: What is the difference between the crash-stop, crash-recovery, and Byzantine process models?**
+**Short:** Crash-stop processes fail permanently, crash-recovery processes can restart after losing volatile state, and Byzantine processes may behave arbitrarily or maliciously.
+
 Crash-stop (fail-stop) assumes a process works correctly until it crashes and then never recovers — the failure is permanent and simplest to reason about. Crash-recovery assumes a process can crash and later recover, losing volatile memory but retaining whatever it wrote to stable storage — the realistic model for servers that reboot, redeploy, or get OOM-killed, requiring algorithms to persist enough state (logs) to resume correctly. Byzantine assumes a process may behave arbitrarily or maliciously, sending contradictory messages and lying about its state — the model for trustless, open systems, requiring far more expensive Byzantine fault tolerance (typically 3f+1 replicas). Inside a single trusted datacenter you normally assume non-Byzantine crash-recovery, which is why Raft and Paxos are non-Byzantine algorithms.
 
 **Q: Why can't a Raft leader always serve a read from local state, and what fixes it?**
+**Short:** A partitioned or superseded leader can still answer reads from stale local state, so a linearizable read needs a majority heartbeat round or a leader lease to confirm leadership.
+
 Because a leader that has been partitioned off or superseded can still answer reads from its local state, returning values that a newer leader has already updated — which violates linearizability by serving stale data. The fix is to confirm the leader is still the leader before serving a linearizable read: either a read barrier, where the leader exchanges a heartbeat round with a majority to prove it still holds leadership before answering, or a leader lease, where the leader holds a time-bounded lease during which it may serve reads locally without a round trip (trading a clock assumption for lower latency). Follower reads without such confirmation are only safe under weaker consistency.
 
 ---

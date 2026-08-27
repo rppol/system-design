@@ -705,69 +705,91 @@ The central failure is **data distribution shift**, named by which probability m
 ## Interview Questions
 
 **Q: What are the three types of data distribution shift and which probability changes in each?**
+**Short:** Covariate shift moves P(X), label shift moves P(Y), and concept drift moves P(Y given X), one factor at a time.
 Covariate shift changes P(X) while P(Y|X) stays stable, label shift changes P(Y) while P(X|Y) stays stable, and concept drift changes P(Y|X). Covariate = the input mix moves (train on older patients, serve younger ones); label = the outcome mix moves (a preventive drug halves disease incidence); concept drift = the same input now has a different correct answer (SF housing prices post-COVID with identical house features). Naming which of the three factors of the joint P(X,Y) moved is the fastest way to classify a shift and pick a fix.
 
 **Q: What is covariate shift, with a concrete example?**
+**Short:** Covariate shift is P(X) changing while P(Y given X) stays the same, as when older-patient training data serves a younger population.
 Covariate shift is when the input distribution P(X) changes but the input-to-label mapping P(Y|X) stays the same. Example: a breast-cancer model trained on clinic data skewed toward older women, then served to an app population skewed young — the age distribution moved but the true age→risk relationship did not. Causes include selection bias, active learning, and new marketing bringing a different demographic; the fix, when the target P(X) is known, is importance weighting.
 
 **Q: What is concept drift and why is it especially dangerous?**
+**Short:** Concept drift is P(Y given X) changing, so a familiar input now has a different correct answer, as with SF housing prices post-COVID.
 Concept drift is when P(Y|X) changes — the same input now maps to a different correct label. It is dangerous because the model isn't seeing unfamiliar inputs (which you might catch with input statistics); it sees familiar inputs and gives the old, now-wrong answer. The canonical example is SF house prices after COVID: identical house features (P(X) unchanged) but a very different correct price (P(Y|X) changed). Concept drift is often cyclic/seasonal too, like rideshare weekday-vs-weekend pricing.
 
 **Q: What is a degenerate feedback loop and how do you detect one?**
+**Short:** A degenerate feedback loop is a model's own predictions biasing the labels it later trains on, seen as falling diversity or rising ARP.
 A degenerate feedback loop is when a model's predictions influence the labels it is later trained on, so its biases reinforce themselves. A recommender shows item A slightly more, A gets more clicks *because* it was shown more, so the next model ranks A even higher — popularity becomes self-fulfilling. Detect it by measuring aggregate diversity / long-tail coverage (do they shrink over time?) or with popularity-bucket accuracy / Average Recommendation Popularity (ARP), which reveals the system collapsing onto already-popular items.
 
 **Q: How do you correct a degenerate feedback loop?**
+**Short:** Degenerate feedback loops are corrected with randomized exploration or positional features that let the model discount exposure bias.
 Two techniques: randomization (exploration) and positional features. Randomization shows some random or exploratory items — TikTok-style pushing of new videos to a small random audience — to gather unbiased feedback on items the ranker would never surface, at the cost of some short-term user experience (the Haight result). Positional features encode where an item was shown (e.g. "shown in slot 1") so the model can discount the click boost that position gives and learn intrinsic relevance instead.
 
 **Q: What is the difference between an edge case and an outlier?**
+**Short:** An outlier is an input far from the rest of the distribution; an edge case is an input where the model performs catastrophically worse.
 An outlier is about the input — a data point far from the rest of the distribution — while an edge case is about the output — an input where the model performs catastrophically worse. An outlier may or may not be an edge case (the model can handle some unusual inputs fine), and an edge case is often caused by an outlier but matters because of its consequence. You can drop outliers during training, but in production you cannot drop inputs, so edge-case behavior (framed with self-driving cars) often gates whether the system is acceptable at all.
 
 **Q: Why does the Google 60-of-96 statistic matter for ML monitoring?**
+**Short:** Huyen cites a Google study where 60 of 96 pipeline outages were ordinary software bugs, not ML-specific, so check plumbing first.
 Because it shows most production ML outages are ordinary software failures, not ML-specific ones. In a Google study of 96 pipeline failures, 60 came from non-ML causes — dependency issues, deployment mistakes, and data-join failures — so before blaming concept drift you should check whether your "model problem" is a plain engineering bug. It also explains why abrupt accuracy drops are almost always internal pipeline problems rather than the world changing.
 
 **Q: What are the limitations of the KS (Kolmogorov–Smirnov) test for shift detection?**
+**Short:** KS is univariate, so it misses multivariate shifts, and grows so powerful at scale that it flags trivial differences as significant.
 KS is univariate-only and produces excessive false alarms at scale. Being univariate, it tests one feature dimension at a time, so it misses multivariate shifts where each marginal looks fine but the joint distribution moved. Being a significance test on large samples, it becomes so powerful that it flags tiny, practically meaningless differences as significant, firing constantly on production data volumes. The fixes are to reduce dimensionality first, test the low-dimensional prediction distribution, and threshold on effect size rather than raw p-value.
 
 **Q: Why can a cumulative window hide a distribution shift that a sliding window reveals?**
+**Short:** A cumulative window dilutes a recent bad day with weeks of prior good data, so only a sliding window reveals the drop clearly.
 A cumulative window accumulates all data from a fixed start, so weeks of prior good data dilute one recent bad day and the metric barely moves. Huyen's figure shows hourly accuracy dropping sharply on day 15 — obvious in a sliding-window view but nearly invisible in the cumulative view, which keeps trending flat. The lesson is to use sliding windows to detect recent shifts; cumulative windows lag and mask dips.
 
 **Q: What is the trade-off between short and long detection windows?**
+**Short:** Shorter detection windows react faster but trigger more false alarms, while longer windows are stabler but slower to react.
 Short windows detect shifts faster but generate more false alarms, while long windows are more stable but slower to react. A short window has less data diluting the signal, so a real change shows up quickly, but it is also noisier, so normal fluctuation can look like a shift. You tune window length to the timescale of the shift you must catch, and you must respect seasonality — comparing a Monday window to a Sunday reference "detects" a shift that is just the weekly cycle.
 
 **Q: Why is alert fatigue called the number-one monitoring killer?**
+**Short:** Alert fatigue is the top monitoring killer because frequent benign alerts train the on-call to ignore everything, including real ones.
 Because when alerts fire too often — especially on benign feature-schema violations — the on-call learns to ignore them, and the one real alert gets missed. Most schema violations do not correspond to a real model problem, so alerting on all of them trains humans to mute the channel, defeating the entire monitoring system. Tuning thresholds to minimize false alarms and attaching runbooks is what separates a monitoring system that works from one everyone has muted.
 
 **Q: What is the difference between monitoring and observability?**
+**Short:** Monitoring watches known failure modes defined in advance; observability instruments enough state to investigate ones never anticipated.
 Monitoring tracks external outputs to detect known failure modes you decided to measure in advance; observability instruments enough internal state (telemetry) that you can interrogate failures you never anticipated. Monitoring answers "did metric X cross its threshold?"; observability answers "why did this new thing happen?" without shipping new code, because the data was already emitted. Observability matters more for ML because its failures are silent and novel — you cannot pre-enumerate every way a distribution can shift.
 
 **Q: What are the four layers of ML-specific monitoring metrics?**
+**Short:** The four ML monitoring layers, from truest to cheapest, are accuracy, predictions, features, and raw inputs.
 Accuracy-related metrics, predictions, features, and raw inputs — ordered from truest-but-slowest to cheapest-but-furthest-from-the-outcome. Accuracy needs labels/feedback and is the best signal but arrives slowly; prediction-distribution monitoring is cheap and immediate and catches degenerate outputs even without labels; feature monitoring checks schema and statistics on inputs; raw-input monitoring watches upstream data usually owned by a data-platform team. Monitor down the stack for early warning and up the stack for ground truth.
 
 **Q: Why is monitoring the prediction distribution so useful even without labels?**
+**Short:** Monitoring the prediction distribution catches degenerate outputs, like the model going all-False, instantly and without any labels.
 Because predictions are low-dimensional, so two-sample tests are cheap and well-behaved on them, and degenerate outputs are catchable in real time. If the model starts returning all-False for 10 minutes, or all one class, the prediction distribution collapses and is instantly visible — long before any label arrives to reveal the accuracy hit. A shift in the output distribution is also a strong, immediate hint that inputs or the concept have shifted.
 
 **Q: What are the four caveats of feature monitoring?**
+**Short:** Feature monitoring's four caveats are compute cost, alert fatigue, not revealing why a feature moved, and cross-pipeline train/serve skew.
 Compute cost, alert fatigue, lag-to-cause, and cross-pipeline drift. Compute cost: models can have thousands of features, so per-feature stats every window are expensive. Alert fatigue: most schema violations are benign, so alerting on all of them drowns real signals. Lag-to-cause: a feature-drift alert tells you what moved, not why or whether it hurt predictions. Cross-pipeline drift: a feature computed differently in training versus serving (train/serve skew) drifts between pipelines, a top cause of great-offline-bad-online.
 
 **Q: How can you address data distribution shifts once detected?**
+**Short:** Shifts are addressed mainly by periodic retraining, alongside training on massive diverse data and label-free adaptation like importance weighting.
 The three industry approaches are training on massive diverse datasets (hope it covers everything), retraining periodically (the dominant one), and adapting without new labels (research-stage, e.g. importance weighting). Periodic retraining opens the design space of fine-tune vs train-from-scratch, which window of data, and how often — the bridge to Ch 9's continual learning. You can also design more robust features (bucket account-age so small drifts don't matter) and train market-specific models so each sees a more stationary distribution.
 
 **Q: What is the difference between operational and ML-performance expectation violations?**
+**Short:** Operational violations like crashes are visible immediately; ML-performance violations let predictions silently worsen with no error.
 Operational violations are the system being down, slow, or returning errors — they are visible because a crash throws and latency shows on a dashboard. ML-performance violations are the model running perfectly while its predictions silently get worse — no exception, no error code, no red tile, so you often learn about it weeks later from a business metric. This silent second class is unique to ML and is the reason ML needs its own shift taxonomy and monitoring stack.
 
 **Q: How does importance weighting correct covariate shift without new labels?**
+**Short:** Importance weighting reweights training examples by the ratio of production to training input frequency, correcting covariate shift without new labels.
 It reweights each training example by the ratio P_target(x) / P_source(x), so training over-weights input regions common in production and under-weights regions over-represented in training. Because covariate shift assumes P(Y|X) — the label rule — is unchanged, re-balancing only the input mix is enough to correct the model, no new labels required. The catch is you must be able to estimate the target (production) input distribution P(X), which is not always possible.
 
 **Q: What is a feature-schema change and why is it a pipeline bug rather than a real shift?**
+**Short:** A feature-schema change, like a duration silently switching from months to years, is a pipeline bug masquerading as a distribution shift.
 A feature-schema change is when the schema or semantics of a feature changes — the classic being a logging change that switches a duration from months to years, so the model's input is silently off by 12×. It is a pipeline bug, not the world shifting, because nothing about the real input-to-label relationship moved; your own data plumbing corrupted the feature. Huyen stresses that such internal, abrupt changes (also label-schema changes like a credit-score range moving) are among the most common causes of sudden accuracy drops, which is why you check the pipeline first.
 
 **Q: When does label shift occur without covariate shift?**
+**Short:** Label shift occurs alone when P(Y) moves but P(X) and P(X given Y) stay fixed, as with a drug that halves disease incidence for everyone.
 When P(Y) changes but both P(X) and P(X|Y) stay the same — the example is a preventive drug given to everyone that halves disease incidence. The fraction of positive cases drops (label shift), but a person who does have the disease still presents the same features (P(X|Y) unchanged) and the overall input population is unchanged (P(X) unchanged). This shows label shift and covariate shift are genuinely distinct even though they often co-occur, since changing P(X) with P(Y|X) fixed usually drags P(Y) along too.
 
 **Q: What are the three components of a well-designed alert?**
+**Short:** A well-designed alert needs a policy threshold, notification channels, and a description with a runbook, or it just creates panic.
 An alert policy, notification channels, and a description with a runbook. The policy is the condition and threshold that triggers the alert (e.g. accuracy below 90% for two windows); the channels define where it goes and to whom (PagerDuty, Slack, on-call rotation); the description is a clear message plus a runbook giving the step-by-step response and escalation path. An alert without a runbook just creates panic, and poorly-tuned policies create the alert fatigue that gets the whole system muted.
 
 **Q: Why do teams increasingly use ML to analyze their monitoring logs, and what is the risk?**
+**Short:** Teams use ML to analyze monitoring logs because log volume at scale is too large for humans, though the monitoring system can itself fail.
 Because at scale logs explode into billions of events that no human can read, so teams apply ML — anomaly detection and log clustering — to surface problems, a recursion where monitoring an ML system needs ML. Distributed tracing (tagging events with request IDs) makes the logs reconstructable per-request, but the volume still forces automated analysis. The risk is that the monitoring system is itself software that can fail, and a graph or a model output is not understanding — dashboards and log-ML support investigation but do not replace it.
 
 ---

@@ -1114,6 +1114,8 @@ in parallel — one thread, one log, one machine.
 ## Interview Questions
 
 **Q: What is price-time priority and how does the order-book data structure enforce it?**
+**Short:** Price-level nodes kept in price order, each holding a FIFO queue by arrival, make best-price-then-earliest-order structural, not sorted.
+
 Price-time priority means the best price matches first, and among orders at the same price the earliest-submitted matches first. The order book enforces it by keeping price-level nodes in price order (best price at the head of a doubly-linked list) and storing each level's orders in a FIFO queue, so taking the head price node then the head of its FIFO always yields the best-priced, earliest order. No sorting happens on the hot path — the structure is the priority. This is why fairness is provable rather than approximate.
 
 **Q: How does the order book achieve O(1) add, cancel, and best-price lookup?**
@@ -1122,24 +1124,38 @@ Price-time priority means the best price matches first, and among orders at the 
 It composes three structures: a doubly-linked list of price-level nodes (head = best price, so best bid/ask is O(1)), a `price → node` hashmap (append a resting order at any level in O(1)), and an `order_id → order` hashmap where each order links to its FIFO node (cancel is an O(1) unlink, no scan). Matching repeatedly takes the head of the opposing best level's FIFO, O(1) per fill. The naive mistake is scanning to cancel, which is O(n) and kills latency under cancel-heavy flow.
 
 **Q: What does the sequencer do, and why is it the heart of the design?**
+**Short:** The sequencer stamps one global monotonic id on every order and execution, making the entire system a deterministic function of that log.
+
 The sequencer is the single writer that stamps a global, monotonically increasing sequence id on every inbound order and every outbound execution, appending each to the event log. It is the single ordering authority, so "who was first at this price" has exactly one answer, forever. Every downstream component becomes a deterministic function of the sequenced stream, which gives fairness, reproducibility, lockstep backups, and gap detection. Remove the sequencer and you lose the one total order the entire system depends on.
 
 **Q: Why does the design put everything on one machine instead of using distributed microservices?**
+**Short:** A network round trip alone would consume the whole sub-millisecond budget, so the design trades horizontal scale for latency.
+
 Because a single in-data-center network round-trip is tens-to-hundreds of microseconds and would consume the whole sub-millisecond budget across several hops. Collapsing the components onto one server and communicating over a shared-memory (mmap) event bus removes the network and serialization entirely, leaving only CPU and cache latency. It is the book's key inversion: you sacrifice horizontal scale within a symbol to win latency and determinism, and scale by partitioning symbols across cores instead.
 
 **Q: Why is the matching engine single-threaded per symbol instead of multi-threaded?**
+**Short:** One lock-free thread per symbol is the only way to guarantee a single deterministic total order at microsecond speed.
+
 Because a single symbol must have exactly one total order of events, and one thread with no locks is the only way to guarantee that deterministically at microsecond speed. Multi-threading within a symbol adds locks, cache-line bouncing, and nondeterministic interleaving — you would lose fairness and reproducibility and gain latency jitter. Parallelism comes from giving each symbol its own single-threaded engine on its own core, so AAPL and MSFT match independently while each stays perfectly ordered.
 
 **Q: What is deterministic replay and how does it prevent a backup from diverging?**
+**Short:** A backup replaying the same sequenced events in order holds an identical book in lockstep and provably cannot drift from the primary.
+
 Deterministic replay means a component rebuilds its exact state by replaying the same sequenced events in the same order, since identical inputs always produce identical outputs. A hot backup consumes the same sequenced stream as the primary, so it holds an identical order book in lockstep — absent bugs, it provably cannot diverge, unlike a replica that ships state and can drift. Failover is therefore a promotion of an already-current replica, recovering in seconds with no cold rebuild.
 
 **Q: How does the system guarantee zero lost orders once an order is accepted?**
+**Short:** The sequencer durably appends every accepted order to the log before matching, so the log, not memory, is the source of truth.
+
 Every accepted order is durably appended to the mmap append-only event store by the sequencer before matching, so the log — not the in-memory book — is the source of truth. After any crash, the matching engine rebuilds its exact book by replaying the log, and a hot backup already holds the state in lockstep. An acknowledged order survives because it exists as a sequenced, durable event that recovery replays deterministically.
 
 **Q: What is the difference between L1, L2, and L3 market data?**
+**Short:** L1 is just best bid/ask, L2 aggregates depth by price level, and L3 exposes every individual resting order.
+
 L1 is the top of book — the best bid and best ask (plus last trade) — which is what a normal quote shows. L2 is depth of market: the top N price levels on each side, aggregated as total quantity per level. L3 is the full order-by-order book, exposing every individual resting order, used by market makers to see exact queue position. They increase in richness and bandwidth from L1 to L3, and the market data publisher builds all three from the same sequenced execution stream.
 
 **Q: How does event sourcing here relate to the digital wallet chapter?**
+**Short:** It's the same append-only-log rung as the wallet chapter, pushed further so the whole exchange is a fold over the sequencer's log.
+
 It is the same event-sourcing rung from Ch 12 pushed to its extreme: state is the deterministic fold of an append-only event log rather than something mutated in place. In the wallet, a reproducible event log made balances reliable and auditable; in the exchange, the whole system — matching engine, market data, reporter — becomes a deterministic state machine over the sequencer's log. The exchange adds a hard microsecond latency budget, which is why the log lives in mmap shared memory rather than a database.
 
 **Q: Why are prices stored as fixed-point integers instead of floating point?**
@@ -1148,9 +1164,13 @@ It is the same event-sourcing rung from Ch 12 pushed to its extreme: state is th
 Because floating-point arithmetic introduces rounding error that is unacceptable in money and, worse, can differ across CPUs, compilers, or optimization levels — which silently breaks determinism and would diverge a backup from the primary. Fixed-point integers (for example, price in units of 1/10000 of a dollar) are exact and reproducible everywhere. Determinism is a correctness requirement here, so anything nondeterministic like float math is banned from the hot path.
 
 **Q: What is the application loop (busy-poll) and why not use blocking I/O?**
+**Short:** Busy-polling a pinned core trades a hot CPU for jitter-free latency, since blocking I/O adds tens of microseconds of scheduler delay.
+
 The application loop is a hot spin loop where each component continuously polls the shared-memory event store for the next event and processes it immediately, with no blocking. Blocking I/O — a read() syscall or a mutex — adds context-switch and scheduler latency of tens of microseconds and introduces jitter, which is fatal to a single-digit-microsecond budget. Busy-polling trades a hot CPU core (kept busy, pinned) for deterministic ultra-low latency, the approach the LMAX Disruptor popularized.
 
 **Q: How is the market data fan-out kept from adding latency to the matching path?**
+**Short:** Matching never waits on fan-out, and IP multicast delivers to all subscribers at constant cost regardless of subscriber count.
+
 The market data publisher and reporter are strictly off-path consumers of the sequenced stream — matching emits executions and moves on, never waiting on fan-out. Distribution uses IP multicast, so one packet reaches all subscribers at once and the publisher's cost is constant whether there is one subscriber or fifty thousand. This decoupling means publishing quotes and candlesticks adds zero nanoseconds to the microsecond matching hot path.
 
 **Q: How does the exchange detect that an event was lost or missed?**
@@ -1164,12 +1184,18 @@ Every event carries a monotonically increasing sequence id, so a consumer that s
 Colocation places participants' servers in racks inside the exchange's own data center, and exchanges equalize the cable lengths so every co-located participant is literally the same physical distance from the matching engine. It solves the one unfairness the software cannot: the speed of light, which would otherwise give a nearer server a millisecond edge over a distant one. Combined with a single sequenced source and multicast delivery, colocation extends fairness down to the cable.
 
 **Q: What are speed bumps and batch auctions, and what problem do they address?**
+**Short:** Both convert latency arbitrage into a fairer contest, by slowing everyone equally or by matching a batch at one clearing price.
+
 A speed bump is a small uniform delay on incoming orders — IEX's is 350 microseconds of coiled fiber — that blunts latency-arbitrage strategies by slowing everyone equally. A batch auction collects orders over a short window and matches them at a single clearing price, converting the race-to-be-first (a latency contest) into a uniform-price auction (a price contest). Both address the same truth: when ordering is the product, microscopic speed differences become economically decisive, so exchanges intervene beyond what the matching engine alone can enforce.
 
 **Q: Walk through what happens when an incoming limit buy crosses the best ask.**
+**Short:** A crossing buy fills against resting asks in price-time order until exhausted, resting any unfilled remainder as the new best bid.
+
 Suppose the best ask is 100.03 with 200 shares (ord#7) then 50 (ord#9), and a limit buy for 250 at 100.03 arrives. Since buy limit 100.03 is at or above the best ask, it crosses: it fills 200 against ord#7 (fully filled, removed), then 50 against ord#9 (fully filled, removed), emptying the 100.03 level so its node is removed. The buy is fully filled with two executions; if instead only 100 rested there, it would fill 100 and rest its remaining 150 on the bid side at 100.03, becoming the new best bid.
 
 **Q: How does the client gateway stay thin, and why does that matter?**
+**Short:** The gateway only authenticates, validates, and normalizes wire formats with no business logic, since every microsecond there adds to latency.
+
 The gateway only authenticates the connection, validates message well-formedness, enforces rate limits, and normalizes FIX or binary wire formats into the compact internal format — then hands off, with no business logic. It matters because the gateway is on the hot path, so every microsecond it spends is added to round-trip latency; keeping it thin preserves the sub-millisecond budget. Risk and funds checks live in the order manager, and matching lives in the engine, so the gateway does the minimum.
 
 **Q: What is a limit order versus a market order, and why is only the limit order in scope?**
@@ -1183,6 +1209,8 @@ A limit order specifies both price and quantity and executes only at that price 
 Synchronous cross-DC replication adds a WAN round-trip of milliseconds to every commit, which is unacceptable on a microsecond hot path, so the hot primary and backup stay in one DC and a remote DC is replicated asynchronously for disaster recovery. The cost is a small RPO — a few in-flight events could be lost if the entire primary DC is destroyed — accepted deliberately to protect latency and RTO. It is the classic replication tradeoff from the message-queue chapter, resolved firmly toward latency.
 
 **Q: How is a candlestick (OHLC) built from the execution stream?**
+**Short:** The publisher folds executions per interval into open, running high/low, latest close, and summed volume from the sequenced stream.
+
 Each candle covers a fixed interval (1 minute, 5 minutes, 1 day) and records Open (first trade price), High (max), Low (min), Close (last trade price), and Volume (summed quantity). The market data publisher folds executions as they arrive: the first execution in an interval sets open, high, low, and close equal to its price, and each later one updates high as a max, low as a min, close as the latest price, and adds to volume. Because it consumes the sequenced stream, every subscriber's candles are identical.
 
 **Q: Why does mechanical sympathy (CPU pinning, cache-resident book, no locks) matter at this scale?**

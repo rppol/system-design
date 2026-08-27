@@ -799,6 +799,7 @@ Pregel/BSP model, and expose declarative **high-level APIs** (Hive, Pig, Spark S
 ## Interview Questions
 
 **Q: What distinguishes batch processing from online services and stream processing?**
+**Short:** Batch processes bounded input for throughput with no one waiting; online services optimize latency; streaming handles unbounded input with low latency.
 Batch processing reads a large, *bounded* input of known size and produces derived output, with no user waiting, so success is measured by throughput (how much data per unit time) rather than response time. Online services handle one request at a time and are judged by latency. Stream processing (Chapter 11) is the middle ground: it consumes *unbounded*, never-ending input and produces continuously updated output with low latency. Batch's bounded, no-one-waiting nature is what lets it prioritize throughput and rely on re-running jobs to handle failures.
 
 **Q: How does the Unix philosophy foreshadow MapReduce?**
@@ -807,9 +808,11 @@ Batch processing reads a large, *bounded* input of known size and produces deriv
 The Unix philosophy builds complex behavior from small tools that each do one thing well, connected through a uniform interface (every tool reads and writes sequences of lines/bytes) and composed via pipes, treating inputs as immutable. MapReduce scales exactly these ideas: a job reads input and writes output without modifying the input or causing side effects, mappers and reducers are small composable functions, and jobs chain into workflows. The key inheritance is loose coupling and immutable inputs, which together make jobs re-runnable and fault-tolerant.
 
 **Q: What is the shuffle in MapReduce, and why is it the heart of the model?**
+**Short:** The shuffle partitions, sorts, and transfers mapper output by key so each reducer sees all values for its keys grouped together.
 The shuffle is the framework-managed step between map and reduce that partitions every mapper's output by key, sorts each partition, and transfers all values for a given key across the network to a single reducer. It's the heart of the model because it's what guarantees a reducer sees *all* values for its keys, grouped and sorted — which is what makes grouping, aggregation, and joins possible. The programmer writes only map and reduce; the shuffle (and its sort) is the expensive, defining machinery MapReduce provides.
 
 **Q: What does "bringing computation to the data" mean and why does it matter?**
+**Short:** MapReduce schedules mapper tasks on machines already holding their input block, avoiding network transfer of the larger raw data.
 It means the scheduler tries to run each mapper task on a machine that already stores a replica of the input block that task will read, rather than shipping the input across the network to wherever there's a free CPU. It matters because the input data is large while the program is small, so moving the computation to the data avoids saturating the network with bulk data transfer — only the smaller mapper *output* needs to be shuffled. This locality optimization is central to MapReduce's scalability on commodity clusters.
 
 **Q: Compare reduce-side and map-side joins.**
@@ -828,6 +831,7 @@ Hot-key skew is when one join key has vastly more records than others — a cele
 MapReduce writes each job's complete output to the distributed filesystem (replicated three times) before the next job can read it, so a workflow of N jobs passes all intermediate data through disk and network N times, and jobs must run strictly sequentially. Dataflow engines (Spark, Tez, Flink) model the entire workflow as one DAG of operators and keep intermediate state in memory or local disk instead of materializing to HDFS between steps, also skipping unnecessary sorts and redundant mappers — making them substantially faster, especially for iterative workloads.
 
 **Q: How does Spark achieve fault tolerance without materializing every intermediate result?**
+**Short:** Spark's RDDs record deterministic lineage, so a lost partition is recomputed by replaying its recorded operations instead of reading a saved copy.
 Spark represents data as RDDs (Resilient Distributed Datasets) that record their *lineage* — the exact, deterministic sequence of operations that produced them from their inputs. When a partition is lost to a machine failure, Spark doesn't need a saved copy; it recomputes that partition by replaying the recorded operations on the (still available or itself recomputable) input data. This trades recomputation cost for avoiding the heavy materialization MapReduce does, but it depends critically on the operators being deterministic.
 
 **Q: Why must dataflow operators be deterministic, and what breaks determinism?**
@@ -846,12 +850,15 @@ Iterative algorithms repeat the same computation many times until convergence, b
 MapReduce-style systems give you freedom and resilience: you can run arbitrary code in any language over data in any format (schema-on-read, good for messy semi-structured data and machine learning), and fault tolerance is fine-grained — a failed task is retried without restarting the whole job. MPP SQL databases require data to be loaded into a fixed schema first (schema-on-write) and only run SQL, and they typically abort an entire query if a node fails; in return they're often faster for the structured analytic queries they're designed for. It's a flexibility-and-fault-tolerance versus speed-and-structure tradeoff.
 
 **Q: What kinds of output do batch workflows typically produce, and why build them offline?**
+**Short:** Batch jobs build derived outputs like search indexes and ML models offline, then atomically load them, avoiding overload on live serving databases.
 Batch jobs produce derived data: search indexes (e.g. Lucene segments), read-only key-value snapshots to bulk-load into serving databases, recommendation results, and trained machine-learning models. They're built offline because generating this derived data involves huge numbers of writes that would overload a live serving database and risk inconsistency on partial failure; instead the job writes immutable output files in one place and the serving layer atomically loads or swaps them in, keeping the production system stable and the operation re-runnable.
 
 **Q: Why are immutable inputs so important to batch processing?**
+**Short:** Immutable inputs make batch jobs safely re-runnable, since retries and fixes always start from the same well-defined starting data.
 Immutable inputs are what make batch jobs safely re-runnable, which is the foundation of batch fault tolerance and experimentation. Because a job never modifies its input, you can retry a failed task, re-run the entire job after fixing a bug, or run it again with different parameters, always getting a well-defined result from the same starting data. If inputs could change underneath a running job, retries would be non-deterministic and a partial failure could leave the system in an unrecoverable, inconsistent state — so immutability underpins the whole model's reliability.
 
 **Q: What roles do high-level APIs like Hive, Pig, and Spark SQL play?**
+**Short:** They let engineers express batch computations declaratively, letting the engine's optimizer choose the efficient physical execution plan.
 They let engineers express batch computations — joins, filters, aggregations — declaratively instead of hand-writing low-level map and reduce functions, then compile that down to the underlying execution engine. Crucially, they include query optimizers that automatically choose execution strategies, such as whether to use a broadcast hash join or a partitioned join based on data sizes, bringing the declarative-versus-imperative advantages from Chapter 2 to batch processing: more concise code, and the engine — not the programmer — picking the efficient physical plan.
 
 **Q: What is HDFS, and what design choices make it suitable for batch processing?**
@@ -860,6 +867,7 @@ They let engineers express batch computations — joins, filters, aggregations �
 HDFS (the Hadoop Distributed File System, modeled on Google's GFS) is a shared-nothing distributed filesystem that splits files into large blocks and replicates each block across the local disks of many commodity machines, with a central NameNode tracking block locations. These choices suit batch processing because they provide cheap, massively scalable, fault-tolerant storage (lost replicas are re-replicated automatically), and block placement enables "bringing computation to the data" by scheduling tasks where their input already resides. It favors high-throughput sequential scans of huge files over low-latency random access.
 
 **Q: How is a workflow of multiple MapReduce jobs constructed and managed?**
+**Short:** Chained MapReduce jobs pass HDFS output to the next job's input, orchestrated by schedulers like Oozie, Airflow, or Luigi.
 Complex computations rarely fit in a single map-and-reduce pass, so they're built as a *workflow*: the output directory of one job on HDFS becomes the input of the next, chaining jobs together. Because there's no built-in notion of a multi-job pipeline in basic MapReduce, scheduling tools like Oozie, Airflow, and Luigi orchestrate the dependencies — deciding when each job can start (after its inputs are fully written), handling retries, and managing the overall DAG of jobs — which is one of the awkwardnesses that dataflow engines later eliminated by representing the whole workflow as a single job.
 
 **Q: What does "transparency" mean as a Unix design principle, and how does it carry over to MapReduce?**

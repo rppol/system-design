@@ -1156,27 +1156,43 @@ only for the payment boundary. The whole pattern transfers to flights, movie tic
 ## Interview Questions
 
 **Q: Why is a hotel reservation system a concurrency problem rather than a big-data problem?**
+**Short:** Write volume is tiny (~3 QPS); the real challenge is stopping two transactions from booking the same last room.
+
 Because the write volume is tiny — about 3 reservations per second — but two bookings for the last room must never both succeed. Back-of-envelope: 1M rooms × 70% occupancy / 3-day average stay ≈ 240,000 reservations/day ≈ 3 QPS. There is no write-throughput pressure; the entire engineering challenge is preventing double-booking and overbooking-limit violations when transactions race on the same hot inventory row.
 
 **Q: What are the three ways to prevent two users from booking the last room, and which fits this system?**
+**Short:** Pessimistic locking, optimistic locking, or a database constraint — the book prefers optimistic locking or the constraint here.
+
 Pessimistic locking, optimistic locking, and a database constraint. Pessimistic locking (`SELECT ... FOR UPDATE`) makes the second transaction wait but risks deadlocks and throttles throughput; optimistic locking uses a version column and retries on conflict; a database constraint (`CHECK total_reserved ≤ 1.1 × total_inventory`) rejects the over-ceiling write atomically. Because contention is low (~3 QPS), optimistic locking or the database constraint is preferred — no held locks, cost paid only on the rare real conflict.
 
 **Q: How does an idempotency key stop a double-clicked "Book" from creating two reservations?**
+**Short:** A client-supplied reservationID as a unique key makes a replayed POST return the first reservation, not a second one.
+
 The client-supplied `reservationID` is a unique key, so a replayed identical POST hits a unique-constraint violation instead of inserting a second row. The first request inserts the reservation and returns it; the duplicate request is detected and returns that same reservation rather than creating a new one. The guest ends up with exactly one booking no matter how many times the button is clicked or the request is retried.
 
 **Q: Why does booking by room type instead of room number change the whole schema?**
+**Short:** Availability must be tracked per date, which a per-room boolean can't express, so inventory is keyed by room type and date.
+
 Because availability must be tracked per date, which a per-room `is_available` boolean cannot express. Guests book a room type (e.g. King Deluxe) for a date range, so inventory is modeled as one `room_type_inventory` row per `(hotel_id, room_type_id, date)` with `total_inventory` and `total_reserved`. A boolean has no date dimension and can't say "free April 1–3 but sold out April 4," so the type+date table is the correct model.
 
 **Q: What exactly is the availability-check condition, and how does the 110% overbooking limit enter it?**
+**Short:** Each night must satisfy total_reserved plus rooms_requested at or below 1.1 times total_inventory, the overbooking margin.
+
 For every night of the stay, the system requires `total_reserved + rooms_requested ≤ 1.1 × total_inventory`. The 1.1 factor is the 10% overbooking margin: the hotel deliberately sells up to 110% of physical capacity to offset no-shows and cancellations. If any single night fails the check the whole booking is rejected — you cannot sell only part of a multi-night stay.
 
 **Q: Why is the last-room race a "lost update," and what makes it invisible in testing?**
+**Short:** Two transactions both read the same count before either writes, so one increment is lost — visible only under real concurrency.
+
 Two transactions both read `total_reserved = 99` before either writes, both pass the check, and both increment — so one update is effectively lost and the room is oversold. It is invisible in low-concurrency testing because the two statements (SELECT then UPDATE) only interleave when transactions truly overlap on the same hot row, which happens at production peaks. That is why it slips past tests and corrupts inventory live.
 
 **Q: What are the downsides of pessimistic locking here?**
+**Short:** It risks deadlocks and serializes bookings behind held locks, throttling throughput — overkill at this system's ~3 QPS.
+
 It risks deadlocks and throttles throughput because transactions serialize behind held exclusive locks. `SELECT ... FOR UPDATE` blocks a second booking until the first commits, which is correct but costly: under load, bookings queue behind the lock, a slow transaction stalls everyone behind it, and grabbing rows in different orders can deadlock. At ~3 QPS this heavy machinery is overkill, so it is not the recommended default.
 
 **Q: How does optimistic locking detect a conflict without holding any lock?**
+**Short:** It writes only if a read version column is unchanged; zero rows affected signals a conflict to retry.
+
 It reads a `version` column, then updates only `WHERE version = oldVersion`, incrementing version — if someone else committed first, the update affects 0 rows and signals a conflict to retry. No locks are held, so it scales better and can't deadlock, which suits low contention. Its weakness is a retry/failure storm under high contention, when many transactions read the same version and all but one fail.
 
 **Q: What is the tradeoff of enforcing the limit with a database constraint?**
@@ -1185,39 +1201,63 @@ It reads a `version` column, then updates only `WHERE version = oldVersion`, inc
 A `CHECK (total_reserved ≤ 1.1 × total_inventory)` enforces the ceiling atomically in one place, but the logic lives in the database outside application version control, the raised error is a low-level exception you must map to a clean response, and not all databases support it well. Its strength is simplicity and that no service can bypass the invariant; like optimistic locking, it is a good low-overhead choice at this system's low contention.
 
 **Q: Why choose a relational database over NoSQL for this system?**
+**Short:** Reservations need ACID transactions across availability, inventory, and booking, and the tiny write rate creates no pressure toward NoSQL.
+
 Because reservations need ACID transactions over money and inventory, and the data is naturally relational. A booking must atomically check availability, increment `total_reserved`, and record the reservation — atomicity and isolation prevent double-booking. The write rate (~3 QPS) creates no scaling pressure that would force NoSQL, and RDBMS gives ACID and foreign keys out of the box, so it is the natural fit.
 
 **Q: Why is `hotel_id` the natural shard key, and what does sharding by it preserve?**
+**Short:** Nearly every query carries hotel_id, so sharding on it keeps each booking a single-shard ACID transaction.
+
 Because almost every query — availability, reservation, rates — carries `hotel_id`, so it distributes load evenly and keeps each booking on a single shard. A single-shard booking stays a local ACID transaction, so the same locking/constraint logic works unchanged per shard with no cross-shard coordination. At, say, 30,000 QPS across 100 shards that is ~300 QPS per shard, easily handled.
 
 **Q: If inventory is cached in Redis, how do you prevent the cache from causing an oversell?**
+**Short:** The database constraint stays authoritative at commit, so a stale cache can waste a round trip but never causes a real oversell.
+
 Keep the database constraint authoritative — the cache is only an optimization the DB overrides at commit. A stale cache may briefly show a sold-out room as available and let a request through, but the atomic DB check (constraint or version) rejects the actual booking, so no real oversell occurs. The cache (keyed `hotelID_roomTypeID_date`, short TTL) accelerates reads without ever making the final decision.
 
 **Q: Why prefer keeping reservation and inventory in one service over a distributed transaction?**
+**Short:** It keeps reserve-and-decrement a single local ACID transaction, avoiding the cost and fragility of 2PC or a saga.
+
 Because it keeps reserve-and-decrement a single local ACID transaction, sidestepping the cost and fragility of 2PC or a saga. Splitting them across services and databases would force distributed coordination for what a local transaction handles cleanly. The genuine cross-service boundary is reservation ↔ payment, where a saga is appropriate — so distribute only there, not within inventory.
 
 **Q: What is a saga and how does it apply to reservation plus payment?**
+**Short:** A saga chains local transactions with compensating undo steps, so a failed payment releases the reserved room.
+
 A saga is a chain of local transactions linked by events, with compensating transactions to undo earlier steps if a later one fails. If payment fails after inventory was decremented, a compensating transaction releases the held room by decrementing `total_reserved`. Sagas are asynchronous and non-blocking so they scale, at the cost of only eventual consistency and the effort of writing every compensating action.
 
 **Q: Why is two-phase commit (2PC) a poor fit for a scalable microservice booking system?**
+**Short:** It is synchronous and blocking — participants hold locks through the prepare phase, and a coordinator crash can leave them stuck.
+
 Because it is synchronous and blocking — every participant holds locks through the prepare phase, cutting throughput, and a coordinator crash can leave participants stuck. It does give strong cross-service atomicity, but the blocking behavior and coordinator dependency scale badly. For a hotel system the book prefers avoiding distributed transactions altogether (one ACID service) or using a saga at the payment boundary.
 
 **Q: Walk through the reservation funnel numbers.**
+**Short:** Traffic drops roughly 10x per funnel step: about 300 QPS browsing, 30 QPS on order pages, 3 QPS actual reservations.
+
 The system sees roughly 300 QPS of browse traffic, 30 QPS of order-page traffic, and 3 QPS of actual reservations — about 10x fewer at each step down. Most visitors only browse, a fraction reach a specific room's order page, and a fraction of those actually book. The read side being ~100x the write side justifies a CDN plus cache on the browse path while the small write path uses a strongly consistent RDBMS.
 
 **Q: How many rows does `room_type_inventory` hold, and does it fit in one database?**
+**Short:** About 73 million rows — hotels times room types times a 2-year horizon — comfortably fitting one relational database.
+
 About 73 million rows, which fits comfortably in a single relational database. The math: 5,000 hotels × ~20 room types × ~730 days (2 years) ≈ 73M rows. No sharding is needed at this scale, but making `hotel_id` part of every primary key keeps the schema shard-ready so it can partition later without redesign.
 
 **Q: Why must the availability check pass for every night of a multi-night stay?**
+**Short:** A booking touches one inventory row per night, and every night must pass the ceiling check or the whole stay is rejected.
+
 Because a reservation touches one inventory row per night, and you cannot sell a partial stay. A 3-night booking reads three `room_type_inventory` rows and every one must satisfy `total_reserved + requested ≤ 1.1 × total_inventory`; if even one night is at the ceiling, the whole booking is rejected. Selling nights 1–2 of a 3-night request would leave the guest without a room on night 3.
 
 **Q: Why does overbooking exist, and how is it bounded in the design?**
+**Short:** Selling up to 110% of capacity offsets predictable no-shows and cancellations, bounded by the reserved-vs-inventory invariant.
+
 Overbooking sells above physical capacity — up to 110% — because a predictable fraction of guests no-show or cancel, so selling exactly to capacity leaves rooms empty and revenue lost. It is bounded by the invariant `total_reserved ≤ 1.1 × total_inventory`, enforced in the availability check and, in the constraint approach, by the database itself. On the rare night everyone shows up, the hotel "walks" the overflow to a partner hotel.
 
 **Q: The client already disables the Book button after a click — why still need a server-side idempotency key?**
+**Short:** Disabling the button doesn't stop network retries or scripted clients, so only a server-side unique key guarantees no duplicate booking.
+
 Because client-side prevention doesn't stop network retries, back-button resubmits, or scripted/malicious clients, so duplicate bookings and double charges can still occur. Graying out the button is a good UX measure but not a correctness guarantee. The server-side idempotency key (`reservationID` as a unique constraint) is what actually guarantees at most one reservation per attempt, regardless of client behavior.
 
 **Q: How does this design generalize to other booking systems?**
+**Short:** The same reserve-limited-inventory-under-contention pattern covers airline seats, movie tickets, and Airbnb listings.
+
 The same "reserve limited inventory against a date/time axis under contention" shape covers airline seat booking, movie-ticket booking, and Airbnb. In each case you model inventory per unit-type per time slot, guard double-submission with an idempotency key, guard the last-unit race with locking or a constraint, and scale by sharding on the natural entity id. Learn the hotel case and the others are variations on it.
 
 ---

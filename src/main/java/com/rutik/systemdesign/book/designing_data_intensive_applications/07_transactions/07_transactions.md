@@ -631,9 +631,11 @@ locks, aborts on conflict — the modern sweet spot when contention is moderate)
 ## Interview Questions
 
 **Q: What does each letter of ACID actually guarantee, and which one is the odd one out?**
+**Short:** Atomicity, isolation, and durability are database-enforced guarantees, but consistency is really an application-defined invariant, the odd one out.
 Atomicity means all of a transaction's writes apply or none do, so a failed transaction aborts and is safely retryable (it's about abortability, not concurrency). Isolation means concurrent transactions don't see each other's intermediate state, with serializability being the strongest form. Durability means committed data survives crashes. Consistency is the odd one out: it means preserving application invariants, but those are defined and largely enforced by the *application*, not the database, and Kleppmann notes the "C" was somewhat shoehorned in to complete the acronym.
 
 **Q: What is the difference between a dirty read and a dirty write, and which level prevents them?**
+**Short:** A dirty read sees another transaction's uncommitted write, and a dirty write overwrites one; read committed isolation prevents both.
 A dirty read is reading data another transaction has written but not yet committed — you might see a value that gets rolled back, or a partial multi-object update. A dirty write is overwriting data another transaction has written but not yet committed, letting concurrent writes interleave and corrupt each other. Both are prevented by the read committed isolation level, which guarantees you only read committed data and only overwrite committed data (typically via row locks for writes plus serving the old committed value to readers).
 
 **Q: What is read skew (non-repeatable read), and how does snapshot isolation fix it?**
@@ -641,6 +643,7 @@ A dirty read is reading data another transaction has written but not yet committ
 Read skew is when a transaction reads the database at two moments and sees different committed states because another transaction committed in between — e.g. summing two bank balances mid-transfer and seeing money apparently missing. Read committed allows it. Snapshot isolation fixes it by giving each transaction a consistent snapshot: it reads all data as of the instant it began, ignoring later commits, so every read within the transaction sees the same self-consistent view. It's implemented with MVCC, keeping multiple timestamped versions of each object.
 
 **Q: How does MVCC let readers and writers avoid blocking each other?**
+**Short:** MVCC keeps multiple committed versions per object, so readers use an old version instead of waiting and writers add new ones instead of blocking.
 MVCC (multi-version concurrency control) keeps several committed versions of each object, each tagged with the transaction ID that created it. A reading transaction sees the version that was committed before it started and ignores any created later or still in progress, so it never has to wait for a writer — and a writer creates a new version without overwriting the old one a reader might be using, so it never has to wait for a reader. This "readers never block writers, writers never block readers" property is what makes snapshot isolation efficient.
 
 **Q: What is a lost update, and what are the ways to prevent it?**
@@ -652,12 +655,15 @@ A lost update happens when two transactions concurrently do read-modify-write on
 Write skew is when two transactions read the same set of data, then each writes to *different* objects based on what they read, and the combined effect violates an invariant each transaction individually preserved — like two on-call doctors each checking "are there ≥2 on call?" and both going off call, leaving zero. It's harder than a lost update because the transactions don't write the same object, so locking a single row or detecting an overwrite doesn't catch it; the conflict is on a *premise* (the count) that spans rows, and only serializability reliably prevents it.
 
 **Q: Walk through the on-call-doctor example of write skew.**
+**Short:** Both doctors' transactions see two on-call doctors under snapshot isolation and each go off call, leaving zero; only serializable isolation catches this.
 The invariant is that at least one doctor must remain on call. Two doctors are on call and both want to take sick leave. Under snapshot isolation, both transactions read "2 doctors on call, so it's safe for me to leave," then each updates its *own* row to off-call, and both commit — leaving zero doctors on call. Neither transaction did a lost update (they wrote different rows), and each saw a consistent snapshot showing two doctors, so snapshot isolation permits it. Only serializable isolation, which considers that both relied on a now-falsified premise, prevents it.
 
 **Q: What is a phantom, and why doesn't `SELECT ... FOR UPDATE` prevent it?**
+**Short:** A phantom is a write that changes another transaction's query result set, and SELECT FOR UPDATE can't lock rows that don't exist yet.
 A phantom is when a write in one transaction changes the result set of a search query in another transaction — a row that matches a condition appears or disappears. `SELECT ... FOR UPDATE` locks the rows that *currently* match, but it can't lock rows that don't exist yet, so another transaction can still INSERT a new row that would have matched the condition (e.g. booking a meeting room for a time slot that "looked free"). Preventing phantoms needs predicate or index-range (next-key) locks, or serializable isolation, or the materialize-conflicts workaround.
 
 **Q: What are the three ways to implement serializable isolation?**
+**Short:** The three approaches are actual serial execution, two-phase locking, and serializable snapshot isolation.
 Actual serial execution: run transactions literally one at a time on a single thread, viable now that datasets fit in RAM and OLTP transactions are short (VoltDB, Redis). Two-phase locking (2PL): pessimistic shared/exclusive locks held until commit, where readers block writers and writers block readers, with predicate/index-range locks for phantoms. Serializable snapshot isolation (SSI): optimistic — run on a snapshot with no read locks and, at commit, abort any transaction whose reads were invalidated by another committed write (PostgreSQL serializable, FoundationDB).
 
 **Q: How can running everything on a single thread (actual serial execution) ever be a good idea?**
@@ -665,15 +671,19 @@ Actual serial execution: run transactions literally one at a time on a single th
 Because two trends made it viable: RAM is cheap enough that the active dataset often fits entirely in memory, eliminating the disk-wait stalls that single-threading would otherwise expose; and OLTP transactions are typically short and make few requests. Removing concurrency removes all locking overhead and all the anomaly problems at once. The constraints are that transactions must be small and fast (one slow one stalls everything), submitted as stored procedures to avoid app round-trips, and write throughput must fit a single CPU core (or the data is partitioned).
 
 **Q: How does two-phase locking differ from the locking in read committed?**
+**Short:** Two-phase locking holds every read and write lock until the transaction ends, so readers and writers block each other, unlike read committed.
 Read committed uses short-lived write locks and lets reads proceed against the last committed value without locking, so readers don't block writers. Two-phase locking is far stricter: a transaction acquires a shared lock to read and an exclusive lock to write, holds *all* locks until it ends, and consequently readers block writers and writers block readers. This much stronger locking is what gives 2PL full serializability, but it sharply reduces concurrency and makes deadlocks common.
 
 **Q: How does serializable snapshot isolation (SSI) achieve serializability without read locks?**
+**Short:** SSI runs transactions on a snapshot with no read locks, then aborts at commit time if another committed write invalidated its earlier reads.
 SSI is optimistic: transactions read from a consistent MVCC snapshot with no read locks, so nothing blocks during execution. The database tracks what each transaction read, and at commit time it checks whether another transaction has committed a write to data this transaction read — meaning the premise behind its decisions is now outdated. If so, it aborts this transaction, which then retries. Because it only aborts on a genuine serialization conflict and never takes read locks, it offers serializability with much better concurrency than 2PL when contention is moderate.
 
 **Q: What are the trade-offs that make SSI better or worse than 2PL?**
+**Short:** SSI beats 2PL under low contention since neither reads nor writes block, but under high contention its commit-time aborts waste more work.
 SSI is better when contention is low to moderate: reads never block and writes never block reads, so it scales read-heavy workloads far better than 2PL, and it avoids 2PL's deadlock storms. SSI is worse when contention is high: many transactions read data that others then modify, so the commit-time conflict checks abort a large fraction of transactions, causing repeated retries and wasted work. SSI also depends on transactions being short, since long ones accumulate more reads and are more likely to be invalidated before they commit.
 
 **Q: Why is retrying an aborted transaction the right default, but with caveats?**
+**Short:** Retrying an aborted transaction is safe by default only if it's idempotent, backs off under overload, and skips non-database side effects.
 Abort-and-retry is the clean recovery model for transient problems (deadlocks, serialization conflicts, brief network issues) because atomicity guarantees a failed transaction left no partial state. The caveats: the transaction may have actually committed before its acknowledgment was lost, so a blind retry double-applies it unless it's idempotent; retrying during overload makes the overload worse, so you need exponential backoff; retrying a permanent error like a constraint violation is pointless; and any side effects outside the database, such as a sent email, can't be undone by the retry.
 
 **Q: Why does the book warn that isolation-level names are unreliable?**

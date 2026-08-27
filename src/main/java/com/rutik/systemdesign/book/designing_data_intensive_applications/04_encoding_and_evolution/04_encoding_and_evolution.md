@@ -778,15 +778,19 @@ operates under.
 ## Interview Questions
 
 **Q: What are forward and backward compatibility, and why do you need both at once?**
+**Short:** Backward compatibility lets new code read old data; forward compatibility lets old code read new data; rolling deploys need both.
 Backward compatibility means new code can read data written by old code; forward compatibility means old code can read data written by new code. You need both simultaneously because deployments are rolling — for a window of time, old and new versions of your application run side by side, reading and writing the same database and queues. New code must understand the historical data, and old code must tolerate (and not corrupt) data written by the newer code it hasn't been updated to fully understand.
 
 **Q: How do Protocol Buffers and Thrift achieve schema evolution, and what are the rules?**
+**Short:** Protobuf and Thrift tag fields by number, not name, so new optional fields with defaults keep old and new readers compatible.
 They encode fields by numeric tag rather than by name, so the schema maps tags to field names and types out of band. To add a field you assign it a brand-new tag; old readers ignore unknown tags (forward compatible), and the field must be optional or have a default so new readers can handle old data lacking it (backward compatible). The rules: never reuse a tag number, never make a new field required, and only remove optional fields — never reusing their tags.
 
 **Q: How does Avro differ from Protobuf/Thrift, and what is its key advantage?**
+**Short:** Avro's tagless encoding matches fields by name between writer and reader schemas, making it well-suited to dynamically generated schemas.
 Avro's encoded bytes contain no field tags or type annotations at all — just concatenated values — so the reader must know the schema used to write the data. It separates the writer's schema (used to encode) from the reader's schema (what the consumer expects) and reconciles them by matching fields by *name*, filling defaults for missing fields and ignoring extra ones. Its key advantage is friendliness to dynamically generated schemas, like auto-deriving a schema from a database table, because there are no manually assigned tag numbers to coordinate.
 
 **Q: Why does Avro distinguish the writer's schema from the reader's schema?**
+**Short:** Avro's bytes carry no field identifiers, so the reader needs the exact writer's schema to interpret and reconcile against its own.
 Because the data may have been written by a different (often older or newer) version of the code than the one reading it, and Avro's tagless encoding gives no way to interpret the bytes without the exact writing schema. By carrying or referencing the writer's schema and resolving it against the reader's expected schema by field name, Avro lets the two versions differ yet still communicate — defaults cover fields the reader added, and fields the writer included but the reader dropped are skipped.
 
 **Q: What is the "silent field drop" bug when data flows through a database?**
@@ -802,9 +806,11 @@ Because you can deploy new code across a fleet in minutes, but the data already 
 They lock data to a single language so other systems can't read it; they're a security risk because decoding can instantiate arbitrary classes, enabling remote code execution on untrusted input; and they typically neglect versioning and efficiency, encoding bulky representations with poor evolution support. They're acceptable only for the most transient, same-process, same-version use — never for data persisted or sent across a network or time.
 
 **Q: What problems do JSON, XML, and CSV have despite their popularity?**
+**Short:** Kleppmann notes JSON, XML, and CSV are verbose, ambiguous on numeric types, and offer only weak or optional schema support.
 They're verbose and have ambiguous data types: XML and CSV can't reliably distinguish a number from a string, and JSON can't distinguish integers from floats and loses precision on integers above 2^53. They have no native binary support, forcing Base64 (a ~33% size increase), and their schema support is optional or weak (CSV has none). They persist because they're human-readable and universally supported, making them a solid lingua franca for interfaces between organizations.
 
 **Q: Why is RPC's "make a remote call look like a local call" considered a leaky abstraction?**
+**Short:** Kleppmann argues RPC's local-call illusion hides network-only failure modes like timeouts with an unknown outcome and variable latency.
 Because a network call has failure modes a local call never does: it can be lost or delayed unpredictably, and it can time out *after* the server already executed it, leaving the caller unsure whether it happened. Latency varies enormously, all arguments must be serialized, and large objects become problematic across languages. A local function call either returns a value or throws; pretending the network behaves the same way hides exactly the cases that cause production bugs.
 
 **Q: Given RPC timeouts, why is idempotence important?**
@@ -828,6 +834,7 @@ When data flows through a database, the writer and reader are separated in *time
 The list of ways a network call can fail or behave unlike a local call — timeouts with an unknown outcome, wildly variable latency, mandatory serialization of arguments, cross-language type translation — means the differences aren't incidental friction to be smoothed over; they're the actual shape of the problem. Trying to hide them behind an API that looks like ordinary function calls just relocates the bugs to where nobody is looking for them. Kleppmann's suggestion is closer to what REST already does: don't hide that it's a network protocol, and design the interface so failure modes are visible and handled explicitly rather than papered over.
 
 **Q: What is the actor model, and how does it relate to message compatibility?**
+**Short:** The actor model has actors communicate only via asynchronous messages, which still need forward/backward compatibility during rolling upgrades.
 The actor model structures concurrency as independent actors that hold local state and communicate only by sending each other asynchronous messages, avoiding shared-memory locking. A distributed actor framework (Akka, Erlang/OTP, Orleans) transparently routes those messages across nodes, so it doubles as a programming and a distribution model. Because actors exchange encoded messages and the system undergoes rolling upgrades, those messages need the same forward/backward compatibility as any other dataflow.
 
 **Q: When would you choose a textual format like JSON over a binary schema format like Avro or Protobuf?**
@@ -839,6 +846,7 @@ Choose JSON when the interface crosses organizational boundaries or targets a br
 The field must have a **default value**. Adding a field without a default breaks backward compatibility, because new readers using a reader's schema that requires the field would have nothing to fill it with when decoding data an old writer produced without it. Removing a field that lacks a default breaks forward compatibility, because old readers expecting that field would have nothing to read when decoding data a new writer produced without it. Because Avro resolves purely by field name rather than by a manually assigned tag number, this default-value rule — not a tag-numbering convention — is what carries the entire weight of Avro's evolution story.
 
 **Q: Why must you never reuse a field tag number in Protobuf/Thrift, and what's the analogous Avro concern?**
+**Short:** Reusing a retired Protobuf/Thrift tag misreads old data as the new field; Avro's analogous risk is a rename breaking name-based matching.
 Reusing a retired tag number means old data encoded with that tag for the *old* field will be misinterpreted by new code as the *new* field of that tag, silently corrupting reads. The analogous Avro concern is that since resolution is by field *name*, renaming a field breaks matching unless you use aliases — so you add an alias mapping the new name to the old so the reader can still reconcile data written under the previous name. Both are about preserving the identity link between historical bytes and current code.
 
 **Q: MessagePack only shrinks the "userName"/"favoriteNumber"/"interests" example from 81 to 66 bytes. Why isn't that saving bigger, and what would make it bigger?**

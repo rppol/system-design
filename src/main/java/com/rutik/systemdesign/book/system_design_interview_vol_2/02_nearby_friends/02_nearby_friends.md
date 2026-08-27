@@ -1057,12 +1057,18 @@ keyed by **geohash cell** instead of user id — publish to your cell, subscribe
 ## Interview Questions
 
 **Q: Why can't you reuse Chapter 1's geospatial-index approach for nearby friends?**
+**Short:** Friend locations are mutable and viewer-private with push delivery, none of which a static geo-index built once can handle.
+
 Because the data is mutable, the query is per-viewer, and delivery is push — none of which a static geo-index handles. Chapter 1's businesses are static, so an index is built once and read millions of times, and the answer is the same for everyone. Nearby-friends locations change every 30 seconds (334K index writes/second against a read-optimized structure), each user's answer is filtered by *their private friend graph* (a shared index just returns strangers you throw away), and the triggering event is a *friend* moving (a search index has no "notify viewer X when object Y changes"). Those three mismatches force WebSockets plus pub/sub instead.
 
 **Q: Why is the Redis cache — not the database — the source of truth for a user's current location?**
+**Short:** Only the single most recent point matters, so a fast, cheap-to-rebuild cache beats paying for durable disk writes.
+
 Because current location only needs to be the single most recent point, read/written extremely fast, and it is cheap to reconstruct, so durability is not worth paying for. You never query the cache across users, only point-lookup by user id, and if the cache is lost every active client re-reports within 30 seconds and the state rebuilds itself. Paying for durable disk writes on the hot 334K-writes/second path would be wasted; the durable record lives in the Cassandra history table instead, so the ephemeral cache is deliberately the source of truth for *current* position.
 
 **Q: Why does a pull/polling design fail to meet the 30-second freshness requirement at this scale?**
+**Short:** Polling multiplies request rate by the friend count to roughly 33 million reads per second, far more than push costs.
+
 Because to stay fresh, every client must poll for all ~100 friends every interval, multiplying the request rate by the friend count to ~33 million reads/second — roughly 100x the push cost. Push sends one message per *move* (334K publishes/second) and only to relevant friends, whereas polling every 30 seconds forces 334K polls × 100 friends of read amplification and still caps how quickly a friend entering range is detected at the poll interval. Push over WebSocket is the only affordable way to hit few-second freshness.
 
 **Q: What is connection draining and why do stateful WebSocket servers need it?**
@@ -1071,18 +1077,28 @@ Because to stay fresh, every client must poll for all ~100 friends every interva
 Connection draining is marking a server so it accepts no new connections, waiting for existing connections to close, then removing it — needed because a WebSocket server holds thousands of live persistent connections that you cannot sever all at once. To deploy new code or scale in, you drain: the load balancer stops routing new connections to the node, its connection count bleeds down as users disconnect naturally (with a max-timeout fallback where stragglers reconnect elsewhere), and only then is it removed. In-place restart would drop every connection at once and cause a reconnect storm, so every release becomes a drain-and-replace.
 
 **Q: Why use WebSocket here instead of HTTP long-polling or short-polling?**
+**Short:** WebSocket pushes one message per move to only relevant friends, giving few-second latency at far lower cost than polling.
+
 Because WebSocket is a persistent bidirectional connection that sends one message per move and only to relevant friends, giving few-second latency at ~334K publishes/second. Short-polling to meet the same freshness forces every client to fetch all ~100 friends every 30 seconds (~33M reads/second of amplification) and bounds detection latency by the poll interval; long-polling helps latency but still pays per-poll fan-out. WebSocket's server-push model lets a friend's movement reach you immediately with a single delivery rather than being discovered on the next poll.
 
 **Q: Walk through the pub/sub memory math — how did the book reach ~200 GB and multiple servers?**
+**Short:** About 1 billion friend-channel subscriptions at roughly 200 bytes each total near 200 GB, exceeding one Redis box.
+
 Roughly 10 million online users each subscribe to ~100 friends' channels, giving ~1 billion live subscriptions, and at ~200 bytes of Redis bookkeeping each that is ~200 GB. Empty channels are nearly free — the cost is subscriptions, not the ~100M channels themselves. Since ~200 GB exceeds a single large Redis box (~100 GB usable), you need multiple pub/sub servers just for memory — and CPU (the ~33M deliveries/second of fan-out) pushes you further, so the tier is sharded across many nodes.
 
 **Q: Is the pub/sub tier bounded by memory or by CPU?**
+**Short:** Both matter, but CPU from roughly 33 million message deliveries per second is usually the tighter constraint.
+
 Both, but CPU (message fan-out) is usually the tighter constraint. Memory is ~200 GB of subscription state, which already needs multiple servers, but the ~33 million message deliveries per second (334K publishes × ~100 subscribers) is what really forces distribution across many nodes. You must size and shard the tier for message-delivery throughput, not just for the subscription memory footprint.
 
 **Q: Why is Redis pub/sub a good fit — what does it decouple?**
+**Short:** It decouples publishers from subscribers, so a location publisher never needs to know who is currently listening.
+
 It gives loose coupling between the location updater (publisher) and the friends' handlers (subscribers), so the publisher never needs to know who is listening. A user reporting a move just publishes one message to its own channel; the set of subscribers — friends coming online, going offline, being added or removed — changes constantly without the publisher knowing or caring. That decoupling is exactly what a fast-changing social fan-out needs, and pub/sub's in-memory speed keeps latency low.
 
 **Q: How do you shard the pub/sub tier, and how do WebSocket servers find the right node?**
+**Short:** Channels are sharded by consistent hashing on user id, with service discovery like etcd resolving a channel to its node.
+
 Shard by hashing the channel id (user id) with consistent hashing, and use a service-discovery component like etcd or ZooKeeper holding the hash ring so WebSocket servers resolve a channel to its owning node. A WebSocket server that wants to publish to or subscribe to a channel first looks up the hash ring in service discovery to find which pub/sub node hosts that channel, then connects there. Consistent hashing keeps channel movement small when nodes are added or removed.
 
 **Q: What is the resubscribe-on-scaling problem and how do you mitigate it?**
@@ -1091,6 +1107,8 @@ Shard by hashing the channel id (user id) with consistent hashing, and use a ser
 When you add a pub/sub node, consistent hashing remaps some channels to it, and every WebSocket server subscribed to a moved channel must tear down and re-establish that subscription — a thundering herd of resubscriptions. Because thousands of WebSocket servers may each hold many moved channels, a single resize can trigger a burst of subscription churn that briefly degrades live updates. Mitigate by scaling during off-peak hours (fewer live subscriptions to move), over-provisioning so resizes are rare, and rolling changes gradually.
 
 **Q: Why is there no celebrity ("Justin Bieber") fan-out problem in nearby friends?**
+**Short:** Friendship is mutual and capped, so no channel ever gets the millions of subscribers a follower graph would create.
+
 Because friendship is mutual and capped, so no channel ever has millions of subscribers. The feed-world fan-out explosion comes from asymmetric relationships — one account with tens of millions of followers — but here you cannot have a million-friend account; platforms cap friends (Facebook at 5,000, and even a 10,000 cap is a hard bound). The worst-case fan-out per channel is a few thousand subscribers, which the sharded pub/sub tier handles comfortably, so celebrity-fan-out hedges are unnecessary.
 
 **Q: How does adding or removing a friend change the subscriptions?**
@@ -1099,6 +1117,8 @@ Because friendship is mutual and capped, so no channel ever has millions of subs
 Adding a friend triggers a subscribe callback (your handler subscribes to their channel, and theirs to yours since friendship is mutual); removing, opting out, or going offline triggers an unsubscribe callback and a "drop this friend" push to the client. The subscription set is kept in sync with the friend graph in real time so the live view always mirrors the current friend list without a full refresh. This callback wiring is what lets friends appear and disappear from the nearby list instantly.
 
 **Q: How does the "nearby random person" feature change the channel key?**
+**Short:** It keys channels by geohash cell instead of user id, since strangers share no friendship graph to route messages on.
+
 It keys channels by geohash cell instead of by user id, since strangers share no friendship to route on. When a user opts in they publish their location to the channel of the geohash cell they are currently in and subscribe to their own cell plus the 8 neighboring cells (so people just across a boundary are still visible), unsubscribing and resubscribing as they cross cell boundaries. The same pub/sub machinery is reused with geographic proximity, rather than the social graph, as the grouping key.
 
 **Q: How is the TTL used on the location cache, and what does it model?**
@@ -1107,15 +1127,23 @@ It keys channels by geohash cell instead of by user id, since strangers share no
 The TTL (~10 minutes) is reset on every location report and models whether a user is "active." An active user keeps reporting and keeps resetting the timer, so their entry stays; a user whose phone dies or who closes the app stops reporting, and ~10 minutes later the TTL lapses and the entry is auto-evicted — no separate "user went offline" signal is needed. The TTL is set comfortably longer than the 30-second report interval so a couple of missed updates never evict a genuinely active user.
 
 **Q: Why is sharding the location cache trivial?**
+**Short:** Each user's location is looked up independently with no cross-user queries, so sharding by user id needs no coordination.
+
 Because each user's current location is independent — there is never a query that spans users against the cache — so you can shard by user id with no cross-shard coordination. The "who is in this box" intersection happens per-connection inside the WebSocket handlers, not in Redis, so the cache only ever serves point lookups and writes keyed by user id. That makes consistent-hash or Redis-Cluster sharding by user id spread both the 334K writes/second and the storage evenly; the main load to provision for is TTL churn (constant writes plus background expiry).
 
 **Q: Where is the distance actually computed, and why there?**
+**Short:** Distance is computed at the receiving friend's WebSocket handler, which drops the update if it exceeds the 5-mile range.
+
 Distance is computed at the *subscriber* side — the receiving friend's WebSocket handler — after a location update is delivered through pub/sub. The handler holds that friend's own last-known position in memory, computes the straight-line distance between publisher and subscriber, and pushes the update to the friend's client only if it is within 5 miles, dropping it otherwise. Doing it at the subscriber means each friend applies its own position, and out-of-range updates die at the WebSocket server without ever reaching the friend's phone.
 
 **Q: What data model does the location history database use, and why Cassandra?**
+**Short:** It stores (user_id, timestamp) to (lat, lng) on Cassandra, chosen for its write-optimized LSM-tree under heavy append load.
+
 It stores `(user_id, timestamp) -> (latitude, longitude)` with `user_id` as the partition key and `timestamp` as a descending clustering key, on Cassandra because the workload is overwhelmingly write-heavy independent appends. At 334K appends/second with reads rare and offline and no cross-partition transactions, Cassandra's write-optimized LSM-tree, horizontal partitioning, and even load distribution by partition key are an ideal fit. Partitioning by user id keeps each user's trail co-located and time-ordered for later analytics or ML.
 
 **Q: Estimate the location-update QPS for this system.**
+**Short:** About 334,000 writes per second, from 10 million users each reporting their location once every 30 seconds.
+
 About 334K writes per second: 10 million concurrent users each reporting once every 30 seconds is 10,000,000 / 30 ≈ 333,333 updates/second. This is before any fan-out, and every update hits a WebSocket server, the location cache, the history DB, and a pub/sub publish — which is why the system is characterized as write-heavy and steers the storage choices (Redis hot path, Cassandra history). Fanning each publish out to ~100 friends yields the ~33 million pub/sub deliveries/second figure.
 
 **Q: Why consider Erlang/OTP as an alternative to Redis pub/sub, and why do most teams avoid it?**
@@ -1124,9 +1152,13 @@ About 334K writes per second: 10 million concurrent users each reporting once ev
 Erlang/OTP fits the "one cheap process per user, route messages between them" shape natively — millions of lightweight processes, message-passing, and a BEAM VM that clusters nodes and distributes processes transparently, as WhatsApp used to scale to hundreds of millions of connections. Most teams avoid it because it is a niche language with a small talent pool, harder to hire for and operate, whereas Redis pub/sub plus etcd/ZooKeeper is built from commodity, well-understood components. Reach for Erlang only with deep in-house expertise; otherwise the mainstream stack is the safer default.
 
 **Q: What happens to your nearby-friends view when a friend goes offline?**
+**Short:** Their handler unsubscribes and the server pushes an unsubscribe message, so your client drops them from the display.
+
 Their WebSocket handler unsubscribes from the friend graph, and the server sends an "unsubscribe a friend" message so your client drops them from the display. Because a friend who goes offline stops reporting, their location cache entry also lapses after the TTL, and no further updates flow through their channel. The design keeps the live view in sync with who is actually online rather than showing a stale position indefinitely.
 
 **Q: Why is eventual consistency acceptable for location data here, and what does it buy you?**
+**Short:** A few seconds of lag is fine, letting the design skip durability and strong consistency for a cheap, fast-scaling hot path.
+
 Because a few seconds of lag between a friend moving and you seeing it is fine, and an occasional dropped update is corrected by the next report within 30 seconds. This tolerance is what lets the design use a fast in-memory cache without durability, a best-effort (lossy) pub/sub bus instead of a durable queue, and cheap horizontal scaling — no strong-consistency coordination is needed anywhere on the hot path. Relaxing consistency is the single assumption that makes the whole live fan-out affordable.
 
 ---

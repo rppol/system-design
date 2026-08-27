@@ -825,9 +825,11 @@ follows from this research-to-production shift.
 ## Interview Questions
 
 **Q: Why can a model with state-of-the-art offline accuracy still fail to deliver business value?**
+**Short:** Offline accuracy is only a proxy for business value, and Booking.com and Netflix both saw the two diverge.
 Because offline accuracy is only a proxy for the business outcome, and the two often diverge. Booking.com found more-accurate models didn't always increase bookings, and Netflix never fully deployed its \$1M-prize model because the offline improvement didn't justify the production complexity and serving cost. Production has many stakeholders whose objectives (revenue, latency, cost) conflict with pure accuracy, so you must validate with online A/B tests against a business metric rather than trusting the offline benchmark.
 
 **Q: Why should you never report average (mean) latency, and what should you report instead?**
+**Short:** The mean is skewed by outliers and hides the real experience, so report percentiles like p50 and p99 instead.
 Because latency is a long-tailed distribution and the mean is dragged up by outliers, describing no real request. For `[100,102,100,100,99,104,110,90,3000,95]` the mean is ~390ms but the typical request is ~100ms; the mean hides both the typical experience and the real problem. Report percentiles — p50 (median) for the typical case and p90/p95/p99 for the tail — and optimize the tail, because the slowest requests often hit your most active, most valuable users.
 
 **Q: In the recommendation-ranking example, whose objectives conflict, and why does that matter?**
@@ -835,21 +837,27 @@ Because latency is a long-tailed distribution and the mean is dragged up by outl
 The ML engineers want the most accurate ranking, sales wants to promote paying vendors, product wants the fastest response (users leave as latency grows), and the manager wants to maximize profit — all at once, and they genuinely conflict. The most accurate ranking is not the most profitable is not the fastest, so there's no single "correct" model, only a negotiated tradeoff. This is why production ML is as much about balancing stakeholder objectives as it is about building the model.
 
 **Q: How is an ML system's artifact different from a traditional software system's, and why does it matter?**
+**Short:** An ML system's true artifact is code plus data plus model, since the data shapes behavior as much as the code.
 An ML system's behavior depends on code *and* data together, so the real artifact is code + data + model, whereas traditional software behavior is determined by code alone. Changing the training data yields a different model even with identical code, so you can't reason about, reproduce, or test the system by inspecting the code. This is why ML forces you to version and test *data*, not just code — the chapter's core code-vs-data insight.
 
 **Q: What is the difference between latency and throughput, and why does batching create tension between them?**
+**Short:** Latency is time for one request, throughput is requests per second, and batching raises one while worsening the other.
 Latency is the time to serve a single request; throughput is how many requests you handle per unit time. Batching requests together raises throughput because hardware (especially GPUs) processes a batch more efficiently, but it raises each request's latency because a request may wait for the batch to fill before processing. Research prioritizes throughput (training), production prioritizes latency (users wait), so you can't simply batch everything.
 
 **Q: Why is fairness a bigger concern in production ML than in research?**
+**Short:** ML operationalizes bias at scale, repeating the same biased decision millions of times instantly.
 Because production ML decisions affect real people at scale, and ML operationalizes and amplifies biases rather than merely having them. A biased loan, résumé-screening, or bail model makes the same biased decision millions of times, instantly and often invisibly, so the harm is far larger than a single biased human. Research typically optimizes only accuracy and never measures fairness, which is why bias must be explicitly designed in and monitored in production.
 
 **Q: Give the working definition of machine learning and explain what "unseen data" requires.**
+**Short:** ML learns complex patterns from existing data to predict on unseen data drawn from a similar distribution.
 Machine learning learns complex patterns from existing data to make predictions on unseen data. "Unseen data" means the model must generalize to data it never saw during training, which requires the assumption that the unseen data shares patterns (comes from a similar distribution) with the training data. When that assumption breaks — the world shifts — predictions degrade, which is the seed of data distribution shift covered in Chapter 8.
 
 **Q: When does ML "shine" — what four conditions make it worth using?**
+**Short:** ML shines when the task is repetitive, wrong predictions are cheap, it runs at scale, and patterns keep changing.
 ML shines when the task is repetitive, wrong predictions are relatively cheap, it operates at scale, and the underlying patterns are constantly changing. Repetition gives many examples to learn from, cheap errors accommodate ML's probabilistic nature, scale amortizes the high fixed cost of data and infrastructure, and changing patterns make a retrained model beat hand-written rules that would otherwise need constant manual rewriting. Missing any condition weakens the case for ML.
 
 **Q: When should you NOT use machine learning?**
+**Short:** Avoid ML when it's unethical, unnecessary, not cost-effective, lacks data or patterns, or one wrong call is catastrophic.
 Don't use ML when it's unethical, when simpler heuristics already solve the problem, when it's not cost-effective, when there's no data or no learnable pattern, or when a single prediction matters enormously. ML is statistical — good on average but with no guarantee on any individual case — so a catastrophic, irreversible one-shot decision is a poor fit. And even when ML fits, start with the simplest non-ML baseline first.
 
 **Q: Why does the book insist on trying the simplest non-ML baseline first?**
@@ -857,12 +865,15 @@ Don't use ML when it's unethical, when simpler heuristics already solve the prob
 Because a simple baseline does three things at once: it may already be good enough (saving an entire ML project), it gives you a baseline to prove ML actually beats, and it serves as a fallback for cold-start and model-failure cases. It forces ML to earn its complexity rather than being the default. This "earn the complexity" mindset runs through the whole book.
 
 **Q: How is monitoring an ML system different from monitoring traditional software?**
+**Short:** ML monitoring must also watch for data drift and quality decay, since a model can fail silently while checks stay green.
 Traditional monitoring checks operational health — uptime, errors, latency — but an ML system needs that *plus* monitoring for data drift and prediction-quality decay that have no SWE equivalent. An ML system can fail silently: it serves confidently wrong predictions on drifted data while every traditional health check stays green. Because behavior depends on constantly-shifting data, you must watch the data and the model, not just the code.
 
 **Q: What concrete numbers does the book cite to show latency has real business cost?**
+**Short:** Google found 500ms of added latency cut search traffic ~20%, and ~53% of mobile users abandon a 3-second load.
 Google's 2009 experiment found that adding just 500ms of latency to search dropped traffic by up to ~20%, and studies show ~53% of mobile users abandon a site that takes more than 3 seconds to load. The rule of thumb is that responses in the ~100ms range feel instant, and beyond that users perceive lag. These numbers are why production ML prioritizes inference latency and the tail, not training throughput.
 
 **Q: How does production data differ from research data?**
+**Short:** Research data is static and clean like ImageNet, while production data is messy, user-generated, biased, and shifting.
 Research data is static, clean, well-formatted, and already labeled (benchmarks like ImageNet), which is what makes leaderboards meaningful. Production data is messy, unstructured, user-generated (sometimes adversarial), biased, and — most importantly — constantly shifting as the world changes. A model trained on last month's distribution is asked to predict on this month's, so the "unseen data shares training patterns" assumption slowly breaks and the model decays.
 
 **Q: Why is versioning data harder than versioning code?**
@@ -870,18 +881,23 @@ Research data is static, clean, well-formatted, and already labeled (benchmarks 
 Because datasets are huge — versioning a multi-terabyte dataset is nothing like a `git commit` — and there's no clean line-by-line diff for "the distribution shifted slightly." Code has a natural, compact, diffable representation; data doesn't, and the meaningful changes are statistical rather than textual. Tools like DVC help, but the problem is fundamentally messier than code versioning, which is why reproducibility is a real engineering effort in ML.
 
 **Q: Why is interpretability often required in production but optional in research?**
+**Short:** Production decisions affect real people, so trust, high-stakes domains, and regulation often demand explainability.
 Because production decisions affect people, and research only optimizes a leaderboard metric. A 2020 survey found many people won't trust or adopt an AI system they can't understand; high-stakes domains like medical diagnosis need explanations to be actionable and accountable; regulation increasingly mandates explainability for automated decisions; and explanations help debug wrong predictions. This creates an accuracy-vs-interpretability tradeoff production faces and research can usually ignore.
 
 **Q: What does "complex patterns" require, and when does ML fail this test?**
+**Short:** ML needs a real pattern too complex for hand-written rules; purely random data or a simple rule both defeat it.
 It requires both that patterns exist and that they're complex enough to justify ML. If the data is essentially random — like near-random stock-price movements — there is no pattern to learn and ML only overfits noise. If the pattern is simple enough for a few hand-written rules — "if the email contains FREE, mark as spam" — the rules beat a model. ML pays off in the gap between "too complex for hand rules" and "still has a real underlying pattern."
 
 **Q: What is the cold-start problem, and why does it argue for a non-ML fallback?**
+**Short:** The cold-start problem is a new user or system with no history yet, needing a non-ML fallback until data accumulates.
 The cold-start problem is a brand-new user, item, or system with no historical data yet, so ML has nothing to learn from and can't make good predictions. Since ML requires existing data, a system needs a non-ML fallback (popularity ranking, a business rule) to serve those cases until enough data accumulates. This is one concrete reason the simplest-baseline-first approach doubles as a fallback strategy.
 
 **Q: Why can model size be an ML-specific engineering problem with no SWE precedent?**
+**Short:** Modern models can hold billions of parameters, so fitting one onto a phone needs compression traditional software never faced.
 Because modern models can have hundreds of millions to billions of parameters, making them slow to load and slow to run inference, which strains production latency budgets. Edge or on-device serving — running the model on a phone, browser, or IoT device for latency, privacy, or offline use — is increasingly wanted, but the device has tight memory and compute limits, so the model must be compressed to fit. Getting a gigabyte-scale model onto a phone is a problem traditional software never faced.
 
 **Q: Why does the book say a production ML system is "much more than the model"?**
+**Short:** The actual ML code is a tiny box inside a much larger system of data, serving, and monitoring infrastructure.
 Because the actual ML code is a tiny box surrounded by a much larger system: data collection, data verification, feature extraction, serving infrastructure, configuration, resource and process management, and monitoring. Most of the engineering effort and most of the failures live outside the model itself. This "hidden technical debt" shape is why succeeding in production is mostly about the system around the model, not the model.
 
 ---

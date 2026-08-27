@@ -816,6 +816,7 @@ document databases reprise the hierarchical model's strengths and its many-to-ma
 Choose a document database when your data is a self-contained tree of one-to-many relationships (a résumé, a product with its variants) that you usually read all at once — you gain locality, schema flexibility, and a closer match to application objects. What you give up is good support for joins and many-to-many relationships; resolving references means denormalizing (risking update anomalies) or emulating joins in application code. As data grows more interconnected, that weakness dominates.
 
 **Q: What is the object-relational impedance mismatch, and how does the document model reduce it?**
+**Short:** The impedance mismatch is the awkward translation between nested application objects and flat relational rows; documents mirror object structure directly.
 It's the awkward translation between application objects (nested, with collections) and the flat rows/columns of the relational model, usually bridged by an ORM. The document model reduces it for tree-shaped data because a nested JSON document mirrors the object's structure directly — a person with many jobs and schools is one document, not several joined tables. It does not eliminate the mismatch for many-to-many data, where you still need references.
 
 **Q: Explain schema-on-read versus schema-on-write and give a scenario favoring each.**
@@ -831,24 +832,31 @@ The relational model laid data out plainly and let a query optimizer choose acce
 Because a declarative query states *what* result you want, not *how* to compute it, the engine is free to choose the best execution plan, change it as data/indexes evolve without touching app code, and parallelize across cores and machines since no sequential order is pinned. Imperative code fixes the order and hides intent, so the engine can't safely optimize or parallelize it. SQL's declarativeness is precisely what lets the same query keep working as the optimizer and storage improve.
 
 **Q: When is a graph model clearly better than a relational one, and why is the equivalent SQL awkward?**
+**Short:** Graph models fit dominant many-to-many, variable-length-path traversals; SQL is awkward because the join count isn't fixed in advance.
 A graph model is clearly better when many-to-many relationships dominate and you traverse variable-length paths (social networks, fraud rings, routing). The equivalent SQL is awkward because the number of joins isn't known in advance — "people connected to X within N hops" needs recursive CTEs (`WITH RECURSIVE`), which are verbose and hard to read, whereas Cypher expresses the same as a concise node-edge pattern the engine matches at any path length.
 
 **Q: Describe the property-graph model's components.**
+**Short:** A property graph has vertices with properties and edges with a label plus tail and head vertices, each carrying its own properties.
 A property graph has vertices and edges. Each vertex carries a unique ID, a set of outgoing and incoming edges, and a collection of key-value properties. Each edge carries a unique ID, its tail (start) and head (end) vertices, a label naming the relationship type, and its own key-value properties. This structure lets any vertex connect to any other and lets multiple relationship types coexist in one graph, which is what makes traversal so flexible.
 
 **Q: What is a triple-store, and how does it relate to a property graph?**
+**Short:** A triple-store encodes data as (subject, predicate, object) statements, a compact uniform encoding equivalent to a property graph, queried with SPARQL.
 A triple-store represents all data as three-part statements: (subject, predicate, object), such as (Lucy, age, 33) or (Lucy, marriedTo, Alain). When the object is a primitive value the triple is a property; when it's another subject the triple is an edge. This is essentially a compact, uniform encoding of a property graph and underlies RDF and the Semantic Web, queried with SPARQL.
 
 **Q: What problem does locality solve in document databases, and when does it backfire?**
+**Short:** Locality lets a document load in one read instead of joins, but backfires on large documents since reads and writes touch the whole document.
 Locality means a document's related data is stored physically together, so loading it takes one read instead of multiple joins — great when you typically need most of the document at once. It backfires for large documents because the database generally loads the *entire* document even to read one field, and updates usually rewrite the whole document, so big documents make reads wasteful and writes expensive. The guidance is to keep documents reasonably small.
 
 **Q: Why does normalization require joins, and what's the tradeoff against denormalization?**
+**Short:** Normalization stores each fact once and requires a join to resolve it; denormalization duplicates it, trading read speed for write consistency.
 Normalization stores each fact once and references it by ID (so a region name lives in one row), which means resolving the human-readable value requires a join back to that row. Denormalization duplicates the value into many records to avoid the join, speeding reads but creating update anomalies — changing the value means finding and rewriting every copy, and missing one causes inconsistency. The choice trades read simplicity against write consistency.
 
 **Q: What is MapReduce as a query mechanism, and why did MongoDB add a declarative aggregation pipeline alongside it?**
+**Short:** MapReduce is a bulk-processing model of pure map/reduce functions; MongoDB added a declarative aggregation pipeline since most queries are simpler declared.
 MapReduce is a bulk-processing model where you supply pure `map` and `reduce` functions and the framework distributes the work across machines — a middle ground between declarative and imperative. MongoDB initially exposed MapReduce for aggregation but added the declarative aggregation pipeline because, for most queries, expressing intent declaratively is more concise and lets the engine optimize, reserving imperative functions for genuinely custom logic.
 
 **Q: What is Datalog and what makes it powerful for complex queries?**
+**Short:** Datalog expresses queries as composable rules deriving new facts recursively from stored predicates, scaling to complex reusable logic.
 Datalog stores data as simple facts (`predicate(subject, object)`) and expresses queries as rules that derive new predicates from existing ones, including recursively. Its power is composability: you build complex queries from small, named, reusable rules that can reference each other, which scales to sophisticated logic better than writing one giant query. It's less convenient for quick one-offs but excellent for reusable analytical logic, and it underlies systems like Datomic.
 
 **Q: What does "polyglot persistence" mean and why is it the likely future?**
@@ -860,6 +868,7 @@ Polyglot persistence is using several different datastore types within one appli
 As features accumulate, entities that started independent acquire references to each other — users gain followers, posts gain tags, products gain related-product links — so one-to-many trees evolve into many-to-many webs. This implies that a document model chosen early for its simplicity may need to give way to relational or graph models as relationships proliferate, so it's worth anticipating which relationships will grow rather than optimizing only for today's shape.
 
 **Q: How do relational and document databases converge, and why does that matter for choosing one?**
+**Short:** Relational databases gained JSON columns and document databases gained references, so the choice should follow the dominant access pattern, not a strict binary.
 They converge because relational databases have added JSON/XML column types and document-like nested storage, while document databases have added references and join-like lookups. This matters because the choice is less binary than it appears: you can get document-style flexibility inside PostgreSQL or relational-style references inside MongoDB, so you should choose based on which model is *primary* for your dominant access pattern rather than assuming you must forgo the other's features entirely.
 
 **Q: What is the CSS/browser example, and what does it prove about declarative languages that has nothing to do with databases?**

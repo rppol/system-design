@@ -1342,69 +1342,91 @@ and reason about failures its docs never mention.
 ## Interview Questions
 
 **Q: What does an inverted test pyramid look like, and why is it a maintainability smell?**
+**Short:** An inverted test pyramid relies mainly on slow, flaky end-to-end tests instead of a broad base of fast unit tests.
 An inverted pyramid (ice-cream cone) is a test suite dominated by slow, flaky end-to-end tests over a thin base of unit tests. It's a smell because e2e tests are slow (CI takes tens of minutes), flaky (they fail for reasons unrelated to the code, so developers reflexively re-run red builds), and expensive to debug (a failure could be anywhere across many services). The result is that nobody trusts a green build and real regressions hide in the noise; the fix is to push coverage down the pyramid so most tests are fast, reliable unit tests.
 
 **Q: Why should you measure latency percentiles like p99 instead of the average?**
+**Short:** The average hides the latency tail; p99 shows the slow experience a meaningful share of requests actually had.
 Because the average hides the tail that actually hurts users. If 99 requests take 10 ms and one takes 5000 ms, the average is ~60 ms — a number no single user experienced — while the truth is 1% of users had a terrible time. The p99 (99% of requests were at least this fast) captures that tail, and it matters even more than 1% suggests because a single user's page load fans out into many backend requests, so the odds that user hits at least one slow request are far higher than 1%.
 
 **Q: What is coordinated omission and why does it make latency measurements dangerously optimistic?**
+**Short:** Coordinated omission drops the slow requests a stall prevented from being sent, making measured latency look better than it is.
 Coordinated omission is a measurement error that omits the slow requests a stall prevented from being sent, making measured latency look far better than reality. It records only the requests that completed and silently drops the requests that were never sent because the system was already stalled — and those omitted requests are exactly the slow ones. A closed-loop load tester that sends, waits for the response, then sends the next will itself stall when the server stalls, so the would-be-slow requests during that window never enter the histogram, making the measured p99 look far better than reality. The fix is to measure against the intended request schedule (tools like wrk2), counting a request as slow if it should have been sent by now.
 
 **Q: How does an error budget govern release velocity?**
+**Short:** An error budget is the allowed failure fraction below the SLO that teams can spend on faster, riskier releases.
 An error budget is the allowed failure fraction (1 − SLO) that you can *spend*: a 99.9% SLO permits 0.1% failures, about 43 minutes of downtime over 30 days. When the budget has room, you spend it on faster feature releases, riskier rollouts, and chaos experiments, because reliability beyond the SLO gives users no extra value. When the budget is exhausted, you freeze risky releases and redirect effort to reliability until it recovers. The budget is the objective arbiter of the features-versus-reliability fight, turning reliability from an absolute into an economic decision.
 
 **Q: What is the difference between fast-burn and slow-burn SLO alerting?**
+**Short:** Fast-burn pages immediately for a high burn rate over a short window; slow-burn opens a ticket for a low rate over hours.
 Fast burn is a high burn rate over a short window (e.g. 14.4× over 1 hour), indicating an acute outage — it pages immediately, and the short window gives fast detection while the high threshold keeps precision. Slow burn is a low burn rate over a long window (e.g. 3× over 6 hours), indicating a chronic low-grade problem that would quietly exhaust the budget over days — no single moment looks like an outage, so it opens a ticket for business hours rather than a night page. Watching both windows catches both sudden severe failures and slow leaks.
 
 **Q: Why should you alert on symptoms rather than causes?**
+**Short:** Alerting on user-visible symptoms like SLO burn keeps every page actionable, unlike cause-based alerts that often fire without real impact.
 Because symptom-based alerts fire only when users are actually affected, so every page is real. User-visible SLO burn (error rate up, latency up) pages you for genuine impact, while cause-based alerts (CPU high, disk 80%, an instance down) mostly fire for conditions that aren't hurting users because the system routed around them. Cause-based alerts produce alert fatigue: on-call learns to ignore the flood of non-actionable pages and then misses the real one. Alert on symptoms so every page is actionable, and reserve cause investigation for debugging after a symptom has paged you.
 
 **Q: What is an expand/contract (two-phase) migration and what problem does it solve?**
+**Short:** Expand/contract migrates a schema or API in phases, keeping old and new forms compatible while both code versions run together.
 Expand/contract splits an incompatible schema or API change into phases where the old and new forms coexist, so it's safe during a rollout when version N and N−1 run simultaneously. You *expand* first — add the new form (column/field/endpoint) while still reading and writing the old — then migrate/backfill the data and switch readers to the new form (often behind a flag), and only *contract* (remove the old form) once nothing uses it. It solves the outage caused by an in-place change: renaming a column in one shot breaks every running instance that still expects the old name the instant N and N−1 coexist, which is every rollout.
 
 **Q: When do you reach for metrics vs. logs vs. traces?**
+**Short:** Metrics detect that something is wrong, traces locate which hop in a fan-out is slow, and logs explain what a specific request did.
 Reach for metrics to detect *that* something is wrong — they're cheap, aggregated, low-cardinality, and always-on, so they power alerting and dashboards. Reach for traces to find *where* in a fan-out the problem is — a request-scoped span tree shows which downstream hop is the slow one across services. Reach for logs to see *what* exactly a service did on specific requests — high-cardinality structured per-event detail. The workflow chains them: a metric alert pages you, a trace locates the slow hop, and the logs of that hop explain why.
 
 **Q: Why are configuration changes a leading cause of outages, and how should you manage them?**
+**Short:** Config changes cause outages because they take effect instantly, fleet-wide, without the review, testing, or canary a code deploy gets.
 Because a dynamic config change has the blast radius of a deploy — instant and fleet-wide — but often none of the safety. There's no code review, no CI, no canary, just an operator editing a value live, and the failure is frequently delayed and global: a code path reads the bad value hours later and the whole fleet falls over at once. Manage config exactly like code: validate values before applying (reject an out-of-range timeout), version them in source control with easy rollback, and roll them out incrementally through a canary rather than pushing globally and instantly.
 
 **Q: What is the difference between monitoring and observability?**
+**Short:** Monitoring pages on predefined known-unknown alerts; observability lets you explore high-cardinality data to answer novel unknown-unknowns.
 Monitoring detects *that* the system is broken and pages a human, using predefined metrics and alerts to answer known-unknowns (questions you knew to ask in advance, like "is error rate high?"). Observability answers *why* by letting you ask arbitrary new questions after the fact — the unknown-unknowns — through exploring high-cardinality data like wide-event logs and traces. Monitoring is the smoke alarm; observability is the ability to investigate a novel failure you never anticipated and couldn't have pre-built a metric for.
 
 **Q: What is the difference between a stub, a mock, and a fake?**
+**Short:** A stub returns canned answers, a mock also asserts on how it was called, and a fake is a lightweight but real working implementation.
 A stub returns hard-coded canned answers and verifies nothing about how it was called. A mock is like a stub but also asserts on the interaction — that the unit called the dependency the expected number of times with the expected arguments — which is useful when the behaviour under test *is* the interaction, but over-mocking couples tests to implementation and makes refactoring painful. A fake is a lightweight but real working implementation of the dependency's contract, like an in-memory database, giving the highest fidelity of the three because it actually behaves like the real thing.
 
 **Q: Why is high cardinality dangerous in metrics but fine in logs and traces?**
+**Short:** High-cardinality labels explode a metrics backend's time-series count, while logs and traces are built to handle high-cardinality detail.
 Each distinct label-value combination is a separate time series to store and index, so a high-cardinality label like user_id explodes the series count into the millions and bankrupts the metrics backend. Logs and traces, by contrast, are built for high-cardinality per-event data — you *want* wide events with user IDs and request IDs so you can slice by any dimension to answer an unknown-unknown. The rule is to keep metric labels low-cardinality and bounded, and push high-cardinality detail into logs and traces.
 
 **Q: How do feature flags decouple deployment from release?**
+**Short:** Feature flags let you deploy code with new behavior off, then release by flipping it on, decoupling deployment from release entirely.
 A feature flag is a runtime toggle that lets you deploy code to production with the new behaviour turned off, then *release* by flipping the flag on — and instantly roll back by flipping it off, with no redeploy. This decoupling makes trunk-based development work even for a multi-week feature (you merge and deploy half-finished code behind an off flag) and turns release into a fast, reversible runtime action instead of a heavyweight deploy. It also becomes a manageability tool: you can kill a misbehaving feature in seconds during an incident.
 
 **Q: What is a distributed trace, and how does it find the slow hop in a fan-out?**
+**Short:** A distributed trace links a request's spans across services into a tree, and the longest span in the waterfall reveals the slow hop.
 A distributed trace captures the end-to-end journey of a single request across services as a tree of timed spans. The request gets a unique trace ID that's propagated through every downstream call, and each unit of work becomes a span with a start time, duration, and parent link, so the spans form a tree. Rendered as a waterfall, the trace instantly shows which span is the long bar — which downstream hop is the bottleneck for *this* request — a causal question that aggregate metrics and siloed per-service logs cannot answer. Its completeness depends on instrumentation coverage; an un-instrumented service is a blind gap in the trace.
 
 **Q: Why is staging never a substitute for canarying in production?**
+**Short:** Staging never matches production's scale, data, and traffic, so canarying a small production slice catches what staging misses.
 Because staging is never a faithful replica of production, so a change can pass every staging test and still break in prod. Staging has smaller scale, different data, different traffic, and often different configuration, while production has orders of magnitude more load, real user data with edge cases, and dependencies in states staging never reproduces. Staging reduces risk but can't eliminate it, which is why you canary in production: deploy to a small traffic slice, compare its health to the baseline, and widen only if healthy, exposing at most a few percent of users to a problem.
 
 **Q: What are the three metric types, and when do you use each?**
+**Short:** Counters only increase, gauges rise and fall as a snapshot, and only histograms bucket observations finely enough to compute percentiles.
 A counter only increases (or resets on restart) and you read its rate — total requests, total errors, total bytes. A gauge goes up and down and represents a current snapshot — memory used, queue depth, in-flight requests. A histogram buckets observations into ranges to capture a distribution — request latency into <10 ms, <50 ms, <100 ms — and is the only type from which you can compute percentiles like p99, which a plain counter or gauge cannot give you.
 
 **Q: What is the difference between an SLI, an SLO, and an SLA?**
+**Short:** An SLI measures user-perceived health, an SLO is the internal target for it, and an SLA is the contractual, penalty-backed customer promise.
 An SLI (service-level indicator) is a metric measuring user-perceived health, almost always a good-events/total-events ratio like successful-requests/total-requests. An SLO (service-level objective) is an internal target for that SLI over a window — e.g. 99.9% success over 30 days — that the team commits to. An SLA (service-level agreement) is a contractual, penalty-backed promise to customers; you deliberately set the internal SLO tighter than the SLA so you notice trouble and react before you breach the customer contract.
 
 **Q: Why is "prefer the smallest test that catches the bug" the guiding principle of testing?**
+**Short:** Smaller tests are faster and more reliable and pinpoint failures closer to the bug, so testing should default to the smallest one that works.
 Because smaller tests are faster, more reliable, and pin the failure to a smaller region of code, so they give confidence at the lowest cost. A smaller-scope test (fewer components) fails closer to the actual bug, and a smaller-size test (single process, no I/O) is deterministic and runs in milliseconds instead of the minutes and flakiness of a multi-machine test. You climb to a larger test only when a smaller one genuinely cannot exercise the behaviour, which is why the pyramid concentrates most coverage at the cheap, reliable base.
 
 **Q: What is formal verification and when is it worth the effort?**
+**Short:** Formal verification model-checks a specification against its invariants, exhaustively finding design bugs testing can't reach at scale.
 Formal verification proves that a *design* satisfies its invariants by model-checking a precise specification rather than testing the code. You write the spec in a formal language like TLA+ and a model checker exhaustively explores every reachable state, producing a counter-example trace if an invariant can be violated. It's worth the effort for the small, critical core — a consensus protocol, a replication scheme — whose state space is too large for empirical testing to hit the rare dangerous interleavings, and where a bug is catastrophic; Amazon used TLA+ to find subtle design bugs in DynamoDB and S3 before writing code. The caveat is it verifies the design, not the implementation, so correct specs can still be coded incorrectly.
 
 **Q: What does it mean to run continuous deployment versus continuous delivery?**
+**Short:** Continuous delivery keeps every passing change ready to release with a human trigger; continuous deployment ships it automatically.
 Continuous delivery means every change that passes the pipeline is *ready* to release to production, but a human makes the final call to push the button. Continuous deployment goes all the way to production automatically with no human gate — every green change ships — which requires very high confidence in the pipeline's safety gates (strong tests, canary rollout, automated rollback). Delivery is the safe default for most teams; deployment suits high-maturity teams shipping low-risk changes many times a day.
 
 **Q: What is the book's closing argument about fundamentals versus frameworks?**
+**Short:** Vitillo argues the fundamentals of distributed systems outlast the frameworks and tools built on top of them, which keep changing.
 That distributed systems rest on a small set of fundamental ideas that don't change, while the frameworks and tools built on them constantly do. The five fundamentals — communication, coordination, scalability, resiliency, and maintainability — outlast the languages, frameworks, and cloud services that will be obsolete in a few years. An engineer who understands *why* a timeout must be bounded, *why* percentiles beat averages, *why* consensus needs a majority quorum, and *why* config changes cause outages can pick up any new tool quickly and reason about failure modes its documentation never mentions. Chasing the newest framework without the fundamentals builds systems that work in the demo and collapse in production.
 
 **Q: Why must every alert be actionable, and what is a runbook's role?**
+**Short:** Every alert must prompt a concrete action or it becomes ignorable noise, and a runbook turns that action into a step-by-step guide.
 Every page must be actionable because a human woken at 3 a.m. must be able to *do* something about it; a page that isn't actionable is noise that trains on-call to ignore alerts, manufacturing the alert fatigue that eventually hides a real incident. If an alert isn't actionable it should be a ticket or dashboard, not a page. A runbook supports this by linking each alert to a concrete, step-by-step diagnose-and-mitigate guide, turning a night-time panic into a checklist and letting a less-senior engineer safely handle the page.
 
 ---

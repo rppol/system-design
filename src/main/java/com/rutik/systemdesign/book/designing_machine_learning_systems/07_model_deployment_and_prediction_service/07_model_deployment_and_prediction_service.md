@@ -989,24 +989,31 @@ bridges the framework×hardware matrix, applying **operator fusion / tiling / ve
 ## Interview Questions
 
 **Q: What is the difference between batch prediction and online prediction, and what are the two downsides of batch?**
+**Short:** Batch precomputes and stores predictions on a schedule, trading freshness and cold-user coverage for cheap throughput.
 Batch prediction precomputes predictions on a schedule and stores them, serving a lookup, while online prediction computes the prediction at request time. Batch is high-throughput and hides model latency, but its two downsides are staleness (predictions freeze between refresh cycles, so they can't react to changing user intent) and wasted compute (it precomputes for every user/item, most of whom never show up, and can't serve brand-new cold users with no precomputed row). Online prediction is fresher and only computes what's requested, at the cost of needing fast inference and real-time data.
 
 **Q: What is train/serve skew and why is it a top source of production ML bugs?**
+**Short:** Train/serve skew is two pipelines computing the same feature differently, silently corrupting serving inputs.
 Train/serve skew is when a feature is computed one way during training and a different way during serving, so the model receives inputs subtly different from what it learned on. It happens when a batch pipeline computes a feature over historical logs while a separate stream pipeline computes the "same" feature over live events, and the two implementations disagree on a window boundary, timezone, null handling, or rounding. Accuracy quietly drops with no error anywhere, which is why it's so dangerous; the fix is a single shared feature definition, ideally one stream engine that can also replay history so training and serving compute the feature identically.
 
 **Q: What are the three modes of prediction, and how do they differ?**
+**Short:** The three modes are batch lookup, online with batch features, and online with streaming plus batch features.
 The three modes are batch prediction, online prediction with batch features, and online prediction with streaming plus batch features. Batch precomputes everything and serves a stored lookup; online-with-batch-features runs the model at request time but on precomputed features from a feature store; online-with-streaming-features (streaming prediction) adds features computed live from the event stream, like DoorDash's orders-in-the-last-10-minutes. They differ in when the model runs and how fresh the input data is, trading infrastructure complexity for freshness.
 
 **Q: Why does DoorDash-style delivery-time estimation need streaming features?**
+**Short:** Only streaming features capture minutes-old signals like kitchen backlog and nearby driver availability.
 Because accurate ETAs depend on signals that are only minutes old, like how many orders a kitchen just received and how many drivers are free right now. Batch features (the restaurant's historical mean prep time) can't capture "the kitchen just got slammed" or "no drivers are available." Streaming features are aggregations over a sliding window of recent events computed by a stream processor and handed to the model at request time, which is the only way to reflect real-time conditions in the prediction.
 
 **Q: Give the DistilBERT compression numbers and say what technique produced them.**
+**Short:** Knowledge distillation makes DistilBERT about 40% smaller, 60% faster, and 97% as accurate as BERT.
 DistilBERT is about 40% smaller, about 60% faster at inference, and retains about 97% of BERT's language-understanding quality, produced by knowledge distillation. Distillation trains a small student model to mimic a large teacher's soft output probabilities, which carry more information than hard labels. It's a strong quality-per-cost win, but it requires a training dataset to push through the teacher and an extra training stage.
 
 **Q: Why is quantization considered the most general and widely used compression method?**
+**Short:** Quantization is most general because it applies to almost any model and hardware natively supports it.
 Because it applies to essentially any model, gives both memory and compute wins, and is directly supported by hardware and runtimes. Unlike low-rank factorization, which is architecture-specific, and distillation, which needs a teacher and training data, quantization just uses fewer bits per weight (fp32 to fp16 to int8 to binary) and works on almost anything. Int8 gives a 4x memory reduction over fp32 plus faster integer math, which is why it's the default first reach for shrinking a model.
 
 **Q: What is the difference between post-training quantization and quantization-aware training?**
+**Short:** PTQ quantizes a finished model with no retraining; QAT simulates low precision during training to recover accuracy.
 Post-training quantization (PTQ) quantizes the finished fp32 model after training with no retraining, which is fast and needs no data but causes a larger accuracy drop, especially at int8 or binary. Quantization-aware training (QAT) simulates low precision during training so the model learns to be robust to it, recovering most or all of the accuracy at the cost of retraining. QAT is used when PTQ's accuracy loss is unacceptable.
 
 **Q: What are the four myths about ML deployment, in one line each?**
@@ -1014,6 +1021,7 @@ Post-training quantization (PTQ) quantizes the finished fp32 model after trainin
 That you only deploy one or two models (reality: hundreds, per task, region, and segment — Uber runs thousands); that performance stays stable if untouched (reality: it decays from training's end due to software rot and data distribution shift); that you won't need to update models much (reality: update as often as infra allows — Etsy 50/day, Weibo ~10 min); and that most ML engineers don't worry about scale (reality: most work at scale-relevant companies). Each myth leads teams to under-invest in the serving, monitoring, and retraining platform.
 
 **Q: Why does a deployed model's accuracy degrade even if nobody changes the code?**
+**Short:** Accuracy decays because the serving data distribution drifts away from the distribution the model trained on.
 Because the data distribution shifts: the world the model serves drifts away from the world it was trained on, so its inputs increasingly differ from the training distribution and predictions get worse. On top of that, ordinary software rot (dependency, OS, and hardware drift) degrades any untouched system. The key mental model is that model performance is a decaying asset from the moment training ends, not a fixed property, which is why monitoring and frequent retraining are mandatory.
 
 **Q: How does low-rank factorization shrink a convolution, using MobileNet as the example?**
@@ -1025,6 +1033,7 @@ It replaces a standard convolution with a depthwise-separable convolution, split
 Unstructured pruning zeros out individual weights, producing a sparse matrix that can cut nonzero parameters by ~10x to ~30x, but the dense tensor shape is unchanged, so you only get real speedups on hardware or kernels that exploit sparsity. Structured pruning removes whole neurons, channels, or filters, so the network becomes genuinely smaller and dense and speeds up on ordinary hardware. This is why a big parameter-count reduction from unstructured pruning is not automatically a speedup.
 
 **Q: What is the Lottery Ticket Hypothesis?**
+**Short:** It claims a large network contains a small sub-network that alone matches full accuracy when trained from the same init.
 It's the claim that a large randomly-initialized network contains a small sub-network (a "winning ticket") that, if trained in isolation from the same initialization, can match the full network's accuracy. It suggests large networks are heavily over-parameterized and that most of the network is scaffolding for finding a good sparse sub-network. It gives theoretical motivation for pruning, though finding the ticket in practice is nontrivial.
 
 **Q: What are the main benefits of running a model on the edge instead of the cloud?**
@@ -1032,6 +1041,7 @@ It's the claim that a large randomly-initialized network contains a small sub-ne
 Edge inference works offline without a network connection, removes the network round-trip from latency, keeps data on the device for privacy and GDPR compliance, and is cheaper at scale because it runs on hardware the user already owns. The primary motivation is often cost — cloud bills grow with usage and can dominate expenses. The tradeoff is that edge hardware is compute-, memory-, and energy-constrained, so the model may be too big or slow to run without compression and optimization.
 
 **Q: What is the framework-by-hardware compatibility problem, and how do intermediate representations solve it?**
+**Short:** An intermediate representation gives every framework one shared graph that any hardware backend can compile from.
 It's the M×N problem of making many ML frameworks (TensorFlow, PyTorch, JAX) each run efficiently on many hardware backends (CPU, GPU, mobile NPU, TPU) — an intractable number of pairwise hand-tuned integrations. Intermediate representations solve it the way compilers do: express the model as a neutral computation graph in the middle, so you build M front-ends (framework to IR) and N back-ends (IR to hardware) instead of M×N direct paths. ONNX-style IRs and ML compiler stacks then progressively lower and optimize the graph down to each target.
 
 **Q: What is operator fusion and why is it one of the biggest optimization wins?**
@@ -1043,6 +1053,7 @@ Operator fusion merges adjacent operations, such as a convolution followed by a 
 AutoTVM-style autotuning uses an ML cost model that learns the target hardware and searches the space of possible schedules (loop orders, tile sizes, fusion choices), using measured or predicted runtimes to pick the fastest one for your specific model and device. The advantage is it can beat hand-tuned vendor kernels like cuDNN and generalizes to new ops and hardware, rather than being limited to what a human optimized. The tradeoff is that the search takes hours, a one-time compile-time cost you pay for a faster deployed model.
 
 **Q: What is WebAssembly's role in in-browser ML, and how does its performance compare?**
+**Short:** WebAssembly runs model inference in-browser faster than JavaScript, though still slower than running natively on-device.
 WebAssembly (WASM) is a compiled bytecode format browsers run at near-native speed, letting you compile a model or its runtime and run inference client-side much faster than JavaScript. The precise positioning is that WASM is faster than JavaScript but slower than running natively on the device, so it's the best portable option inside the browser sandbox but not a replacement for a native NPU kernel. It's how in-browser ML gets acceptable performance while keeping the deploy-anywhere reach of the web.
 
 **Q: What three things do you need to move from batch prediction to online prediction?**
@@ -1050,12 +1061,15 @@ WebAssembly (WASM) is a compiled bytecode format browsers run at near-native spe
 You need fast inference so the model returns within the request's latency budget, real-time transport to move data as it's produced (Kafka/Kinesis-style), and a stream computation engine to compute streaming features from that transport. Miss any one and you fall back to batch. This is why teams often ship batch first and migrate to online as the fast-inference and streaming pieces come online.
 
 **Q: Why does the book call batch prediction a "workaround" rather than a permanent design?**
+**Short:** Batch prediction exists only until fast inference and real-time pipelines make online prediction the default.
 Because batch exists mainly to compensate for inference that used to be too slow to do per request and real-time pipelines that were hard to build. As inference gets faster (via compression) and streaming infrastructure matures, those reasons disappear, and online prediction becomes the default because it's fresher and doesn't waste compute on users who never show up. So batch prediction fades as online infrastructure matures, rather than being an end state.
 
 **Q: What are the range and precision tradeoffs when quantizing to fewer bits?**
+**Short:** Fewer bits narrow the representable range, risking overflow, and coarsen steps, causing rounding error.
 Fewer bits narrow the representable range, risking overflow or saturation when a value exceeds the maximum, and coarsen the granularity, causing rounding error when values fall between representable steps. You pick a scale and zero-point to map floats into the integer range: too tight a range clips large values (overflow), too loose wastes precision on common small values (rounding). This is why naive int8 can hurt accuracy and why quantization-aware training or per-channel scaling is used, and why edge accelerators standardize on fixed-point arithmetic.
 
 **Q: Why is "how often can we update our models?" the right question instead of "how often should we?"**
+**Short:** Update cadence should be capped by infrastructure, not preference, since Etsy deploys 50+ times a day and Weibo retrains every 10 minutes.
 Because model performance decays continually from distribution shift, so the faster you can retrain and redeploy, the better you defend against drift — making iteration speed a first-class design goal. The best teams push cadence very high (Etsy deployed 50+ times a day, Weibo iterates models roughly every 10 minutes), which is only possible with automated pipelines. If retraining is manual and expensive, you update rarely and lose to drift, so the real constraint is your infrastructure, not a schedule.
 
 ---

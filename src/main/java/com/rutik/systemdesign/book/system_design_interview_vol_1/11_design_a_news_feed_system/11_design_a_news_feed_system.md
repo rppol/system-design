@@ -901,27 +901,43 @@ decoupling**, and monitoring of **peak QPS** and **feed retrieval latency**.
 ## Interview Questions
 
 **Q: What is the celebrity (hotkey) problem in a news feed, and how does the design solve it?**
+**Short:** A celebrity's millions of followers make fan-out-on-write a write storm, so celebrity posts are pulled at read time instead of pushed.
+
 It is when a user with millions of followers posts and fan-out-on-write must push that single post into millions of feeds at once, creating a write storm that stalls publishing. Pure push cannot handle it because gathering the huge follower list and writing to every feed is slow. The fix is the hybrid model: never fan out celebrity posts on write; instead followers pull the celebrity's posts at read time and merge them into their pushed feed, so a celebrity post triggers zero fan-out writes.
 
 **Q: When would you choose fanout on write (push) over fanout on read (pull)?**
+**Short:** Push when reads must be fast and followers are bounded; pull for celebrities and inactive users, since production systems combine both.
+
 Choose push when reads must be fast and the poster has a bounded follower count, because push pre-computes each friend's feed so reads are instant. Push's downsides are the celebrity write storm and wasted work pre-computing feeds for inactive users. Pull is better for celebrities and read-rarely accounts since it stores the post once and builds feeds on demand, at the cost of slow reads. Production systems combine them: push for ordinary users, pull for celebrities.
 
 **Q: Why does the news feed cache store feed IDs instead of full post objects?**
+**Short:** Storing only `<post_id, user_id>` references keeps each post in one place, so a viral post isn't copied into a million feed caches.
+
 Because a post should live in exactly one place, so the cache stores compact `<post_id, user_id>` references and hydrates them into full posts on read. If it stored full objects, a viral post reaching a million feeds would be copied a million times, exploding storage and making a single edit or delete a million-row update. Storing IDs keeps each post once in the content cache, makes every user's feed a cheap list of references, and is why fan-out to millions of feeds costs only tiny id writes.
 
 **Q: What role does the graph database play in the fanout workflow?**
+**Short:** It stores the friend/follower graph and is queried for the poster's friend IDs before the fanout service filters and enqueues recipients.
+
 It stores the friend/follower relationship graph and is queried to get the poster's friend IDs before fan-out. Graph databases are well suited to managing this relationship data and recommendation-style queries. In the push workflow, the fanout service first asks the graph DB "who are this user's friends," then uses those IDs to read friend info from the user cache and filter recipients before enqueueing the fan-out work.
 
 **Q: Why is the recipient list filtered before fan-out, and what filters apply?**
+**Short:** Recipients are filtered for muted friends and selective-sharing lists before enqueueing, so fan-out never writes to feeds that shouldn't see the post.
+
 Because not every friend should receive every post, so the fanout service filters recipients using friend info from the user cache. Filters include skipping friends who have muted the poster and honoring selective sharing, where the poster chose to share a post with only some friends (for example a close-friends list). Filtering before enqueueing means fan-out workers never write the post into feeds of users who shouldn't see it.
 
 **Q: How do the publish and retrieve APIs look, and what identifies the user?**
+**Short:** Publish is `POST /v1/me/feed` and retrieve is `GET /v1/me/feed`, both scoped to the caller by the `auth_token`.
+
 Publishing is `POST /v1/me/feed` with `content` and an `auth_token`, and retrieval is `GET /v1/me/feed` with an `auth_token`. The `/me` path segment scopes both operations to the authenticated user, and the `auth_token` authenticates the request and identifies whose feed is being written or read. The read needs no request body because the token alone determines which user's feed to assemble.
 
 **Q: Walk through the six-step news feed retrieval flow.**
+**Short:** The newsfeed service fetches feed IDs from cache, then hydrates each into a post, author, and media by querying the content, user, and CDN layers.
+
 A user sends `GET /v1/me/feed`, the load balancer routes it to a web server, and the web server calls the newsfeed service. The newsfeed service fetches the list of feed IDs from the news feed cache, then hydrates each id by fetching full posts from the content/post cache and author info from the user cache, with media served from the CDN. Finally the fully assembled feed is returned to the client as JSON. It is a fan-in hydration that expands a compact id list into rich objects.
 
 **Q: Why is a message queue placed between the fanout service and the fanout workers?**
+**Short:** The queue decouples slow fan-out from the publish request, letting publishing return immediately while workers write feeds asynchronously.
+
 To decouple the potentially slow fan-out from the user's publish request so publishing returns immediately. The fanout service puts the filtered friend list plus the post id on the queue, and a pool of fanout workers consumes it asynchronously, writing feed IDs into each recipient's news feed cache. This absorbs the fan-out spike and applies back-pressure through the queue instead of making the poster wait for thousands of cache writes.
 
 **Q: What are the five cache layers in a news feed system and what does each store?**
@@ -930,15 +946,23 @@ To decouple the potentially slow fan-out from the user's publish request so publ
 News feed stores the IDs of feeds (the per-user feed list); content stores post data, with very popular posts in a separate hot cache; social graph stores user relationship data; action stores whether a user liked or replied to a post; and counters store like, reply, follower, and following counts. Each layer answers one question fast so a feed load hits cache rather than the primary database, and the hot content tier absorbs viral-post read spikes.
 
 **Q: How does the design keep the news feed cache from growing without bound?**
+**Short:** It caches only a length-limited window of recent feed IDs per user, since most users rarely scroll past the top of their feed.
+
 It caches only a configurable, length-limited number of recent feed IDs per user rather than every post the user could ever see. This works because most users do not scroll thousands of posts deep; they read the top of the feed. When a user does scroll past the cached window, older content is fetched from the database, keeping the in-memory footprint small and predictable regardless of total post volume.
 
 **Q: What two responsibilities does the web-server tier enforce, and why there?**
+**Short:** Authentication and rate limiting, enforced at the edge so an unauthenticated or unlimited post can't amplify into a fan-out DoS.
+
 Authentication and rate limiting, enforced at the edge before any downstream service runs. Authentication uses the `auth_token` so only signed-in users can publish or retrieve, and it identifies whose feed is affected. Rate limiting caps how many times a user can post per period, which matters because one post amplifies into thousands of fan-out writes, making an unrate-limited endpoint an amplified DoS vector; the web tier is the cheap place to shed that load using Chapter 4 techniques.
 
 **Q: How are images and videos in the feed delivered efficiently?**
+**Short:** Media is served from a CDN using URLs carried in the feed, so heavy assets never pass through the application servers.
+
 Media is stored in and served from a CDN rather than streamed through the application servers, so heavy assets are delivered from edge locations close to the user. The feed itself carries only media URLs, and during read-time hydration those URLs point at the CDN. Serving media through the app tier instead would saturate its bandwidth, so offloading to a CDN keeps the application servers focused on assembling feed metadata.
 
 **Q: Why keep the web tier stateless, and how does that help scaling?**
+**Short:** A stateless web tier can be scaled horizontally since any server can handle any request, with identity and rate limits held outside the server.
+
 Because a stateless web tier can be scaled horizontally by adding or removing servers freely, with any request routable to any server. Identity rides in the `auth_token` and rate-limit counters live in a shared store like Redis, so no session state is pinned to a specific server. This means a server can die without dropping sessions and the load balancer can spread traffic evenly, which is the foundation for the horizontal scaling discussed in the wrap-up.
 
 **Q: What are the three downstream services in the publish flow and what does each do?**
@@ -947,9 +971,13 @@ Because a stateless web tier can be scaled horizontally by adding or removing se
 The post service persists the post to the post database and post cache; the fanout service pushes the new post into the news feed caches of the poster's friends; and the notification service informs friends that new content is available. Separating persistence from propagation from alerting means a slow fan-out never blocks the post from being saved, and each service can scale and fail independently.
 
 **Q: What is the concrete tradeoff that makes pure fanout-on-read (pull) undesirable as the only strategy?**
+**Short:** Pull forces every read to gather and merge posts live, which is too slow for the busiest path in a feed system.
+
 Its fatal weakness is slow reads, because the feed is not pre-computed and every read must gather and merge the recent posts of everyone the user follows, live. Reads are the busiest path in a feed system, so paying that cost on every open is expensive. Pull's advantages — no wasted work for inactive users and no hotkey problem — are real, which is why it is kept for celebrities, but for the common ordinary-user read it is too slow, so push handles that case.
 
 **Q: What does a fanout worker actually write into the cache, and in what form?**
+**Short:** It appends a `<post_id, user_id>` mapping to each recipient's feed cache, writing only the reference and never the post content.
+
 Each fanout worker consumes the friend list and post id from the message queue and, for every recipient friend, appends a feed entry to that friend's news feed cache as a `<post_id, user_id>` mapping. It writes the id of the post plus the poster's user id, not the post content itself. This keeps the write tiny and lets the read path later hydrate the id into a full post and author object from the content and user caches.
 
 **Q: Which scaling and resilience levers does the wrap-up recommend?**
@@ -958,9 +986,13 @@ Each fanout worker consumes the friend list and post id from the message queue a
 Scale the database with vertical vs horizontal scaling, SQL vs NoSQL choices, replication, and sharding; keep the web tier stateless; cache as much as possible; support multiple data centers; loosely couple components with message queues; and monitor key metrics. The two metrics called out are QPS during peak hours, to know when to add capacity, and feed retrieval latency, the user-facing speed of opening the app.
 
 **Q: Why sort the feed reverse-chronologically rather than by relevance, in this design?**
+**Short:** Relevance ranking is out of scope, so the design fixes the sort key as post creation time, newest first.
+
 Because relevance ranking is deliberately out of scope; the design fixes the sort key as post creation time, newest first. Building an ML relevance model would be a much larger, separate problem. Reverse-chronological order keeps the feed-assembly logic simple, an ordered merge by timestamp, which is enough to demonstrate the publishing, fan-out, and hydration architecture that the chapter is really about; real systems layer ranking on top afterward.
 
 **Q: In the hybrid model, how is a follower's final feed assembled from both paths?**
+**Short:** The pushed feed of ordinary friends is merged at read time with pulled celebrity posts, then sorted newest-first before hydration.
+
 The follower's pushed feed (posts fanned out on write by ordinary friends) is merged at read time with the pulled posts of the celebrities they follow. The push path already left ordinary friends' post IDs in the news feed cache, and the pull step fetches recent celebrity posts on demand; the newsfeed service combines them and sorts newest-first before hydrating. This gives fast reads for the bulk of the feed while avoiding any fan-out write storm from the celebrities.
 
 ---

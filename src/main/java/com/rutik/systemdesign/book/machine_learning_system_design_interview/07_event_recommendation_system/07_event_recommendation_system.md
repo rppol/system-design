@@ -1066,18 +1066,23 @@ context**, and you relearn the world **constantly**.
 ## Interview Questions
 
 **Q: What are the three learning-to-rank families and which does this chapter choose?**
+**Short:** The book picks pointwise binary classification over pairwise and listwise for simplicity and fast retraining.
 Pointwise (score each item independently then sort), pairwise (learn which of two items ranks higher), and listwise (optimize the whole ordering directly). Pointwise methods reduce ranking to binary classification (logistic regression, GBDT, NN); pairwise methods include RankNet, LambdaRank, and LambdaMART; listwise methods include SoftRank, ListNet, and AdaRank. The book chooses pointwise binary classification — predict P(register) and sort — because it is simplest to serve and fastest to retrain, which matters when events expire constantly and the model must refresh often.
 
 **Q: Why do ephemeral events create permanent cold start, and why does that reshape the design?**
+**Short:** Events expire before building interaction history, so the book leans on attribute features and constant retraining.
 Because an event expires on its start date after gathering only a few hundred to a few thousand interactions, it never builds the behavioral history a video or product enjoys. So the model can almost never rely on an item's own past, unlike normal recsys where cold start is a small new-item corner case. This forces the design to lean on attribute/content features (location, time, social, description) and to retrain continually rather than learn per-item embeddings that would never get enough signal.
 
 **Q: What is the point-in-time-correctness trap and how does it silently break a model?**
+**Short:** Computing features from an event's final state leaks future registrations into training, inflating offline AUC.
 Every dynamic feature in a training row must reflect the world as of the impression time, not the current/final state, or the future leaks into training. For example, computing "# users registered" from the event's final total includes registrations that happened after the user's impression (and the user's own), so the feature effectively encodes the label. Offline AUC/mAP look near-perfect, but the model fails in production because at serving time the event is still in the future and those final counts do not exist. The fix is an as-of join counting only registrations with timestamp earlier than the impression.
 
 **Q: GBDT or a neural network for this problem, and what decides it?**
+**Short:** The book favors a neural network long-term because it fine-tunes incrementally, unlike GBDT's full retrains.
 The continual-learning requirement decides it: GBDT is the stronger tabular learner but can only retrain from scratch, while a neural network can fine-tune incrementally on fresh data. Because events expire and appear constantly, the model must refresh very often, and being able to fine-tune rather than rebuild nightly tilts the long-run choice toward the NN. GBDT remains an excellent starting point and is more accurate per datum on the tabular features, so both are defensible — the discriminating argument is how you keep the model fresh.
 
 **Q: Why is mAP chosen over MRR and nDCG as the offline metric?**
+**Short:** The book picks mAP because labels are binary and a session can have multiple registrations, unlike MRR or nDCG.
 Because the relevance labels are binary (registered or not) and a user may register for several events per session. MRR only credits the first relevant item, so it is biased toward one-relevant-item cases and wastes the other registrations. nDCG needs graded relevance to be meaningful and degenerates with binary labels. mAP is designed for binary relevance with multiple relevant items, averaging precision at each relevant rank, which matches the setup exactly.
 
 **Q: What is the difference between batch (static) and streaming (dynamic) features here?**
@@ -1085,12 +1090,15 @@ Because the relevance labels are binary (registered or not) and a user may regis
 Batch features change slowly and are precomputed offline (user age, event category, price, description embedding, host popularity), while streaming features change fast and must be computed at request time (# registered so far, friends-registered ratio, remaining time, live travel time). Caching a dynamic feature makes it stale within minutes and silently degrades ranking. The serving design reads batch features cheaply from a feature store and computes streaming features from an online store per request.
 
 **Q: Name the five feature families and one example from each.**
+**Short:** The five families are location, time, social, user, and event, each contributing attribute-based signals.
 Location (user-to-event distance, bucketized), time (remaining time until the event), social (ratio of the user's friends who registered), user (age), and event (price, bucketized). Location, time, and social carry most of the predictive weight because event identity has almost no history to exploit. Event features like description-similarity-to-history provide the content-based backbone that stands in for missing behavioral signal.
 
 **Q: Why are social features unusually strong for event recommendation?**
+**Short:** People attend events their friends attend, so friend registration ratios outpredict raw popularity in the book.
 Because people attend events their friends attend, so friend signals are more predictive here than in most recsys. The ratio of a user's friends who registered, the number of friends who invited them, whether a friend is hosting, and the user's history with a host all strongly predict registration. Five close friends going pulls far harder than five thousand strangers, so personal social proof outperforms raw popularity.
 
 **Q: How does the serving funnel keep latency low against a million events?**
+**Short:** A cheap geo-and-date filter cuts a million events to a few hundred before the model scores any candidates.
 It filters before it ranks: a cheap event-filtering service uses geo radius, date window, and user filters (no model) to cut ~1M events to a few hundred candidates, then the model only scores those hundreds. Each stage is more expensive per item than the last, so the pipeline spends its cheapest filter first. This is why ~1,700 QPS over a 1M-event catalog can return in ~150 ms.
 
 **Q: What are the three stages of the serving pipeline?**
@@ -1098,21 +1106,27 @@ It filters before it ranks: a cheap event-filtering service uses geo radius, dat
 Event filtering (candidate generation by location, date, and user filters), ranking (hydrate batch and online features, score P(register), sort), and re-ranking (business logic — diversity, dedup, remove already-registered events). The filter cuts a million events to hundreds, the ranker applies the model, and the re-ranker enforces rules the pure model ignores. The output is the final ranked feed.
 
 **Q: Why does the system need continual learning, and how is it structured?**
+**Short:** Because events expire constantly, the book retrains frequently, gating deploys on offline metrics and guardrails.
 Because events expire and new ones appear continuously, yesterday's model has never seen most of tomorrow's candidates, so it must retrain frequently — daily or more — on fresh interactions. The loop turns fresh interactions into point-in-time-correct training rows, fine-tunes or retrains, gates on offline metrics (mAP plus guardrails), and deploys or rolls back. This constant relearning is the operational payoff of not being able to rely on item history.
 
 **Q: How is the training dataset labeled and what imbalance problem arises?**
+**Short:** Registrations are positives and non-registered impressions are negatives, heavily imbalanced toward negatives.
 Positives are impressions the user registered for; negatives are impressions without registration — natural labeling from behavior, which is free but noisy. Because most impressions do not convert, the data is heavily imbalanced toward negatives. Remedies are downsampling the negatives (recalibrating the output if calibrated probabilities matter) or using a class-weighted loss that up-weights the rare positive registrations.
 
 **Q: Why bucketize continuous features like distance and price instead of using them raw?**
+**Short:** Bucketizing lets the model learn nonlinear thresholds, like registration dropping off past a distance sweet spot.
 Because registration probability is nonlinear in these features — high nearby, dropping off past a threshold, then flattening — and a raw linear term cannot express that shape. Bucketizing (e.g. distance into <1, 1–5, 5–20, 20–50, >50 km) lets linear and tree models learn a separate weight per bin, capturing the sweet spot. It also tames outliers and skewed distributions.
 
 **Q: Why embed high-cardinality IDs like event_id, and what is the cold-start catch?**
+**Short:** Embeddings avoid one-hot explosion, but a brand-new event_id has an untrained embedding under ephemerality.
 Because one-hot encoding huge vocabularies explodes dimensionality, so a learned dense embedding per ID is more efficient and captures similarity. The catch for events is that a brand-new event_id has an untrained embedding, which is almost always the case given ephemerality, so the model must fall back on the event's attribute features (category, description, host, location). This is another reason attribute features carry the load rather than item identity.
 
 **Q: What is delayed feedback and how does it corrupt labels if ignored?**
+**Short:** A user may register days later, so labeling that impression negative too soon misclassifies a future positive.
 Delayed feedback is a user registering days after the impression, so labeling that impression "negative" immediately is wrong — it is a not-yet-converted positive. Training on premature labels teaches the model to under-predict registration. The fix is a maturation window: wait long enough before finalizing negatives so late registrations are captured as positives.
 
 **Q: How does position bias distort training, and how is it handled?**
+**Short:** Top-ranked events get more clicks regardless of quality, so the book logs position and de-biases it in training.
 Users register more for events shown near the top regardless of quality, so raw impression logs over-credit high positions and teach the model that "position 1 is good," entrenching whatever the current ranker surfaces. The mitigation is to log the display position and de-bias — for example, include position as a feature during training and drop it at serving time — so the model learns event quality rather than display luck.
 
 **Q: How should new users and new events be handled at serving time?**
@@ -1120,12 +1134,15 @@ Users register more for events shown near the top regardless of quality, so raw 
 New users have no history, so fall back on demographic and location features and show popular or nearby events; new events have no interactions — the permanent condition — so rely on content/metadata features (category, description embedding, host popularity) and give them exploration traffic. Exploration, via epsilon-greedy or contextual bandits, prevents a rich-get-richer loop where only already-popular events are ever shown. This lets brand-new events gather the signal they need.
 
 **Q: What distinguishes pointwise from pairwise LTR in what the loss actually sees?**
+**Short:** Pointwise scores one item alone; pairwise compares two items and directly optimizes their relative order.
 Pointwise loss looks at one item at a time and predicts an absolute relevance score, never comparing two candidates, so it reduces to standard classification. Pairwise loss looks at a pair and predicts which should rank higher, directly optimizing relative order, which is closer to what ranking quality measures. Pairwise (RankNet, LambdaRank, LambdaMART) generally orders better but costs more to train and serve, which is why the frequent-retrain requirement favors pointwise here.
 
 **Q: Why is a great event 2,000 km away irrelevant, and how do features encode that?**
+**Short:** Users overwhelmingly attend nearby events, so bucketized distance and travel time are strong negative signals.
 Because users overwhelmingly attend events near them, so distance and travel time are first-class negative signals when large. Features encode this via bucketized user-to-event distance, same-city/same-country binary flags, estimated travel time (which differs from raw distance in traffic), and a comparison of this event's distance to the user's historical registration distances. A homebody and a frequent traveler get different predictions for the same 40 km event.
 
 **Q: Why can offline and online metrics diverge, and which decides what ships?**
+**Short:** Offline metrics reflect logged bias from the old ranker, so the book treats the online A/B test as the real verdict.
 They diverge because offline metrics like mAP are computed on logged data affected by feedback loops, position bias, and the fact that the log only contains events the old ranker chose to show. Online metrics — CTR, conversion rate (registrations/impressions), revenue lift — measure real user behavior under the new model. The offline metric guides model selection cheaply, but the online A/B test is what decides what ships.
 
 ---

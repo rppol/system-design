@@ -1328,15 +1328,23 @@ timing wheel, and dead letter queues — round out a production-grade design.
 ## Interview Questions
 
 **Q: Why does the design choose pull over push for consumers?**
+**Short:** Pull lets the consumer control its own fetch rate, so it can never be overwhelmed by the broker.
+
 Because pull lets each consumer control its own consumption rate, so a slow consumer can never be overwhelmed by the broker. With push, the broker decides the rate and can flood a slow consumer; with pull, the consumer fetches only when it has capacity and asks for a batch of its chosen size, which also makes batching and message replay natural. The one downside of pull — busy-waiting on an empty topic — is solved with long polling, where the broker holds the fetch request open until data arrives, giving near-real-time latency without a tight loop.
 
 **Q: What is the maximum useful number of consumers in a consumer group, and why?**
+**Short:** The partition count, because each partition can be owned by only one consumer per group at a time.
+
 It equals the number of partitions, because each partition is assigned to exactly one consumer within a group. If a topic has 4 partitions and you add a 5th consumer to the group, that consumer owns no partition and sits idle, wasting resources. So parallelism is capped by partition count, and you must provision enough partitions up front for your target throughput rather than just adding consumers.
 
 **Q: With acks=1, how can a message be lost even though the producer got an acknowledgment?**
+**Short:** The leader can acknowledge before any follower replicates, so a leader crash right after can lose the message.
+
 Because acks=1 acknowledges as soon as the leader writes the message, before any follower has replicated it. If the leader crashes in that window, a new leader is elected from the in-sync replicas — none of which received the message — so the message is silently lost even though the producer believed it succeeded. Guaranteed no-loss requires acks=all (all ISR must have the message) plus disabling unclean leader election.
 
 **Q: What are in-sync replicas (ISR) and why does durability depend on them?**
+**Short:** The ISR is the set of replicas caught up with the leader, and only they are guaranteed to hold every acks=all write.
+
 The ISR is the set of replicas, including the leader, that are fully caught up with the leader's log within a configured lag tolerance. Durability is defined relative to the ISR because acks=all waits for every ISR member to have the message, so any of them can be elected leader after a failure without losing acknowledged data. A follower that falls too far behind is removed from the ISR so it doesn't hold up writes, and it can rejoin once it catches up.
 
 **Q: How do at-most-once, at-least-once, and exactly-once each fall out of the design?**
@@ -1345,9 +1353,13 @@ The ISR is the set of replicas, including the leader, that are fully caught up w
 They are configurations, not fixed properties: at-most-once uses a weak ack (0 or 1) and commits the offset before processing, so a crash skips a message (may lose, never duplicates); at-least-once uses acks=all and commits after processing, so a crash before commit reprocesses the message (no loss, may duplicate); exactly-once adds an idempotent producer plus a transaction that commits the offset and the output together atomically (no loss, no duplicate). At-least-once is the common default because loss is usually the bigger concern and consumers can be made idempotent.
 
 **Q: Why is offset commit timing what decides at-least-once vs at-most-once?**
+**Short:** Committing before processing risks skipping a message on crash; committing after risks reprocessing it.
+
 Because the offset records how far the consumer has progressed, and whether you commit before or after processing determines what happens on a crash. Commit before processing and a crash leaves the offset advanced past an unprocessed message, so it is skipped (at-most-once, may lose). Commit after processing and a crash leaves the offset unchanged, so the message is read and processed again on restart (at-least-once, may duplicate). The ack setting controls producer-side loss; the commit timing controls consumer-side loss vs duplication.
 
 **Q: Why does the ordering guarantee hold only within a partition, not across a topic?**
+**Short:** Each partition is an independently ordered log, and there is no coordination of order across partitions.
+
 Because each partition is an independent append-only log with its own monotonically increasing offsets, and there is no coordination of order across partitions, which live on different brokers. Messages within one partition are strictly ordered, but two messages on different partitions have no defined relative order. To keep related messages ordered, you route them to the same partition via a partition key so they share one ordered log.
 
 **Q: Why did the design reject a general-purpose database for storage in favor of an append-only log?**
@@ -1361,42 +1373,68 @@ Because a message queue's access pattern is a firehose of sequential appends plu
 Because appending and scanning are purely sequential access, which is what disks are good at — a rotational disk is slow only at random seeks (head movement), while sequential streaming throughput is high, sometimes rivaling random SSD access. On top of that, the OS page cache keeps recently written data in RAM, and since consumers usually read near the tail (just-written data), many reads are served from memory without touching disk, and the broker can send those bytes with zero-copy.
 
 **Q: Why is the message offset assigned by the broker instead of by the producer?**
+**Short:** Only the partition's single leader broker can guarantee a gapless, monotonically increasing offset sequence.
+
 Because the offset must be a single gapless monotonically increasing sequence per partition, and only the partition's one leader broker — the sole writer — can guarantee that. If producers chose offsets, two producers could collide or leave gaps, breaking ordering and the offset-to-byte index. So the producer sends a message without an offset and the leader stamps the next offset as it appends, which is also why each partition has exactly one leader acting as sequencer.
 
 **Q: Walk through what happens when a consumer crashes versus leaves gracefully.**
+**Short:** A graceful leave rebalances immediately, while a crash waits for a missed-heartbeat timeout before reassigning.
+
 A graceful leave sends a LeaveGroup message, so the coordinator immediately rebalances and reassigns that consumer's partitions to the survivors. A crash sends nothing, so the coordinator only notices when the consumer misses heartbeats past the session timeout, and only then rebalances. This is why crash recovery is slower than graceful departure — you must wait out the heartbeat/session timeout before the crashed consumer's partitions are reassigned and processing resumes.
 
 **Q: Who computes the partition assignment during a rebalance — the coordinator or a consumer?**
+**Short:** An elected group leader (a consumer) computes the assignment plan; the coordinator only orchestrates it.
+
 The group leader, which is an elected consumer, computes the partition-assignment plan, while the group coordinator (a broker) only orchestrates the protocol. On a membership change the coordinator tells members to rejoin, picks one as group leader and sends it the membership and partition lists; the leader runs the assignment strategy (range, round-robin, or sticky) and returns the plan via SyncGroup; the coordinator then distributes each member its assignment. Splitting it this way keeps assignment logic on the client side.
 
 **Q: Why does adding partitions to a topic risk breaking per-key ordering?**
+**Short:** It changes hash(key) mod num_partitions, so a key's messages can split across old and new partitions.
+
 Because partition routing is hash(key) mod num_partitions, so changing the partition count changes which partition a given key maps to. A key that landed on partition 2 may start landing on partition 5, splitting its history across two partitions and destroying the guarantee that its messages are read in order. The practical rule is to provision enough partitions up front when per-key ordering matters, since you cannot safely repartition a keyed topic in flight.
 
 **Q: How does the idempotent producer prevent duplicates from producer retries?**
+**Short:** A producer id plus sequence number lets the broker recognize and discard retried batches as duplicates.
+
 The producer attaches a producer id and a per-partition sequence number to each batch, and the broker tracks the last sequence number it accepted. If a producer resends a batch because it never received an ack even though the write actually succeeded, the broker sees a sequence number it has already stored and discards the duplicate. This deduplicates retries at the log level, so producer-side retries no longer create duplicate messages, which is one half of achieving exactly-once.
 
 **Q: What role does the coordination service play, and why is KRaft replacing ZooKeeper?**
+**Short:** It detects dead brokers and elects partition leaders; KRaft folds this into the brokers via Raft, removing ZooKeeper.
+
 The coordination service handles cluster membership, broker liveness detection, and leader election for partitions, plus storing cluster metadata. Historically this was ZooKeeper, an external system, which meant two systems to operate and a metadata bottleneck that limited how many partitions a cluster could hold. KRaft folds a Raft-based metadata quorum into the brokers themselves, so there is one system to operate and metadata scales to millions of partitions, while doing the same jobs of detecting dead brokers and electing new partition leaders.
 
 **Q: Why is batching described as a knob that cuts both ways?**
+**Short:** Bigger batches raise throughput but add latency, while smaller batches lower latency but cut throughput.
+
 Because larger batches raise throughput but also raise latency, while smaller batches lower latency but lower throughput. Buffering many messages into one request amortizes network and disk overhead and compresses better, but a message may wait in the producer buffer until the batch fills or a linger timer fires, adding delay. This is exactly why the requirements asked for both high-throughput and low-latency use cases to be configurable — the batch size and linger settings expose the dial.
 
 **Q: How is two-week retention implemented so cheaply?**
+**Short:** Retention just deletes whole old segment files by age or size, never scanning or deleting individual messages.
+
 By deleting whole segment files rather than individual messages. Each partition's log is split into bounded, immutable segment files, and retention just periodically unlinks segments whose newest message is older than the retention window (or once total size exceeds a cap). Because it is a file delete rather than a scan-and-delete of records, retention costs almost nothing, and you never modify existing data — you only append and drop old segments.
 
 **Q: Why does a smart producer client route directly to partition leaders instead of using a routing tier?**
+**Short:** Folding routing into the client removes a network hop, enables per-partition batching, and avoids a shared bottleneck.
+
 Because folding routing into the producer client removes a network hop, enables better batching, and avoids a shared bottleneck. A standalone router adds an extra hop (producer to router to broker), whereas a client that reads the partition-to-leader metadata sends the batch straight to the leader. The client can also batch per destination partition before sending, which a central router receiving pre-serialized messages could not do as well, and there is no single router to become a scaling or failure choke point.
 
 **Q: How are delayed messages implemented efficiently at scale?**
+**Short:** A delay topic plus a timing wheel gives O(1) insert and expiry for tracking when each delayed message should fire.
+
 By routing delayed messages to a temporary delay topic and using a timing wheel to track when each should fire. A timing wheel is a circular buffer of time-slot buckets that gives O(1) insertion and expiry, far cheaper than a per-message timer when there are millions of pending delays. When a message's delay expires, it is moved from the delay structure into its real destination topic for normal consumption.
 
 **Q: What is a dead letter queue and why is it needed?**
+**Short:** A DLQ quarantines messages that repeatedly fail processing so a poison message can't stall the whole partition.
+
 A dead letter queue is a separate topic where messages that repeatedly fail processing are moved after a retry limit, so the main stream keeps flowing. Without it, a poison message that always throws would be retried forever and stall the whole partition behind it. Quarantining the bad message in a DLQ lets the rest of the partition proceed and lets engineers inspect, fix, and replay the failed messages later.
 
 **Q: What happens during partition leader failure, and how does acks=all guarantee no loss across it?**
+**Short:** A new leader is elected from the ISR, which already holds every message acknowledged under acks=all.
+
 When the coordination service detects the leader is dead via missed heartbeats, it elects a new leader from the in-sync replicas. Because ISR members are by definition caught up with everything acknowledged under acks=all, the new leader already has every acknowledged message, so no data is lost. The exception is unclean leader election, where an out-of-sync replica is promoted for faster availability — that can drop acknowledged messages, so the no-loss configuration keeps unclean election disabled.
 
 **Q: Why can't you immediately decrease a topic's partition count, and what happens instead?**
+**Short:** The partition still holds retained data, so it is retired and stays readable until it ages out of retention.
+
 Because a partition still holds retained, possibly unconsumed messages that must not be lost. Instead of deleting it, the partition is retired: producers stop writing to it, but it stays readable until its data ages out of the retention window and consumers finish draining it, after which it can be removed. This retirement window (e.g. two weeks) is the price of not throwing away buffered data.
 
 ---

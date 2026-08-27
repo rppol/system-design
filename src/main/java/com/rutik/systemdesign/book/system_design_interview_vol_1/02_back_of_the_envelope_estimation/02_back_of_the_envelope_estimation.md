@@ -909,66 +909,87 @@ server count.
 ## Interview Questions
 
 **Q: What is the single most common arithmetic mistake when computing QPS from a daily volume?**
+**Short:** Dividing by 24 hours instead of 86,400 seconds inflates the QPS answer by a factor of 3,600.
 Dividing by hours (24) instead of seconds (86,400), which inflates the answer 3,600×. A service with 300 million actions a day is ~3,500 QPS (300M / 86,400), not 12.5 million — so if your QPS comes out in the millions for a few-hundred-million-user service, you divided by the wrong unit. Always divide daily volume by 86,400 seconds and sanity-check the magnitude against the user count.
 
 **Q: How much downtime per year does each additional "nine" of availability actually allow?**
+**Short:** Each additional nine of availability cuts allowed yearly downtime by exactly a factor of ten.
 Each additional nine cuts allowed downtime by exactly 10×. 99% allows 3.65 days/year, 99.9% allows 8.77 hours, 99.99% allows 52.6 minutes, and 99.999% allows 5.26 minutes. So "just add a nine" is a 10× engineering ask, and the jump from three to four nines (8.77 h to 52.6 min) often forces multi-region redundancy.
 
 **Q: How much slower is reading 1 MB from disk than from memory, according to the latency table?**
+**Short:** The table puts a 1 MB disk read at about 120 times slower than the same read from memory (30 ms versus 250 microseconds).
 About 120× slower — 30 ms from disk versus 250 µs from memory. This ratio is the core justification for caching: anything served from RAM instead of disk is roughly two orders of magnitude cheaper. It is why "memory fast, disk slow, avoid disk seeks" is the table's headline lesson.
 
 **Q: Order these fastest to slowest — disk seek, main memory reference, same-datacenter round trip, L1 cache reference.**
+**Short:** From fastest to slowest: L1 cache, then main memory, then a same-datacenter round trip, then a disk seek.
 L1 cache (0.5 ns) < main memory (100 ns) < same-DC round trip (500 µs) < disk seek (10 ms). The four span about seven orders of magnitude, clustering into CPU/cache, local network, and durable-storage plateaus. Interviewers use ordering questions to check you know the *ratios*, since the absolute numbers drift with hardware.
 
 **Q: Why is peak QPS commonly estimated as 2× the average QPS?**
+**Short:** Traffic is not uniform across the day, so the book sizes capacity for the busy hour using a standard 2x rule of thumb over the average.
 Because traffic is not uniform across the day, so you must size capacity for the busy hour, not the average. A ~2× factor is a standard rule of thumb; systems with sharper spikes (flash sales, live events) use larger multipliers. Sizing to average QPS guarantees the system falls over at peak.
 
 **Q: Two 99.9% services are wired in series (a request must pass through both) — what is the combined availability?**
+**Short:** Availabilities multiply in series, so two 99.9% services chained together yield about 99.8% combined availability.
 About 99.8%, because availabilities multiply in series: 0.999 × 0.999 = 0.998. Adding a dependency to the request path can only lower total availability, so long synchronous call chains are fragile. This is why you push critical dependencies into redundant parallel replicas instead of stacking them in series.
 
 **Q: Two 99% services are placed in parallel as redundant replicas — what is the combined availability?**
+**Short:** Redundant replicas multiply their failure probabilities, so two 99% services in parallel reach about 99.99% combined availability.
 About 99.99%, because in parallel the failure probabilities multiply: 1 − (0.01 × 0.01) = 0.9999. Redundancy is the only lever that *adds* nines — two two-nines components become a four-nines pair. This is the mathematical reason high availability is built from redundancy, not from making single components more reliable.
 
 **Q: Estimate Twitter's average tweet QPS given 300M MAU, 50% daily active, and 2 tweets per user per day.**
+**Short:** The chapter's chain of assumptions works out to roughly 3,500 average tweet QPS, with peak around 7,000.
 About 3,500 QPS, with peak around 7,000. DAU = 300M × 50% = 150M; tweets/day = 150M × 2 = 300M; QPS = 300M / 86,400 ≈ 3,472 ≈ 3,500; peak ≈ 2× ≈ 7,000. The whole answer is one assumption chain divided by seconds-per-day, then doubled for peak.
 
 **Q: Estimate Twitter's 5-year media storage given 300M tweets/day, 10% with media, 1 MB each.**
+**Short:** Multiplying media tweets per day by size and by five years of days gives roughly 55 petabytes of media storage.
 About 55 PB. Media tweets/day = 300M × 10% = 30M; bytes/day = 30M × 1 MB = 30 TB/day; over 5 years = 30 TB × 365 × 5 = 54,750 TB ≈ 55 PB. Text and IDs (~204 bytes/tweet) are ~0.2% of this and are dropped as negligible.
 
 **Q: Why do you compress data before sending it over the network?**
+**Short:** Compression is roughly 15,000 times cheaper than a cross-continent round trip, so shrinking the payload pays for itself in transfer time.
 Because compression is nearly free compared to transfer time — compressing 1 KB with a fast algorithm is ~10 µs, while a cross-continent round trip is ~150 ms (about 15,000× more). Spending a little CPU to shrink the payload almost always pays for itself in reduced transfer time. This is a direct conclusion from the latency-numbers table.
 
 **Q: In power-of-two terms, how many bytes is 1 PB, and why do estimates treat 2^10 as ~1,000?**
+**Short:** A petabyte is 2^50, about 10^15 bytes, and estimates round 2^10 to 1,000 because the ~2.4% error is negligible for order-of-magnitude work.
 1 PB is 2^50 bytes ≈ 10^15 (a quadrillion) bytes. Estimates pretend 2^10 (1,024) ≈ 10^3 because the ~2.4%-per-step error is negligible for order-of-magnitude work and it makes mental arithmetic possible. The powers-of-two table's real value is the *ladder of names* — thousand, million, billion, trillion, quadrillion → KB, MB, GB, TB, PB.
 
 **Q: What is an SLA, and what availability do cloud providers typically promise?**
+**Short:** An SLA is the formal uptime guarantee a provider gives customers, and major cloud vendors typically publish SLAs of 99.9% or higher.
 A Service Level Agreement is the formal contract defining the uptime (and performance) a provider guarantees to customers. Major cloud vendors like Amazon, Google, and Microsoft typically publish SLAs of 99.9% or higher for their services. Availability in an SLA is usually stated in "nines," and each nine corresponds to a specific, memorizable amount of allowed yearly downtime.
 
 **Q: Why does the book insist the process matters more than the final number in estimation?**
+**Short:** Interviewers grade clean reasoning under uncertainty — sane rounding, stated assumptions, labeled units — not an exact figure.
 Because interviewers grade whether you reason cleanly under uncertainty — round sanely, state assumptions, label units — not whether you hit an exact figure nobody expects you to compute precisely. An estimate is a conversation tool to agree on scale (one server or a fleet) before debating architecture. A spuriously precise number that took three minutes to derive loses to a quick, well-reasoned order of magnitude.
 
 **Q: Which five estimates should you rehearse being able to derive quickly?**
+**Short:** Rehearse QPS, peak QPS, storage, cache size, and number of servers, since these are what interviewers actually ask for.
 QPS, peak QPS, storage, cache size, and number of servers. These are the quantities interviewers actually ask for, and each follows a repeatable recipe you can drill until the arithmetic is reflexive. Rehearsing them beforehand means you spend interview time on architecture, not on remembering how to convert daily volume to QPS.
 
 **Q: Estimate the peak egress bandwidth for a video service with 5 million concurrent viewers streaming 1080p at ~5 Mbps.**
+**Short:** The estimate comes out to about 25 Tbps, a load so far beyond one origin that it makes the need for a CDN undeniable.
 About 25 Tbps: 5,000,000 viewers × 5 Mbps = 25,000,000 Mbps = 25 Tbps. That is far beyond any single origin or region, which is exactly why video systems require a CDN to serve bytes from edge caches. The estimate turns "do we need a CDN?" into an undeniable yes in one line.
 
 **Q: For a URL shortener with 100M new URLs/day, ~100 bytes each, kept 10 years, what is the storage estimate?**
+**Short:** About 36.5 terabytes total, showing a URL shortener is bounded by read QPS and cache, not by storage.
 About 36.5 TB. Records = 100M × 365 × 10 = 365 billion; storage = 365 billion × 100 bytes ≈ 36.5 TB. Despite 365 billion rows, tiny records keep total storage small — a URL shortener is bounded by read QPS and cache, not storage, the opposite of Twitter.
 
 **Q: How should you handle messy arithmetic like 99,987 ÷ 9.1 on a whiteboard?**
+**Short:** Round aggressively to clean powers of ten before dividing, since getting the magnitude right is the whole goal, not precise arithmetic.
 Round aggressively before dividing: 100,000 / 10 = 10,000. Precise arithmetic wastes interview time and earns no points, so simplify numbers to clean powers of ten and accept an order-of-magnitude answer. Getting the magnitude right is the entire goal of a back-of-the-envelope estimate.
 
 **Q: Why does the Twitter storage estimate ignore tweet text and IDs entirely?**
+**Short:** Text and IDs are about 0.2% of the total next to media, so the estimate drops them as a negligible, dominated-out term.
 Because they are negligible next to media: 64 B (id) + 140 B (text) ≈ 204 bytes/tweet, so ~61 GB/day versus 30 TB/day of media — about 0.2%. On a back-of-the-envelope pass you estimate the dominant term and drop anything 100×+ smaller, since carrying it adds noise, not accuracy. Identifying the dominant term is a core estimation skill.
 
 **Q: How do you derive the yearly downtime for any availability percentage without memorizing the table?**
+**Short:** Multiply the seconds in a year, 31,536,000, by the downtime fraction (1 minus the availability) to get allowed downtime directly.
 Multiply the seconds in a year (365 × 24 × 3,600 = 31,536,000) by the downtime fraction (1 − availability). For 99.99%, the fraction is 0.0001, so 31,536,000 × 0.0001 = 3,153.6 s ≈ 52.6 minutes. This lets you reconstruct any row on the spot instead of memorizing all of them.
 
 **Q: What does the 150 ms California-to-Netherlands round trip tell you about system design?**
+**Short:** Cross-region hops are roughly 300 times a same-datacenter round trip, so chatty traffic should stay within a region.
 That datacenters are far apart and cross-region traffic is expensive — 150 ms is about 300× a same-datacenter round trip (500 µs). The lesson is to keep chatty traffic within a region and treat inter-region hops as a scarce resource, replicating data closer to users rather than making synchronous cross-continent calls. It is the geographic conclusion of the latency table.
 
 **Q: Why is a single disk seek (10 ms) something to design around?**
+**Short:** A disk seek costs as much as forty sequential 1 MB memory reads, so high-performance storage batches and sequentializes I/O instead.
 Because it costs as much as reading 1 MB sequentially from memory forty times over, so random disk access is punishingly slow compared to sequential access. The design response is to batch and sequentialize I/O — pay for throughput, not seeks — which is why log-structured storage, sequential writes, and large sequential reads dominate high-performance storage engines. "Avoid disk seeks" is a direct reading of the latency table.
 
 ---

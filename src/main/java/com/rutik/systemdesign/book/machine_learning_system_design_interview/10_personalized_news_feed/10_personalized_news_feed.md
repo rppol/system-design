@@ -1010,27 +1010,35 @@ negative hide weight, retention metrics) that Facebook's MSI pivot exemplifies.
 ## Interview Questions
 
 **Q: Why does a reaction-only engagement score fail for passive users, and how is it fixed?**
+**Short:** Passive users' reaction probabilities collapse near zero, so dwell-time and skip heads recover a usable ranking.
 Because a passive user rarely reacts, every reaction probability is near zero, so every post gets an almost identical near-zero score and the ranking becomes a meaningless tie. The model can no longer tell a good post from a bad one for that user, so the feed effectively falls back to random or recency. The fix is to add implicit-signal heads that read behavior the user emits without deciding to react: a dwell-time regression head and a P(skip) classification head, which are dense (present on every impression) and spread the scores apart to restore a usable ranking.
 
 **Q: Are the reaction weights in the engagement score learned by the model?**
+**Short:** No — the reaction weights are a business decision tuned by A/B testing, not learned by the model.
 No — the reaction weights (e.g. click=1, like=5, comment=10, share=20, hide=−20) are a business decision, set by product and tuned via online A/B testing, not learned by gradient descent. There is no ground-truth label for "how much a share is worth"; that is a value judgment about what the product wants to encourage. Keeping the weights outside the model lets product retune ranking behavior overnight by editing a config, as Facebook did in its 2018 Meaningful Social Interactions pivot, without retraining the reaction heads.
 
 **Q: What is the difference between the loss weights and the score weights in this system?**
+**Short:** Loss weights balance per-head training gradients; score weights are business-set values that order the feed at serving time.
 They are two different weighted sums for two different jobs. The loss weights (λ) live in the training objective and balance how much each head influences the shared bottom's gradients so the abundant-click head doesn't starve the rare-share head; they are set by the ML engineer at training time. The score weights (w) live in the serving-time score and fold the predicted probabilities into a single ranking number that encodes the product's value judgments; they are set by the business and tuned via A/B test. Confusing them, or trying to learn the score weights, is a common mistake.
 
 **Q: Why choose a multi-task network over N independent classifiers or a single multi-label model?**
+**Short:** A shared-bottom multi-task network gives per-head flexibility at near single-model training and serving cost.
 Because multi-task gives per-reaction flexibility at near single-model cost. N independent classifiers are too expensive — N models to train and serve and N forward passes per candidate at feed latency. A single multi-label model is cheap but forces one shared loss and threshold across reactions whose base rates differ by orders of magnitude (clicks common, hides very rare), so it can't balance per-head imbalance. The multi-task network shares one bottom (so one forward pass feeds all heads) while each head keeps its own loss and threshold, and the abundant heads regularize the data-starved ones via positive transfer.
 
 **Q: Why is user–author affinity the most predictive feature family?**
+**Short:** Who wrote a post and how this specific viewer has engaged with that author predicts engagement more than content does.
 Because who wrote a post and how the specific viewer feels about that author matters more than the raw content of the post. Affinity features — the user's historical engagement rate with this author, connection age and strength, close-friend/family status — capture the interaction between this user and this author, which lives in cross features, not in either entity alone. It is why the same viral post ranks high for a viewer whose close friend posted it and low for a viewer who barely knows the author, and why content-only or two-tower models underperform here.
 
 **Q: How is dwell time modeled, and how does it differ from the reaction heads?**
+**Short:** Dwell time is a regression head trained with MAE, an implicit signal denser but noisier than the reaction classifiers.
 Dwell time is modeled as a regression head (predict seconds of attention) trained with MAE or MSE, whereas the reaction heads are binary classifiers trained with cross-entropy. Dwell is an implicit signal — the user never decides to "dwell," they just linger — so it is denser than reactions (recorded on essentially every impression) but noisier (a long dwell can mean engrossed or distracted). Its density is exactly what the sparse-reaction passive-user problem needs.
 
 **Q: Why evaluate the model per head instead of with a single offline metric?**
+**Short:** No single offline metric fits a multi-objective ranker, so each head is scored separately with ROC-AUC or MAE.
 Because there is no clean single offline metric for a multi-objective ranker — a single aggregate would need the business score weights baked in, and those are precisely what you tune online, not offline. So each head is evaluated on its own: ROC-AUC (and PR-AUC for rare, imbalanced heads like share/hide) for the reaction classifiers, and MAE/MSE for the dwell-time regressor. Per-head metrics also localize regressions: if the share head's AUC drops, you know exactly where to look.
 
 **Q: What negative reactions must the model handle, and how do they affect the score?**
+**Short:** Hide, block, and report are explicit negatives; the hide head's probability enters the score with a negative weight.
 Hide, block, and report are negative reactions signaling the post was unwanted, and the model has an explicit hide head whose predicted probability enters the engagement score with a negative weight (e.g. −20). This actively pushes likely-to-be-hidden posts down rather than merely ranking them lower on positives. Omitting the negative head is a pitfall: without it, annoying or harmful posts are never demoted, only less-positively ranked, so they still surface.
 
 **Q: How is the total training loss constructed for the multi-task network?**
@@ -1038,6 +1046,7 @@ Hide, block, and report are negative reactions signaling the post was unwanted, 
 The total loss is a weighted sum of per-head losses: binary cross-entropy for each reaction head (click, like, comment, share, hide, skip) plus a regression loss (MAE, robust to the heavy dwell-time tail, or MSE) for the dwell-time head, each multiplied by its training-time loss weight λ. The loss weights balance the very different base rates so one abundant head doesn't dominate the shared bottom's gradients. These λ are separate from the serving score weights w.
 
 **Q: What is a training example for this model, and where do the labels come from?**
+**Short:** One example is a single impression labeled with every reaction, dwell time, and skip flag from the interaction log.
 One training example is a single impression — a <user, post> pair that was actually shown — labeled with each reaction the user did or didn't make, plus the recorded dwell time and skip flag. Labels are logged naturally from the interaction stream, so no hand labeling is needed: a shown post that got a like is a positive for the like head and a negative for the others. Splitting must be by time (older to train, newer to test) to mimic serving and avoid leaking future engagement.
 
 **Q: What are the three serving stages of the feed pipeline?**
@@ -1049,6 +1058,7 @@ Retrieval, ranking, and re-ranking. Retrieval cheaply gathers unseen fresh and o
 Reverse-chronological ignores relevance — a mediocre new post outranks an excellent older one the user missed — and popularity-only creates a rich-get-richer feedback loop where viral posts crowd out everything else and personalization vanishes. The engagement-score ranker instead predicts, per user, how much this specific person will engage with each post using affinity and content signals, so a post from a close friend or on a topic the user loves can beat a fresher or more globally popular one.
 
 **Q: What is position bias, and why does it corrupt the training labels here?**
+**Short:** Position bias means top-placed posts get engagement because of placement, skewing labels toward the prior ranker.
 Position bias is that a post shown at the top of the feed earns more engagement because it was at the top, not because it is better. Since the training labels are logged from the previous ranker's output, they are biased toward whatever that ranker already placed high, so a naive model just learns to reproduce the old ranking. You mitigate it by logging the serving position and correcting for it (e.g. inverse-propensity weighting), otherwise the model can't distinguish genuinely good posts from merely well-placed ones.
 
 **Q: Why is the offline/online gap especially wide for feed ranking?**
@@ -1056,9 +1066,11 @@ Position bias is that a post shown at the top of the feed earns more engagement 
 Because feed ranking is a feedback-loop system: the model is trained on data that the previous model's ranking generated, so offline replay flatters whatever policy created the logs and can't observe how a new ranker would reshape traffic. Add position bias in the labels, and offline metrics become unreliable proxies. Only an online A/B test measures the new ranker on the traffic it actually shapes, which is why the chapter validates ranking changes online with time spent, reaction rates, hide rate, and retention.
 
 **Q: How do you keep the system optimizing meaningful engagement instead of addictive clickbait?**
+**Short:** Weight comments and shares above clicks, penalize hides negatively, and track retention rather than raw time spent.
 Weight high-effort positive reactions (comments, shares) far above clicks, keep an explicit negative weight on hide, and measure retention and satisfaction — not just raw time spent — as guardrail metrics online. A high click weight or a single "engaged at all" label optimizes low-value clicks and invites clickbait, which shows up as clicks rising while comments/shares fall and hides rise. This weighting philosophy is exactly Facebook's 2018 Meaningful Social Interactions reweighting toward person-to-person engagement.
 
 **Q: What is the P(skip) head and why is it useful for passive users?**
+**Short:** The skip head predicts quick scroll-past probability, a dense negative signal for ranking down posts to silent readers.
 The skip head is a binary classifier predicting the probability the user scrolls past a post quickly without engaging (a very short dwell / immediate scroll-past). For passive users whose explicit reactions are all near zero, a high skip probability is the negative signal that says "this silent reader will bounce off this post," letting the ranker push it down. Combined with the dwell-time head, skip supplies the dense implicit signal that separates otherwise-tied posts for silent readers.
 
 **Q: Why is a neural network preferred over GBDT for the shared bottom here?**

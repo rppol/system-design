@@ -1024,21 +1024,27 @@ repeated batch, and real ML systems run both — the on-ramp to online predictio
 ## Interview Questions
 
 **Q: Why is Parquet often better than CSV for analytical/ML data, and by how much?**
+**Short:** Parquet's column-major layout let AWS unload data 2x faster and use up to 6x less storage than text.
 Parquet stores data column-major, so a query touching a few columns over many rows reads only those columns and skips the rest, and columns compress far better because neighboring values share a type. AWS measured Parquet as 2x faster to unload and up to 6x less storage in Amazon S3 versus a text format. CSV is row-major, so it's better only when you read/write whole examples. Use Parquet for feature-subset analytics and cost-sensitive lakes.
 
 **Q: What is the difference between row-major and column-major storage, and which access pattern suits each?**
+**Short:** Row-major suits whole-example access like CSV; column-major suits feature-subset scans like Parquet.
 Row-major stores consecutive elements of a row together, so reading or appending a whole example is one contiguous access (CSV, NumPy's C-order default). Column-major stores consecutive elements of a column together, so scanning or aggregating one feature across many rows is contiguous (Parquet, pandas DataFrames). Match the layout to your dominant access: whole-example reads/writes favor row-major, feature-subset scans favor column-major.
 
 **Q: Why can iterating a pandas DataFrame row by row be an order of magnitude slower than expected?**
+**Short:** A pandas DataFrame is column-major, so row-wise iteration like df.iterrows() fights its layout.
 Because a pandas DataFrame is column-major, so accessing data by column is fast but accessing by row (like `df.iterrows()`) fights the layout. People carry over NumPy's row-major intuition and assume row iteration is cheap, but on a column-major structure it isn't. The fix is to vectorize over columns or convert to a NumPy array and iterate along its fast axis.
 
 **Q: What is the difference between REST and RPC?**
+**Short:** REST is a loosely-coupled HTTP resource style; RPC makes a remote call look like a local function.
 REST is an HTTP-based architectural style built around resources and verbs, loosely coupled and the default for public web and cross-organization APIs. RPC makes calling a remote service look like calling a local function, giving tighter coupling and typically better performance and typing, common between a company's own internal services (gRPC). Both are request-driven and synchronous; REST leans toward interoperability, RPC toward intra-company efficiency.
 
 **Q: What is the difference between pub/sub and a message queue?**
+**Short:** Pub/sub broadcasts to any subscriber on a topic; a message queue routes to one intended recipient.
 In pub/sub, a producer publishes to a topic without naming any recipient, and any number of consumers can subscribe and independently read those events (fan-out). In a message queue, a message usually has an intended recipient, and the broker routes it to that specific consumer. The core distinction is the recipient: pub/sub broadcasts to whoever subscribes; a queue targets an intended consumer. Kafka/Kinesis are pub/sub; RabbitMQ/RocketMQ are message queues.
 
 **Q: What is the difference between a data warehouse and a data lake?**
+**Short:** A warehouse enforces schema-on-write for fast queries; a lake stores raw data with schema-on-read.
 A data warehouse stores structured, processed data with schema-on-write — the schema is defined and enforced before data is loaded, so queries are fast and predictable. A data lake stores raw data in its native format with schema-on-read — structure is imposed only when the data is read, so ingestion is cheap and flexible. Warehouses suit curated BI and features; lakes suit logs, images, and exploratory ML; the lakehouse tries to combine both.
 
 **Q: What do ACID and BASE each stand for, and how do they differ?**
@@ -1050,6 +1056,7 @@ ACID is Atomicity (all-or-nothing), Consistency (preserves invariants), Isolatio
 Because three shifts blur it: transactional-and-analytical hybrids (HTAP engines, CockroachDB) serve both on one system; storage and compute are decoupled in cloud warehouses like BigQuery and Snowflake, breaking the monolithic-database assumption; and "online" now means "in production, low-latency" rather than "not batch." The workload-shape intuition (many small ops vs few large scans) still helps, but it no longer dictates which product you buy.
 
 **Q: What is the difference between ETL and ELT, and how does it map to warehouse vs lake?**
+**Short:** ETL transforms data before loading it into a warehouse; ELT loads raw data and transforms later.
 ETL extracts data, transforms it (cleans and conforms to a schema) before loading, so only structured data enters the destination — the data-warehouse discipline. ELT extracts and loads the raw data first, then transforms later on demand — the data-lake discipline. ETL buys clean, fast queries at the price of up-front rigidity; ELT buys cheap flexible ingestion at the price of slow, repeated downstream transformation. The lakehouse reconciles them.
 
 **Q: What are the three modes of dataflow between processes?**
@@ -1057,21 +1064,27 @@ ETL extracts data, transforms it (cleans and conforms to a schema) before loadin
 Passing through a database (process A writes, B reads or polls), passing through services (A sends a request and B responds — request-driven REST/RPC), and passing through real-time transport (A publishes events to a broker that B reads — event-driven pub/sub or message queues). They differ in coupling, latency, and who knows about whom: the database mode is simple but slow, services are fast but tightly coupled, and a broker is fast and decoupled.
 
 **Q: Why is request-driven architecture said to amplify failures, while event-driven decouples?**
+**Short:** Synchronous request-driven calls propagate a callee's latency and failures up the caller chain.
 Because request-driven services are synchronous — a caller blocks on its callee, so the callee's latency and failures propagate up the chain, and in a deep graph one slow leaf can stall everything. Event-driven architecture puts a broker between producers and consumers, so a producer doesn't wait on or even know its consumers; the broker buffers events, decoupling the two sides. That's why data-heavy systems migrate from synchronous service webs to brokered event streams.
 
 **Q: When does the book prefer request-driven vs event-driven architecture?**
+**Short:** The book favors request-driven for logic-heavy systems and event-driven for data-heavy ones.
 Request-driven (services) works well for systems that rely more on logic than on data, where a bounded set of synchronous calls computes a result. Event-driven (real-time transport) works better for data-heavy systems, where many services must react to a high volume of continuously flowing events. As the number of services and the data between them grows, the synchronous request web becomes brittle and a broker-mediated stream scales better.
 
 **Q: What are the drawbacks of passing data between processes through a database?**
+**Short:** Passing data through a database requires shared access and forces slow, latency-adding polling.
 Both processes must have access to the same database, which is often impossible across company boundaries and couples them internally, and reading/writing a database is slow relative to memory or network messaging. Worse, the consumer usually has to poll — repeatedly ask "is there new data?" — adding latency and load. It's fine for simple, non-latency-critical hand-offs but wrong for the hot path, which is what real-time transports solve.
 
 **Q: How do batch and stream processing map to different kinds of features?**
+**Short:** Batch processing of historical data yields static features; stream processing yields dynamic ones.
 Batch processing runs over bounded, historical data on a schedule (Spark, MapReduce) and produces static features that change slowly, like a driver's average rating over the last month. Stream processing runs over unbounded, continuously arriving events (Flink, KSQL, Spark Streaming) and produces dynamic features that reflect the present, like how many drivers are available right now. Production ML systems run both pipelines and must keep the feature definitions consistent.
 
 **Q: Why is stream processing hard, yet sometimes more efficient than repeated batch?**
+**Short:** Streaming struggles with joins and late events, but stateful processing avoids batch's repeated rework.
 Streaming is hard because joining unbounded streams requires deciding how long to wait and buffering state, and late or out-of-order events can change results you've already emitted. It can still be more efficient because a stateful stream processor keeps a running aggregate and processes each event exactly once, whereas a batch job that recomputes a windowed feature every run redoes work over data it already saw. For continuously updated features, streaming does strictly less work.
 
 **Q: Why is user input data considered malformed by default, and what does that imply?**
+**Short:** Users enter malformed data by default, so input paths need heavy validation done at low latency.
 Because users routinely enter data in the wrong format — text where a number is expected, wrong date formats, wrong file types — so any system that assumes clean input breaks in production. It implies user-input paths need heavy, defensive validation and normalization at the boundary. And because users are latency-intolerant, that validation must also be fast, which pushes user-facing paths toward real-time rather than batch processing.
 
 **Q: What is the difference between first-party, second-party, and third-party data?**
@@ -1079,9 +1092,11 @@ Because users routinely enter data in the wrong format — text where a number i
 First-party data is data your own company collects about your users; second-party data is another company's first-party data made available to you (often via partnership or purchase); third-party data is collected by data aggregators about the general public who aren't their direct customers. Trust and directness decrease from first to third. First-party is the durable asset because third-party data can be regulated away.
 
 **Q: How did the IDFA change squeeze third-party data?**
+**Short:** Apple's 2021 opt-in IDFA change gutted third-party data by removing cross-app tracking coverage.
 Third-party mobile data relied on a per-device advertiser ID (Apple's IDFA) to stitch a user's behavior across many apps into one profile. Apple's 2021 App Tracking Transparency made IDFA opt-in, and most users declined, so aggregators lost the identifier that linked cross-app behavior. Coverage and reliability of third-party data collapsed almost overnight — a reminder that data you don't own can be deprecated out from under you.
 
 **Q: Why does the document model have good locality but weak joins?**
+**Short:** Documents give one-fetch locality for whole objects but make cross-document joins weak or manual.
 Because a document stores all of an entity's data together as one self-contained object, so reading the whole entity is a single fetch with no joins — excellent locality. But relationships *across* documents aren't first-class, so joins are weak or must be done in application code, and many-to-many relationships (which relational handles naturally) become painful. Locality also backfires when you need just one field but must read the whole document.
 
 **Q: When should you choose a graph model over a relational model?**

@@ -748,12 +748,15 @@ began in spirit — the model is the small part; the humans are the system.
 ## Interview Questions
 
 **Q: What is the consistency-accuracy tradeoff in ML user experience?**
+**Short:** The tension between showing the model's freshest prediction and keeping the user's experience stable and learnable across sessions.
 It is the tension between showing the model's freshest, most accurate prediction and keeping the user's experience stable and learnable across sessions. Because ML is probabilistic and the model keeps updating, a purely accuracy-driven system would shift its outputs every visit, breaking the user's muscle memory. Booking.com hit this with ML filter suggestions that kept moving, so it pinned suggestions the user had engaged with — accepting slightly less "optimal" filters for a consistent interface. The practical guidance: sometimes deliberately hold the model back from its freshest output because consistency is worth more than a marginal relevance gain.
 
 **Q: Why are "mostly correct" predictions dangerous, and how do you design around them?**
+**Short:** A fluent output that's right 90% of the time looks identical to a correct one, so non-experts trust and ship the wrong part.
 They are dangerous because a fluent, confident output that is right 90% of the time looks identical to a fully correct one, so a non-expert who cannot spot the wrong 10% trusts and ships it. This is worse than an obvious failure because it manufactures false confidence — a translation that reverses a negation or SQL that joins the wrong table but runs. The fix is a UX pattern, not a modeling one: show multiple candidate outputs (like rendering three code completions), make wrong answers cheap to reject, and keep a human in the loop as the decision-maker. The more non-expert your users, the more this matters.
 
 **Q: What is smooth failing, and why is it better than timing out?**
+**Short:** Smooth failing serves a faster, worse backup answer when the main model misses its latency budget, instead of timing out.
 Smooth failing is serving a worse-but-instant backup answer when the main model misses its latency budget, instead of returning an error. Big models are more accurate but have long-tail latency, so some requests blow past a hard SLA; a naive timeout gives the user nothing after a spinner. Graceful degradation beats timeouts: fire the main model and, if it hasn't returned by the deadline, serve a simpler model, a cached prediction, or a heuristic default. A slightly-less-accurate answer inside the budget is almost always a better experience than a perfect answer that arrives too late.
 
 **Q: Compare the separate-ops-team and end-to-end-data-scientist approaches to team structure.**
@@ -761,21 +764,27 @@ Smooth failing is serving a worse-but-instant backup answer when the main model 
 A separate ops team gives specialization — data scientists model, a dedicated team productionizes — but creates communication overhead, cross-boundary debugging, finger-pointing when something breaks, and narrow context because the scientist never sees the model in production. End-to-end data scientists own the whole lifecycle, giving full context and no handoff, but demand a person who knows modeling and all of infra (the unicorn problem) and risk drowning in infra toil. The book resolves the debate not by picking a side but by adding a condition: a paved-path platform makes end-to-end ownership feasible without DevOps expertise.
 
 **Q: What resolution does the book reach on the end-to-end data scientist debate?**
+**Short:** End-to-end ownership works only when a paved-path platform absorbs the infra, giving full context without needing a DevOps unicorn.
 End-to-end ownership works, but only with the right abstractions and platform underneath it. Without tooling, forcing every data scientist to own infra recreates the unicorn-hiring problem and buries them in toil; the separate-team alternative leaks context and creates finger-pointing. The resolution is Netflix-style paved paths (from Chapter 10): self-serve platform abstractions that absorb the infra complexity so a data scientist can deploy, monitor, and roll back without being a DevOps expert. Success equals tooling that lets one owner keep full context at scale.
 
 **Q: What three failures does the book identify in the Ofqual 2020 grading fiasco?**
+**Short:** Ofqual's failures were the wrong objective, evaluation too coarse to catch cohort-size bias, and no transparency or appeal.
 Wrong objective, insufficient fine-grained evaluation, and lack of transparency and appeal. Ofqual optimized for maintaining schools' historical grade distributions rather than individual-student accuracy, which is the wrong values choice for a life-altering decision. It never evaluated finely enough per slice to catch that small cohorts (private schools) kept teacher grades while large cohorts (state schools) were downgraded — systematic bias favoring the privileged. And the algorithm's workings and failure modes were opaque with no meaningful appeal until too late, collapsing public trust and forcing a government U-turn after ~40% of grades were downgraded.
 
 **Q: What are the lessons from the Strava heatmap incident?**
+**Short:** Anonymized aggregate data can still leak, defaults are ethical choices, and reusing data beyond its original consent widens risk.
 That anonymized aggregate data still leaks, that defaults are ethical decisions, and that third-party data reuse widens risk. Strava published a heatmap of billions of anonymized, aggregated GPS routes, but in sparsely populated regions the only activity came from soldiers, so the aggregate traced the perimeters of secret military bases. Aggregation is not anonymization — in low-density contexts the pattern itself is identifying. Users were included opt-out by default and most never changed the setting, and data collected for fitness tracking was reused for a public visualization whose risks the original consent never contemplated.
 
 **Q: Where can bias enter an ML pipeline, beyond the training data?**
+**Short:** Bias can enter at training data, labeling, feature engineering, the objective function, and evaluation, not just the data.
 At every stage: training data, labeling, feature engineering, the objective function, and evaluation. Training data may be unrepresentative; annotators inject labeling bias; features can be proxies for protected attributes; the objective can favor the majority slice; and aggregate-only evaluation hides disparate impact. A responsible-AI audit must inspect the whole workflow, not just the data, because a bias introduced at any one stage propagates into the model. Slice-based audits at the evaluation stage feed findings back to fix the upstream stages.
 
 **Q: Why is ZIP code a problematic feature even when race is not an input?**
+**Short:** ZIP code correlates strongly with race and income, so a model using it can discriminate on race without race as an input.
 Because ZIP code is a proxy for protected attributes — it correlates strongly with race and income, so a model using it can discriminate on race without ever seeing race as a feature. This is the textbook example of proxy bias: removing the protected attribute from the inputs does not remove the model's ability to discriminate, because a correlated feature carries the same information. The mitigation is to audit features for proxy effects, not just to drop the obviously protected columns.
 
 **Q: Explain the privacy-versus-accuracy tradeoff and who bears its cost.**
+**Short:** Differential privacy's noise cuts accuracy most for underrepresented groups, since their thinner signal is swamped hardest.
 Privacy techniques like differential privacy inject calibrated noise so no individual's data can be reconstructed, and that noise reduces model accuracy. The critical finding is that the accuracy cost falls hardest on underrepresented groups: because they have less data, the added noise swamps their already-thin signal disproportionately. So a privacy mechanism meant to protect everyone equally in fact degrades the model most for the people already least well-served, which is why you must evaluate its impact per slice rather than trusting the aggregate.
 
 **Q: What is the compactness-versus-fairness tradeoff in model compression?**
@@ -783,27 +792,35 @@ Privacy techniques like differential privacy inject calibrated noise so no indiv
 Compression techniques like pruning and quantization shrink models with barely any drop in aggregate accuracy, but that small drop is concentrated on rare classes and underrepresented groups — compression amplifies bias on the long tail. So a compressed model can look fine on headline metrics while being markedly less fair. The guidance is that you cannot judge a pruned or quantized model on aggregate accuracy alone; you must run slice-based evaluation to see the disparate impact before shipping it.
 
 **Q: What is a model card and what does it contain?**
+**Short:** A model card is a document reporting a model's details, intended use, factors, metrics, data, ethics, and known limitations.
 A model card is a short document shipped with a trained model that reports how it was built and where it should and should not be used. Its sections are model details (who, when, architecture), intended use (primary and out-of-scope uses), factors (relevant groups and environments), metrics (which measures and why), evaluation data, training data, ethical considerations (risks and sensitive uses), and caveats and recommendations (known limitations). The point is that a model's limits and intended scope travel with it, so downstream teams can't unknowingly misuse it out of context.
 
 **Q: What does "act early" mean in responsible AI, and what is the failure mode it avoids?**
+**Short:** Acting early means building responsibility in at design time rather than bolting ethics on after the system is already built.
 Act early means addressing bias and potential harm at design time rather than retrofitting responsibility after the system is built. The failure mode it avoids is "bolted-on ethics" — treating responsibility as a compliance step at the end, by which point the wrong objective, proxy features, and unrepresentative data are already baked into a system that is expensive and painful to unwind. Building responsibility in from problem formulation onward is both cheaper and far more effective than fixing it later.
 
 **Q: Why should subject-matter experts be involved beyond labeling?**
+**Short:** SMEs contribute most in problem formulation, feature engineering, and error analysis, not only in labeling data.
 Because SMEs contribute their most valuable knowledge in problem formulation, feature engineering, and error analysis, not just annotation. A doctor can catch a misframed objective before data collection; a farmer knows which signals actually matter as features; and an SME explains model errors in domain terms that make them actionable. Treating SMEs as labelers only wastes this, and the friction of file-a-ticket-and-wait kills iteration — so involve them across the lifecycle and give them no-code/low-code tooling to contribute directly.
 
 **Q: What organizational processes does the book recommend for mitigating bias?**
+**Short:** The book recommends internal review boards, third-party audits, and incident reporting to catch and remediate bias.
 Internal review boards, third-party audits, and incident reporting. Review boards evaluate high-stakes models before launch; third-party audits provide independent external review because teams are blind to their own biases; and incident reporting gives a channel to surface, track, and remediate harms after deployment, the way security teams handle vulnerabilities. The book also stresses staying up-to-date on responsible AI, since the field, its techniques, and its regulations move quickly — responsibility is a continuous practice, not a one-time sign-off.
 
 **Q: Why does the book call an ML system "sociotechnical," and why does that matter?**
+**Short:** An ML system's success depends on its users, its team, and the people it affects, not on the model's accuracy alone.
 Because an ML system's success or failure is decided by humans — the users consuming probabilistic outputs, the team building and operating it, and the people affected by its decisions — as much as by the model itself. The model is the small part; the same technically excellent system can confuse users, mislead non-experts, stall on slow requests, overwhelm one engineer, or systematically harm a group. Recognizing it as sociotechnical means UX, team structure, and ethics are first-class engineering concerns, not afterthoughts — which is the book's closing thesis.
 
 **Q: Why is showing multiple candidate outputs a better pattern than showing the single best one for large models?**
+**Short:** Showing several candidate outputs keeps a human as verifier and raises the odds at least one is fully correct.
 Because it keeps the human as the verifier and raises the odds that at least one candidate is fully correct. A single output invites the user to trust it blindly, which is dangerous when the model is "mostly correct" and the user can't spot the wrong part. Rendering several (like three code completions) reframes the model as a suggestion engine with a human in the loop, and the act of choosing forces a verification step the user would otherwise skip. It is a UX fix for a problem no amount of extra accuracy fully removes.
 
 **Q: Why is an opt-out default an ethical decision, using Strava as the example?**
+**Short:** Because most users never change defaults, choosing opt-out over opt-in effectively decides what happens to nearly everyone's data.
 Because most users never change default settings, so the default effectively decides what happens to nearly everyone's data. Strava included users in its public heatmap by default (opt-out), and few changed it or understood the implication, so billions of routes were pooled into a visualization that exposed military bases. An opt-in default — excluded unless you consciously agree — would have prevented the leak. The lesson is that choosing opt-out versus opt-in is not a neutral engineering knob; it is a consequential ethical choice about consent.
 
 **Q: How does the majority-slice problem connect the objective function to fairness?**
+**Short:** An objective that maximizes aggregate accuracy is dominated by the common case, so it can neglect a rare but important subgroup.
 An objective that maximizes average or aggregate accuracy is dominated by the common case, so it can be maximized while neglecting a rare but important subgroup — the loss barely moves if a minority is served poorly. This is how the objective function becomes a bias source: optimizing the aggregate quietly trades away minority performance. Ofqual's choice to optimize institutional grade distributions over individual accuracy is an instance of this. The corrective is fairness-aware objectives and per-slice goals, verified with slice-based evaluation (Chapter 6).
 
 ---

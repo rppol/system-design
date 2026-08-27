@@ -844,51 +844,67 @@ letting Step 1 sprawl or drowning in one Step-3 component.
 ## Interview Questions
 
 **Q: What is the single biggest mistake candidates make in a system design interview?**
+**Short:** Jumping to a solution before clarifying requirements, which skips scoping and usually bakes in wrong assumptions about scale and features.
 Jumping straight to a solution without clarifying the requirements first. The prompt ("design Twitter") is deliberately vague, and answering it like a trivia question skips scoping, hides how you handle ambiguity, and usually bakes in wrong assumptions. Your first move should always be a burst of clarifying questions about features, scale, growth, and constraints — asking is the behaviour being rewarded, not a sign of weakness.
 
 **Q: What is a system design interview actually testing, if not the "right" architecture?**
+**Short:** It tests process signals — collaboration, comfort with ambiguity, scoping, and tradeoff articulation — since no single right answer exists.
 It tests process signals — collaboration, comfort with ambiguity, scoping ability, and tradeoff articulation — because there is no single right answer. The interviewer watches how you convert a vague prompt into a bounded problem, whether you reason about alternatives, and whether you treat them as a teammate. The final diagram matters far less than the thinking and communication that produced it.
 
 **Q: What are the three red flags that fail otherwise-capable candidates?**
+**Short:** The three red flags are over-engineering, narrow-mindedness defending one favored approach, and stubbornness against hints or new constraints.
 Over-engineering, narrow-mindedness, and stubbornness. Over-engineering is reaching for exotic technology the requirements do not justify, unaware of the cost. Narrow-mindedness is defending one favourite approach and refusing to explore alternatives. Stubbornness is arguing with the interviewer and failing to update the design when given a hint or new constraint. All three are behavioural, not technical, and they sink candidates who know the material.
 
 **Q: What are the four steps of the framework, in order?**
+**Short:** Understand the problem and scope it, propose a high-level design and get buy-in, do a design deep dive, then wrap up.
 Step 1: understand the problem and establish design scope. Step 2: propose a high-level design and get buy-in. Step 3: design deep dive. Step 4: wrap up. Steps 1 and 2 bound and blueprint the problem, Step 3 is the longest and covers the hard tradeoffs, and Step 4 shows senior instincts like bottlenecks and operations. Every design chapter in the book (Ch 4–15) follows this same spine.
 
 **Q: Why is "get buy-in" a distinct goal of Step 2 rather than just drawing a design?**
+**Short:** Agreeing on the blueprint before deep-diving stops you building detail on a design the interviewer would have redirected away from.
 Because system design is collaborative, and agreeing on the blueprint before deep-diving prevents you from building ten minutes of detail on a design the interviewer would have redirected. You draw a coarse box-and-arrow diagram, walk concrete use cases through it, and explicitly ask for the interviewer's reaction. Treating them as a teammate and co-designing is itself a scored signal; presenting a finished plan is not.
 
 **Q: How should you handle a question the interviewer won't give you a firm answer to?**
+**Short:** Make a reasonable assumption, state it out loud, and write it on the whiteboard so the interviewer can correct it before you build on it.
 Make a reasonable assumption, state it out loud, and write it on the whiteboard. This keeps you and the interviewer aligned on what problem you are actually solving and gives them a chance to correct a wrong assumption before you build on it. Explicit assumptions are a strength; silent ones are a trap because the whole design may rest on a premise the interviewer never agreed to.
 
 **Q: In Step 3, the book warns against "unnecessary minutiae" — what's the example?**
+**Short:** Don't derive the EdgeRank ranking formula for a news-feed design question — it burns deep-dive time on a sub-problem not being tested.
 Don't derive the EdgeRank ranking algorithm when the question is about news feed architecture. The interviewer wants to see how the feed is generated, stored, fanned out, and served — not the feature-weighting formula that ranks posts. Spending deep-dive time re-deriving a ranking algorithm (or a hash function for a URL shortener) burns the clock on a sub-problem the question is not testing.
 
 **Q: How do you decide which components to deep-dive in Step 3?**
+**Short:** Agree the priorities with the interviewer rather than deciding alone, targeting the 2-3 components that carry the system's hard tradeoffs.
 Agree the priorities with the interviewer rather than deciding unilaterally — either ask where they want depth or propose the 2–3 most critical components and confirm. The right targets are the parts that carry the system's hard tradeoffs (for Twitter, the news feed fan-out and the celebrity hot-key problem), not the standard or tangential ones. Steering with the interviewer is part of the collaboration signal.
 
 **Q: Why is the wrap-up (Step 4) important when the design already works?**
+**Short:** The wrap-up is where you show senior instincts — critiquing your own design's bottlenecks and covering operations at 10x scale.
 Because you are not done when the design works — you are done when the interviewer says so, and the wrap-up is where you show senior instincts. You identify bottlenecks in your own design, recap it end-to-end, discuss error cases, cover operational concerns like monitoring and safe rollout, and sketch how it evolves at 10× scale. Being able to critique your own design and think operationally is a strong differentiator.
 
 **Q: How should time be allocated across the four steps in a 45-minute interview?**
+**Short:** Roughly 3-10 minutes on Step 1, 10-15 on Step 2, 10-25 on the deep dive of Step 3, and 3-5 minutes to wrap up in Step 4.
 Roughly Step 1: 3–10 min, Step 2: 10–15 min, Step 3: 10–25 min, Step 4: 3–5 min. The deep dive should dominate the budget, so the two most common ways to run out of time are letting Step 1 sprawl or over-investing in a single Step-3 component. The numbers are proportions, not a stopwatch — the point is that Step 3 is where the interview is won or lost.
 
 **Q: When should you include API endpoints and the data schema — Step 2 or Step 3?**
+**Short:** It depends on the interviewer's steer — a rough schema fits Step 2, but a schema that is itself the hard part belongs in the Step 3 deep dive.
 It depends, and you should propose a level and let the interviewer steer. Sketching key API contracts and a rough schema in Step 2 can make the blueprint concrete, but going deep on every field risks burning your budget before the deep dive. If the data model is itself the hard part (e.g. a key-value store), it belongs in the Step-3 deep dive; if you're tight on time, keep it minimal.
 
 **Q: When should you do back-of-the-envelope estimation during the interview?**
+**Short:** Only when it justifies a design decision, like whether a read path needs a cache, and only after checking the interviewer values it.
 Only when it helps shape a design decision, and after checking whether the interviewer cares about it. Use it to justify choices — whether the read path needs a cache/CDN, whether the write path needs sharding, or how many characters a key needs — not to compute numbers for their own sake. Some interviewers weight estimation heavily and some do not, so ask rather than assume.
 
 **Q: Why does the book say there is "neither a right answer nor a best answer"?**
+**Short:** The right design depends entirely on the stated requirements, so a startup-scale answer and a millions-of-users answer are both legitimate.
 Because the correct design depends entirely on the requirements, and a solution for a young startup legitimately differs from one for a company with millions of users. Presenting a single "big company" architecture regardless of the stated scale is a mistake; matching the design to the actual requirements is the skill. This is also why clarifying scope in Step 1 is non-negotiable — without it you cannot know which answer is right for this problem.
 
 **Q: Walk through the Twitter scoping numbers the chapter derives.**
+**Short:** 300M MAU at 50% daily active and 2 tweets/user/day works out to roughly 3,500 writes/second average, 7,000 at peak, and 55 PB over 5 years.
 From 300M monthly active users with 50% daily use you get 150M DAU; at 2 tweets per user per day that's ~3,500 tweet writes/second on average and ~7,000/second at peak. Assuming ~1 KB text and 10% of tweets carrying ~1 MB media gives ~30 TB of media per day, or roughly 55 PB over the 5-year retention window. The exact figures matter less than the habit of turning a vague prompt into concrete magnitudes every later decision can lean on.
 
 **Q: What should you do when you get stuck during the interview?**
+**Short:** Ask for a hint and keep talking through your reasoning out loud, since getting stuck is normal but going silent reads badly.
 Ask for a hint — the book explicitly says don't hesitate to do so — and keep communicating out loud rather than thinking in silence. Getting stuck is normal; refusing help or going quiet is what reads badly. Continuing to talk through your reasoning lets the interviewer redirect you, and treating a hint as useful information to update on (rather than something to argue against) is the opposite of the stubbornness red flag.
 
 **Q: What does "treat the interviewer as a teammate" mean in practice?**
+**Short:** It means thinking out loud, inviting reactions to your blueprint, and adjusting based on their feedback instead of performing a monologue.
 It means thinking out loud, bouncing ideas off them, inviting reactions to your blueprint, and adjusting based on their feedback — co-designing rather than performing a monologue. A good interviewer works with you like a colleague at a design review, so a subtle nod or a follow-up question is signal to use. This collaborative behaviour is scored directly and is the antidote to the narrow-mindedness and stubbornness red flags.
 
 **Q: List the book's "Dos" for a system design interview.**
@@ -907,9 +923,11 @@ Don't be unprepared for typical questions; don't jump into a solution without cl
 Because tracing a real request (like "post a tweet" or "open the news feed") end-to-end through your box-and-arrow diagram grounds the abstract design and surfaces missing components — where fan-out happens, where the timeline is cached. It also lets the interviewer confirm your mental model matches the requirements and often reveals edge cases you then fold in. It's the cheapest way to validate a blueprint before committing deep-dive time to it.
 
 **Q: How is over-engineering different from a genuinely ambitious design?**
+**Short:** Over-engineering adds complexity the requirements don't justify, while an ambitious-but-appropriate design traces every piece to a requirement.
 Over-engineering introduces complexity the requirements don't justify — a CDN before you know the read volume, sharding before any number demands it — and signals a candidate unaware of cost and complexity. An ambitious-but-appropriate design introduces each component only when a stated requirement or an estimate calls for it. The tell is justification: every piece of a strong design traces back to a requirement or a number, whereas over-engineering adds pieces "because they're impressive."
 
 **Q: Why is designing in silence a problem even if your final design is correct?**
+**Short:** The interview scores reasoning and communication, not just the final diagram, and silence gives the interviewer nothing to evaluate.
 Because the interview scores your reasoning and communication, not just the end diagram, and silence leaves the interviewer nothing to evaluate and no opening to redirect you. A wrong idea spoken aloud is more useful than a right idea kept internal, because the interviewer can course-correct the former. Communication is repeated in the Dos, the Don'ts, and the red flags precisely because it is the highest-leverage habit in the whole framework.
 
 ---

@@ -1016,69 +1016,113 @@ the limit, catch exceptions, and back off on retry.
 ## Interview Questions
 
 **Q: Why does a fixed window counter allow up to 2x the limit at window edges?**
+**Short:** Requests clustered at a window boundary land in two separate windows, so a rolling interval spanning both can see double the limit.
+
 Because the counter resets at the window boundary, so a burst timed across two adjacent windows is counted twice as two separate windows but arrives within one rolling window. With a limit of 5/minute, 5 requests just before the reset and 5 just after both pass their own window checks, yet a 60-second window straddling the boundary contains all 10 — double the intended rate. Sliding-window algorithms fix this by considering the actual rolling interval.
 
 **Q: What is the difference between token bucket and leaking bucket?**
+**Short:** Token bucket permits bursts by spending saved tokens, while leaking bucket smooths output to a constant rate via a FIFO queue.
+
 Token bucket allows short bursts while leaking bucket enforces a smooth, constant output rate. Token bucket refills tokens at a fixed rate and lets a request through whenever a token is available, so a quiet client can spend accumulated tokens in a burst; leaking bucket puts requests in a FIFO queue drained at a fixed outflow rate, so output is steady regardless of how bursty the input is. Choose token bucket when bursts are acceptable, leaking bucket when a downstream needs stable throughput.
 
 **Q: How do you fix the race condition on a Redis rate-limit counter?**
+**Short:** The book recommends an atomic Lua script or a Redis sorted set instead of locks to make the read-modify-write atomic.
+
 Use an atomic Lua script or a Redis sorted set, not locks. The read-check-increment sequence is not atomic, so two concurrent requests can both read the same counter value and each write back the same incremented value, losing one increment and letting traffic exceed the limit. A Lua script runs the whole read-modify-write atomically inside Redis; a sorted set counts and prunes timestamps with atomic operations. Locks would work but significantly slow the system.
 
 **Q: Why are locks a poor solution to the rate limiter race condition?**
+**Short:** Locks serialize access on the hot request path, adding latency a rate limiter can't afford, so the book favors atomic Redis operations instead.
+
 Because locks significantly slow down the system, serializing access to a component that sits on the hot request path. A rate limiter must add near-zero latency, so blocking every request on a mutex around the counter defeats the purpose and can throttle throughput more than the traffic you are trying to limit. The book instead recommends atomic Redis mechanisms — a Lua script or a sorted set — which get atomicity without the lock's wait time.
 
 **Q: Where should a rate limiter be placed — client, server, or gateway?**
+**Short:** The book recommends server-side or API-gateway placement, since client-side limits can be forged or bypassed.
+
 Server-side or in an API gateway (middleware), never client-side. Client-side limits are unreliable because requests can be forged by malicious actors and you often do not control the client implementation. Server-side gives full control of the algorithm; an API gateway is natural if you already run a microservice architecture with a gateway doing auth and IP whitelisting. The choice depends on your tech stack and engineering resources.
 
 **Q: Walk through the sliding window counter formula with numbers.**
+**Short:** The sliding window counter estimates current count plus previous count weighted by overlap percentage, e.g. 3 + 5 x 0.70 = 6.5.
+
 The estimate is current-window count plus previous-window count weighted by the overlap percentage, e.g. 3 + 5 x 0.70 = 6.5. With a limit of 5, a previous window of 5 requests, a current window of 3, and a request arriving 30% into the current window, the rolling window overlaps 70% of the previous window; the estimate 6.5 exceeds 5, so the request is rejected. Cloudflare measured this approximation wrong only 0.003% of the time over ~400M requests.
 
 **Q: Why is the sliding window log accurate but memory-heavy?**
+**Short:** It stores every request's timestamp to count exactly within the rolling window, which costs memory, even for rejected requests.
+
 It is exact because it stores every request's timestamp and counts only those inside the current rolling window, so no boundary burst slips through — but that same per-request timestamp storage costs a lot of memory. Worse, even rejected requests have their timestamps stored until they age out, so a flood of rejected requests still consumes memory. Timestamps are usually held in a Redis sorted set.
 
 **Q: Why store rate-limit counters in Redis instead of a database?**
+**Short:** Redis is in-memory with INCR and EXPIRE for auto-expiring counters, avoiding the disk latency a database would add on the hot path.
+
 Because disk access in a database is too slow for a component on the request hot path, whereas Redis is in-memory and supports time-based expiration. Redis offers INCR to increment the counter and EXPIRE to auto-delete it when the window ends, which is exactly the counter-with-timeout pattern a rate limiter needs. This keeps per-request overhead in microseconds rather than the milliseconds a disk read would add.
 
 **Q: What HTTP status and headers does a throttled request return?**
+**Short:** It returns HTTP 429 with X-Ratelimit-Remaining, X-Ratelimit-Limit, and X-Ratelimit-Retry-After headers guiding the client's backoff.
+
 It returns HTTP 429 Too Many Requests, along with rate-limiter headers telling the client its quota state. X-Ratelimit-Remaining gives remaining allowed requests in the window, X-Ratelimit-Limit gives the total calls allowed per window, and X-Ratelimit-Retry-After gives the seconds to wait before retrying without being throttled. The client uses Retry-After to back off before its next attempt.
 
 **Q: How do you synchronize rate-limit state across multiple limiter servers?**
+**Short:** A centralized store like Redis lets stateless limiter servers share one counter, rather than relying on discouraged sticky sessions.
+
 Use a centralized data store like Redis that all limiter servers read from and write to. Because the web tier is stateless, a client's requests can hit different limiter servers, and without shared state each server holds only a partial count and the limit isn't enforced. Sticky sessions could pin a client to one server but are discouraged because they are neither scalable nor flexible; a shared Redis lets every limiter agree on the same counter.
 
 **Q: What are the two parameters of the token bucket, and how many buckets do you need?**
+**Short:** Bucket size and refill rate are the two parameters; bucket count scales with rule granularity — per endpoint, per user, per IP, or global.
+
 The two parameters are bucket size (max tokens) and refill rate (tokens added per second). The number of buckets depends on the rules: typically one bucket per API endpoint per user (e.g. separate buckets for posting, adding friends, and liking), one bucket per IP when throttling by IP, or a single global bucket when limiting total system throughput. More granular rules mean more buckets.
 
 **Q: What are the benefits of rate limiting?**
+**Short:** The book lists preventing resource starvation from DoS, reducing cost, and preventing server overload as the three benefits.
+
 It prevents resource starvation from DoS attacks, reduces cost, and prevents server overload. Blocking excess calls stops one caller from exhausting capacity (Twitter caps ~300 tweets/3h); fewer wasted requests mean fewer servers and lower spend, which matters most when calling paid third-party APIs billed per call; and filtering bot or misbehaving traffic keeps real load within capacity. An interviewer expects all three named.
 
 **Q: What is the difference between hard and soft rate limiting?**
+**Short:** Hard rate limiting rejects everything over the threshold, while soft rate limiting tolerates brief bursts above it.
+
 Hard rate limiting means requests cannot exceed the threshold at all, while soft rate limiting allows requests to exceed the threshold for a short period. Hard limiting rejects everything over the cap immediately; soft limiting tolerates brief bursts, which is useful when you don't want to penalize legitimate short spikes. The choice depends on how strictly the downstream must be protected.
 
 **Q: At what OSI layer does application rate limiting operate, and what is an example at a lower layer?**
+**Short:** Application rate limiting works at OSI Layer 7 using HTTP context, while IP-based limiting with iptables works at Layer 3.
+
 Application-level rate limiting operates at OSI Layer 7 (HTTP), while a lower-layer example is limiting by IP address with iptables at Layer 3 (network). An L7 limiter can key on user, endpoint, or API token because it sees the HTTP request; an L3 filter blocks by IP before the packet becomes an HTTP request. Both are valid and often layered together.
 
 **Q: Why is client-side rate limiting unreliable?**
+**Short:** Client-side limits can be forged or bypassed because the client's code isn't under the server's control.
+
 Because client requests can be forged by malicious actors and you often have no control over the client implementation. Anyone can modify or bypass a limit that lives in code they control, so a client-side check enforces nothing against a determined attacker. Rate limiting must be enforced server-side or in the gateway; a client-side limit is at best a courtesy to reduce accidental over-calling.
 
 **Q: What does Cloudflare's 0.003% statistic tell us about the sliding window counter?**
+**Short:** Cloudflare found only 0.003% of ~400 million requests misclassified, showing the sliding window counter's approximation is accurate in practice.
+
 It shows the sliding window counter's approximation is highly accurate in practice despite assuming even distribution in the previous window. Cloudflare tested ~400 million requests and found only 0.003% were wrongly allowed or wrongly rate limited, so the small theoretical inaccuracy of weighting the previous window is negligible for real traffic. That accuracy plus low memory makes it the practical default over the exact-but-heavy sliding window log.
 
 **Q: How does the leaking bucket handle a burst, and what is its downside?**
+**Short:** It queues bursts into a fixed-rate FIFO drain, but a filled queue can delay fresh requests into being rate limited, and its parameters are hard to tune.
+
 It queues incoming requests and drains them at a fixed outflow rate, so a burst fills the FIFO queue rather than passing through at once. The downside is that a burst fills the queue with old requests, and if they aren't processed in time, more recent requests get rate limited even though they arrived within the current window. Its two parameters, queue size and outflow rate, are also not easy to tune.
 
 **Q: Why enqueue rate-limited requests instead of dropping them?**
+**Short:** Some workloads, like orders, retain value later, so queuing an over-limit request beats the default of dropping it with a 429.
+
 Because some workloads can process the request later rather than losing it, e.g. orders throttled during a system overload can be queued and fulfilled once capacity frees up. Dropping is the default response with a 429, but for use cases where the request has lasting value, forwarding it to a queue avoids discarding real work. The detailed design shows the middleware either dropping or queuing over-limit requests.
 
 **Q: How are rate-limiting rules defined and stored in the detailed design?**
+**Short:** Rules live in config files like Lyft's YAML format on disk, pulled by workers into a cache the middleware reads.
+
 Rules are written in configuration files (e.g. Lyft's YAML format) and stored on disk, then workers frequently pull them into a cache the middleware reads. A rule maps a domain and descriptor to a limit per unit of time, such as 5 marketing messages per day or 5 login attempts per minute. Keeping rules in config files makes them easy to change without redeploying the limiter logic.
 
 **Q: What client best practices reduce the chance of being rate limited?**
+**Short:** The book lists caching responses, staying under the known limit, catching 429 exceptions, and adding backoff time to retries.
+
 Cache responses to avoid frequent API calls, understand the limit and stay under it, catch exceptions so the client recovers gracefully from a 429, and add sufficient back-off time to retry logic. Using a client cache avoids redundant calls entirely; exponential backoff on retries prevents a throttled client from immediately hammering the server and worsening the overload. These are the four best practices the book lists.
 
 **Q: How does a multi-data-center setup and eventual consistency optimize a distributed rate limiter?**
+**Short:** Routing to nearby edge servers cuts latency, and eventual consistency across data centers avoids the cost of keeping every counter perfectly synced.
+
 Edge servers close to users cut latency, and rate-limit state across data centers is synchronized with an eventual-consistency model rather than strong consistency. Routing traffic to the nearest edge (Cloudflare had 194 edge locations as of 5/20/2020) avoids the high latency of a distant data center, and eventual consistency avoids the coordination cost of keeping every region's counter perfectly in sync. The small staleness this allows is an acceptable tradeoff for performance.
 
 **Q: What should monitoring of a rate limiter reveal?**
+**Short:** Monitoring should show whether the algorithm and rules are effective, revealing when rules are too strict or a surge overwhelms the algorithm.
+
 It should reveal whether both the rate-limiting algorithm and the rules are effective. If rules are too strict, many valid requests are dropped and should be relaxed; if the limiter becomes ineffective during a sudden surge like a flash sale, the algorithm may need to change to one that absorbs bursts, such as a token bucket. Gathering this analytics data after deployment is how you tune the limiter over time.
 
 ---

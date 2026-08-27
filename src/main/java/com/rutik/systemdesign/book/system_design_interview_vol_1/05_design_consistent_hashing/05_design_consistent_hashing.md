@@ -951,54 +951,88 @@ is why consistent hashing underpins Dynamo, Cassandra, Discord, Akamai, and Magl
 ## Interview Questions
 
 **Q: Why does `serverIndex = hash(key) % N` remap almost every key when N changes?**
+**Short:** Changing N changes the divisor, so `hash % N` and `hash % (N-1)` are unrelated functions that scatter almost every key onto a different server.
+
 Because changing `N` changes the divisor, and `hash % 4` versus `hash % 3` are effectively unrelated functions that scatter keys differently. So it is not just the failed server's keys that move — nearly every key on every server gets a new index at once. In the book's 4-server, 8-key example, losing one server moves 7 of the 8 keys. That mass remap is what makes a cache stampede the origin database.
 
 **Q: What fraction of keys move when a server is added or removed under consistent hashing?**
+**Short:** On average k/n keys move, since only the arc owned by the changed server is re-homed while every other key keeps its server.
+
 On average `k/n`, where `k` is the number of keys and `n` the number of servers. Only the keys in the single arc owned by (or newly stolen by) the changed server are re-homed; every other key keeps its exact server because no other ring point moved. This is the defining property from the Karger paper and the entire reason the technique exists.
 
 **Q: When you add a node to the ring, which keys move and in which direction do you scan for them?**
+**Short:** The keys in the arc scanning counter-clockwise from the new node back to the previous node move; clockwise is the unaffected successor's arc.
+
 The affected keys are the arc from the new node scanning counter-clockwise (anticlockwise) back to the previous node. Those keys previously walked clockwise to the new node's successor; now they stop at the new node instead. Scanning clockwise is the classic trap — that direction is the successor's arc, which is not affected at all.
 
 **Q: Why do virtual nodes exist — what two problems do they solve?**
+**Short:** They fix unequal partition sizes and non-uniform key distribution by giving each server many interleaved ring points instead of one.
+
 They solve the basic ring's two flaws: unequal partition sizes and non-uniform key distribution. With one point per server the arcs between servers are wildly unequal, and even equal arcs catch different numbers of keys, so some server runs hot. Representing each server by many interleaved points averages many small arcs toward `1/n` of the ring, evening out both arc length and key load.
 
 **Q: How does the clockwise lookup handle a key whose hash lands past the last server on the ring?**
+**Short:** It wraps around the ring back to the first server, implemented as a modulo on the sorted point list's length.
+
 It wraps around: walking clockwise past the maximum value returns to 0 and continues to the first server after the join. The ring is a circle precisely so there is always a server ahead of any key. In code this is the `bisect(...) % len(points)` — the modulo on the list length loops the search index back to the first point.
 
 **Q: What are the two problems with basic consistent hashing that virtual nodes fix?**
+**Short:** Uneven partition sizes and uneven key distribution across equal arcs, both smoothed by giving each server many ring points instead of one.
+
 First, it is impossible to keep partition sizes uniform as servers join and leave, so one server can own a giant arc while a neighbor owns a sliver. Second, keys are not perfectly uniformly distributed, so even equal-length arcs catch unequal key counts, creating hotspots. Virtual nodes place each server at many points, so the law of large numbers evens out both effects.
 
 **Q: How many virtual nodes should you use, and what is the tradeoff?**
+**Short:** A few hundred per server, trading tighter load balance (~10% stdev at 100 vnodes, ~5% at 200) against more ring metadata to store and gossip.
+
 Enough to hit your load-balance target: the standard deviation of load is about 10% at 100 virtual nodes per server and about 5% at 200. More vnodes means tighter balance but more metadata — ring entries to store, search, and gossip on membership changes. The practical choice is a few hundred per server, tuned against your memory and coordination budget.
 
 **Q: When a server is removed, where do its keys go?**
+**Short:** They pass to its clockwise successor, the next server encountered walking forward from the removed position.
+
 To its clockwise successor — the next server encountered walking clockwise from the removed server's position. The removed server's entire arc is inherited by that one neighbor (with vnodes, the many small arcs go to several different neighbors). Keys on all other servers are completely untouched.
 
 **Q: Does consistent hashing eliminate the cache-miss storm entirely?**
+**Short:** No, it shrinks the blast radius from nearly all keys to about k/n keys rather than eliminating misses entirely.
+
 No, it shrinks the blast radius from ~all keys to ~`k/n` keys. A membership change still forces the keys in one arc to miss and re-fetch, but that is a fraction of the fleet's load rather than the entire keyspace hitting the origin at once. The storm becomes a survivable ripple instead of a stampede.
 
 **Q: The hash ring gives even key distribution — true or false?**
+**Short:** False for a bare ring; only approximately true once many virtual nodes per server are added to smooth the arcs.
+
 False for the basic ring, and only approximately true with virtual nodes. Real key hashes cluster, and with few ring points per server the arcs are unequal, so load is skewed. Only by adding many virtual nodes per server does per-server load converge toward `1/n` with a small standard deviation (~5–10%).
 
 **Q: What data structure makes the ring lookup efficient, and what is its complexity?**
+**Short:** A sorted structure like a TreeMap or sorted array with binary search gives O(log m) lookup over the ring's points.
+
 A sorted collection of ring points (e.g. a sorted array plus binary search, or a TreeMap / red-black tree). The clockwise walk becomes a `bisect`/`ceilingKey` in O(log m) where m is the number of points (n·k with vnodes). Adding or removing a server inserts or deletes just that server's points, leaving the rest of the structure — and almost all key assignments — unchanged.
 
 **Q: Why use SHA-1 (a 160-bit hash) for the ring, and does the exact function matter?**
+**Short:** SHA-1's huge range spreads points near-continuously around the ring; any uniform hash like MD5 or Murmur works identically.
+
 The hash just needs to spread points uniformly over a large space; SHA-1 gives a 0 to 2^160−1 range, huge enough that collisions and clustering are negligible. The size means points are effectively continuous around the circle, so arcs can be finely divided by virtual nodes. Any good uniform hash works — MD5 (ketama) and Murmur are also common; the ring mechanics are identical.
 
 **Q: What is the difference between a physical node and a virtual node on the ring?**
+**Short:** A physical node is the real server; a virtual node is one of many hashed ring points that resolve back to that same server.
+
 A physical node is the actual server; a virtual node is one of the many ring points that map back to it. Each physical server is hashed several times with distinct suffixes to produce its virtual nodes, which interleave with other servers' points. Lookup lands on a virtual node, then resolves it to the physical server that owns it.
 
 **Q: On a membership change, do you scan the affected range clockwise or counter-clockwise, and to which boundary?**
+**Short:** Counter-clockwise from the changed node back to the previous node, since that arc is the changed node's own partition.
+
 Counter-clockwise, from the added or removed node back to the previous node. The affected arc is always the changed node's own partition — it ends at the changed node and starts just after the previous node. Scanning clockwise instead would select the successor's keys, which must not move.
 
 **Q: How does consistent hashing enable easy horizontal scaling and hotspot mitigation?**
+**Short:** Rebalancing stays local when servers join or leave, and giving heavier servers more virtual nodes shares load proportionally without a global reshuffle.
+
 Because rebalancing is local, you can add servers to grow capacity or remove them to shrink without a global reshuffle or downtime, and data spreads more evenly as the fleet grows. Virtual nodes keep any one server from owning a disproportionate arc, so popular key ranges do not stampede a single node — and heavier servers can be given more vnodes to take a larger, proportional share.
 
 **Q: Does adding virtual nodes change the big-O of a key lookup?**
+**Short:** Only mildly, from O(log n) to O(log(n*k)), since vnodes add more points to binary-search but the lookup stays logarithmic.
+
 Only mildly: lookup goes from O(log n) to O(log(n·k)) because there are more points to binary-search, where k is vnodes per server. It stays logarithmic and fast; the real cost of more vnodes is metadata — memory for the ring map and more state to propagate on membership changes — not lookup latency.
 
 **Q: If two servers hash to nearly the same point on the ring, what happens?**
+**Short:** The clockwise neighbor inherits a near-empty arc between them, creating a partition-size imbalance that many virtual nodes dilute.
+
 The server just clockwise of the other owns a near-empty arc between them, so it holds almost no keys while its neighbor holds a normal share — a partition-size imbalance. This is exactly issue 1 of the basic ring, and it is why you use many virtual nodes: with hundreds of points per server, one unlucky near-collision is diluted across the rest.
 
 **Q: Why can't you avoid the storm by re-sharding with modulo during a low-traffic window?**
@@ -1012,6 +1046,8 @@ Because a modulo reshard still remaps nearly every key, so even at low traffic t
 Amazon Dynamo and DynamoDB and Apache Cassandra use it for data partitioning (with virtual nodes / a token ring); Discord uses it to route which instance owns which entity; Akamai uses it to pick which CDN edge cache serves an object; and Google's Maglev uses it for network load balancing with minimal flow disruption. All exploit the same property: membership changes disturb only a small, local slice.
 
 **Q: How do virtual nodes let you support heterogeneous (unequal-capacity) servers?**
+**Short:** Giving a more powerful server proportionally more virtual nodes lets it own a proportionally larger share of the ring's keys.
+
 Give a more powerful server proportionally more virtual nodes. Since a server's expected load is proportional to its total arc length, and arc length grows with the number of points it owns, doubling a server's vnode count roughly doubles its share of keys. This weights the ring by capacity without changing the lookup algorithm at all.
 
 ---

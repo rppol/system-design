@@ -2640,12 +2640,18 @@ never let a performance optimization quietly become a hard dependency.
 ## Interview Questions
 
 **Q: Why is a cache "becoming load-bearing" one of the most dangerous scalability failure modes?**
+**Short:** The origin is sized only for the traffic the cache doesn't absorb, so a cache outage or flush dumps 100% of load onto an undersized origin and it collapses.
+
 Because the origin gets sized for the small fraction of traffic the cache does not absorb, so when the cache fails, 100% of load falls through to an origin provisioned for a fraction of it, and it collapses. A cache absorbing 95% of reads means the origin only ever handles 5%; a cache outage or flush suddenly sends everything to it, causing a cascading failure — an outage caused by the cache that was meant to prevent one. Defend by capacity-planning the origin for cache-down, replicating the cache, load-shedding on fall-through, and watching the hit ratio as a hidden-dependency signal.
 
 **Q: What is a cache stampede (thundering herd) and how do you prevent it?**
+**Short:** Many concurrent requests miss on the same expired hot key at once and all hammer the origin; prevent it with request coalescing, early refresh, and TTL jitter.
+
 It is when a hot key expires and many concurrent requests all miss at once, hammering the origin simultaneously to recompute the same value. It is worst for the hottest keys because they have the most concurrent readers, and it is what makes cold-start-after-deploy so dangerous. Prevent it with request coalescing (only one request recomputes while others wait and share the result), probabilistic early expiration (refresh before the TTL expires), TTL jitter, and serve-stale-while-revalidate so no request waits on the miss.
 
 **Q: Why is DNS-based load balancing slow to fail over from a dead server?**
+**Short:** DNS answers are cached by clients, OS, and resolvers per their TTL (and often longer), so clients keep hitting a dead server's IP until that cached record expires.
+
 Because DNS responses are cached at the client, OS, and resolvers according to the record's TTL, and many resolvers ignore the TTL and cache even longer. When a server dies, clients keep resolving to its dead IP until their cached record expires, so the dead server keeps receiving traffic for minutes. This is why DNS is used for coarse geographic steering, not fast within-region failover — use an L4/L7 load balancer with health checks for that.
 
 **Q: What is the difference between L4 and L7 load balancing?**
@@ -2654,9 +2660,13 @@ Because DNS responses are cached at the client, OS, and resolvers according to t
 L4 operates at the transport layer, routing opaque connections by their tuple (source/destination IP and port) to a backend behind a VIP, with no visibility into HTTP; L7 terminates TCP and TLS, parses the HTTP request, and routes per request by path, header, or cookie. L4 is fast and cheap (it just shuffles packets, and can even use Direct Server Return), but pins a whole connection to one backend and cannot route by content. L7 is smarter (per-request routing, rewrites, mesh policy) at the cost of more CPU per request.
 
 **Q: Why does `hash(key) mod N` reshuffle almost all keys when you add a node, and what fixes it?**
+**Short:** Adding a node changes N, which changes almost every key's modulo result at once; consistent hashing fixes it by remapping only the arc near the new node.
+
 Because changing N changes the modulo result for nearly every key at once, so adding one node to an N-node cluster remaps roughly N/(N+1) of all keys, triggering a cluster-wide data-movement storm. Consistent hashing fixes it: hash both keys and nodes onto a ring and let each key belong to the next node clockwise, so a membership change moves only about K/N keys — just the arc between the new node and its neighbor. Virtual nodes then smooth the load and support heterogeneous node sizes.
 
 **Q: What does it mean for the data plane to have a soft rather than hard dependency on the control plane?**
+**Short:** The data plane keeps serving requests on its last-known-good config when the control plane is down, so an outage there degrades management, not serving.
+
 A soft dependency means the data plane keeps serving requests on its last-known-good configuration when the control plane is down, so a control-plane outage degrades management (no new deploys or config), not serving. A hard dependency — where the data plane calls the control plane on every request — makes the control plane a single point of failure that takes down the whole request path when it hiccups. Design LBs, meshes, and resolvers to cache config and run independently so the request path never blocks on the management path.
 
 **Q: Why is exactly-once delivery impossible, and how do you get exactly-once processing anyway?**
@@ -2670,39 +2680,63 @@ Exactly-once delivery is impossible because a sender cannot distinguish a lost m
 Because a queue decouples producer and consumer rates, so when consumers fall behind the backlog grows silently while producers still succeed and nothing errors — the system looks healthy while processing latency climbs to hours. It is an outage with extra steps, invisible until users notice their work never completed. Catch it by monitoring backlog age (the age of the oldest unprocessed message, which is the real latency users feel), bounding queue depth so you shed instead of accumulating, and autoscaling consumers on backlog.
 
 **Q: What is the difference between HTTP freshness and validation, and how does a 304 fit in?**
+**Short:** Freshness lets the client reuse a cached response with zero network call within max-age; validation sends a conditional GET and gets a bodyless 304 if unchanged.
+
 Freshness lets the client reuse a cached response with no network call at all while it is within its `max-age`; validation is the fallback when the response is stale — the client asks the origin whether it changed. Validation uses a conditional GET: the client sends the stored ETag in `If-None-Match`, and if the resource is unchanged the origin returns 304 Not Modified with an empty body, so the client keeps its cached copy and only headers cross the wire. Freshness avoids the round trip entirely; the 304 avoids re-sending the body.
 
 **Q: How do immutable versioned URLs let you cache aggressively yet still ship changes instantly?**
+**Short:** A content hash in the filename lets the asset be cached forever, since any change produces a new URL; the short-TTL HTML then points at the new hash instantly.
+
 By putting a content hash in the filename (e.g. `app.3f2a1b.js`) and marking it `max-age` of a year with `immutable`, so the asset is cached essentially forever because if its content changed its URL would change. To ship an update you build a new file with a new hash, producing a brand-new URL that the (short-TTL) HTML now references, so clients fetch the new asset immediately while harmlessly keeping the old one. You decouple "cache forever" from "let me change it" by changing the URL on every change.
 
 **Q: What is the CDN "overlay network" and why does it beat the raw internet?**
+**Short:** BGP routes by AS hop count, not latency, so a CDN builds its own overlay that measures latency between its points of presence and routes along the fastest path.
+
 The internet routes with BGP, which picks paths by AS hop count and policy rather than latency or congestion, so the default path is often not the fastest. A CDN builds an overlay: it measures latency and loss between its own points of presence and routes traffic along the best internal path, terminates TLS/TCP at a nearby edge (short RTT for handshakes and slow-start), and keeps warm, pre-optimized edge-to-origin connections. Even uncacheable dynamic content benefits from this routing and connection reuse.
 
 **Q: What does tiered CDN caching accomplish that flat edge caching does not?**
+**Short:** A parent/regional cache sits between many edge PoPs and the origin, so origin load only reflects parent misses instead of every edge missing straight to origin.
+
 It shields the origin and raises the hit ratio on the long tail by interposing a parent/regional cache between the many edge PoPs and the origin. Without it, every edge misses straight to the origin, so origin load scales with the number of edges; with edge → parent → origin, the origin only sees parent misses, and less-popular objects that would miss at any single small edge get cached once at the shared parent and reused. Origin traffic drops sharply and overall hit ratio improves.
 
 **Q: What are the tradeoffs between range and hash partitioning?**
+**Short:** Range partitioning keeps keys sorted for efficient range scans but risks hotspots on skewed ranges; hash partitioning spreads load evenly but loses sort order.
+
 Range partitioning keeps keys sorted, so range scans are efficient, but it is prone to hotspots when access concentrates on a narrow range (time-ordered or lexicographically skewed keys all hit one partition). Hash partitioning spreads keys uniformly, killing hotspots, but loses sort order so range scans become scatter-gather across all partitions. Choose range for ordered/range-query workloads and hash for point lookups where you fear skew; mitigate range hotspots by prefixing keys, and fix hash resharding with consistent hashing.
 
 **Q: What problem do virtual nodes solve in consistent hashing?**
+**Short:** Virtual nodes fix load imbalance and node heterogeneity by placing each physical node at many points on the hash ring instead of just one.
+
 They solve load imbalance and node heterogeneity by hashing each physical node onto the ring at many points instead of one. With few nodes, single arcs are uneven and one node can own a disproportionate slice; many small vnodes per node average the load out. Assigning a more powerful machine more vnodes lets it take a proportionally larger share, and when a node dies its vnodes' arcs redistribute across many remaining nodes rather than dumping all the recovery load on one neighbor.
 
 **Q: Why does append-only, immutable storage make replication simpler (as in Azure's stream layer)?**
+**Short:** With no in-place updates there are no conflicting overwrites to reconcile, so replication becomes copying appends in order instead of agreeing on concurrent writes.
+
 Because with no in-place updates there are no conflicting overwrites to reconcile — replication becomes copying appends in order rather than agreeing on the outcome of concurrent writes. In Azure's stream layer, extents are appended at a single tail and replicated down a chain, and once sealed an extent is byte-identical everywhere and readable from any replica. Mutable data, by contrast, can receive conflicting updates to the same offset and needs consensus per write; immutability turns an agreement problem into a copying problem, which is why blob stores, log storage, and Kafka all use it.
 
 **Q: How does an aggressive health check take out a whole fleet?**
+**Short:** A health check that pings a shared dependency fails on every instance at once when that dependency blips, so the load balancer pulls the whole fleet from rotation.
+
 By marking every instance unhealthy at once when a shared dependency blips. If the health check pings a common downstream (a database) and that database has a brief issue, every instance fails the check simultaneously, so the load balancer removes the entire fleet from rotation and there is nowhere to send traffic — a total outage caused by the safety mechanism. Keep health checks shallow (test the instance itself, not its dependencies), and have the LB fail open rather than remove the last healthy instances.
 
 **Q: What is replication lag and which read guarantees does it break?**
+**Short:** Replication lag is the delay before an async follower catches up, and it breaks read-your-own-writes, monotonic reads, and consistent-prefix reads on stale replicas.
+
 Replication lag is the delay before an asynchronous follower catches up to the leader, during which reads from that follower are stale. It breaks read-your-own-writes (you write, then read from a lagging replica that lacks your write, so it seems to vanish), monotonic reads (successive reads hitting replicas at different lag can go backwards in time), and consistent-prefix reads. Mitigate by routing a user's reads to the leader or a known-caught-up replica for a window after they write, or by using version tokens.
 
 **Q: Why do joins and transactions get expensive once you partition a database?**
+**Short:** Data touched by a join or transaction may span nodes, turning a join into slow scatter-gather and a cross-partition transaction into a costly two-phase commit.
+
 Because the data they touch may live on different nodes. A join across partitions becomes scatter-gather — query every relevant partition and merge — which is slow and hard to keep transactional, and a transaction spanning partitions needs distributed atomic commit (2PC), which is slow and reduces availability. The pragmatic response is to co-locate related data in the same partition (choose the partition key so joined rows and a transaction's rows land together) and denormalize so most operations stay single-partition.
 
 **Q: What is single-table / access-pattern-first design in NoSQL, and why is it used?**
+**Short:** It models storage from the application's query list rather than normalized entities, denormalizing and packing data so each access pattern hits one partition.
+
 It is modeling the data layout from the list of queries the application will run, rather than normalizing entities, because NoSQL stores cannot cheaply join. You denormalize, duplicate data, and pack related items so each access pattern maps to a single-partition lookup; in DynamoDB this becomes one table holding multiple entity types keyed so queries hit one partition. It inverts relational modeling: you design the storage from the queries, trading storage and write duplication for fast, predictable single-partition reads at scale.
 
 **Q: When does a cache actually help, and when is it just overhead?**
+**Short:** It helps when hit ratio is high, access is skewed hot, and staleness is tolerable; it is overhead when hit ratio is low, since a miss costs more than no cache at all.
+
 A cache helps when the hit ratio is high, access is skewed toward a hot set, some staleness is tolerable, and the origin is expensive to hit. It is overhead when the hit ratio is low, because a miss costs a cache lookup plus the origin fetch plus a cache write — strictly more work than not caching. So caches pay off for read-heavy, skewed, staleness-tolerant workloads over slow origins, and hurt for uniform-access, write-heavy, or freshness-critical workloads.
 
 **Q: What are the tradeoffs between a local in-process cache and an external shared cache?**
@@ -2716,6 +2750,8 @@ A local cache lives in the service's memory with zero network hop, making it the
 It is a set of microservices so tightly coupled — sharing a database, deploying together, calling each other synchronously in long chains — that you pay all the costs of distribution (network, partial failure, latency) and get none of the benefits (independent deploy, isolation). It usually comes from drawing service boundaries in the wrong place. Avoid it by splitting along real business seams, keeping services independently deployable with their own data, and starting from a well-modularized monolith, extracting a service only when a specific pain justifies it.
 
 **Q: How does an API gateway's response composition affect availability?**
+**Short:** Composing a response from K services each at availability p yields roughly p^K, so five 99.9% services compose to about 99.5% — fan-out multiplies risk.
+
 It multiplies availability risk downward: if the gateway must call K services each at availability p to compose one response, the aggregate availability is roughly p^K, worse than any single dependency. Composing a response from five 99.9% services yields about 99.5% — a real degradation caused purely by fan-out. Minimize synchronous fan-out, cache aggregated results, and make composition tolerant of partial failure (return a degraded response when one dependency is down) rather than failing the whole request.
 
 **Q: What is a reconciliation loop and how does static stability relate to it?**
@@ -2729,6 +2765,8 @@ A reconciliation loop is a controller that continuously compares desired state t
 A log-based broker stores messages in a partitioned append-only log where consumers track their own offset and messages are retained for a window, so consumers can replay and multiple independent consumer groups can read the same log, with ordering guaranteed per partition. A traditional queue deletes each message after it is acknowledged, offering no replay and weaker ordering but easy competing-consumers scaling and per-message features like visibility timeouts. You scale a log by adding partitions and a queue by adding consumers; choose a log for event streams and replay, a queue for task distribution.
 
 **Q: What is a poison pill and why do you need a dead-letter queue?**
+**Short:** A poison pill always fails processing and, in an ordered partition, blocks every message behind it; a dead-letter queue removes it after N retries so the rest keep flowing.
+
 A poison pill is a message that always fails to process — malformed or triggering a consumer bug — so an at-least-once consumer retries it forever and, in an ordered partition, blocks every message behind it. A dead-letter queue solves this: after N failed attempts the message is moved to a separate queue for offline inspection, unblocking the main channel so healthy messages keep flowing. You alert on dead-letter arrivals and debug them out of band rather than letting one bad message stall the pipeline.
 
 **Q: What are the three scaling dimensions of the scale cube, and where does caching fit?**
@@ -2747,9 +2785,13 @@ Because microservices import large fixed costs — operational burden (many pipe
 Synchronous replication makes the leader wait for a follower to acknowledge before confirming a write, so the follower is guaranteed current and no committed write is lost — but a slow or down follower blocks writes, and more sync followers make writes slower and more fragile. Asynchronous replication confirms the write immediately and replicates in the background, so writes are fast and a slow follower does not block them, but if the leader crashes before a write propagates, that write is lost. Most systems compromise with semi-synchronous replication: one synchronous follower for durability, the rest asynchronous for speed.
 
 **Q: Why does adding read replicas not help a write-bound database, and what does?**
+**Short:** Every write still funnels through the single leader, so read replicas scale reads but add no write capacity; only partitioning splits writes across multiple leaders.
+
 Because every write still funnels through the single leader, so read replicas scale reads linearly but do nothing for write throughput. Followers only serve reads; they replay the leader's writes rather than accepting their own, so a workload bottlenecked on writes gains no capacity from more followers. The fix for write scale is partitioning (sharding): split the data across multiple leaders so writes to different shards proceed in parallel — and in practice you combine both, sharding for write scale and replicating each shard for read scale and fault tolerance.
 
 **Q: Why is deleting a cache key safer than updating it on a write (cache-aside)?**
+**Short:** A deleted key can only cause an extra miss, while an updated key can leave the cache holding a value the origin never durably stored — so invalidate, don't overwrite.
+
 Because a deleted key can only cause an extra miss, whereas an updated key can leave the cache holding a value the origin never durably stored. If you write the origin first and then delete the key, a crash between the two leaves the cache merely empty (self-correcting on the next read), and a concurrent reader that repopulates from a stale snapshot is bounded by the TTL. Updating the cache before the origin, or setting instead of deleting, opens races where cache and origin disagree and the wrong value persists — so the safe order is origin-first, then invalidate.
 
 **Q: Why does the number of partitions cap consumer parallelism in a log-based broker?**
@@ -2758,6 +2800,8 @@ Because a deleted key can only cause an extra miss, whereas an updated key can l
 Because the broker assigns each partition to exactly one consumer within a consumer group, so at most one consumer per partition is active — 8 partitions cap a group at 8 working consumers, and any extra consumers sit idle. This means you must choose the partition count for peak parallelism up front, since repartitioning later reshuffles the key-to-partition mapping (a mod-N-style problem) and disturbs ordering. It is the direct consequence of per-partition ordering: one consumer per partition is what preserves order while allowing parallelism across partitions.
 
 **Q: Why must connection draining happen when removing an instance behind a load balancer?**
+**Short:** Draining stops new traffic to an instance being removed while letting its in-flight requests finish, so a routine deploy is invisible instead of dropping live requests.
+
 Because without it, killing an instance during a deploy or scale-in drops the requests still in flight on it. Connection draining tells the load balancer to stop sending the instance new requests while letting existing ones finish before the instance is terminated, so a routine deploy is invisible to users instead of returning a burst of errors. It is the small graceful-shutdown feature that makes rolling deployments safe, and its absence is a common cause of deploy-time error spikes.
 
 ---

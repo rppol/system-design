@@ -670,6 +670,7 @@ Because the partition number then depends on N, the node count, so adding or rem
 Not in the strict, original sense. "Consistent hashing" properly names Karger et al.'s specific coordinator-free ring-hashing technique from 1997, but the book notes that this original technique works poorly in practice and is rarely what real databases actually implement — Cassandra is commonly *described* as using consistent hashing, but in fact uses one of the simpler rebalancing approaches from §6.4 (partitioning proportional to the number of nodes). The distinction matters in an interview because reaching for "consistent hashing" as a one-size-fits-all explanation repeats a popular oversimplification the book explicitly corrects.
 
 **Q: What is a hot spot, and why doesn't hash partitioning solve every hot-spot problem?**
+**Short:** A hot spot is one partition or key overloaded with traffic; hashing can't fix a single celebrity key that always hashes to the same partition.
 A hot spot is a partition or key that receives disproportionately more load than others, bottlenecking the system on one node and defeating the purpose of partitioning. Hash partitioning evens out load across *different* keys, but it can't help when a *single* key is extremely hot — a celebrity account or a viral post — because all requests for that one key hash to the same partition. No system auto-corrects this; the application must split the hot key (e.g. append a random suffix) and fan out reads across the resulting keys.
 
 **Q: Compare document-partitioned (local) and term-partitioned (global) secondary indexes.**
@@ -677,6 +678,7 @@ A hot spot is a partition or key that receives disproportionately more load than
 A local (document-partitioned) index keeps each partition's own index of only its documents, so writes update just one partition (cheap), but a read by the indexed attribute must query every partition and merge results — scatter/gather, which is slow and tail-latency-prone. A global (term-partitioned) index partitions the index by the term value itself, so a read goes straight to the one partition holding that term (fast), but a single document write may update several index partitions, making writes slower and usually asynchronous, so the index can lag the data.
 
 **Q: What is scatter/gather, and why does its latency get worse as you add partitions?**
+**Short:** Scatter/gather queries every partition and merges the results, so tail latency is set by the slowest partition and worsens as partitions grow.
 Scatter/gather is the read pattern of a local secondary index: the query is sent to all partitions ("scatter"), each searches its local index, and the results are merged ("gather"). Its latency is governed by the *slowest* partition to respond, so as the number of partitions grows, the probability that at least one is slow (GC pause, hot, degraded) rises, pushing up the overall p99. This is why secondary-index reads on heavily partitioned local indexes can have surprisingly bad tail latency.
 
 **Q: Describe the three main rebalancing strategies and when you'd use each.**
@@ -688,12 +690,15 @@ Fixed number of partitions: create many more partitions than nodes up front and 
 Because rebalancing is expensive — it moves large amounts of data and reroutes requests — and when coupled with automatic failure detection it can trigger cascading failures: a node that looks slow gets work shifted onto it, becomes more overloaded, and triggers further rebalancing, spiraling the cluster into instability. The usual mitigation is to keep a human in the loop: the system can *propose* a rebalancing plan automatically, but an operator reviews and commits it, preventing surprise data movements during incidents.
 
 **Q: How does request routing work, and what role does ZooKeeper play?**
+**Short:** Clients can route via any node, a dedicated routing tier, or partition-aware clients, and ZooKeeper commonly holds the authoritative partition-to-node map.
 Request routing directs a client's request to the node currently holding the relevant partition, which is a service-discovery problem because partitions move during rebalancing. The three shapes are: any node forwards to the right one, a routing tier forwards on the client's behalf, or partition-aware clients connect directly. ZooKeeper acts as the authoritative registry of the partition-to-node mapping — nodes register there and routing components subscribe to changes — so everyone shares a consistent, current view; Cassandra and Riak instead gossip this state peer-to-peer.
 
 **Q: How is partitioning related to and combined with replication?**
+**Short:** Partitioning and replication are independent and combined: each record lives in exactly one partition, which is then replicated across several nodes.
 They're largely independent techniques used together: partitioning decides which records go on which node, while replication keeps multiple copies of each partition for fault tolerance. A record belongs to exactly one partition, but that partition is replicated to several nodes; a node typically stores some partitions as leader and others as follower. Because the two concerns compose cleanly, you can reason about partitioning scheme and replication scheme separately, then combine them (e.g. hash-partitioned with a single leader per partition replicated three ways).
 
 **Q: How does a compound primary key (as in Cassandra) get the best of both partitioning schemes?**
+**Short:** Cassandra's compound key hashes only the first column to pick the partition, then sorts the rest, spreading writes while keeping in-partition range scans fast.
 A compound primary key hashes only the first column to choose the partition, then stores the remaining columns *sorted* within that partition. This spreads different partition keys evenly across nodes (avoiding sequential hot spots) while still allowing efficient range scans on the sorted columns *within* a single partition. For example, partition by user ID but sort that user's updates by timestamp — so "give me this user's posts from last week" is a fast in-partition range scan, not a scatter/gather.
 
 **Q: Why does keying a time-series database purely by timestamp cause problems, and how do you fix it?**
@@ -705,6 +710,7 @@ Because timestamps are monotonically increasing, all writes for the current time
 Because a single document can have several indexed attribute values, and in a term-partitioned index each of those values may live on a *different* index partition, so writing one document requires updating multiple index partitions — a distributed, multi-node operation. Doing that synchronously would require a distributed transaction across index partitions on every write, which is slow and reduces availability. So systems typically apply index updates asynchronously, accepting that the global index briefly lags the underlying data.
 
 **Q: What is skew, and how does it undermine the benefits of partitioning?**
+**Short:** Skew is uneven data or load across partitions, and it undermines partitioning because one overloaded partition bottlenecks the whole cluster.
 Skew is an uneven distribution of data or query load across partitions, where some partitions hold far more data or serve far more requests than others. It undermines partitioning because the whole point is to spread work across nodes for scalability; if one partition is a hot spot, that node becomes the bottleneck and the system performs no better than a single machine for that workload, while other nodes sit underused. Avoiding skew — through good key/hash choice and hot-key handling — is central to effective partitioning.
 
 **Q: What is the cold-start problem in dynamic partitioning, and how is it addressed?**

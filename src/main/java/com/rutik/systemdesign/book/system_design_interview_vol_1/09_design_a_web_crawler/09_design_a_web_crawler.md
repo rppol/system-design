@@ -956,21 +956,33 @@ by structural queueing — are the crawler's defining tricks.
 ## Interview Questions
 
 **Q: Why is a naive BFS crawler impolite, and how does the URL Frontier fix it?**
+**Short:** Back queues route each host's URLs to one queue drained by a single worker with a delay, guaranteeing one request per host at a time.
+
 Because most links on a page point to the same host, so a plain FIFO Frontier dequeues a burst of same-host URLs and downloads them simultaneously, hammering one server like a DoS attack. The fix is the back-queue tier: a queue router uses a host→queue mapping table so every URL for a host lands in one back queue, and a single worker drains each back queue with a delay between fetches. That structurally guarantees one request at a time per host while different hosts still crawl in parallel.
 
 **Q: Why choose BFS over DFS for web crawling?**
+**Short:** DFS can descend one branch of links unboundedly deep, while BFS explores level by level and falls out naturally from a FIFO queue.
+
 Because DFS's depth can be unboundedly deep, descending one branch of links almost forever before backtracking, which is unsuitable for a general crawl. BFS explores level by level and falls out naturally from a FIFO URL Frontier — dequeue a URL, enqueue its links. The chapter notes that even BFS needs help, since plain FIFO BFS is both impolite and priority-blind, which the front/back queue design corrects.
 
 **Q: How does the Content Seen? component detect duplicates efficiently?**
+**Short:** It compares page hashes in constant time instead of comparing full documents, since roughly 29% of web pages are duplicate content.
+
 It compares the hashes of two web pages rather than comparing the full documents. Hashing each page to a fixed-size value lets the crawler check a hash set in constant time, which is essential because roughly 29% of web pages are duplicate content and comparing billions of full documents byte-by-byte would be infeasible. If a new page's hash is already present, the page is discarded as a duplicate.
 
 **Q: Why is a Bloom filter used for URL Seen?, and what is the risk?**
+**Short:** It answers "seen this URL?" in constant time using far less memory than storing all URLs, but risks false positives that skip new URLs.
+
 A Bloom filter answers "have I seen this URL?" in constant time using a bit array far smaller than storing all the URLs, which is why it is chosen for billions of URLs. The risk is false positives: it can wrongly report a genuinely new URL as already seen and silently skip it, costing crawl coverage, though it never re-crawls a seen URL and never has false negatives. You tune the bit-array size and number of hash functions to keep the false-positive rate acceptable, or use an exact hash table if you can afford the memory.
 
 **Q: Why is DNS resolution a bottleneck, and how is it mitigated?**
+**Short:** A synchronous lookup takes 10 to 200 ms, so a local, periodically refreshed DNS cache keeps lookups off the crawl's hot path.
+
 Because DNS resolution is synchronous and a single lookup takes 10 to 200 ms, so at hundreds of pages per second, doing a fresh lookup per fetch would serialize the whole crawl. The mitigation is a local DNS cache — mapping hostnames to IPs and refreshing it with a background job — which has a very high hit rate because a crawler repeatedly hits the same hosts. This removes DNS from the hot path so the downloader is not blocked on lookups.
 
 **Q: How does the front/back queue architecture separate priority from politeness?**
+**Short:** Front queues rank URLs by priority signals like PageRank, and back queues route by host so one worker per host enforces politeness.
+
 Front queues handle priority and back queues handle politeness, and they compose. The prioritizer scores each URL by signals like PageRank, traffic, and update frequency and places it in a front queue by priority level; the front-queue selector pulls from higher-priority queues more often. The selected URL is then routed by host into a back queue, where one worker per queue drains it with a delay — so important pages get crawled sooner without ever fetching a single host too aggressively.
 
 **Q: What is a spider trap and how do you defend against it?**
@@ -979,21 +991,33 @@ Front queues handle priority and back queues handle politeness, and they compose
 A spider trap is a page or set of pages that causes the crawler to loop infinitely, such as an infinitely deep, dynamically generated directory structure like /foo/bar/foo/bar/… The defenses are setting a maximum URL length so absurdly long generated URLs are rejected, and maintaining a manual blacklist of hosts known to be traps. There is no perfect automatic detector because traps can be algorithmically generated, so a human-curated blacklist is the practical backstop.
 
 **Q: How does the crawler handle freshness, given pages change constantly?**
+**Short:** It recrawls selectively based on each page's update history and importance, refreshing frequently-changing or high-value pages more often.
+
 It recrawls pages, but selectively rather than uniformly. It recrawls based on each page's update history — pages that change frequently are recrawled more often — and it prioritizes important pages (high PageRank or traffic) for more frequent recrawling. This keeps the most valuable and most volatile pages fresh without wasting throughput recrawling static pages needlessly.
 
 **Q: What is robots.txt and why must the crawler cache it?**
+**Short:** It is the site-root file listing crawl permissions, cached per host so it isn't re-downloaded before every single page fetch.
+
 robots.txt is the Robots Exclusion Protocol file at a site's root that tells crawlers which pages they are allowed to download, and a well-behaved crawler must check it before crawling. It must be cached because a host has many pages, and re-downloading robots.txt for each page would be slow and itself impolite; the crawler downloads it periodically and reuses the cached rules across that host's pages.
 
 **Q: Run the back-of-the-envelope estimate for 1 billion pages per month.**
+**Short:** About 400 pages/sec average and 800 peak, with roughly 500 TB stored monthly and about 30 PB over five years.
+
 Average QPS is 1,000,000,000 pages divided by roughly 2.6 million seconds in a month, which is about 400 pages per second, and with a 2x peak factor the peak is about 800 pages per second. For storage, at an assumed 500 KB per page, one month is 500 TB, and five years is 500 TB times 60 months, which is about 30 PB. Those numbers drive the distributed-crawl throughput target and the disk-plus-cache storage design.
 
 **Q: Why is the Content Parser kept as a separate component off the crawl path?**
+**Short:** Parsing HTML is comparatively slow, so keeping it separate lets downloaders fetch the next URL immediately without waiting on it.
+
 Because parsing and validating HTML is comparatively slow, and inlining it into the download loop would slow the crawl. Making it a separate component lets downloaders hand pages off and immediately fetch the next URL, so parsing runs asynchronously without throttling throughput. It also creates a clean seam where malformed pages are detected and rejected before they reach storage.
 
 **Q: Why convert relative URLs to absolute URLs in the URL Extractor?**
+**Short:** Relative links can't be fetched as-is; they must be resolved against the page's own URL into a fully qualified address first.
+
 Because links inside a page are frequently written relative to the current page and cannot be fetched as-is. For example, a link /wiki/Robot on the page https://en.wikipedia.org/wiki/Web_crawler must be resolved against that base URL into the absolute URL https://en.wikipedia.org/wiki/Robot before the crawler can enqueue and download it. Without this conversion the extracted links would be meaningless to the downloader.
 
 **Q: What does the URL Filter exclude?**
+**Short:** Blacklisted sites and content types, links leading to error pages, and unwanted file extensions like images, video, and PDF.
+
 It excludes URLs the crawler should not fetch: blacklisted sites and content types, links that lead to error pages, and URLs with unwanted file extensions. For a scope of HTML only, that means filtering out extensions like .jpg, .png, .mp4, and .pdf, plus any blacklisted or error-prone links. Filtering here keeps junk out of the Frontier before the URL Seen? check.
 
 **Q: How does the crawler stay robust against crashes and bad servers?**
@@ -1002,18 +1026,28 @@ It excludes URLs the crawler should not fetch: blacklisted sites and content typ
 It uses consistent hashing to distribute hosts across downloader servers so servers can be added or removed with minimal remapping, and it checkpoints crawl state periodically so it resumes from the last checkpoint rather than restarting from seeds after a crash. It also handles exceptions gracefully so a malformed page or timeout does not crash the system, and validates data to keep bad content out of storage. Together these let a weeks-long crawl survive the inevitable failures.
 
 **Q: Why store most content on disk but keep some in memory?**
+**Short:** Five years of crawl is about 30 PB, far too large for RAM, so only a hot subset of popular pages is cached in memory.
+
 Because five years of crawl is about 30 PB, which is far too large to hold in RAM, so the bulk of content must live on disk. A hot subset of popular, frequently accessed content is cached in memory to reduce access latency. This hybrid balances the enormous capacity requirement against the need for fast access to the most-used pages.
 
 **Q: Why does the URL Frontier use hybrid disk-plus-memory storage?**
+**Short:** Hundreds of millions of URLs are too many for pure memory, but memory buffers at the enqueue and dequeue ends avoid disk-blocked workers.
+
 Because the Frontier can hold hundreds of millions of URLs — too many for pure memory — yet it is on the throughput-critical path and cannot tolerate a disk read per dequeue. The majority of URLs are persisted to disk for capacity and durability, while memory buffers hold the enqueue and dequeue ends so workers are not blocked on disk I/O. This gives in-memory throughput with disk-scale capacity and restart survival.
 
 **Q: How does the crawler handle JavaScript-generated links?**
+**Short:** It renders the page's JavaScript before parsing, since fetching raw HTML alone would yield an empty shell missing the client-built links.
+
 It uses server-side rendering, also called dynamic rendering, to execute the page's JavaScript and generate its links before parsing. Modern sites build links on the client with AJAX and frameworks, so fetching the raw HTML yields an empty shell and the crawler would miss most links. Rendering first lets the URL Extractor see the same links a real browser would.
 
 **Q: What makes a crawler horizontally scalable?**
+**Short:** Stateless crawl servers, with all state held in the shared Frontier, seen-sets, and storage, so more servers add throughput freely.
+
 Statelessness of the crawl servers, so more servers can be added freely to increase throughput. State lives in the shared Frontier, seen-sets, and storage rather than on the crawl workers, and the URL space is partitioned across a distributed set of downloader servers. Combined with database replication and sharding for the data layer, this lets the crawl scale to 800 pages per second and beyond.
 
 **Q: What are the four characteristics of a good crawler?**
+**Short:** Scalability, robustness, politeness, and extensibility, and every Step-3 deep dive maps back to one of the four.
+
 Scalability, robustness, politeness, and extensibility. Scalability means crawling billions of pages efficiently in parallel; robustness means handling bad HTML, unresponsive servers, and crashes without stopping; politeness means not overwhelming any single host; and extensibility means absorbing new content types by plugging in modules rather than rewriting the core. Every Step-3 deep dive maps back to one of these four.
 
 **Q: What performance optimizations does the HTML Downloader use?**
@@ -1027,6 +1061,8 @@ Distributed crawling across many servers with a partitioned URL space, a cached 
 Through plug-in modules that attach at the seams between components without changing the core loop, such as a PNG Downloader module to handle image content or a Web Monitor module to detect copyright and trademark infringement. Because the crawler is built from separated components — downloader, parser, extractor, filter — each seam is a natural place to add a new module. This is why the design keeps parsing separate from downloading rather than fusing them.
 
 **Q: What is data noise and how is it handled?**
+**Short:** Low-value content like ads, spam URLs, and code snippets, handled by filtering it out so crawl budget and storage aren't wasted.
+
 Data noise is low-value content such as advertisements, spam URLs, and code snippets that add little to the crawl's purpose. It is handled by excluding it — filtering out spammy and low-quality pages so crawl budget and storage are not wasted on them. This complements duplicate detection (hashes) and spider-trap defenses (URL-length limits and blacklists) as part of avoiding problematic content.
 
 ---

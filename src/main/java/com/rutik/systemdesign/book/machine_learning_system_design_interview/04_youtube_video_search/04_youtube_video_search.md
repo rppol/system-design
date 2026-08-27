@@ -922,9 +922,11 @@ as (noisy) labels.
 ## Interview Questions
 
 **Q: Why is MRR the preferred offline metric for this system rather than mAP, nDCG, or precision@k?**
+**Short:** MRR is the only metric that fits the one-relevant-video labels, since precision@k is capped at 1/k and nDCG needs relevance grades.
 Because the labeled data has exactly one relevant video per query, and MRR (mean of `1/rank` of that single video) measures exactly what matters — how high the one correct video is ranked. Precision@k is capped at `1/k` (a perfect system scores precision@10 = 0.1, which looks broken); nDCG needs graded relevance scores we don't have (labels are binary); and mAP with a single relevant item mathematically degenerates to the reciprocal rank anyway, so it reduces to MRR while adding conceptual overhead. MRR is bounded in (0, 1], native to the one-relevant-item setting, and its steep `1/rank` weighting rewards getting the right video to the very top.
 
 **Q: Why choose a frame-level video encoder over a video-level one, and what do you give up?**
+**Short:** Frame-level ViT-per-frame encoding is far cheaper at 1B videos than video-level 3D models, at the cost of temporal understanding.
 Frame-level encoding samples a few frames, embeds each with a cheap 2D ViT, and aggregates (mean-pool) — far cheaper than a video-level 3D conv or video transformer, which is decisive at 1 billion videos. The tradeoff is that frame-level treats the video as a bag of frames and loses temporal dynamics, so it can't distinguish "sitting down" from "standing up" or handle motion-centric queries as well. The book accepts this because search relevance is mostly about what visually appears in the video, and the indexing-cost savings dominate the modest loss of temporal signal.
 
 **Q: Why run both an embedding-based visual search and an inverted-index text search instead of just one?**
@@ -936,6 +938,7 @@ Because each covers the other's blind spot: the visual embedding path captures s
 For a batch of N annotated `<video, query>` pairs, you encode all N queries and all N videos, compute the N×N matrix of dot products (scaled by temperature), and treat the diagonal as positives and every off-diagonal cell as a negative. Softmax is applied along each row and column and cross-entropy pushes the diagonal probabilities toward 1, pulling matched pairs together and pushing mismatched pairs apart. The key efficiency: each example's N−1 other batch members serve as free negatives, so a batch of N yields N positives and N·(N−1) negatives at no extra encoding cost — which is why large batches (CLIP used ~32k) make contrastive training stronger.
 
 **Q: Why not use BoW or TF-IDF as the text encoder for the visual-search path?**
+**Short:** BoW and TF-IDF carry no semantics, so they can't align a query with a semantically matching video embedding.
 Because BoW and TF-IDF carry no semantics — "puppy" and "dog" are as far apart as "puppy" and "invoice" — so they cannot align a query with a semantically-matching video in a shared space. They also produce huge sparse vectors, ignore word order, and handle out-of-vocabulary words poorly. Statistical methods are fine for the inverted-index *text* path (exact lexical matching), but the embedding path needs a semantic, ideally context-aware, encoder like a transformer.
 
 **Q: Why pick a transformer over word2vec or a plain embedding layer for the text encoder?**
@@ -943,9 +946,11 @@ Because BoW and TF-IDF carry no semantics — "puppy" and "dog" are as far apart
 Because a transformer produces context-aware embeddings via self-attention, so "bank" in "river bank" and "bank account" get different vectors — whereas word2vec and a lookup embedding layer give one static vector per word regardless of context. word2vec (CBOW/skip-gram) already captures semantics and analogies, and an embedding layer is trainable, but neither disambiguates by context. For search queries where meaning depends on word combinations, the transformer's contextual representation is worth the extra cost.
 
 **Q: How can a text query and a video be compared with a single dot product when they are different modalities?**
+**Short:** Contrastive training maps both encoders into one shared embedding space, so matching pairs land close and their dot product is high.
 Because both encoders are trained to map their inputs into the same shared embedding space, so a matching query and video end up geometrically close and their dot product is high. Contrastive training is what enforces this alignment: it explicitly pushes up the similarity of true pairs and pushes down false ones, so after training the dot product between a query embedding and a video embedding is a meaningful relevance score. The two encoders can have completely different architectures; only their output space must coincide.
 
 **Q: What steps make up text normalization, and why does Unicode NFKC matter?**
+**Short:** Normalization lowercases, folds punctuation and accents, and NFKC collapses visually-identical Unicode variants into one form.
 Text normalization lowercases, strips or folds punctuation and accents, and trims/collapses whitespace so trivially-different strings match. Unicode NFKC normalization additionally collapses compatibility variants — full-width characters, ligatures, non-breaking spaces — into a single canonical byte form, so visually-identical characters aren't treated as distinct tokens. Without it, "Ａ" (full-width) and "A" become different vocabulary entries, fragmenting the index and the embeddings; NFKC guarantees one representation per visible character.
 
 **Q: What are the tradeoffs between word, subword, and character tokenization?**
@@ -953,9 +958,11 @@ Text normalization lowercases, strips or folds punctuation and accents, and trim
 Word-level tokenization is simple but has a huge vocabulary and maps unseen words to `<UNK>` (OOV problem); character-level has a tiny vocabulary and never hits OOV but produces very long sequences with weak per-token semantics. Subword tokenization (BPE/WordPiece/SentencePiece) is the middle ground transformers use: a bounded ~30k–50k vocabulary where unseen words decompose into known pieces, so there is no OOV and sequences stay short. It is the default for the transformer text encoder chosen here.
 
 **Q: When would you map tokens to IDs with a hashing trick instead of a lookup table?**
+**Short:** Use hashing when the vocabulary is huge or streaming, trading collisions for constant memory and no stored vocabulary.
 Use the hashing trick when the token space is enormous or streaming and you can't afford to build and store a growing vocabulary — hashing maps any token to a fixed range in constant memory with no vocabulary file. The cost is collisions (unrelated tokens share an ID) and irreversibility (you can't recover the token from the ID). A lookup table is deterministic, collision-free, and reversible but must be maintained and grows with the corpus, so it's preferred when the vocabulary is bounded and stable.
 
 **Q: Why keep a non-ML inverted index in an otherwise learned system?**
+**Short:** An inverted index gives exact lexical matching on rare tokens and named entities that learned embeddings blur away.
 Because an inverted index gives exact lexical matching that embeddings fundamentally can't: it never blurs a rare token, named entity, model number, or exact phrase into a neighbor, and it needs no training. Learned encoders compress rare tokens into shared regions and lose their precise identity, so tail queries with specific terms fail on the embedding path. The inverted index is cheap, interpretable, and immediately covers new metadata, making it the perfect complement to the semantic path.
 
 **Q: How do you fuse the visual and text candidate lists given their scores are on different scales?**
@@ -967,21 +974,27 @@ You either normalize each path's scores before combining (e.g. min-max or z-scor
 It applies business and integrity logic that pure relevance retrieval ignores: boosting for popularity and freshness, enforcing region restrictions, filtering policy-violating or unsafe content, removing near-duplicates, and optionally running a heavier cross-attention re-ranker over the top few hundred candidates. Retrieval optimizes relevance; re-ranking makes the final list safe, fresh, diverse, and compliant. Separating the stages keeps the expensive re-ranker off the billion-scale retrieval path.
 
 **Q: How does the indexing pipeline handle a newly uploaded video, and is there a cold-start problem?**
+**Short:** A new video's embedding is computed from its pixels immediately, so it is retrievable with zero content cold-start.
 On upload, the video encoder computes the video's embedding offline and adds it to the ANN index, and the metadata (title, description, tags) is added to the Elasticsearch inverted index. There is no content cold-start problem: because the embedding is derived from the video's own pixels, a brand-new video with zero interactions is immediately retrievable — unlike interaction-based recommenders that need engagement history. Only periodic encoder retraining is batch; indexing a single new video is continuous and cheap.
 
 **Q: Why is exact nearest-neighbor search infeasible at this scale, and what replaces it?**
+**Short:** Exact search is O(N·D) over 1B videos, so approximate nearest neighbor (IVF or HNSW) trades a little recall for speed.
 Exact nearest neighbor is O(N·D) per query — scanning all ~1B D-dimensional video embeddings — which is far too slow for interactive search. It is replaced by approximate nearest neighbor (ANN) using structures like IVF (inverted file / clustering) or HNSW (graph-based), often with product quantization to shrink the index. ANN trades a small, tunable amount of recall for orders-of-magnitude lower latency, which is the same recall-vs-speed tradeoff Chapter 2 established for visual search.
 
 **Q: What role does the temperature parameter play in the contrastive loss?**
+**Short:** Temperature divides similarities before softmax, controlling how sharply the loss concentrates on hard negatives.
 Temperature is a scalar that divides the similarities before the softmax, controlling how sharp or soft the resulting distribution is. A low temperature sharpens the softmax so the loss focuses hard on the most-confusable negatives (strong gradients, but can be unstable), while a high temperature softens it and spreads the signal across many negatives. It is a key hyperparameter of CLIP-style training and is often learned jointly with the encoders.
 
 **Q: What are the online metrics for this search system, and why not rely on offline MRR alone?**
+**Short:** Online metrics are CTR, completion rate, and watch time, since offline MRR can rise while real watch-time quality falls.
 Online metrics are click-through rate on results, video completion rate / watch time of search-originated sessions, and the fraction of successful (non-reformulated, non-bounced) sessions. Offline MRR is measured against static human judgments that go stale and can't capture quality signals like clickbait or freshness, so a model can raise MRR yet hurt watch time. The fusion weights and re-ranker are therefore tuned by A/B testing on these online metrics, not by offline MRR alone.
 
 **Q: Why use frame sampling instead of encoding every frame, and how do you set the rate?**
+**Short:** Sampling a fixed rate or fixed frame count bounds the linear per-frame encoding cost across a billion-video corpus.
 Because a video has far too many frames to encode all of them — cost scales linearly with frame count across 1B videos — so you sample (e.g. 1 frame per second or a fixed N evenly-spaced frames). The rate is a coverage-vs-cost knob: more frames give better temporal and content coverage but proportionally more compute and a larger index. You pick the lowest rate that still captures the video's visual content well enough for retrieval, accepting that motion-heavy content may need a higher rate.
 
 **Q: Could you use user interactions instead of human-annotated pairs to train the encoders, and what's the catch?**
+**Short:** Clicks give free abundant training pairs but carry position bias and clickbait noise unless de-biased.
 Yes — mining clicks and watches gives abundant, free `<query, video>` positive pairs without paying annotators, which is attractive at scale. The catch is noise: click logs carry position bias (users click what's shown high), clickbait, and presentation effects, so unless you de-bias them the model learns to rank thumbnails and titles rather than true relevance. A common practice is to train on interactions but keep a clean human-labeled set for evaluation.
 
 **Q: How would query understanding (spell-check, NER, intent) improve retrieval?**

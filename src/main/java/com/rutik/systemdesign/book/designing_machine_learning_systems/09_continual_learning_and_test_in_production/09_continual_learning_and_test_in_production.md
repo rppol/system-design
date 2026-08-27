@@ -804,51 +804,67 @@ Chapter 8 showed that every deployed model decays as production data drifts; thi
 ## Interview Questions
 
 **Q: What is the difference between stateless retraining and stateful training, and what did Grubhub gain by switching?**
+**Short:** Stateless retrains from scratch on a data window; stateful fine-tunes the last checkpoint on only new data, and Grubhub cut compute 45x.
 Stateless retraining trains a model from scratch (random init) on a full data window every run, while stateful training continues the previous checkpoint on only the new data since the last update. Stateful cuts compute and data-storage cost and converges faster because it reprocesses each data point roughly once instead of re-reading the whole window. Grubhub reported a 45x reduction in compute cost and a 20% increase in purchase-through rate after moving from daily stateless retraining to stateful training. The catch is that stateful only works for data iteration; a new feature or architecture forces a stateless retrain.
 
 **Q: Does continual learning mean updating the model on every incoming sample?**
+**Short:** No, continual learning updates a challenger on evaluated micro-batches, not per-sample online updates.
 No — continual learning means frequent micro-batch updates behind an evaluation gate, not per-sample online SGD. Per-sample updating causes catastrophic forgetting and instability (the model lurches toward the last few examples) and is computationally wasteful. Instead you accumulate a small batch (e.g., 512–1,024 samples), update a challenger replica, evaluate it, and promote it to champion only if it beats the current model. The dial you turn is update frequency, not update granularity.
 
 **Q: Why is interleaving able to find the better ranker with far fewer samples than A/B testing?**
+**Short:** Each user gives a direct within-list A-vs-B comparison, so Netflix found winners with over 100x fewer samples.
 Because each user gives a direct within-list A-versus-B comparison instead of a noisy across-group comparison. Netflix interleaves both models' recommendations into one list per user and attributes each click to the model that produced the clicked item, so every user contributes evidence about which ranker is better. Netflix found this identifies the winner with over 100x smaller sample sizes than a traditional A/B test. The caveat: interleaving measures user preference among rankers, not the core business metric, so you confirm the winner with a follow-up A/B test.
 
 **Q: What three requirements make bandits harder to deploy than A/B testing?**
+**Short:** Bandits need online prediction, short feedback loops, and payout-tracking infrastructure that most stacks lack.
 Bandits need online prediction, short feedback loops, and a payout-tracking mechanism. They must serve predictions in real time (bandits are meaningless in batch), they need the reward signal (click/convert) quickly to update per-arm estimates, and they need infrastructure to attribute each reward to the arm that produced it and continuously update the estimates. Most stacks lack the payout-tracking piece and have slow feedback, so teams default to the simpler, model-agnostic A/B test even though bandits are more data-efficient.
 
 **Q: How do you choose the log-and-wait window length for click labels?**
+**Short:** Set it from the observed click-time distribution to cover most clicks, trading false negatives against staleness.
 You tune it from the observed click-time distribution, trading false negatives against staleness. Too short a window (e.g., 5 minutes) labels slow clickers who click at minute 10 as "no click," baking false negatives into training data; too long a window makes labels stale and forces you to hold large amounts of in-flight prediction state. A common rule is to set the window to cover the bulk of clicks (e.g., 95% of the click-time histogram). The window exists because labels are computed by joining a logged prediction to the user's later action.
 
 **Q: Why does evaluation, not training speed, usually cap how often you can update a model?**
+**Short:** Trusting an update can take far longer than producing it; fraud models can take about two weeks to evaluate.
 Because trusting an update can take far longer than producing it, so evaluation is the real bottleneck. A fraud-detection model can take about two weeks to reveal its true quality since fraud is rare and confirmations (chargebacks, investigations) arrive slowly. Making training instant does nothing if you still need two weeks to know an update is safe. More frequent updates also multiply the chances to ship a broken or poisoned model, so continual learning demands more rigorous, automated evaluation, not less.
 
 **Q: What are the four stages of continual learning?**
+**Short:** Manual stateless retraining, automated stateless retraining, automated stateful training, then trigger-based continual learning.
 Stage 1 is manual, stateless retraining (someone retrains from scratch when they remember). Stage 2 is automated retraining (a script on a scheduler, usually still stateless) — where most mature ML companies actually sit. Stage 3 is automated stateful training (fine-tune from checkpoint on only the delta, with checkpoint and data-version lineage). Stage 4 is true continual learning, where updates fire on triggers (time, performance drop, data volume, drift) instead of a fixed schedule, plus the on-device/edge dream. Each stage is unlocked by building specific infrastructure the previous one lacked.
 
 **Q: Why can't you always do stateful training, and when must you retrain from scratch?**
+**Short:** Stateful training only works for data iteration; any model iteration, like a new feature, forces a stateless retrain.
 Stateful training only works for data iteration — same architecture and features, fresher data — because it continues the previous checkpoint's weights. The moment you do model iteration (add or re-encode a feature, or change the architecture or algorithm), the old weights no longer align with the new input/parameter space, so you must retrain statelessly from scratch. That's why mature setups do both: frequent stateful updates plus a periodic stateless retrain to absorb feature/architecture changes and re-anchor against accumulated incremental drift.
 
 **Q: What is shadow deployment and what can't it tell you?**
+**Short:** Shadow deployment logs a challenger's predictions unseen by users, so it can't reveal how users would react to them.
 Shadow deployment runs the challenger in parallel with the champion, serving the champion's predictions to users while logging the challenger's predictions without ever showing them. It's the safest test because a broken challenger can't affect any user, at the cost of roughly doubling serving compute. Its blind spot is user reaction: because the challenger's outputs are never shown, for recommendation-style tasks it can't tell you whether users would have engaged with them — it validates correctness and stability, not user response.
 
 **Q: What is the most common way to run an A/B test incorrectly?**
+**Short:** Splitting variants by time, like running A on Monday and B on Tuesday, instead of randomizing assignment per user.
 Splitting variants by time instead of randomizing per user — for example running model A on Monday and model B on Tuesday. That confounds the model difference with day-of-week effects, so any observed difference could be caused by the day rather than the model. A correct A/B test randomizes each user's assignment to A or B across the same time period, so the two groups differ only in which model they get, and then compares them with a two-sample statistical test on enough samples.
 
 **Q: Why does the book say statistical significance is not everything?**
+**Short:** A significant result can still be a false positive or too small in practice to be worth shipping.
 Because a statistically significant result can still be a false positive or too small to matter in practice. At the 5% level there's roughly a 5% chance of a spurious "winner," and statistical significance is distinct from practical significance — an effect can be statistically real yet too tiny to be worth shipping, and an important effect can be missed with too few samples. You interpret the p-value as the probability of the observed difference if the models were actually equal, but you still judge whether the effect is large enough to matter.
 
 **Q: How does a canary release differ from an A/B test, and when is it just eyeballing?**
+**Short:** A canary ramps traffic to a new model with rollback; without randomized assignment it is only eyeballing metrics.
 A canary release ramps a new model from a small traffic slice while monitoring, rolling back on problems, whereas A/B testing splits a fixed fraction to each model for statistical comparison. If the canary's split is randomized, it effectively is an A/B test and you can run proper statistics. If the split is not randomized (e.g., one data center or a self-selected beta cohort), the groups aren't comparable, so a canary is just eyeballing metrics — a safety mechanism to catch obvious breakage, not a rigorous "B beats A" measurement.
 
 **Q: Why do matrix-based and tree-based models resist incremental updates?**
+**Short:** Their structure is fit globally over the whole dataset, so new data usually forces a full re-fit, not a local update.
 Because their structure is fit globally over the whole dataset, so new data can't be absorbed with a cheap local step like a neural net's gradient update. Collaborative filtering factorizes a user-item matrix, and incorporating new interactions generally requires recomputing the whole factorization; a fitted decision tree chose its splits over the entire training set, so new data usually means re-fitting. Exceptions exist — Hoeffding trees (VFDT) are designed to grow incrementally from a stream — but they're special-purpose, unlike neural nets which fine-tune naturally.
 
 **Q: How do you decide how often to update a model?**
+**Short:** Train the same model on differently-aged data windows and evaluate all of them on today's data to measure freshness value.
 Measure the value of data freshness: train the same model on equal-length data windows ending at different past points (3 months ago, 1 month ago, yesterday) and evaluate all of them on today's data. If the model trained on 3-month-old data performs almost as well as the one trained on yesterday's, fresh data has low value and you can relax the cadence; if performance drops sharply with data age, fresh data is valuable and frequent updates pay off. This replaces the common practice of picking a retrain cadence by gut feeling.
 
 **Q: What is the difference between model iteration and data iteration, and why does it matter for continual learning?**
+**Short:** Model iteration changes the model and needs a stateless retrain; data iteration feeds the same model fresher data statefully.
 Model iteration changes the model itself (architecture, features, algorithm) and requires a stateless retrain, while data iteration keeps the same model and feeds it fresher data via stateful training. It matters because continual learning is essentially aggressive data iteration, and the value-of-data-freshness experiment only measures that axis. Early on, model iteration often gives bigger gains, but at some point returns to model iteration flatten and data iteration dominates — signaling you should invest engineering in the freshness pipeline rather than another model redesign.
 
 **Q: Why should you tap a real-time transport like Kafka instead of the data warehouse for continual learning?**
+**Short:** Warehouse ETL adds hours of lag, so tapping Kafka or Kinesis directly gives continual learning genuinely fresh data.
 Because the data warehouse is populated by scheduled ETL jobs that add hours of lag, so its freshest data may already be a day old — fatal for an hourly update cadence. Reading directly from the real-time transport (Kafka or Kinesis) lets you consume events before they land in the warehouse, giving you genuinely fresh data. The same broker already carries these events to online serving, so continual learning simply taps that existing stream.
 
 **Q: Name the main bandit algorithms and the idea behind each.**
@@ -856,15 +872,19 @@ Because the data warehouse is populated by scheduled ETL jobs that add hours of 
 Epsilon-greedy explores a random arm with probability epsilon and exploits the current best otherwise; Thompson sampling maintains a probability distribution over each arm's payout, samples from them each round, and plays the arm with the highest sampled value; and Upper Confidence Bound (UCB) applies optimism under uncertainty, choosing the arm with the highest upper confidence bound so rarely-tried arms get explored until their estimates tighten. All three balance exploration against exploitation to minimize regret, shifting traffic toward the better-performing arm as evidence accumulates — unlike A/B testing's fixed split.
 
 **Q: What is a contextual bandit and what problem does it address?**
+**Short:** A contextual bandit explores and exploits at the item level inside one recommender, addressing partial feedback.
 A contextual bandit applies explore-exploit at the item level inside a single recommender, using the request as context to decide which items to show, balancing confident items against uncertain ones. It addresses the partial-feedback (bandit-feedback) problem: you only observe outcomes for items you actually show, so a purely exploiting recommender never learns that a rarely-shown item might be great. Contextual bandits deliberately explore to gather that missing feedback and improve the model — but they're hard to implement because the implementation depends on the specific learning algorithm, unlike model-level bandits or A/B tests that treat the model as a black box.
 
 **Q: Why is continual learning described as a superset of scheduled batch retraining?**
+**Short:** Anything achievable on a fixed retraining schedule is also achievable with continual learning at that same frequency.
 Because anything you can achieve by retraining on a fixed schedule you can also achieve with continual learning by choosing that same frequency, so continual learning strictly dominates batch retraining in capability. This reframes the decision from "should we do continual learning?" to "at what frequency does retraining pay for itself?" — and the answer is rarely "never." If a task works batched, the guidance is to make updates more frequent wherever the value of fresh data exceeds the update cost.
 
 **Q: What is the champion/challenger pattern and why is it central to continual learning?**
+**Short:** The champion serves all traffic while a challenger replica is updated and evaluated, promoted only if it wins.
 The champion is the model currently serving all traffic; the challenger is a replica you update on a fresh micro-batch and evaluate, promoting it to champion only if it beats the current one. It's central because you never mutate the serving model in place, so a bad update lands in the challenger and is discarded before it can reach users. This is what lets continual learning survive its own increased failure rate — every update passes an evaluation gate on a side replica before promotion.
 
 **Q: What lesson does Microsoft's Tay teach about continual learning?**
+**Short:** Tay shows a model that learns from live user input is a target for coordinated poisoning, corrupted within a day.
 Tay shows that a model learning from live user input is a target for coordinated data poisoning and can be corrupted fast. Microsoft's Tay chatbot learned from Twitter interactions and was manipulated by trolls into offensive output within under 24 hours, forcing its shutdown. The lesson is that faster, more automated absorption of user data increases exposure to adversarial manipulation, so continual learning needs stronger automated evaluation, input validation, and abuse defenses — the increased update rate raises the stakes on every safeguard.
 
 ---

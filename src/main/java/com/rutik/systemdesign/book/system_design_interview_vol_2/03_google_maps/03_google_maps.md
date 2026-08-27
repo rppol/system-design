@@ -993,30 +993,48 @@ access pattern demands, and never solve a static-data problem with a live-comput
 ## Interview Questions
 
 **Q: Why is the road network stored as routing tiles instead of one in-memory graph?**
+**Short:** The planet's road graph is too large for one machine's memory, so tiles let a search load only the region it touches.
+
 Because the planet's road graph — hundreds of millions of nodes — is far too large to fit in one machine's memory or to load just to plan a short trip. Routing tiles partition the graph geographically into small regions, each a serialized adjacency list in object storage with references to its neighbor tiles. A path search loads only the tiles its frontier actually touches, expanding across boundaries on demand, so you hold a handful of tiles instead of the whole world.
 
 **Q: Why are the shortest-path service and the ETA service kept separate?**
+**Short:** The road graph changes over weeks while traffic changes by the second, so separating them keeps the cacheable search stable.
+
 Because the road graph changes on a timescale of weeks (roads open/close) while traffic changes second by second, so mixing them would force a full graph re-search on every traffic tick. The shortest-path service runs A*/Dijkstra on the static, traffic-blind graph, producing stable, cacheable candidate routes. The ETA service then predicts travel time for those candidates from live and historical traffic. Separation lets the expensive search be cached while the cheap ETA model absorbs all the volatility.
 
 **Q: How many tiles are at zoom level k, and why does that matter for storage?**
+**Short:** Zoom level k has 4^k tiles, so storage reaches petabyte scale by the deepest zoom levels alone.
+
 Zoom level `k` has `4^k` tiles, because each level quarters every tile into four (Web Mercator's power-of-two quadtree). At zoom 21 that is roughly 4.4 trillion tiles; at ~100 KB each, the top level alone is ~440 PB and all levels naively sum to ~590 PB. It matters because it shows raw storage is petabyte-scale, forcing the compression and served-subset reasoning that brings it down to ~50 PB.
 
 **Q: Why does the naive ~590 PB map estimate collapse to roughly 50 PB in practice?**
+**Short:** About 90 percent of the earth is near-empty ocean or land, which compresses to almost nothing and skips deep zoom levels.
+
 Because about 90% of the earth's surface is ocean, ice, or empty land, whose tiles are near-uniform and compress to almost nothing, and those regions do not need the deepest zoom levels. Storing full detail only for populated areas and compressing the empty tiles cuts the footprint by roughly an order of magnitude. Keeping multiple rendered styles, versions, and CDN copies brings it back up toward ~100 PB.
 
 **Q: Why are map tiles served from a CDN, and how does the client find a tile?**
+**Short:** Tiles are static and identical for everyone, and the client computes each tile's URL itself so the CDN edge can cache it.
+
 Because tiles are static and identical for every user, and serving billions of requests/day from origin object storage would be ruinous in egress cost and latency. The client computes the tile URL itself as a pure function of `(lat, lng, zoom)` — converting the coordinate and zoom into a tile `(x, y)` index — and requests that URL, which the CDN edge caches. Because the URL is deterministic and user-independent, no server round-trip is needed to locate a tile and origin sees almost no traffic.
 
 **Q: What are hierarchical tiers of routing tiles and why are they needed?**
+**Short:** Local, arterial, and highway tiers let a long route use coarse tiles for the middle instead of thousands of local tiles.
+
 They are layers of routing tiles — local (every street), arterial (major roads), and highway (motorways only) — where each coarser tier covers a larger area with fewer roads. They are needed because a cross-country search over only local tiles would load thousands of tiles and be far too slow. A long route uses local tiles near the origin and destination but jumps to coarse tiers for the long middle, exactly as a human drives local streets to the freeway, the freeway across the country, then local streets at the end.
 
 **Q: Vector tiles vs raster tiles — which does the book prefer and why?**
+**Short:** The book prefers vector tiles, which ship geometry for client-side styling and smooth zoom instead of pre-rendered images.
+
 Vector tiles are the modern preferred choice. Raster tiles are pre-rendered images (~100 KB) with the style baked in and blocky discrete zoom. Vector tiles ship geometry plus attributes and are rendered on the client, giving three wins: less bandwidth (geometry compresses better than pixels), client-side styling (dark mode, traffic overlay, label language without new tiles), and smooth continuous zoom and rotation. The cost is more client GPU/CPU work and a more complex renderer.
 
 **Q: Why are location updates batched, and what QPS does that produce?**
+**Short:** Batching uploads every 15 seconds cuts writes roughly 15-fold, bringing the load to about 1.6 million writes per second.
+
 Batching (buffering GPS points on the client and uploading every ~15 s) is the biggest lever on the write path, cutting per-second uploads by ~15× and reducing radio wake-ups to save battery. With ~1B DAU and roughly 24M concurrent users, per-second uploads would be an impossible ~24M writes/sec, but batching every 15 s brings steady-state writes to ~1.6M/sec (a few million at peak). Even batched, it is an overwhelmingly write-heavy, append-only workload.
 
 **Q: What database fits the user-location write path and why?**
+**Short:** A wide-column store like Cassandra fits, since its LSM-tree writes handle millions of append-only inserts with no read-before-write.
+
 A wide-column, write-optimized store like Cassandra, partitioned by `user_id` and clustered by timestamp. The workload is millions of append-only writes per second, rarely read back per user, which is exactly Cassandra's sweet spot: LSM-tree writes with no read-before-write and linear horizontal scaling. A relational database with synchronous per-point inserts would melt under the write volume.
 
 **Q: Beyond showing the blue dot, what is the location stream used for?**
@@ -1025,15 +1043,23 @@ A wide-column, write-optimized store like Cassandra, partitioned by `user_id` an
 The location stream is published to Kafka and fans out to several consumers: live traffic (aggregating overlapping GPS traces into per-segment speeds), new-road and road-change detection (consistent traces where no road is mapped), and personalization (a user's history informs results). So the telemetry is the sensor network that keeps the map and traffic model current, not just the source of one user's position.
 
 **Q: How does adaptive ETA / rerouting avoid recomputing every user's route on every traffic change?**
+**Short:** A segment-to-navigator index lets a traffic change recompute ETA only for drivers on or approaching that segment.
+
 It maintains an index of which active navigators are on which road segments, so a traffic change on a segment fans out only to the drivers currently on or approaching that segment. When a segment's speed changes, the system recomputes ETA (and checks for a better route) only for those affected users, not for everyone. Recomputing all routes on every tick would be quadratic and impossible; the segment→navigator index is what makes it scalable, and maintaining that mapping at millions-of-navigators scale is the hard part.
 
 **Q: What delivery protocol streams live ETA/reroute updates to phones, and why not push notifications?**
+**Short:** A persistent connection like a WebSocket streams updates, since push notifications are too rate-limited and high-latency.
+
 A persistent connection such as a WebSocket, held open while the user navigates so the server can stream updates down it. Push notifications are rate-limited and higher-latency, unsuited to a steady stream of small navigation updates. The battery constraint shapes cadence: updates are coalesced and sent only when something material changed (ETA past a threshold, a warranted reroute), not on every tick.
 
 **Q: What is Web Mercator and why is it the standard for web maps?**
+**Short:** Web Mercator maps the sphere into a square that tiles perfectly at every zoom, preserving angles at the cost of polar area.
+
 Web Mercator is the industry-standard map projection variant used by Google Maps, OpenStreetMap, and Bing. It treats the earth as a sphere for speed and maps the world into a clean square that tiles perfectly — the whole world is one tile at zoom 0 and each level quarters each tile — which is why the `4^z`-tiles-per-level math is so clean. Like all Mercator variants it preserves local angles (good for navigation bearings) but distorts area toward the poles, and it clips the extreme poles as an acceptable loss.
 
 **Q: What is geocoding, reverse geocoding, and interpolation?**
+**Short:** Geocoding turns an address into coordinates, reverse geocoding turns coordinates into an address, and interpolation estimates unmatched addresses along a street.
+
 Geocoding converts an address to a coordinate ("1600 Amphitheatre Parkway" → lat/lng); reverse geocoding converts a coordinate back to the nearest address or place. Interpolation handles addresses with no exact match by estimating the point along a street segment — if a block runs from house #1 to #100 over a known length, #50 is placed about halfway. Geocoding is a read-heavy, latency-sensitive key-value lookup, fronted by a cache like Redis.
 
 **Q: What positioning signals does a device combine, and what does each trade off?**
@@ -1047,6 +1073,8 @@ GPS/GNSS trilaterates from satellites for meter-level accuracy outdoors but is s
 The client computes which tiles cover its current viewport at the current zoom and fetches only those — a phone screen needs only about a dozen tiles at a time plus a small prefetch ring for smooth panning — totaling a few hundred KB, not the petabyte-scale world. Each tile is addressed by `(zoom, x, y)` and is a static, cacheable resource identical for all users, so it comes from the CDN edge.
 
 **Q: What is the accuracy-vs-freshness tradeoff, and where does the design make that call?**
+**Short:** The design repeatedly favors fresh-enough over maximal freshness, batching location and traffic updates to protect battery and write load.
+
 It is the tension between fresher data (more frequent GPS, faster tile re-render) and the cost in battery, bandwidth, and write load. The design repeatedly picks "fresh enough": location is batched every ~15 s, tiles are re-rendered on a slow offline cadence, and adaptive ETA recomputes only for segments whose traffic actually moved. Maximal freshness everywhere would destroy battery life and overwhelm the write path.
 
 **Q: How does the shortest-path search expand across routing tiles and jump tiers?**
