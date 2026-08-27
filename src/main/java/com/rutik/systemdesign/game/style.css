@@ -3527,3 +3527,73 @@ body.nav-hidden #tabbar { display: none !important; }
    guess, it measures the available width with a ResizeObserver and re-renders
    (mmChartDirective, _mmRO). Layout works the same way.
    ========================================================================== */
+
+/* ---------- 23. [NAV] Appearance popover -------------------------------- */
+/* Anchored, NOT modal: the page stays visible and live behind it, which is the
+   entire point of a theme picker. */
+.appear-pop {
+  position: fixed; z-index: 60; width: 268px; padding: 14px;
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent);
+  -webkit-backdrop-filter: blur(26px) saturate(1.6); backdrop-filter: blur(26px) saturate(1.6);
+  border: 1px solid var(--glass-brd-hi); border-radius: var(--radius);
+  box-shadow: var(--shadow), var(--glass-hilite);
+  animation: pop-in 0.18s var(--ease-out);
+}
+.ap-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+.ap-row.ap-col { flex-direction: column; align-items: stretch; gap: 9px; }
+.ap-lbl {
+  font-family: var(--mono); font-size: var(--fs-2xs); text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--muted);
+}
+.appear-pop .mode-seg { margin: 0; flex: 1; max-width: 148px; }
+
+/* Four across, two down. The swatch is filled ENTIRELY with the theme's own
+   --accent-2 -> --accent sweep: every theme has a near-black ground, so a swatch
+   that included the ground would read as a black dot and distinguish nothing. */
+.ap-swatches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 6px; }
+.ap-sw {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 2px 0; background: none; border: none; color: var(--faint);
+}
+.ap-sw:hover { color: var(--text); }
+.ap-dot {
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--sw-2), var(--sw-1));
+}
+/* The active ring is TWO-PART on purpose. A flush --accent ring merges into the
+   fill whenever the selected theme's hue IS the accent's own — which is the
+   default state — so the ground-coloured inner gap is load-bearing, not
+   decoration. */
+.ap-sw[aria-checked="true"] .ap-dot { box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 4px var(--accent); }
+.ap-check { color: var(--accent-ink); font-size: 0.8125rem; font-weight: 800; opacity: 0; }
+.ap-sw[aria-checked="true"] .ap-check { opacity: 1; }
+.ap-sw[aria-checked="true"] { color: var(--text); }
+.ap-name { font-size: var(--fs-2xs); line-height: 1.1; }
+
+/* Each theme's own two accent stops, so the swatch is the theme, not a label
+   for it. These are the ONLY per-theme literals left in the file, and they are
+   unavoidable: a swatch must show a theme you are NOT currently in. */
+.ap-dot[data-sw="midnight"] { --sw-1: #7cabff; --sw-2: #9d8cff; }
+.ap-dot[data-sw="ocean"]    { --sw-1: #38bdf8; --sw-2: #22d3ee; }
+.ap-dot[data-sw="forest"]   { --sw-1: #34d399; --sw-2: #a3e635; }
+.ap-dot[data-sw="ember"]    { --sw-1: #fb923c; --sw-2: #f87171; }
+.ap-dot[data-sw="fire"]     { --sw-1: #f5484e; --sw-2: #ff8c42; }
+.ap-dot[data-sw="rose"]     { --sw-1: #fda4af; --sw-2: #f0abfc; }
+.ap-dot[data-sw="orchid"]   { --sw-1: #c084fc; --sw-2: #f472b6; }
+.ap-dot[data-sw="obsidian"] { --sw-1: #cbd1dc; --sw-2: #8b93a3; }
+
+/* A real switch with a STATIC label, not a button whose text flips between
+   "Sound on" and "Sound off" — a control that is also its own state readout is
+   ambiguous about what a click will do. */
+.ap-switch {
+  width: 42px; height: 24px; flex: 0 0 auto; border-radius: 999px; padding: 3px;
+  background: var(--track); border: 1px solid var(--glass-brd); display: flex; align-items: center;
+}
+.ap-switch[aria-checked="true"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; }
+.ap-knob {
+  width: 16px; height: 16px; border-radius: 50%; background: var(--text);
+  transition: transform 0.16s var(--ease-out);
+}
+.ap-switch[aria-checked="true"] .ap-knob { transform: translateX(18px); background: var(--accent-ink); }
+@media (prefers-reduced-motion: reduce) { .ap-knob { transition: none; } }

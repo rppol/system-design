@@ -577,18 +577,103 @@ function applyMode(mode, save = true) {
   syncThemeColor();
 }
 
-function themeOptionsHTML() {
-  const mode = curMode();
-  const modeSeg =
-    `<div class="mode-seg" role="radiogroup" aria-label="Light or dark mode">
-       <button class="mode-opt" role="radio" data-mode="dark" aria-checked="${mode === "dark"}">Dark</button>
-       <button class="mode-opt" role="radio" data-mode="light" aria-checked="${mode === "light"}">Light</button>
-     </div>`;
-  const colors = THEMES.map((t) =>
-    `<button class="theme-opt" role="radio" data-theme="${t.id}" aria-checked="${curTheme() === t.id}">
-       <span class="swatch sw-${t.id}" aria-hidden="true"></span>${t.name}<span class="tcheck">✓</span>
-     </button>`).join("");
-  return modeSeg + colors;
+/* [NAV] APPEARANCE — an anchored popover, three rows, no modal.
+   The rail item said "Appearance" and opened a modal titled "Options" that held
+   deck mode (not appearance — it belongs on the Today start card, where it
+   changes behaviour), Search and Keyboard shortcuts (both already sitting in the
+   rail two rows above), a Done button implying a commit step that does not exist
+   because every control applies instantly, and a single radiogroup mixing two
+   independent axes. And being modal, it blanked the page you were trying to
+   judge the theme against — which is the whole point of the control.
+
+   This is a presentation change over the existing handlers: applyTheme,
+   applyMode, sfx.toggle and the sd_theme / sd_theme_mode / sd_mute keys are
+   untouched. */
+function closeAppearance() {
+  const pop = document.getElementById("appearPop");
+  if (pop) { pop._release?.(); pop.remove(); }
+  document.querySelectorAll("#railAppear, #moreBtn").forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
+
+function openAppearance(anchorBtn) {
+  if (document.getElementById("appearPop")) { closeAppearance(); return; }
+  const anchor = anchorBtn || el("#railAppear") || el("#moreBtn");
+  if (!anchor) return;
+  const mode = curMode(), theme = curTheme();
+  const pop = document.createElement("div");
+  pop.id = "appearPop"; pop.className = "appear-pop";
+  pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Appearance");
+  pop.innerHTML = `
+    <div class="ap-row">
+      <span class="ap-lbl">Mode</span>
+      <div class="mode-seg" id="apMode" role="radiogroup" aria-label="Light or dark mode">
+        <button class="mode-opt" role="radio" data-mode="dark" aria-checked="${mode === "dark"}">Dark</button>
+        <button class="mode-opt" role="radio" data-mode="light" aria-checked="${mode === "light"}">Light</button>
+      </div>
+    </div>
+    <div class="ap-row ap-col">
+      <span class="ap-lbl">Theme</span>
+      <div class="ap-swatches" id="apTheme" role="radiogroup" aria-label="Colour theme">
+        ${THEMES.map((t) => `
+          <button class="ap-sw theme-opt" role="radio" data-theme="${t.id}"
+            aria-checked="${theme === t.id}" aria-label="${esc(t.name)}" title="${esc(t.name)}">
+            <span class="ap-dot" data-sw="${t.id}" aria-hidden="true"><span class="ap-check">&#10003;</span></span>
+            <span class="ap-name">${esc(t.name)}</span>
+          </button>`).join("")}
+      </div>
+    </div>
+    <div class="ap-row">
+      <span class="ap-lbl">Sound</span>
+      <button class="ap-switch" id="apSound" role="switch" aria-checked="${sfx.isOn()}"><span class="ap-knob"></span></button>
+    </div>`;
+  document.body.appendChild(pop);
+  anchor.setAttribute("aria-expanded", "true");
+
+  // Position beside the trigger, clamped to the viewport. The rail item sits at
+  // the bottom-left, the header ⋯ at the top-right, so both cases are handled by
+  // measuring rather than by branching on which one opened it.
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  const railOpen = anchor.id === "railAppear";
+  let left = railOpen ? r.right + 10 : r.right - w;
+  let top = railOpen ? r.bottom - h : r.bottom + 8;
+  pop.style.left = Math.max(8, Math.min(left, window.innerWidth - w - 8)) + "px";
+  pop.style.top = Math.max(8, Math.min(top, window.innerHeight - h - 8)) + "px";
+
+  const modeGrp = el("#apMode");
+  modeGrp.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
+    applyMode(b.dataset.mode);
+    modeGrp.querySelectorAll(".mode-opt").forEach((x) => x.setAttribute("aria-checked", x === b ? "true" : "false"));
+    announce(b.dataset.mode === "light" ? "Light mode" : "Dark mode");
+  }));
+  wireRadioGroup(modeGrp);
+  const themeGrp = el("#apTheme");
+  themeGrp.querySelectorAll(".ap-sw").forEach((b) => b.addEventListener("click", () => {
+    applyTheme(b.dataset.theme);
+    themeGrp._radioSync?.();
+    announce(`${b.getAttribute("aria-label")} theme`);
+  }));
+  wireRadioGroup(themeGrp);
+  const snd = el("#apSound");
+  snd.addEventListener("click", () => {
+    sfx.toggle(); syncMuteBtn();
+    snd.setAttribute("aria-checked", sfx.isOn() ? "true" : "false");
+    announce(sfx.isOn() ? "Sound on" : "Sound off");
+  });
+
+  pop.tabIndex = -1;
+  pop._release = trapFocus(pop, { restoreTo: anchor });
+  // Esc and click-away close it. NOT a modal: the page behind stays visible and
+  // live, so a theme pick can be judged against real content.
+  const dismiss = (e) => {
+    if (e.type === "keydown") { if (e.key !== "Escape") return; }
+    else if (pop.contains(e.target) || e.target.closest?.("#railAppear, #moreBtn")) return;
+    closeAppearance();
+    document.removeEventListener("pointerdown", dismiss, true);
+    document.removeEventListener("keydown", dismiss, true);
+  };
+  document.addEventListener("pointerdown", dismiss, true);
+  document.addEventListener("keydown", dismiss, true);
 }
 
 function closeStreakPop() {
@@ -3859,30 +3944,21 @@ function openPauseSheet(pending) {
 /* ---------- [W3] mobile "More" options sheet (<=640px topbar overflow) ---------- */
 // The <=640px topbar hides mode/theme/mute; this glass sheet (same pattern as the
 // pause sheet) surfaces them plus Search + Help. Reuses trapFocus + wireRadioGroup.
+/* [NAV] The header overflow. Everything that had a home elsewhere is gone from
+   it — theme, mode and sound now live in the Appearance popover, deck mode on
+   the Today start card, Search and Shortcuts in the rail — so there is exactly
+   ONE place to change each setting. What is left is Appearance and Search (the
+   only doors to them in short landscape, where the rail's footer group is
+   hidden) and the About line the removed .foot used to carry. */
 function openMoreSheet() {
   if (el("#moreSheet")) return;
-  const flash = deckMode() === "flash";
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "moreSheet";
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Options");
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "More options");
   o.innerHTML = `<div class="pause-card more-card">
-      <h2>Options</h2>
-      <div class="more-row">
-        <span class="more-lbl">Mode</span>
-        <div class="more-seg" id="moreMode" role="radiogroup" aria-label="Deck mode">
-          <button role="radio" data-mode="quiz" aria-checked="${!flash}">Quiz</button>
-          <button role="radio" data-mode="flash" aria-checked="${flash}">Cards</button>
-        </div>
-      </div>
-      <div class="more-row more-row-col">
-        <span class="more-lbl">Theme</span>
-        <div class="more-theme" id="moreTheme" role="radiogroup" aria-label="Theme">${themeOptionsHTML()}</div>
-      </div>
-      <div class="more-row">
-        <span class="more-lbl">Sound</span>
-        <button class="ghost" id="moreSound"></button>
-      </div>
+      <h2>More</h2>
       <div class="more-actions">
+        <button class="ghost" id="moreAppear">Appearance&hellip;</button>
         <button class="ghost" id="moreSearch">Search&hellip;</button>
         <button class="ghost" id="moreHelp">Keyboard shortcuts</button>
         <button class="primary" id="moreClose">Done</button>
@@ -3893,36 +3969,7 @@ function openMoreSheet() {
   const release = trapFocus(o, { initial: "#moreClose", restoreTo: el("#moreBtn") });
   const close = (restore = true) => { release(restore); o.remove(); };
   o._close = close;
-
-  // Mode: segmented Quiz|Cards radiogroup — same effect as the #modeBtn handler.
-  const modeGrp = el("#moreMode");
-  modeGrp.querySelectorAll("[role=radio]").forEach((b) => b.addEventListener("click", () => {
-    safeSet("sd_mode", b.dataset.mode === "flash" ? "flash" : "quiz");
-    syncModeBtn();
-    modeGrp.querySelectorAll("[role=radio]").forEach((r) => r.setAttribute("aria-checked", r === b ? "true" : "false"));
-    modeGrp._radioSync?.();
-    if (!state.inQuiz) renderHome();
-  }));
-  wireRadioGroup(modeGrp);
-
-  // Theme: the shared theme-radio markup + the same click handler as the popover.
-  const themeGrp = el("#moreTheme");
-  themeGrp.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
-    applyTheme(b.dataset.theme);
-    themeGrp._radioSync?.();
-  }));
-  themeGrp.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
-    applyMode(b.dataset.mode);
-    themeGrp.querySelectorAll(".mode-opt").forEach((x) => x.setAttribute("aria-checked", x === b ? "true" : "false"));
-  }));
-  wireRadioGroup(themeGrp);
-
-  // Sound: mirrors #muteBtn.
-  const snd = el("#moreSound");
-  const syncSnd = () => { snd.textContent = sfx.isOn() ? "Sound on" : "Sound off"; snd.setAttribute("aria-pressed", sfx.isOn() ? "true" : "false"); };
-  syncSnd();
-  snd.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); syncSnd(); });
-
+  el("#moreAppear").addEventListener("click", () => { close(false); openAppearance(el("#moreBtn")); });
   el("#moreSearch").addEventListener("click", () => { close(false); openPalette(); });
   el("#moreHelp").addEventListener("click", () => { close(false); toggleHelp(); });
   el("#moreClose").addEventListener("click", () => close());
@@ -9254,7 +9301,7 @@ function renderNav() {
     rb.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); home(); } });
   }
   el("#railToggle")?.addEventListener("click", () => setRailCollapsed(!railCollapsed()));
-  el("#railAppear")?.addEventListener("click", openMoreSheet);
+  el("#railAppear")?.addEventListener("click", (e) => openAppearance(e.currentTarget));
   el("#railSearch")?.addEventListener("click", () => openPalette());
 }
 
