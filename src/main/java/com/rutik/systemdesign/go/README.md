@@ -150,7 +150,7 @@ This section is exhaustive by design — 27 modules across 5 phases, from `defer
 The complete curriculum in the order above — see [5-Phase Learning Path](#3-5-phase-learning-path). Use it for genuine mastery: every language mechanic, the whole concurrency surface, the runtime and its collector, the standard library's service stack, and the interop and judgment material. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (10 modules)
+### Senior Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -164,8 +164,17 @@ The complete curriculum in the order above — see [5-Phase Learning Path](#3-5-
 | 8 | [channels_and_select](channels_and_select/channels_and_select.md) | module page only |
 | 9 | [sync_primitives_and_memory_model](sync_primitives_and_memory_model/sync_primitives_and_memory_model.md) | module page only |
 | 10 | [context_and_cancellation](context_and_cancellation/context_and_cancellation.md) | module page only |
+| 11 | [concurrency_patterns_and_pitfalls](concurrency_patterns_and_pitfalls/concurrency_patterns_and_pitfalls.md) | module page only |
+| 13 | [escape_analysis_and_performance](escape_analysis_and_performance/escape_analysis_and_performance.md) | module page only |
+| 14 | [profiling_and_tracing](profiling_and_tracing/profiling_and_tracing.md) | 2 files |
+| 15 | [testing_benchmarking_and_fuzzing](testing_benchmarking_and_fuzzing/testing_benchmarking_and_fuzzing.md) | module page only |
+| 16 | [net_http_server](net_http_server/net_http_server.md) | module page only |
+| 17 | [http_clients_and_resilience](http_clients_and_resilience/http_clients_and_resilience.md) | module page only |
+| 18 | [json_and_serialization](json_and_serialization/json_and_serialization.md) | module page only |
+| 19 | [database_sql_and_data_access](database_sql_and_data_access/database_sql_and_data_access.md) | module page only |
+| 21 | [observability_and_opentelemetry](observability_and_opentelemetry/observability_and_opentelemetry.md) | module page only |
 
-**Not in this path** (17 of 27, Full Path only): `concurrency_patterns_and_pitfalls`, `the_runtime_and_garbage_collector`, `escape_analysis_and_performance`, `profiling_and_tracing`, `testing_benchmarking_and_fuzzing`, `net_http_server`, `http_clients_and_resilience`, `json_and_serialization`, `database_sql_and_data_access`, `grpc_and_protobuf_in_go`, `observability_and_opentelemetry`, `time_io_and_stdlib_essentials`, `reflection_and_unsafe`, `cgo_and_ffi`, `idiomatic_api_and_package_design`, `build_deployment_and_supply_chain`, `go_vs_java_and_python`
+**Not in this path** (8 of 27, Full Path only): `the_runtime_and_garbage_collector`, `grpc_and_protobuf_in_go`, `time_io_and_stdlib_essentials`, `reflection_and_unsafe`, `cgo_and_ffi`, `idiomatic_api_and_package_design`, `build_deployment_and_supply_chain`, `go_vs_java_and_python`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior Go interview** actually probes, anchored on the language mechanics that produce bugs and the concurrency surface that produces outages. Same learning order, a strict subset of the Full Path.
@@ -177,16 +186,25 @@ A ruthless cut to what a **senior Go interview** actually probes, anchored on th
 | Runtime & Stdlib | Escape analysis, pprof, and the `net/http`/`database/sql` defaults that silently cap a service — `MaxIdleConnsPerHost = 2` and the unclosed response body |
 
 <!-- study-path-table principal -->
-### Principal Path (4 modules)
+### Principal Path (13 modules)
 
 | # | Module | Files |
 |---|--------|-------|
-| 5 | [generics_and_type_parameters](generics_and_type_parameters/generics_and_type_parameters.md) | module page only |
+| 5 | [generics_and_type_parameters](generics_and_type_parameters/generics_and_type_parameters.md) | 2 files |
 | 7 | [goroutines_and_the_scheduler](goroutines_and_the_scheduler/goroutines_and_the_scheduler.md) | module page only |
 | 9 | [sync_primitives_and_memory_model](sync_primitives_and_memory_model/sync_primitives_and_memory_model.md) | 2 files |
+| 11 | [concurrency_patterns_and_pitfalls](concurrency_patterns_and_pitfalls/concurrency_patterns_and_pitfalls.md) | module page only |
 | 12 | [the_runtime_and_garbage_collector](the_runtime_and_garbage_collector/the_runtime_and_garbage_collector.md) | module page only |
+| 14 | [profiling_and_tracing](profiling_and_tracing/profiling_and_tracing.md) | module page only |
+| 15 | [testing_benchmarking_and_fuzzing](testing_benchmarking_and_fuzzing/testing_benchmarking_and_fuzzing.md) | module page only |
+| 20 | [grpc_and_protobuf_in_go](grpc_and_protobuf_in_go/grpc_and_protobuf_in_go.md) | module page only |
+| 21 | [observability_and_opentelemetry](observability_and_opentelemetry/observability_and_opentelemetry.md) | module page only |
+| 24 | [cgo_and_ffi](cgo_and_ffi/cgo_and_ffi.md) | module page only |
+| 25 | [idiomatic_api_and_package_design](idiomatic_api_and_package_design/idiomatic_api_and_package_design.md) | module page only |
+| 26 | [build_deployment_and_supply_chain](build_deployment_and_supply_chain/build_deployment_and_supply_chain.md) | module page only |
+| 27 | [go_vs_java_and_python](go_vs_java_and_python/go_vs_java_and_python.md) | module page only |
 
-**Not in this path** (23 of 27, Full Path only): `go_fundamentals_and_idioms`, `data_structures_and_memory_layout`, `interfaces_methods_and_embedding`, `errors_and_panics`, `packages_modules_and_tooling`, `channels_and_select`, `context_and_cancellation`, `concurrency_patterns_and_pitfalls`, `escape_analysis_and_performance`, `profiling_and_tracing`, `testing_benchmarking_and_fuzzing`, `net_http_server`, `http_clients_and_resilience`, `json_and_serialization`, `database_sql_and_data_access`, `grpc_and_protobuf_in_go`, `observability_and_opentelemetry`, `time_io_and_stdlib_essentials`, `reflection_and_unsafe`, `cgo_and_ffi`, `idiomatic_api_and_package_design`, `build_deployment_and_supply_chain`, `go_vs_java_and_python`
+**Not in this path** (14 of 27, Full Path only): `go_fundamentals_and_idioms`, `data_structures_and_memory_layout`, `interfaces_methods_and_embedding`, `errors_and_panics`, `packages_modules_and_tooling`, `channels_and_select`, `context_and_cancellation`, `escape_analysis_and_performance`, `net_http_server`, `http_clients_and_resilience`, `json_and_serialization`, `database_sql_and_data_access`, `time_io_and_stdlib_essentials`, `reflection_and_unsafe`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes runtime and organisational judgment rather than language mechanics: what `GOGC` and `GOMEMLIMIT` cost against a container limit, why cgo is a decision you make once for a whole team, what an API contract owes its callers, and when Go is the wrong answer. Roughly half of it is material the Senior Path never covers, and it is the smaller list — depth of judgment, not depth of syllabus.
@@ -342,7 +360,8 @@ interfaces_methods_and_embedding
 errors_and_panics
   errors_and_panics.md  senior
 generics_and_type_parameters
-  generics_and_type_parameters.md  senior, principal
+  generics_and_type_parameters.md         senior, principal
+  generics_implementation_and_gcshape.md  principal
 packages_modules_and_tooling
   packages_modules_and_tooling.md  senior
 goroutines_and_the_scheduler
@@ -354,6 +373,46 @@ sync_primitives_and_memory_model
   the_go_memory_model.md               principal
 context_and_cancellation
   context_and_cancellation.md  senior
+concurrency_patterns_and_pitfalls
+  concurrency_patterns_and_pitfalls.md  senior, principal
 the_runtime_and_garbage_collector
   the_runtime_and_garbage_collector.md  principal
+escape_analysis_and_performance
+  escape_analysis_and_performance.md  senior
+profiling_and_tracing
+  profiling_and_tracing.md                 senior, principal
+  execution_tracer_and_flight_recorder.md  senior
+testing_benchmarking_and_fuzzing
+  testing_benchmarking_and_fuzzing.md  senior, principal
+net_http_server
+  net_http_server.md  senior
+http_clients_and_resilience
+  http_clients_and_resilience.md  senior
+json_and_serialization
+  json_and_serialization.md  senior
+database_sql_and_data_access
+  database_sql_and_data_access.md  senior
+grpc_and_protobuf_in_go
+  grpc_and_protobuf_in_go.md  principal
+observability_and_opentelemetry
+  observability_and_opentelemetry.md  senior, principal
+time_io_and_stdlib_essentials
+  time_io_and_stdlib_essentials.md  -
+reflection_and_unsafe
+  reflection_and_unsafe.md  -
+cgo_and_ffi
+  cgo_and_ffi.md  principal
+idiomatic_api_and_package_design
+  idiomatic_api_and_package_design.md  principal
+build_deployment_and_supply_chain
+  build_deployment_and_supply_chain.md  principal
+go_vs_java_and_python
+  go_vs_java_and_python.md  principal
+case_studies
+  design_a_high_throughput_ingest_service.md  senior, principal
+  design_a_kubernetes_controller.md           senior, principal
+  design_a_realtime_websocket_fanout.md       senior
+  design_a_cross_platform_cli_tool.md         senior
+  design_a_grpc_edge_proxy.md                 principal
+  design_an_embedded_kv_store.md              principal
 -->

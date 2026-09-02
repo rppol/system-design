@@ -77,8 +77,8 @@ unrelated warts.
 - **`comparable` means `==` and `!=` are legal.** It is what makes `map[K]V` with a type
   parameter key possible.
 - **Inference flows from arguments to type parameters, never backwards from the result.**
-  `[1.27]` extends *function type inference* to assignment and conversion contexts, but
-  a call's result type still never drives inference.
+  `[1.27]` generalizes *function type inference* to every context where a generic function
+  is used as a value — conversions included — but a call's result type never drives inference.
 - **Method declarations may declare their own type parameters `[1.27]`.** Interface
   methods still may not, and a generic method cannot implement an interface method.
 - **Instantiation is static.** `Stack[int]` and `Stack[string]` are two distinct,
@@ -433,18 +433,18 @@ func main() {
 ```
 
 Go has never inferred a type argument from the assignment target of a *call*, and
-`[1.27]` did not change that. What `[1.27]` did change is **function type inference**
-when a generic function is used as a *value*:
+`[1.27]` did not change that. What `[1.27]` did generalize is **function type inference**,
+which applies when a generic function is used as a *value*:
 
 ```go
 func Map[S, D any](in []S, f func(S) D) []D { /* ... */ }
 
-// [1.27]: legal without writing Map[int, string] — the target function
-// type supplies both type arguments.
+// The target function type supplies both type arguments, so Map[int, string]
+// need not be written. Assignment like this has inferred since 1.21.
 var toStrings func([]int, func(int) string) []string = Map
 
-// The same inference now works for a conversion, and for a generic
-// function passed where a concrete func type is expected.
+// [1.27]: the same inference now also drives a CONVERSION to a named
+// function type, which previously needed Mapper(Map[int, string]).
 type Mapper func([]int, func(int) string) []string
 var m = Mapper(Map)
 ```
@@ -506,7 +506,7 @@ func demo(users []User, byID map[int]User) {
     // maps.Keys returns iter.Seq[int] [1.23], not a slice.
     ids := slices.Sorted(maps.Keys(byID)) // []int, ascending
     _ = ids
-    for _, u := range maps.Values(byID) {
+    for u := range maps.Values(byID) {       // iter.Seq[User]: ONE range variable
         _ = u
     }
 }
@@ -762,9 +762,9 @@ parameter that never appears in the parameter list is untouched by both stages, 
 `func Zero[T any]() T` can never be inferred — you must write `Zero[int]()`. Assignment
 context does not help either: `var x int = Zero()` is still an error, because Go has
 never driven a call's type arguments from the type of the variable it is assigned to.
-Go 1.27 generalized *function type inference*, which is a different thing: assigning the
-generic function itself to a `func([]int, func(int) string) []string` variable now
-infers from that target type.
+Go 1.27 generalized *function type inference*, which is a different thing: it is the
+generic function used as a **value** that infers from its target function type — an
+assignment, an argument, or, new in 1.27, a conversion to a named function type.
 
 **Q: Can a generic function be slower than the interface-based version it replaced?**
 **Short:** Yes — every pointer-shaped type argument shares one stencil and reaches its methods through a dictionary the inliner cannot see through.
@@ -926,8 +926,8 @@ must keep their input order.
 **Q: What is `iter.Seq` and how does it relate to generics?**
 **Short:** `iter.Seq[V]` is the generic function type `func(yield func(V) bool)` that range-over-func iterates, giving every container one shared iteration protocol.
 
-`iter.Seq[V]` is a type alias for `func(yield func(V) bool)`, and `iter.Seq2[K, V]` is
-its two-value form. Range-over-func `[1.23]` lets you write `for v := range seq` against
+`iter.Seq[V]` is a defined generic function type, `type Seq[V any] func(yield func(V) bool)`, and
+`iter.Seq2[K, V]` is its two-value form. Range-over-func `[1.23]` lets you write `for v := range seq` against
 either. Generics are what make this one protocol rather than dozens: `slices.Collect`,
 `slices.Sorted`, `maps.Keys`, `strings.SplitSeq` and any user-written iterator all
 produce the same parameterized type, so the consumers compose without adapters.
@@ -936,16 +936,17 @@ Returning `false` from `yield` stops the iteration, which is how `break` and an 
 standard bug in hand-written iterators.
 
 **Q: What changed about function type inference in Go 1.27?**
-**Short:** Inference from a target function type now works everywhere a generic function is assigned to a variable or converted, not only when it is passed as an argument.
+**Short:** A target function type now supplies the type arguments in every context a generic function is used as a value, conversions to a named function type included.
 
-Go 1.27 generalized function type inference to every context where a generic function is
-assigned to a variable of function type or converted to a matching function type.
-Previously that inference worked only when the generic function was passed as an
-argument to another function; assigning it to a variable required writing the type
-arguments explicitly. So `var f func([]int, func(int) string) []string = Map` now
-compiles where it once needed `Map[int, string]`, and the same holds for
-`Mapper(Map)`. It does not change inference for *calls* — a type parameter appearing
-only in a call's result type is still uninferable.
+Go 1.27 generalized function type inference so that a target function type supplies the
+type arguments in *every* context where a generic function is used as a value, rather
+than in the two the language had accumulated piecemeal. Assignment to a variable —
+`var f func([]int, func(int) string) []string = Map` — has inferred since Go 1.21, and so
+has passing a generic function as an argument; what 1.27 adds is the remaining contexts,
+notably a conversion to a named function type, `Mapper(Map)`. The rule to remember is
+simply that any function type the compiler can see as the target drives the inference.
+It does not change inference for *calls* — a type parameter appearing only in a call's
+result type is still uninferable.
 
 **Q: Can a union constraint contain an interface that has methods?**
 **Short:** No — a union with more than one term may not include an interface with methods, nor `comparable`, nor any interface embedding one.

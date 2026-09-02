@@ -597,47 +597,50 @@ An internal payments service reported a **0.00% error rate** on a validation end
 while the downstream ledger rejected 3.1% of its writes. The cause was one `:=` inside an `if`.
 
 ```go
-// BROKEN — the := inside the if block declares a SECOND err
-func handle(raw string) error {
+// BROKEN — the := inside the if block declares a SECOND amount AND a SECOND err.
+// This compiles cleanly, vets cleanly, and is wrong on every call.
+func parseAmount(raw string) (int64, error) {
     var err error
     var amount int64
 
     if strings.HasPrefix(raw, "amt=") {
         amount, err := strconv.ParseInt(raw[4:], 10, 64) // new amount AND new err
         if amount < 0 {
-            return errors.New("negative amount")
+            return 0, errors.New("negative amount")
         }
         _ = err // silences the compiler; the parse error dies here
     }
 
-    // err is still nil. amount is still 0. Both writes above went to inner copies.
-    return err
+    // Both inner variables died with the if block. The outer amount is still 0
+    // and the outer err is still nil, so every caller is told "0, no problem".
+    return amount, err
 }
 ```
 
 ```go
-// FIX — declare the new value, assign the existing err
-func handle(raw string) error {
+// FIX — declare the new value under a new name, assign to the outer variables
+func parseAmount(raw string) (int64, error) {
     var amount int64
 
     if strings.HasPrefix(raw, "amt=") {
         parsed, err := strconv.ParseInt(raw[4:], 10, 64)
         if err != nil {
-            return fmt.Errorf("parse amount: %w", err)
+            return 0, fmt.Errorf("parse amount: %w", err)
         }
         if parsed < 0 {
-            return errors.New("negative amount")
+            return 0, errors.New("negative amount")
         }
         amount = parsed // explicit assignment to the outer variable
     }
 
-    _ = amount
-    return nil
+    return amount, nil
 }
 ```
 
 The tell in the broken version is `_ = err`, which the author added to make the compiler stop
-complaining about an unused variable. **Treat `_ = err` as a code smell that means "I shadowed
+complaining about an unused variable. Note that nothing else complains: the outer `amount` and
+`err` are both read by the `return`, so the shadowed pair is invisible to the compiler and to
+`go vet`, and the endpoint reports success forever. **Treat `_ = err` as a code smell that means "I shadowed
 something".** Enable the `shadow` analyzer in `golangci-lint`; it is not part of the default `go vet`
 suite and CI will not catch this for you otherwise.
 

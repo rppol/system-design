@@ -120,9 +120,11 @@ it prevents *corruption*, not the memory *pin*, which only a copy breaks.
 
 ### Strategy 1: pre-size with `make` when the count is known
 
-`make([]T, 0, n)` allocates once. Appending `n` elements to a nil slice instead performs about
-`log2(n)` allocations and copies roughly `2n` elements in total. For `n = 1,000,000` that is the
-difference between one allocation and 21.
+`make([]T, 0, n)` allocates once. Appending `n` elements to a nil slice instead reallocates
+repeatedly — doubling while the slice is small, then growing by a factor that decays from about 1.5x
+toward 1.25x above 256 elements — so the copying adds up to several times `n`. For
+`n = 1,000,000` `[]int` that is the difference between one allocation and about **40**, and between
+zero copies and **over 4,000,000** elements copied.
 
 ### Strategy 2: `copy` or `slices.Clone` at ownership boundaries
 
@@ -326,8 +328,10 @@ produces this capacity sequence:
 |---|---|---|---|---|---|---|---|---|---|
 | `cap` | 1 | 2 | 4 | 4 | 8 | 8 | 16 | 16 | 32 |
 
-Growing a slice to 1,000,000 elements one at a time therefore costs about **21 allocations** and copies
-roughly 2,000,000 elements in total. `make([]int, 0, 1_000_000)` costs one allocation and zero copies.
+Growing a slice to 1,000,000 `int` elements one at a time therefore costs about **40 allocations** and
+copies **over 4,000,000** elements in total — roughly 4x the final length, not 2x, because the growth
+factor decays toward 1.25x rather than staying at 2x. `make([]int, 0, 1_000_000)` costs one allocation
+and zero copies.
 
 ### 6.3 Aliasing and the three-index slice expression
 
@@ -540,10 +544,14 @@ func fast(parts []string) string {
 ```
 
 With 10,000 parts of 10 bytes each, `slow` performs **10,000 allocations** and copies about
-**500 MB** in total, because step *i* copies the *i*-length prefix again. `fast` performs about **20**
-allocations without `Grow` and exactly **1** with it, copying 100 KB once. `b.String()` is zero-copy: it
+**500 MB** in total, because step *i* copies the *i*-length prefix again. `fast` performs about **23**
+allocations without `Grow` — copying about 380 KB along the way — and exactly **1** with it, copying
+100 KB once. `b.String()` is zero-copy: it
 converts the builder's internal `[]byte` to a string without copying, which is legal only because
-`Builder` refuses to be copied after first use (`go vet`'s `copylocks` enforces it).
+`Builder` refuses to be copied after first use — enforced at run time by its own `copyCheck`, which
+panics with `strings: illegal use of non-zero Builder copied by value` the first time you write
+through the copy. Note that `go vet`'s `copylocks` does **not** catch this: it fires only on types that contain a
+`sync.Locker`, and `strings.Builder` contains none.
 
 ### 6.12 Alignment, padding, and `fieldalignment`
 
@@ -892,7 +900,7 @@ about your file format.
 | `benchstat` | Compares benchmark runs with p-values | The only honest way to claim a layout change helped |
 | `go test -bench . -benchmem` | Allocations and bytes per operation | `allocs/op` is the number the `strings.Builder` and pre-sizing changes move |
 | `unsafe.Sizeof` / `Alignof` / `Offsetof` | Compile-time layout constants | Assert layout in a test so a future field insertion fails loudly |
-| `go vet` `copylocks` | Flags copying a value containing a lock | Catches `strings.Builder` and `sync.Mutex` copied by a value receiver |
+| `go vet` `copylocks` | Flags copying a value containing a `sync.Locker` | Catches a `sync.Mutex` or a struct embedding one copied by a value receiver; it does NOT see `strings.Builder`, which self-polices at run time |
 | `slices` / `maps` packages | `Clone`, `Grow`, `Delete`, `Sorted`, `Keys` | Correct implementations of the operations most often hand-written wrong |
 | `unique` `[1.23]` | Process-wide value interning | Collapses high-duplication strings to one canonical copy with pointer-speed equality |
 | `-race` | Data-race detector | A shared backing array mutated from two goroutines is a race even though both slices are "separate" |
@@ -925,12 +933,13 @@ assignment.
 **Q: How much does `append` grow a slice by?**
 **Short:** Small slices roughly double, and above 256 elements the factor ramps smoothly down from about 1.5x toward 1.25x.
 
-The old rule — double below 1,024 elements, then 1.25x — was replaced in Go 1.18. The threshold is now
-**256** elements, and above it the runtime applies `newcap += (newcap + 3*256) / 4` repeatedly, which
+The old rule — double below 1,024 elements, then 1.25x — was replaced in Go 1.18. The threshold is
+now **256** elements, and above it the runtime applies `newcap += (newcap + 3*256) / 4` repeatedly, which
 starts near 1.5x and decays toward 1.25x as the slice grows, removing the sharp discontinuity the old
 rule had. The result is then rounded up to a memory size class, so the capacity you observe is often
-larger than the formula alone predicts. Growing to 1,000,000 elements one at a time costs about 21
-allocations and copies roughly 2,000,000 elements; `make([]T, 0, n)` costs one allocation and zero
+larger than the formula alone predicts. The decaying factor costs more copying than the old doubling
+did: growing to 1,000,000 `int` elements one at a time takes about 40 allocations and copies over
+4,000,000 elements, roughly 4x the final length. `make([]T, 0, n)` costs one allocation and zero
 copies whenever `n` is known.
 
 **Q: What does the three-index slice expression `s[a:b:c]` do?**
@@ -1040,7 +1049,7 @@ copies, and the obligation not to mutate the bytes afterwards moves entirely ont
 
 Building 100 KB from 10,000 pieces of 10 bytes performs 10,000 allocations and copies roughly 500 MB,
 because step *i* copies the whole *i*-length prefix again. `strings.Builder` appends into one growing
-`[]byte` with amortized doubling — about 20 allocations and 200 KB copied — and its `String()` method
+`[]byte` through the same amortized growth — about 23 allocations and 380 KB copied — and its `String()` method
 converts without a copy, which it can do safely only because the type refuses to be copied after first
 use. Calling `b.Grow(n)` with an estimate reduces it to a single allocation. `bytes.Buffer` is the
 equivalent when you need to read back or write to an `io.Writer`.
@@ -1123,7 +1132,7 @@ run the race detector in CI.
 ## 13. Best Practices
 
 1. **Pre-size with `make([]T, 0, n)` whenever `n` is known or estimable.** One allocation instead of
-   about `log2(n)`, and no copying at all.
+   dozens, and no copying at all instead of several times `n` elements.
 2. **Always assign the result of `append`.** `s = append(s, x)`, and return the slice from any function
    that appends to a parameter.
 3. **Clone at every ownership boundary.** Cache writes, channel sends, struct field assignments, and any

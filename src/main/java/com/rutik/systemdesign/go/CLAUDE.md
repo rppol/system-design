@@ -232,7 +232,7 @@ exits 1). Validate anything you touch:
 | Trap | Why Go content hits it constantly |
 |------|-----------------------------------|
 | `;` in a `sequenceDiagram` Note or message | `for i := 0; i < n; i++` and `if err := f(); err != nil` are exactly the strings a writer pastes into a Note. `;` is a statement separator — the fence breaks. Paraphrase, or put the code in a ` ```go ` fence below the diagram |
-| `call` as a node id | Go diagrams are wall-to-wall call/defer/panic flows. `call` is reserved (`click X call fn()`). Use `doCall`, `rpcCall`, `invoke`. Also avoid `end`, `class`, `style`, `click`, `graph`, `subgraph`, `state`, `direction`, and especially `default` — every `select` diagram wants that one |
+| `call` as a node id **or as a `classDef` class name** | Go diagrams are wall-to-wall call/defer/panic flows. `call` is reserved (`click X call fn()`), and it fails in BOTH positions — `classDef call fill:...` does not parse either, which is easy to miss because the node ids all look fine. Use `doCall`, `rpcCall`, `invoke`, `entry`. Also avoid `end`, `class`, `style`, `click`, `graph`, `subgraph`, `state`, `direction`, and especially `default` — every `select` diagram wants that one |
 | `<-` in an unquoted label | `ch <- v` and `<-ch` collide with edge syntax. Quote any label containing `<-`, `->`, `<` or `>`, or write it in prose ("send on ch") |
 | `\"` in a label | Struct tags (`json:"id"`) are the temptation. Use `#quot;`, or keep tags out of diagrams |
 | Padding spaces after an edge label's closing `\|` | `a -->\|"send"\|   b` fails. The habit of aligning a column of edges — natural for anyone who writes good ASCII — is what broke the RSocket diagram. Mermaid is not ASCII art |

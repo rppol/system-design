@@ -520,8 +520,8 @@ for _, req := range reqs {
 `rate.Limiter` is a token bucket: `Wait(ctx)` blocks for one token, `Allow()` is the
 non-blocking "shed if empty" form, and `Reserve()` tells you how long you *would* wait so you
 can decide. A `time.Ticker` gives you none of that — no burst, no cancellation, and a tick that
-is silently dropped if you are not ready to receive it, since the ticker channel has capacity
-for one pending tick and drops the rest. Use a `Ticker` for a periodic housekeeping job; use
+is silently dropped if you are not ready to receive it, since the ticker channel is unbuffered
+`[1.27]` and a tick reaches only a receiver that is already waiting. Use a `Ticker` for a periodic housekeeping job; use
 `rate.Limiter` for anything shaping request flow. Broader strategy is in
 [Rate Limiting in Depth](../../backend/rate_limiting_in_depth/rate_limiting_in_depth.md).
 
@@ -622,7 +622,7 @@ in-flight job fail. Flushing traces first loses the spans for the shutdown itsel
 func TestWorkerRespectsShutdown(t *testing.T) {
     defer goleak.VerifyNone(t) // fails if the test leaves a goroutine behind
 
-    synctest.Run(func() { // [1.25]: fake clock, fake scheduling, zero real time
+    synctest.Test(t, func(t *testing.T) { // [1.25]: fake clock, zero real time
         ctx, cancel := context.WithCancel(context.Background())
         w := NewWorker(2)
         done := make(chan error, 1)
@@ -828,9 +828,7 @@ for {
     select {
     case msg := <-ch:
         handle(msg)
-        if !idle.Stop() {
-            <-idle.C // drain a timer that already fired, so Reset starts clean
-        }
+        idle.Stop()  // [1.23]: after Stop returns, nothing more can arrive on idle.C
         idle.Reset(1 * time.Minute)
     case <-idle.C:
         reportIdle()
@@ -845,9 +843,10 @@ timers/second with a 60-second duration, 840,000 dead timers were live at steady
 1.9 GB in eleven minutes and GC scan time went from 4 ms to 61 ms per cycle. Since `[1.23]` an
 unreferenced timer is collected immediately for modules declaring `go 1.23` or later, so the
 *accumulation* is gone — but the per-iteration `Timer` and channel allocation is not, and a
-14,000/second allocation you do not need is still a profile entry. The `Stop`-then-drain dance
-is also unambiguous now that time channels are always unbuffered `[1.27]`: once `Stop` returns
-false, exactly one value is waiting.
+14,000/second allocation you do not need is still a profile entry. The old `Stop`-then-drain dance
+is also gone: `[1.23]` made `Stop` guarantee that no value is sent on the channel after it returns, so
+`Stop` plus `Reset` is the whole idiom, and the `if !t.Stop() { <-t.C }` still circulating on the
+internet now deadlocks — an unbuffered time channel `[1.27]` buffered nothing for the drain to take.
 
 ### Pitfall 3 — the range over a channel nobody closed
 
@@ -1115,8 +1114,9 @@ timer heap until its duration elapsed, so a loop running 14,000 times a second w
 eleven minutes, with GC scan time rising from 4 ms to 61 ms. Since `[1.23]` an unreferenced timer
 becomes collectable immediately for modules on that language version, so the accumulation is
 gone. The allocation is not: one `Timer` plus one channel per iteration is still a real profile
-entry at high rates. The durable form is one `time.NewTimer` outside the loop with `Stop`,
-drain-if-needed, and `Reset` — unambiguous now that time channels are always unbuffered `[1.27]`.
+entry at high rates. The durable form is one `time.NewTimer` outside the loop with a plain `Stop`
+then `Reset` — `[1.23]` made `Stop` a guarantee that nothing more arrives on the channel, so the old
+`if !t.Stop() { <-t.C }` drain is not merely redundant, it blocks forever.
 
 **Q: How do you implement fan-in, and who closes the merged channel?**
 **Short:** Every producer writes to one shared output channel, and a single extra goroutine waits on a WaitGroup for all of them before closing it.
@@ -1196,7 +1196,7 @@ matters.
 `Wait(ctx)` blocks for a token and returns an error if the context ends first, `Allow()` is the
 non-blocking shed path, and `Reserve()` reports how long you would wait so you can decide. A
 `time.Ticker` fails on all three counts: no burst, no cancellation, and its channel holds only
-one pending tick so ticks are silently dropped when you are not ready to receive. Use a `Ticker`
+an unbuffered channel `[1.27]` so ticks are silently dropped when you are not ready to receive. Use a `Ticker`
 for periodic housekeeping — a metrics flush, a cache sweep — and a limiter for anything shaping
 request flow. The distributed version of the same problem is in
 [Rate Limiting in Depth](../../backend/rate_limiting_in_depth/rate_limiting_in_depth.md).
@@ -1204,7 +1204,7 @@ request flow. The distributed version of the same problem is in
 **Q: How do you test concurrent code without flakiness?**
 **Short:** Run it inside a synctest bubble `[1.25]`, where time is fake and the clock only advances once every goroutine in the bubble is blocked.
 
-`synctest.Run` gives deterministic scheduling and a synthetic clock, so a test of a 30-second
+`synctest.Test(t, fn)` gives deterministic scheduling and a synthetic clock, so a test of a 30-second
 drain deadline completes in microseconds and produces the same result on a loaded CI machine as
 on a laptop — which removes the `time.Sleep(100 * time.Millisecond)` that makes most concurrency
 tests flaky. `synctest.Wait` blocks until the rest of the bubble is idle, which is how you assert
@@ -1276,8 +1276,10 @@ tests pass, which is why that one dependency finds so much.
 **Context.** An event-enrichment service reads from a Kafka topic, calls a third-party
 geolocation API for each event, writes the enriched record to Postgres, and publishes to a
 downstream topic. Sustained load is 8,000 events/second across 12 pods. The geolocation vendor
-allows 400 requests/second per customer with a hard 429 above it. The Postgres pool is 40
-connections per pod. The first implementation had every defect in this module.
+allows 400 requests/second per customer — a fleet-wide ceiling, not a per-pod one — with a hard
+429 above it. The Postgres pool is 40 connections per pod. Source IPs repeat heavily: 97% of events
+carry an address already seen in the last hour, which is the fact the fixed version leans on. The
+first implementation had every defect in this module.
 
 **The failing version.**
 
@@ -1305,8 +1307,8 @@ func (s *Service) Run() {
 
 Four incidents, in the order they arrived:
 
-1. **The vendor rate limit turned into a self-inflicted outage.** With no limiter, 8,000
-   events/second produced 8,000 lookups/second against a 400/second allowance. The vendor
+1. **The vendor rate limit turned into a self-inflicted outage.** With no cache and no limiter, 8,000
+   events/second produced 8,000 lookups/second against a 400/second fleet-wide allowance. The vendor
    returned 429 for 95% of calls, the code logged and dropped each one, and **enrichment
    coverage fell to 4.8%** while the service reported healthy. It ran that way for nine days
    before a downstream analytics team noticed the null rate.
@@ -1334,13 +1336,14 @@ type Service struct {
     geo      GeoClient
     db       *sql.DB
     producer *kafka.Writer
-    limiter  *rate.Limiter // 380/s sustained, burst 40: deliberately under the 400 cap
+    geoCache *lru.Cache[string, Geo] // 97% hit rate: only misses reach the vendor
+    limiter  *rate.Limiter // 30/s per pod x 12 pods = 360/s, under the 400/s fleet cap
     ready    atomic.Bool
     log      *slog.Logger
 }
 
 const (
-    workers       = 24               // Little's Law: 380/s x 60ms p99 = 23 in flight
+    workers       = 24               // Little's Law: 667 events/s per pod x 35 ms p99 = 24
     queueDepth    = 256              // the backpressure point
     perEventBudget = 900 * time.Millisecond
     drainBudget   = 20 * time.Second // strictly inside the 30s Kubernetes grace period
@@ -1406,17 +1409,23 @@ func (s *Service) handle(ctx context.Context, msg kafka.Message) (err error) {
     ctx, cancel := context.WithTimeout(ctx, perEventBudget)
     defer cancel()
 
-    // Rate limit BEFORE the call, honouring cancellation while waiting.
-    if err := s.limiter.Wait(ctx); err != nil {
-        return fmt.Errorf("rate limit wait: %w", err)
-    }
-    geo, err := s.geo.Lookup(ctx, msg.IP)
-    if err != nil {
-        return fmt.Errorf("lookup %s: %w", msg.IP, err)
+    // The cache is what makes the vendor's ceiling reachable at all: 8,000 events/s
+    // fleet-wide, 3% of them a miss, is 240 lookups/s against a 400/s allowance.
+    geo, ok := s.geoCache.Get(msg.IP)
+    if !ok {
+        // Rate limit BEFORE the call, honouring cancellation while waiting.
+        if err := s.limiter.Wait(ctx); err != nil {
+            return fmt.Errorf("rate limit wait: %w", err)
+        }
+        geo, err = s.geo.Lookup(ctx, msg.IP)
+        if err != nil {
+            return fmt.Errorf("lookup %s: %w", msg.IP, err)
+        }
+        s.geoCache.Add(msg.IP, geo)
     }
 
-    // Two writes in parallel, with a buffer sized to the sender count so
-    // NEITHER send can block even if we return early.
+    // Two writes in parallel. errgroup owns both goroutines and Wait collects
+    // both results, so there is no result channel an early return could abandon.
     wg, wgctx := errgroup.WithContext(ctx)
     wg.Go(func() error { return s.db.InsertContext(wgctx, geo) })
     wg.Go(func() error { return s.producer.WriteMessages(wgctx, toMsg(geo)) })
@@ -1437,8 +1446,11 @@ func main() {
     runErr := make(chan error, 1)
     go func() { runErr <- svc.Run(ctx) }()
 
+    // runErr carries exactly one value. Receive it exactly once.
+    exited := false
     select {
     case err := <-runErr:
+        exited = true // the loop died on its own; there is nothing left to drain
         log.Error("worker loop exited", "err", err)
     case <-ctx.Done():
         log.Info("signal received", "cause", context.Cause(ctx)) // names SIGTERM [1.26]
@@ -1451,8 +1463,18 @@ func main() {
     shutCtx, cancel := context.WithTimeout(context.Background(), drainBudget)
     defer cancel()
 
-    if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
-        log.Error("drain", "err", err)
+    if !exited {
+        // ctx is already cancelled, so Run is unwinding. Give it the drain budget
+        // and NOT one second more -- an unbounded wait here is the bug this whole
+        // section exists to prevent.
+        select {
+        case err := <-runErr:
+            if err != nil && !errors.Is(err, context.Canceled) {
+                log.Error("drain", "err", err)
+            }
+        case <-shutCtx.Done():
+            log.Error("drain budget exceeded, severing", "budget", drainBudget)
+        }
     }
     srv.Shutdown(shutCtx)
     svc.producer.Close()
@@ -1464,18 +1486,19 @@ func main() {
 
 | Change | Measured effect |
 |--------|-----------------|
-| `rate.Limiter` at 380/s with burst 40 | 429 responses went from 95% of calls to 0. Enrichment coverage went from 4.8% to 99.97% |
+| Per-pod IP cache in front of a `rate.Limiter` at 30/s, burst 10 | Vendor calls fell from 8,000/s fleet-wide to 240/s, under the 400/s cap with room to spare. 429 responses went from 95% of calls to 0 and enrichment coverage from 4.8% to 99.97% |
 | 24 fixed workers instead of one goroutine per event | Steady-state goroutine count went from unbounded to 27. RSS flattened at 340 MB against a 4 GB limit |
-| Buffered result channel sized to the sender count | The one-goroutine-per-event leak disappeared entirely. `goleak.VerifyTestMain` now passes and guards it |
+| `errgroup` for the two parallel writes instead of a shared result channel | The one-goroutine-per-event leak disappeared entirely. `goleak.VerifyTestMain` now passes and guards it |
 | `queueDepth` of 256 with a blocking producer | Kafka consumer lag became the backpressure signal instead of pod memory. Lag peaked at 40,000 during a vendor slowdown and drained in 6 minutes with no restarts |
 | Per-event context budget of 900 ms | Postgres pool wait p99 went from 11 s to 1.2 ms, because a stuck write now fails and releases instead of queueing |
 | Commit after both writes | Deploy-time event loss went from ~2,100 per rollout to 0; redelivery replaced loss, and the insert was already idempotent on event id |
 | Deferred recover per unit of work | Three panics from a malformed IP field over the next quarter cost three failed events instead of three fleet-wide crash loops |
 | Ordered shutdown with a 20 s budget | Rolling deploys went from 22 minutes with data loss to 4 minutes clean |
 
-**The residual risk, named.** `workers = 24` is derived from the vendor's rate limit and a
-measured 60 ms p99. If the vendor's latency doubles, 24 workers can no longer sustain 380/s and
-the queue backs up — the service degrades correctly (lag rises, nothing crashes) but it does not
+**The residual risk, named.** `workers = 24` is derived from the per-pod event rate and a
+measured 35 ms p99, and the 400/s vendor ceiling is only reachable because 97% of lookups hit the
+cache. If write latency doubles, 24 workers can no longer sustain 667 events/second and
+the queue backs up; if traffic shifts toward first-seen IPs, lookups climb back toward the cap — the service degrades correctly (lag rises, nothing crashes) but it does not
 adapt. The next iteration sizes the pool from observed latency rather than a constant. That is a
 refinement of a system that already survives; the numbers above are what bounding, rate limiting,
 and ordered shutdown bought before any tuning at all.

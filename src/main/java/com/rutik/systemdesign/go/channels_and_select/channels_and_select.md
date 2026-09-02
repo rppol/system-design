@@ -138,7 +138,7 @@ both simpler and roughly 10x faster.
 | Operation | `nil` channel | Open, empty | Open, has room | Open, full | **Closed** |
 |---|---|---|---|---|---|
 | **Send** `ch <- v` | Blocks forever | Unbuffered: blocks for a receiver. Buffered: succeeds | Succeeds | Blocks | **panic: send on closed channel** |
-| **Receive** `v := <-ch` | Blocks forever | Blocks for a sender | Succeeds | Succeeds | Returns the zero value **immediately**, `ok == false` |
+| **Receive** `v := <-ch` | Blocks forever | Blocks for a sender | Succeeds | Succeeds | Drains the remaining buffered values first, then returns the zero value **immediately**, `ok == false` |
 | **`close(ch)`** | **panic: close of nil channel** | Succeeds; wakes all waiters | Succeeds | Succeeds | **panic: close of closed channel** |
 | **`len(ch)`** | `0` | `0` | Items currently buffered | `cap(ch)` | Items still buffered |
 | **`cap(ch)`** | `0` | The capacity | The capacity | The capacity | The capacity |
@@ -311,13 +311,15 @@ deadlocking against each other.
 xychart-beta
     title "Nanoseconds per operation, order of magnitude — measure on your own box"
     x-axis ["atomic.AddInt64", "sync.Mutex uncontended", "buffered chan same goroutine", "unbuffered chan ping-pong"]
-    y-axis "ns per op" 0 --> 320
-    bar [5, 18, 60, 250]
+    y-axis "ns per op" 0 --> 120
+    bar [5, 18, 45, 80]
 ```
 
-An unbuffered channel handoff between two goroutines costs roughly 50x an atomic increment, because it
-involves a lock, a copy, a `gopark` and a `goready` — a full scheduler round trip. That ratio, not the
-absolute figures, is the number to remember when someone proposes a channel to guard a counter.
+An unbuffered channel handoff between two goroutines costs roughly 15x an atomic increment, because it
+involves a lock, a copy, a `gopark` and a `goready` — a full scheduler round trip. The bars above are
+`go test -bench` medians on an idle Apple M3 with `GOMAXPROCS=8`; a contended box or an older x86 moves
+every bar, so it is that ratio, not the absolute figures, that is the number to remember when someone
+proposes a channel to guard a counter.
 
 ---
 
@@ -755,9 +757,7 @@ for {
     select {
     case v := <-ch:
         use(v)
-        if !timer.Stop() {
-            <-timer.C           // drain a timer that already fired
-        }
+        timer.Stop()        // [1.23]: after Stop returns, t.C can never fire
         timer.Reset(50 * time.Millisecond)
     case <-timer.C:
         flush()
@@ -772,6 +772,13 @@ in a loop pinned every timer in the runtime heap for a full hour. And time chann
 unbuffered** `[1.27]`, with the `asynctimerchan` GODEBUG that used to restore the old buffered behaviour
 permanently removed — so a timer channel delivers its value only to a receiver that is actually there,
 and the "I got a stale tick" class of bug is gone.
+
+That second fact is why the `Reset` above is two lines and not four. For a module declaring `go 1.23`
+or later, `Stop` guarantees that **no value is sent on `t.C` after it returns**, so `t.Stop()` followed
+by `t.Reset(d)` is the whole idiom. Writing `if !t.Stop() { <-t.C }` — the pre-1.23 drain, still all
+over the internet — now deadlocks on the branch it was written to protect: `Stop` returning false means
+the timer already fired into a channel nobody was receiving on, and on an unbuffered channel that value
+was never buffered, so the drain blocks forever.
 
 For anything request-scoped, prefer a `context` deadline over a hand-rolled timer: it propagates across
 call and RPC boundaries and it cancels the downstream work instead of merely abandoning it.
@@ -888,7 +895,7 @@ blocking send sits in a `select` with a cancellation case. Those two rules elimi
 // cannot be read without another round trip.
 type chanCounter struct{ inc chan int }
 
-func (c *chanCounter) Add() { c.inc <- 1 }   // ~250 ns and a goroutine hop
+func (c *chanCounter) Add() { c.inc <- 1 }   // ~80 ns and a goroutine hop
 
 // FIX: the shared state never changes owner, so protect it in place.
 type counter struct{ n atomic.Int64 }
@@ -954,7 +961,7 @@ how long. "I added a buffer because it was deadlocking" is a bug report, not a d
 
 | | Channel | `sync.Mutex` | `sync/atomic` |
 |---|---|---|---|
-| Cost per operation | ~60 ns buffered, ~250 ns unbuffered handoff | ~18 ns uncontended | ~5 ns |
+| Cost per operation | ~45 ns buffered, ~60-100 ns unbuffered handoff | ~15-25 ns uncontended | ~5 ns |
 | What it expresses | Ownership transfer and signalling | Mutual exclusion over data in place | A single word updated in place |
 | Needs a goroutine | Usually one on the other side | No | No |
 | Composes with `select` | Yes — the only primitive that does | No | No |
@@ -989,7 +996,7 @@ it has to be a channel. `mu.Lock()` cannot take a context.
 
 ### Do NOT use a channel when:
 - You are protecting fields that stay in place. Use `sync.Mutex`, or `sync/atomic` for a single word.
-- The operation is a simple counter, gauge or flag. An atomic is 50x cheaper and needs no goroutine.
+- The operation is a simple counter, gauge or flag. An atomic is more than 10x cheaper and needs no goroutine.
 - You are building a queue that needs priority, deduplication, delayed re-add or rate limiting. A
   channel is strictly FIFO with none of those; use a real workqueue structure.
 - You would need to check "is it closed" before sending. That check does not exist, and wanting it means
@@ -1317,8 +1324,8 @@ send establishes a happens-before edge in both directions — the sender knows t
 The `select` statement evaluates all of its channel expressions on every pass, so `case <-time.After(d)`
 constructs a new timer each iteration and inserts it into the runtime's timer heap. At 60,000
 iterations per second that is measurable in a heap profile and in GC pacing. Replace it with one
-`time.NewTimer` created outside the loop and `Reset` inside it, draining `t.C` when you stop a timer
-that may already have fired, or hoist the deadline into a `context` when the operation is request-scoped.
+`time.NewTimer` created outside the loop with a plain `t.Stop()` then `t.Reset(d)` inside it, or hoist
+the deadline into a `context` when the operation is request-scoped.
 Since timers became eagerly collectable while unreachable `[1.23]`, the old and much worse form of this
 bug — a one-hour timeout pinning a timer for a full hour on every iteration — no longer occurs, so what
 remains is allocation churn rather than retention.
@@ -1353,16 +1360,17 @@ that never reallocates, with `sendx` and `recvx` wrapping modulo `dataqsiz`. `se
 linked lists of `sudog` structs, each representing one parked goroutine and carrying a pointer to that
 goroutine's value or destination. The `lock` is the fact people most often get wrong in interviews:
 channels are not lock-free, every single operation acquires that mutex, and that is precisely why a
-channel costs an order of magnitude more than a `sync.Mutex` for guarding a simple counter. An
+channel costs several times more than a `sync.Mutex` for guarding a simple counter. An
 unbuffered channel has `dataqsiz == 0` and `buf == nil`, so it is only the two wait queues and the lock.
 
 **Q: Is a channel faster or slower than a mutex?**
-**Short:** Considerably slower — roughly 250 ns for an unbuffered handoff against roughly 18 ns for an uncontended mutex and 5 ns for an atomic.
+**Short:** Slower — roughly 60-100 ns for an unbuffered handoff against roughly 15-25 ns for an uncontended mutex pair and 5 ns for an atomic.
 
 The channel is doing strictly more work: it takes a lock of its own, copies the element, parks one
 goroutine and readies another, which is a full scheduler round trip. Buffered sends within one goroutine
-avoid the park and land nearer 60 ns, but they are still lock plus copy. Treat those figures as orders
-of magnitude and benchmark on your own hardware before quoting them. The right conclusion is not "avoid
+avoid the park and land nearer 45 ns, but they are still lock plus copy. Those are `go test -bench`
+medians on an idle Apple M3; treat them as a ratio, not a constant, and benchmark on your own hardware
+before quoting them. The right conclusion is not "avoid
 channels" — it is that the two primitives answer different questions. A channel transfers ownership and
 composes with `select`, so it can be cancelled or timed out. A mutex protects data that stays in place
 and cannot be cancelled at all, since `Lock` takes no context.
@@ -1484,15 +1492,16 @@ transfer, for signalling, for bounding concurrency, and whenever the operation m
    condition. A closed channel left in a `select` spins a core at 100%.
 7. **Never use `len(ch)` for control flow.** Use `select` with `default`. Export `len(ch)` and `cap(ch)`
    as metrics and alert on depth — that is the one legitimate use.
-8. **Hoist timers out of hot loops.** One `time.NewTimer` plus `Reset`, or a `context` deadline. Drain
-   `t.C` when stopping a timer that may already have fired.
+8. **Hoist timers out of hot loops.** One `time.NewTimer` plus `t.Stop()` and `t.Reset(d)`, or a
+   `context` deadline. `[1.23]` made `Stop` a guarantee that nothing more arrives on `t.C`, so there is
+   nothing to drain and a drain would block.
 9. **Bound anything unbounded.** A buffered channel as a semaphore, or `errgroup.Group.SetLimit(n)`.
    Ranging over an unbounded input with a `go` statement per item is a fork bomb.
 10. **Add `defer goleak.VerifyNone(t)` to packages that spawn goroutines**, and check
     `/debug/pprof/goroutine?debug=1` or the `goroutineleak` profile `[1.27]` when investigating memory
     growth that heap profiles cannot explain.
-11. **Do not use a channel to guard state that stays in place.** A `sync.Mutex` is roughly 14x cheaper
-    and an atomic roughly 50x, and neither needs a goroutine on the other side.
+11. **Do not use a channel to guard state that stays in place.** A `sync.Mutex` is roughly 4x cheaper
+    and an atomic more than 10x, and neither needs a goroutine on the other side.
 12. **Test concurrency with `-race` and `testing/synctest` `[1.25]`.** The fake clock makes timeout and
     ticker logic deterministic instead of flaky.
 
@@ -1565,7 +1574,7 @@ func (e *enricher) run() {
     }
 }
 
-// BROKEN #3: a fresh Timer per iteration, ~22,000 times per second per pod.
+// BROKEN #3: a fresh Timer per iteration, ~730 times per second per pod.
 func (w *writer) run() {
     batch := make([]Order, 0, 500)
     for {
@@ -1593,6 +1602,7 @@ func (w *writer) run() {
 type pipeline struct {
     raw, valid, enriched chan Order
     done                 chan struct{}
+    writerDone           chan struct{}   // closed by the single writer when it returns
     once                 sync.Once
     readers, validators, enrichers sync.WaitGroup
 }
@@ -1676,12 +1686,7 @@ func (w *writer) run() {
             w.flush(batch)
             batch = batch[:0]
         }
-        if !t.Stop() {
-            select {
-            case <-t.C:        // drain only if it had already fired
-            default:
-            }
-        }
+        t.Stop()           // [1.23]: nothing can arrive on t.C after this returns
         t.Reset(200 * time.Millisecond)
     }
 

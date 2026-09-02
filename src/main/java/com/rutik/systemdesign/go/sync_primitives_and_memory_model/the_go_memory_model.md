@@ -1020,8 +1020,12 @@ func (r *Ring) Observe(ns int64, route string) {
 
 func (r *Ring) Drain() []sample {
     n := r.head.Load()
-    out := make([]sample, 0, 4096)
-    for i := n - 4096; i < n; i++ {
+    lo := uint64(0)
+    if n > 4096 { // head is a uint64: n-4096 wraps before the ring has filled
+        lo = n - 4096
+    }
+    out := make([]sample, 0, n-lo)
+    for i := lo; i < n; i++ {
         out = append(out, r.buf[i%4096]) // plain read, no edge to the writer
     }
     return out
@@ -1073,8 +1077,12 @@ func (r *Ring) Observe(ns int64, route string) {
 
 func (r *Ring) Drain() []sample {
     n := r.head.Load()
-    out := make([]sample, 0, 4096)
-    for i := n - 4096; i < n; i++ {
+    lo := uint64(0)
+    if n > 4096 { // head is a uint64: n-4096 wraps before the ring has filled
+        lo = n - 4096
+    }
+    out := make([]sample, 0, n-lo)
+    for i := lo; i < n; i++ {
         s := &r.buf[i%4096]
         before := s.seq.Load()
         if before%2 == 1 {

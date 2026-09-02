@@ -431,7 +431,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func checksum(ctx context.Context, blocks [][]byte) ([]byte, error) {
     h := sha256.New()
     for i, b := range blocks {
-        if i%1024 == 0 { // one atomic load every 1024 blocks, not every block
+        if i%1024 == 0 { // one mutex-guarded Err() every 1024 blocks, not every block
             if err := ctx.Err(); err != nil {
                 return nil, err
             }
@@ -1026,7 +1026,7 @@ first returned error.
 **Q: How do you test deadline-dependent code without real sleeps?**
 **Short:** Run it inside a `testing/synctest` bubble `[1.25]`, where the clock is fake and only advances once every goroutine in the bubble is blocked.
 
-`synctest.Run` executes a function in a bubble with a synthetic clock starting at a fixed
+`synctest.Test(t, fn)` runs `fn` in a bubble with a synthetic clock starting at a fixed
 instant. When every goroutine inside is durably blocked — on a channel, a mutex, or a timer —
 the fake clock jumps forward to the next timer, so a test of a 30-second deadline finishes in
 microseconds and is deterministic rather than flaky under CI load. `synctest.Wait` blocks
@@ -1122,10 +1122,12 @@ Four incidents, in the order they arrived:
    outbound connections for up to 5 seconds. In-flight requests per pod went from 190 to
    3,100, and the outbound HTTP transport's connection pool was fully saturated.
 
-3. **RSS climbed 340 MB per hour.** The discarded cancel funcs from
-   `context.WithTimeout(ctx, 5*time.Second)` left one `timerCtx` per backend per request
-   attached to the parent for the full 5 seconds. At 3,200 requests/second that is roughly
-   64,000 live nodes at steady state, each with an armed timer.
+3. **RSS sat 340 MB above baseline and never came back down between spikes.** The discarded
+   cancel funcs from `context.WithTimeout(ctx, 5*time.Second)` left one `timerCtx` per backend
+   per request attached to the parent for the full 5 seconds. At 178 requests/second per pod —
+   3,200 across 18 — that is roughly 3,600 live nodes per pod at steady state, each with an
+   armed timer, and each pinning the query string and whatever partial results had merged.
+   Under the degradation in incident 1 the same arithmetic reached 12,400 nodes per pod.
 
 4. **One failing backend cost the full 5 seconds anyway.** When Elasticsearch returned an
    error in 12 ms, the other three kept running to their own timeouts. Nothing told them the
