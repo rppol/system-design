@@ -11,7 +11,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ---
 
-## Module List — 38 modules (9 Phases)
+## Module List — 50 modules (9 Phases)
 
 ### Phase 1 — Networking Fundamentals
 
@@ -37,7 +37,14 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
+| `performance_engineering_method/` | Method taxonomy, USE/RED, hypothesis discipline, the 20-minute triage, when to descend to hardware | 23 |
+| `latency_budgets_and_slo_math/` | Serial vs parallel composition, the speed-of-light floor, per-hop allocation, deadline propagation | 22 |
+| `tail_latency_and_fan_out/` | Tail amplification `1-(1-p)^n`, hedged and tied requests, non-load tail sources, mergeable histograms | 20 |
+| `queueing_theory_for_capacity/` | The response-time curve, the knee as utilization nears 1, Kingman's VUT, pooled vs split queues | 19 |
+| `benchmarking_methodology/` | The A/A test, run-to-run variance, confidence intervals, steady state, benchmarks that lie | 20 |
 | `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 16 |
+| `off_cpu_and_ebpf_analysis/` | Blocked-time profiling, run-queue latency, eBPF attach points, bpftrace recipes, USDT probes | 18 |
+| `os_and_io_performance/` | Latency numbers, syscall and context-switch cost, page cache, fsync, CFS throttling, Nagle + delayed ACK | 19 |
 | `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 |
 | `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 17 |
 | `async_and_concurrency_patterns/` | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 |
@@ -76,6 +83,9 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `backend_testing_strategies/` | Testing pyramid, test doubles, contract testing, mutation testing | 16 |
 | `load_and_performance_testing/` | k6, Gatling, JMeter, percentile analysis, coordinated omission | 16 |
+| `workload_characterization_and_load_modelling/` | Traffic-mix extraction, Zipfian key skew, arrival burstiness, shadow traffic, proving the model | 20 |
+| `performance_regression_detection/` | Change-point detection, benchmark result stores, noise reduction, statistical bisect, canary analysis | 20 |
+| `performance_incident_playbook/` | The first ten minutes, mitigate before diagnose, the USE triage tree, the performance postmortem | 20 |
 | `chaos_engineering/` | Steady-state hypothesis, fault injection, blast radius, GameDay | 16 |
 
 ### Phase 8 — Event-Driven Architecture
@@ -102,7 +112,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 38 modules = the "9-Phase Learning Path")
+`README.md` documents the **Full Path** (all 50 modules = the "9-Phase Learning Path")
 plus two curated tiers: **Senior** (22 modules) and **Principal** (18). They are
 different cuts, not nested depths — senior is the craft (build it, debug it at 3am),
 principal is the judgment (which approach at what cost, what you tell a team *not* to
@@ -127,7 +137,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 
 ---
 
-## Case Studies — 5 Total
+## Case Studies — 10 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 

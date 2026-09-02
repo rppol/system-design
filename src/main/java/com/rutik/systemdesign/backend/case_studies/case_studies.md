@@ -1,6 +1,6 @@
 # Backend Engineering — Case Studies
 
-Five end-to-end backend design case studies, each covering a real-world scenario with production-grade architecture, implementation tradeoffs, and interview discussion points.
+Ten end-to-end backend design case studies, each covering a real-world scenario with production-grade architecture, implementation tradeoffs, and interview discussion points.
 
 ---
 
@@ -62,6 +62,12 @@ Grouped by primary engineering concern, not product category:
 |------------|----------------|----------------|
 | [Design a Webhook Delivery Service](design_webhook_delivery_service/design_webhook_delivery_service.md) | At-least-once delivery to endpoints you do not control | Transactional outbox to per-endpoint queues, HMAC signing with a dual-secret rotation window, an exponential retry ladder with circuit breaking and auto-disable, a customer-visible delivery log, and an SSRF-safe egress path. |
 
+### Performance Engineering
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a Continuous Performance Platform](design_continuous_performance_platform/design_continuous_performance_platform.md) | Making performance regressions visible across a few hundred services | The internal platform that produces the data every Performance Engineering module consumes: always-on pprof ingest with symbolize-at-write and columnar service-hour segments (a 92 s query becomes 1.4 s), a benchmark result store that keeps sample arrays and an environment fingerprint, change-point detection with fleet-wide false-discovery control, and cost-estimated automated bisect feeding a differential profile. Also the two things that actually decide whether such a platform survives: the sampling-overhead budget as a dollar figure, and default-on adoption. |
+
 ---
 
 ## Cross-Cutting / Shared Primitives
@@ -79,6 +85,10 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 | Redis sorted sets + fan-out strategy | Feed Service | `../caching_strategies_deep_dive/caching_strategies_deep_dive.md` | 3 — Performance |
 | Cursor pagination | Feed Service | `../rest_api_design/rest_api_design.md`, `../query_optimization/query_optimization.md` | 2 / 4 |
 | Strangler fig, branch-by-abstraction, feature flags | Microservices Migration | `../microservices_fundamentals/microservices_fundamentals.md`, `../distributed_system_operational_patterns/distributed_system_operational_patterns.md` | 9 — Microservices |
+| Continuous profiling, flame graphs, sampling-overhead budget | Continuous Performance Platform | `../performance_profiling/performance_profiling.md`, `../../hld/observability/continuous_profiling.md` | 3 — Performance |
+| Benchmark noise floor, A/A validation, sample sizing | Continuous Performance Platform | `../benchmarking_methodology/benchmarking_methodology.md` | 3 |
+| Change-point detection, statistical bisect, the ratchet | Continuous Performance Platform | `../performance_regression_detection/performance_regression_detection.md` | 3 |
+| Off-CPU and eBPF stack capture | Continuous Performance Platform | `../off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md` | 3 |
 
 ---
 
@@ -100,15 +110,20 @@ flowchart LR
     feed(["design_feed_service<br/>(standalone: fan-out + Redis)"])
     llmapi(["design_llm_serving_api<br/>(standalone: admission control + SSE)"])
     webhook(["design_webhook_delivery_service<br/>(standalone: outbox + retry ladder)"])
+    ratelimit(["design_rate_limiter_service<br/>(standalone: token bucket as a shared service)"])
+    saas(["design_multi_tenant_saas_backend<br/>(standalone: tenant isolation + noisy neighbour)"])
+    perfplat(["design_continuous_performance_platform<br/>(standalone: profile ingest + change-point detection)"])
 
     class booking,feed base
     class llmapi,webhook req
     class payment,migration train
     class eventOrder io
     class msFund frozen
+    class ratelimit,saas mathOp
+    class perfplat lossN
 ```
 
-Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service`, `design_microservices_migration`, `design_llm_serving_api` and `design_webhook_delivery_service` share no patterns with the others and can each be read standalone.
+Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain. Everything else is standalone: `design_feed_service`, `design_microservices_migration`, `design_llm_serving_api`, `design_webhook_delivery_service`, `design_rate_limiter_service`, `design_multi_tenant_saas_backend` and `design_continuous_performance_platform` share no patterns with the others and can each be read on their own. `design_continuous_performance_platform` is the odd one out in a second way as well: it is not a product design at all but an internal platform, and it reads best alongside the section's Performance Engineering modules rather than alongside the other case studies.
 
 ---
 
@@ -130,6 +145,9 @@ Arrows point from the case study that originates a pattern to the one that reuse
 | Design an inference batching system for a single GPU | [design_llm_serving_api](design_llm_serving_api/design_llm_serving_api.md) |
 | Design a webhook / event delivery system | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
 | Design a notification delivery service | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
+| Design a performance / profiling platform | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
+| Design a continuous profiling system (Google-Wide Profiling style) | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
+| Design a CI performance-regression detection system | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
 
 ---
 

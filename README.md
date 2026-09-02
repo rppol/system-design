@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, **CS Fundamentals**, and **Soft Skills & Leadership** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Go**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, **CS Fundamentals**, and **Soft Skills & Leadership** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -498,6 +498,71 @@ A comprehensive, one-stop reference for mastering **FastAPI** and the **ASGI** p
 | [Design an ML Inference API (FastAPI)](src/main/java/com/rutik/systemdesign/fastapi/case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async cache, `lifespan` model loading, streaming responses |
 
 See the [FastAPI Master Index](src/main/java/com/rutik/systemdesign/fastapi/README.md) for the full learning path, version matrix, and cross-reference map.
+
+---
+
+### Go — Senior Engineer & Interview Prep Guide
+
+A guide to **pure Go** — the language nearly every system in the DevOps and Technologies sections is written in (Kubernetes, Docker, Terraform, Prometheus, etcd, Consul, Vault, Cilium). Covers the language core, the GMP scheduler and the memory model, the runtime and its concurrent garbage collector, escape analysis and profiling, and the production-grade standard library that makes a Go service a single static binary. Targets **Go 1.27** (released 2026-08-19).
+
+#### Phase 1 — Language Core
+| Module | Key Concepts |
+|--------|-------------|
+| [Go Fundamentals & Idioms](src/main/java/com/rutik/systemdesign/go/go_fundamentals_and_idioms/go_fundamentals_and_idioms.md) | Zero values, `:=` shadowing, `defer` LIFO and argument evaluation at defer time, value semantics, `iota` |
+| [Data Structures & Memory Layout](src/main/java/com/rutik/systemdesign/go/data_structures_and_memory_layout/data_structures_and_memory_layout.md) | Slice header (ptr/len/cap), `append` aliasing, Swiss-table maps, string vs `[]byte` vs `rune`, struct padding |
+| [Interfaces, Methods & Embedding](src/main/java/com/rutik/systemdesign/go/interfaces_methods_and_embedding/interfaces_methods_and_embedding.md) | Method sets, pointer vs value receivers, the typed-nil trap, `itab`, embedding, `io.Reader`/`io.Writer` |
+| [Errors & Panics](src/main/java/com/rutik/systemdesign/go/errors_and_panics/errors_and_panics.md) | Errors as values, `%w` wrapping, `errors.Is`/`As`/`Join`/`AsType`, panic/recover boundary discipline |
+| [Generics & Type Parameters](src/main/java/com/rutik/systemdesign/go/generics_and_type_parameters/generics_and_type_parameters.md) | Type parameters, `~` approximation, inference limits, `comparable`, generic methods, when NOT to use them |
+| [Packages, Modules & Tooling](src/main/java/com/rutik/systemdesign/go/packages_modules_and_tooling/packages_modules_and_tooling.md) | `go.mod`, minimal version selection, checksum DB, workspaces, build tags, `go fix` modernizers |
+
+#### Phase 2 — Concurrency
+| Module | Key Concepts |
+|--------|-------------|
+| [Goroutines & the Scheduler](src/main/java/com/rutik/systemdesign/go/goroutines_and_the_scheduler/goroutines_and_the_scheduler.md) | GMP model, run queues and work stealing, `sysmon`, async preemption, 2 KB stacks, container-aware `GOMAXPROCS` |
+| [Channels & `select`](src/main/java/com/rutik/systemdesign/go/channels_and_select/channels_and_select.md) | `hchan` internals, buffered vs unbuffered handoff, close semantics, nil-channel disabling, directional types |
+| [Sync Primitives & the Memory Model](src/main/java/com/rutik/systemdesign/go/sync_primitives_and_memory_model/sync_primitives_and_memory_model.md) | `Mutex` starvation mode, `RWMutex` writer starvation, typed atomics, `sync.Map`, `sync.Pool`, `-race` |
+| [Context & Cancellation](src/main/java/com/rutik/systemdesign/go/context_and_cancellation/context_and_cancellation.md) | The context tree, `WithTimeout`/`WithCancelCause`, deadline propagation across RPCs, the `Value` abuse rule |
+| [Concurrency Patterns & Pitfalls](src/main/java/com/rutik/systemdesign/go/concurrency_patterns_and_pitfalls/concurrency_patterns_and_pitfalls.md) | Pipelines, bounded worker pools, `errgroup`, goroutine leaks and the `goroutineleak` profile, graceful shutdown |
+
+#### Phase 3 — Runtime & Performance
+| Module | Key Concepts |
+|--------|-------------|
+| [The Runtime & Garbage Collector](src/main/java/com/rutik/systemdesign/go/the_runtime_and_garbage_collector/the_runtime_and_garbage_collector.md) | Tricolor mark-sweep, hybrid write barrier, the pacer, `GOGC` vs `GOMEMLIMIT`, Green Tea GC |
+| [Escape Analysis & Performance](src/main/java/com/rutik/systemdesign/go/escape_analysis_and_performance/escape_analysis_and_performance.md) | `-gcflags=-m`, stack vs heap, interface boxing, PGO, inlining budget, bounds-check elimination |
+| [Profiling & Tracing](src/main/java/com/rutik/systemdesign/go/profiling_and_tracing/profiling_and_tracing.md) | `net/http/pprof`, CPU/heap/block/mutex/goroutine profiles, pprof labels, `benchstat`, continuous profiling |
+| [Testing, Benchmarking & Fuzzing](src/main/java/com/rutik/systemdesign/go/testing_benchmarking_and_fuzzing/testing_benchmarking_and_fuzzing.md) | Table-driven tests, `t.Cleanup`, `httptest`, `testing/synctest`, native fuzzing, `b.Loop`, golden files |
+
+#### Phase 4 — Standard Library & Services
+| Module | Key Concepts |
+|--------|-------------|
+| [`net/http` Server](src/main/java/com/rutik/systemdesign/go/net_http_server/net_http_server.md) | `ServeMux` method and wildcard patterns, middleware as closures, all four `Server` timeouts, `Shutdown`, HTTP/2 |
+| [HTTP Clients & Resilience](src/main/java/com/rutik/systemdesign/go/http_clients_and_resilience/http_clients_and_resilience.md) | `Transport` pooling and the `MaxIdleConnsPerHost = 2` default, the unclosed-body fd leak, retries, `httptrace` |
+| [JSON & Serialization](src/main/java/com/rutik/systemdesign/go/json_and_serialization/json_and_serialization.md) | Reflection cost, struct tags, `omitempty` vs `omitzero`, streaming `Decoder`, `encoding/json/v2` and `jsontext` |
+| [`database/sql` & Data Access](src/main/java/com/rutik/systemdesign/go/database_sql_and_data_access/database_sql_and_data_access.md) | The pool that is not a driver: conn limits and lifetimes, the `rows.Close()` leak, pgbouncer, `pgx`/`sqlc`/GORM |
+| [gRPC & Protobuf in Go](src/main/java/com/rutik/systemdesign/go/grpc_and_protobuf_in_go/grpc_and_protobuf_in_go.md) | `protoc-gen-go`, the four RPC modes, unary and stream interceptors, `status`/`codes`, deadlines, `connect-go`, buf |
+| [Observability & OpenTelemetry](src/main/java/com/rutik/systemdesign/go/observability_and_opentelemetry/observability_and_opentelemetry.md) | `log/slog` handlers and context attrs, OTel Go SDK, propagation through `context`, `runtime/metrics`, cardinality |
+
+#### Phase 5 — Interop, Judgment & Production
+| Module | Key Concepts |
+|--------|-------------|
+| [Time, I/O & Stdlib Essentials](src/main/java/com/rutik/systemdesign/go/time_io_and_stdlib_essentials/time_io_and_stdlib_essentials.md) | Monotonic vs wall clock, `Timer`/`Ticker` leaks, the `io` interface algebra, `bufio`, `signal.NotifyContext`, `embed` |
+| [Reflection & `unsafe`](src/main/java/com/rutik/systemdesign/go/reflection_and_unsafe/reflection_and_unsafe.md) | `reflect.Type`/`Value`, settability, the three laws of reflect, `unsafe.Pointer`'s valid patterns, `go:linkname` |
+| [cgo & FFI](src/main/java/com/rutik/systemdesign/go/cgo_and_ffi/cgo_and_ffi.md) | The cgo calling convention and its per-call cost, pointer-passing rules, `CGO_ENABLED=0`, `purego`, WASM/`wasip1` |
+| [Idiomatic API & Package Design](src/main/java/com/rutik/systemdesign/go/idiomatic_api_and_package_design/idiomatic_api_and_package_design.md) | Accept interfaces return structs, consumer-defined interfaces, functional options, `internal/`, DI without a framework |
+| [Build, Deployment & Supply Chain](src/main/java/com/rutik/systemdesign/go/build_deployment_and_supply_chain/build_deployment_and_supply_chain.md) | Static builds, distroless images (~10-20 MB), `-ldflags`/`-trimpath`, cross-compilation, `govulncheck`, SBOM |
+| [Go vs Java vs Python](src/main/java/com/rutik/systemdesign/go/go_vs_java_and_python/go_vs_java_and_python.md) | CSP vs virtual threads vs asyncio, concurrent GC vs G1/ZGC vs refcounting, error values vs exceptions, which to pick |
+
+#### Go Case Studies
+| Case Study | Focus |
+|-----------|-------|
+| [Design a High-Throughput Ingest Service](src/main/java/com/rutik/systemdesign/go/case_studies/design_a_high_throughput_ingest_service.md) | 500k events/s in one binary: zero-allocation hot path, bounded workers, sharded batching, `GOMEMLIMIT`, backpressure |
+| [Design a Kubernetes Controller](src/main/java/com/rutik/systemdesign/go/case_studies/design_a_kubernetes_controller.md) | `controller-runtime` reconcile loop, informers, workqueue, CRDs, leader election, idempotent reconcile, finalizers |
+| [Design a Realtime WebSocket Fan-out](src/main/java/com/rutik/systemdesign/go/case_studies/design_a_realtime_websocket_fanout.md) | 1M connections in one process: goroutine cost arithmetic, sharded hub, write-buffer pooling, slow-consumer eviction |
+| [Design a Cross-Platform CLI Tool](src/main/java/com/rutik/systemdesign/go/case_studies/design_a_cross_platform_cli_tool.md) | Single-binary CLI: command tree, config precedence, TTY detection, `signal.NotifyContext`, release matrix |
+| [Design a gRPC Edge Proxy](src/main/java/com/rutik/systemdesign/go/case_studies/design_a_grpc_edge_proxy.md) | L7 Go proxy: dynamic config, per-RPC interceptors, hot reload, `SO_REUSEPORT` zero-downtime restart, p99 under GC |
+| [Design an Embedded KV Store](src/main/java/com/rutik/systemdesign/go/case_studies/design_an_embedded_kv_store.md) | LSM/WAL in Go: mmap vs `read`, why millions of live pointers wreck GC scan time, off-heap value logs, crash recovery |
+
+See the [Go Master Index](src/main/java/com/rutik/systemdesign/go/README.md) for the full learning path, the Senior/Principal tiers, and the cross-reference map.
 
 ---
 
@@ -1098,6 +1163,8 @@ Each chapter covers the book's sections in depth with Mermaid/ASCII diagrams, a 
 | **Java/Spring backend engineer** | `java/` phases 1-4 → `spring/` phases 1-5 → `hld/` case studies |
 | **Python/FastAPI engineer** | `python/` phases 1-3 (language + async) → `fastapi/` phases 1-3 (ASGI stack) → FastAPI case studies |
 | **ML engineer** | `ml/` phases 1-3 (math + classical) → phase 5 (ML systems) → ML case studies |
+| **Go backend / platform engineer** | `go/` phases 1-3 (language → concurrency → runtime) → phase 4 (stdlib services) → Go case studies → `devops/` for the platform layer |
+| **Performance engineer** | `backend/performance_engineering_method/` → `backend/tail_latency_and_fan_out/` → `backend/queueing_theory_for_capacity/` → `backend/off_cpu_and_ebpf_analysis/` → `backend/performance_incident_playbook/` |
 | **LLM/AI engineer** | `llm/foundations_and_architecture/` → `llm/rag_fundamentals/` → `llm/agents_and_tool_use/` → LLM case studies |
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |

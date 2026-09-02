@@ -20,7 +20,7 @@ const estMinutes = (n) => Math.max(1, Math.round(n * 0.5));   // ~30s/question, 
 const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
-  hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
+  go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
 };
@@ -41,6 +41,7 @@ const SECTION_IDENTITY = {
   python:          { accent: "#e8bd54", glyph: "λ" },     //  52  gold
   book:            { accent: "#c9be63", glyph: "¶" },     //  70  parchment
   cuda:            { accent: "#9bcf5a", glyph: "▦" },     // 110  lime
+  go:              { accent: "#69cf59", glyph: "Go" },    // 112  green
   database:        { accent: "#5fc47e", glyph: "▤" },     // 135  green
   spring:          { accent: "#45cfa2", glyph: "S" },     // 160  mint
   fastapi:         { accent: "#3ec5c4", glyph: "F" },     // 182  teal
@@ -151,11 +152,13 @@ const STUDY_ORDER = {
   backend: [
     "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
     "backend/rest_api_design","backend/api_contracts_and_schema_governance","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse","backend/webhooks_and_event_delivery",
-    "backend/performance_profiling","backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns","backend/serving_ai_workloads",
+    "backend/performance_engineering_method","backend/latency_budgets_and_slo_math","backend/tail_latency_and_fan_out","backend/queueing_theory_for_capacity","backend/benchmarking_methodology",
+    "backend/performance_profiling","backend/off_cpu_and_ebpf_analysis","backend/os_and_io_performance",
+    "backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns","backend/serving_ai_workloads",
     "backend/database_internals_and_indexing","backend/query_optimization","backend/database_migrations","backend/distributed_transactions_and_consistency","backend/database_types_deep_dive",
     "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/multi_tenancy_and_isolation","backend/observability_and_monitoring",
     "backend/backend_security_owasp","backend/auth_and_authorization_systems",
-    "backend/backend_testing_strategies","backend/load_and_performance_testing","backend/chaos_engineering",
+    "backend/backend_testing_strategies","backend/load_and_performance_testing","backend/workload_characterization_and_load_modelling","backend/performance_regression_detection","backend/performance_incident_playbook","backend/chaos_engineering",
     "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/rabbitmq_deep_dive","backend/event_sourcing_and_cqrs","backend/durable_execution_and_workflows","backend/messaging_patterns",
     "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
   ],
@@ -339,6 +342,13 @@ const STUDY_ORDER = {
     "devops/observability_metrics_prometheus","devops/observability_logging","devops/observability_tracing_and_otel","devops/visualization_and_alerting","devops/sre_principles_and_slos","devops/incident_management_and_oncall",
     "devops/devsecops_and_supply_chain_security","devops/policy_as_code_and_compliance","devops/disaster_recovery_and_resilience","devops/platform_engineering_and_idp",
     "devops/ml_platform_and_gpu_infrastructure","devops/event_streaming_operations","devops/performance_and_load_testing",
+  ],
+  go: [
+    "go/go_fundamentals_and_idioms","go/data_structures_and_memory_layout","go/interfaces_methods_and_embedding","go/errors_and_panics","go/generics_and_type_parameters","go/packages_modules_and_tooling",
+    "go/goroutines_and_the_scheduler","go/channels_and_select","go/sync_primitives_and_memory_model","go/context_and_cancellation","go/concurrency_patterns_and_pitfalls",
+    "go/the_runtime_and_garbage_collector","go/escape_analysis_and_performance","go/profiling_and_tracing","go/testing_benchmarking_and_fuzzing",
+    "go/net_http_server","go/http_clients_and_resilience","go/json_and_serialization","go/database_sql_and_data_access","go/grpc_and_protobuf_in_go","go/observability_and_opentelemetry",
+    "go/time_io_and_stdlib_essentials","go/reflection_and_unsafe","go/cgo_and_ffi","go/idiomatic_api_and_package_design","go/build_deployment_and_supply_chain","go/go_vs_java_and_python",
   ],
   hld: [
     "hld/scalability","hld/capacity_estimation","hld/load_balancing","hld/caching","hld/database_design",

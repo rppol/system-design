@@ -8,10 +8,11 @@ A comprehensive system design study repository. All content is Markdown — no r
 |---------|---------|-----------|
 | **LLD** | Design patterns (GoF), SOLID, anti-patterns, architecture patterns — 13 modules, 15 design problems | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) — 25 modules, 30 case studies | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
-| **Backend** | Networking, API design, performance, resilience, security, microservices — 40 modules, 9 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
+| **Backend** | Networking, API design, performance engineering, resilience, security, microservices — 50 modules, 10 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
 | **Database** | Relational, NoSQL, distributed DB, production ops — 34 modules, 11 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
 | **Java** | Pure Java senior-engineer guide — 35 modules, 10 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
 | **Spring** | Spring Framework guide — 40 modules, 10 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
+| **Go** | Pure Go senior-engineer guide (the language every system in `devops/` is written in) — 27 modules, 6 case studies, 3 deep-dive sub-files | [go/CLAUDE.md](src/main/java/com/rutik/systemdesign/go/CLAUDE.md) |
 | **Python** | Pure Python senior-engineer guide — 24 modules, 6 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
 | **FastAPI** | FastAPI + ASGI production guide — 21 modules, 8 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 47 modules, 27 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
@@ -38,6 +39,7 @@ src/main/java/com/rutik/systemdesign/
 ├── spring/       ← Spring Framework guide + CLAUDE.md
 ├── python/       ← Pure Python guide + CLAUDE.md
 ├── fastapi/      ← FastAPI + ASGI guide + CLAUDE.md
+├── go/          ← Pure Go guide + CLAUDE.md
 ├── ml/               ← Machine Learning guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
@@ -56,7 +58,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 17, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 18, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -76,7 +78,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 16 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 17 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -98,7 +100,7 @@ question there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Both passes are COMPLETE for all 15 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25, after the migration, and was authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 15 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every non-book Q&A in
 the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s
