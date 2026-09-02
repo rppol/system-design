@@ -88,19 +88,20 @@ The failure mode is not technical. Platforms of this shape are usually built, te
 
   raw bytes/day = 17.28M x 50 KB = 864 GB/day  (CPU profiles alone)
 
-  Services that also enable alloc + mutex + off-CPU profiles: ~25% of the
-  fleet, so multiply the total by ~1.75 for profile-type mix, and again by
-  a factor for the four types on those pods:
+  ~25% of the fleet also enables alloc + mutex + off-CPU, so those pods emit
+  4 profile types where the rest emit 1:
 
-  raw bytes/day, all profile types             ~ 3.4 TB/day
-  after ingest-side stacktrace dedup (~8x)     ~ 432 GB/day stored
-  per service per day, stored                  ~ 1.1 GB
-  per pod per day, stored                      ~ 36 MB
+    profile-type mix multiplier  = 0.75*1 + 0.25*4       = 1.75
+
+  raw bytes/day, all types    864 GB x 1.75      ~ 1.5 TB/day
+  after ingest-side stacktrace dedup (~8x)       ~ 189 GB/day stored
+  per service per day, stored 189 GB / 400       ~ 0.47 GB
+  per pod per day, stored     189 GB / 12,000    ~ 16 MB
 ```
 
 The 8x comes from the fact that consecutive profiles from the same `(service, build_id)` share almost all of their stacks. Store the call-tree structure once per build and each profile becomes a list of `(stacktrace_id, value)` pairs — see §4.3.
 
-**Network is a non-issue; storage and compute are the whole problem.** 200 profiles/sec at 50 KB is 10 MB/s of ingest, which one modest instance can accept. The cost is in symbolizing, normalizing, compacting and later scanning 432 GB/day.
+**Network is a non-issue; storage and compute are the whole problem.** 200 profiles/sec at 50 KB is 10 MB/s of ingest, which one modest instance can accept. The cost is in symbolizing, normalizing, compacting and later scanning 189 GB/day.
 
 ### Benchmark plane — the cheap one
 
@@ -117,7 +118,7 @@ The 8x comes from the fact that consecutive profiles from the same `(service, bu
   bytes/year                             =     10 GB/year
 ```
 
-**Ten gigabytes a year.** This is why §4.4 keeps the full sample array rather than a summary, and why the retention policy for benchmark results is "never delete". The profile plane is 40,000x larger per day.
+**Ten gigabytes a year.** This is why §4.4 keeps the full sample array rather than a summary, and why the retention policy for benchmark results is "never delete". The profile plane, at 189 GB/day stored, is about 7,000x larger per day.
 
 ### Bisect plane
 
@@ -126,8 +127,10 @@ The 8x comes from the fact that consecutive profiles from the same `(service, bu
   fraction needing an automated bisect          ~40% (rest land in a window
                                                       small enough to read)
   bisects/day                                    ~6
-  machine-hours per bisect (from
-  performance_regression_detection §6.5)        14.4
+  machine-hours per bisect -- planning mean,
+  the 512-commit/12-rep reference case in
+  performance_regression_detection §6.5.
+  §4.6's cheap 340-commit example is 4.8       14.4
   machine-hours/day                             ~86
   hosts needed if run flat out                   3.6
   provisioned (queueing headroom, see below)       8
@@ -877,7 +880,7 @@ The corollary, which is what earns the right to be default-on: **the overhead bu
      336 x 730 h x $0.04                    = $9,811 / month
 ```
 
-This is the largest line item in the platform by a factor of five, and it appears on **other teams' cost centers**, which is why it is invisible until someone does this arithmetic. It is also the line item with the most direct lever: the overhead scales linearly in sampling rate (see [`continuous_profiling` §6.1](../../../hld/observability/continuous_profiling.md)), so halving 100 Hz to 50 Hz halves it while still producing hundreds of samples per second per host — enough to resolve any function above 1-2% of total time. The GWP-style alternative is to profile a **rotating 25% of pods** at full rate, which cuts the bill 4x with no loss of fleet-level resolution and a real loss of per-pod resolution during an incident.
+This is the largest line item in the platform — ahead of the $7,299 runner pool, though only by 1.34x — and it appears on **other teams' cost centers**, which is why it is invisible until someone does this arithmetic. It is also the line item with the most direct lever: the overhead scales linearly in sampling rate (see [`continuous_profiling` §6.1](../../../hld/observability/continuous_profiling.md)), so halving 100 Hz to 50 Hz halves it while still producing hundreds of samples per second per host — enough to resolve any function above 1-2% of total time. The GWP-style alternative is to profile a **rotating 25% of pods** at full rate, which cuts the bill 4x with no loss of fleet-level resolution and a real loss of per-pod resolution during an incident.
 
 ```text
   2. INGEST + COMPACTION COMPUTE
@@ -901,13 +904,13 @@ This is the largest line item in the platform by a factor of five, and it appear
 
   4. STORAGE  -- the surprise: it is nearly free
 
-     hot   (7 d, full res)    432 GB/day x 7   = 3.0 TB @ $0.023/GB-mo = $71
-     warm  (8-30 d, hourly rollup, 10x)         = 1.0 TB @ $0.023      = $24
-     cold  (31-400 d, daily rollup, 100x)       = 1.6 TB @ $0.004      =  $7
+     hot   (7 d, full res)    189 GB/day x 7   = 1.3 TB @ $0.023/GB-mo = $30
+     warm  (8-30 d, hourly rollup, 10x)         = 0.4 TB @ $0.023      = $10
+     cold  (31-400 d, daily rollup, 100x)       = 0.7 TB @ $0.004      =  $3
      debuginfo (2,400 binaries x 40 MB, 400 d)  = 0.1 TB @ $0.023      =  $3
      benchmark store (10 GB/yr, Postgres db.r7g.large, multi-AZ)       = $290
      -----------------------------------------------------
-                                                             ~ $395 / month
+                                                             ~ $336 / month
 
   5. BENCHMARK + BISECT RUNNERS
 
@@ -925,7 +928,7 @@ This is the largest line item in the platform by a factor of five, and it appear
 
 ### Reading that table
 
-**Storage is 2% of the bill.** The instinct that "profiles are expensive to store" is wrong at this scale — 432 GB/day compresses and tiers down to 5.6 TB steady state, which is a rounding error on an object store. What profiles are expensive in is **CPU on the pods being profiled** and **CPU to normalize them**. Optimize those and ignore the bytes.
+**Storage is under 2% of the bill.** The instinct that "profiles are expensive to store" is wrong at this scale — 189 GB/day compresses and tiers down to about 2.5 TB steady state, which is a rounding error on an object store. What profiles are expensive in is **CPU on the pods being profiled** and **CPU to normalize them**. Optimize those and ignore the bytes.
 
 **The runner pool is the second-largest item, and it is the one people cut first.** Cutting it is the most expensive saving available: §4.6's worked example shows the same bisect going from 4.8 machine-hours on a pinned runner to 120 on shared CI. The metal host exists for exactly six benchmarks that need to resolve below 1%; everything else runs fine on pinned dedicated instances at sigma ≈ 0.6%.
 
@@ -962,7 +965,7 @@ Two independent multipliers. First, the unit of storage was the pod-minute, so o
 
 **Q: When do you bisect automatically, and how do you decide it is worth it?**
 
-Never below about 40 commits — a human scanning that diff list beats 14 hours of machine time. Above that, compute the cost *before* starting: `steps = ceil(log2(window))`, `reps = 16(sigma/delta)²` where delta is half the detected effect size, times two for interleaved A/B, times the benchmark runtime. For a 340-commit window on a pinned runner at sigma 0.6% detecting a 4.8% effect, that is 9 x 4 x 2 x 4 min = 4.8 machine-hours: approve it. The same detection on shared CI at sigma 6% needs 100 reps per step and comes to 120 machine-hours: refuse it, and return the three levers — narrow the window, move to a quieter runner, or split the range across two hosts. The estimate costs microseconds and is the difference between a work item with options and a job that silently never finishes.
+Never below about 40 commits — a human scanning that diff list beats 14 hours of machine time. Above that, compute the cost *before* starting: `steps = ceil(log2(window))`, `reps = 16(sigma/delta)²` where delta is half the detected effect size, times two for interleaved A/B, times the benchmark runtime. For a 340-commit window on a pinned runner at sigma 0.6% detecting a 4.8% effect, the formula gives `16 x (0.6/2.4)² = 1` rep, which the orchestrator raises to its floor of 4 — one measurement per arm cannot survive a single outlier — so 9 x 4 x 2 x 4 min = 4.8 machine-hours: approve it. The same detection on shared CI at sigma 6% needs 100 reps per step and comes to 120 machine-hours: refuse it, and return the three levers — narrow the window, move to a quieter runner, or split the range across two hosts. The estimate costs microseconds and is the difference between a work item with options and a job that silently never finishes.
 
 **Q: What is the difference between your CI gate and your change-point detector, and why do you need both?**
 
@@ -978,7 +981,7 @@ The immediate fix is that `env_hash` — the fingerprint of kernel, runtime, fla
 
 **Q: Justify default-on profiling in production. A team tells you they will not accept unknown overhead on their latency-critical service.**
 
-They are right to ask, and the answer has to be a measurement, not a policy. Publish the budget as an SLO — p99 per-pod profiling overhead under 1% of the pod's CPU request — instrument it, and alert on it like any other SLO, because default-on is only defensible while that number holds. Show the arithmetic: at 100 Hz with roughly 5 microseconds per stack capture on an 8-core host, that is 4 ms of CPU per core-second, about 0.4% for CPU profiling alone. Offer the levers before they ask: halve the sampling rate, which halves the overhead and still leaves hundreds of samples per second, or profile a rotating subset of pods GWP-style. And keep opt-out genuinely available and one config line away — six of our nine opt-outs were legitimate hard-real-time paths. The reason to fight for default-on is not that the overhead is zero; it is that opt-in adoption is bounded by how many teams you can personally persuade, and we measured that bound at 11 services out of 400 over eighteen months.
+They are right to ask, and the answer has to be a measurement, not a policy. Publish the budget as an SLO — p99 per-pod profiling overhead under 1% of the pod's CPU request — instrument it, and alert on it like any other SLO, because default-on is only defensible while that number holds. Show the arithmetic: at 100 Hz with roughly 5 microseconds per stack capture on an 8-core host, that is 8 x 100 x 5 us = **4 ms of CPU per wall-second across 8 cores** — against 8 core-seconds of capacity, **0.05%** for CPU profiling alone. Be honest about the gap between that and the 0.7% fleet mean in the capacity plan: stack capture is the cheap part, and the rest is allocation and off-CPU instrumentation on the quarter of the fleet that enables them, plus encode and ship. Offer the levers before they ask: halve the sampling rate, which halves the overhead and still leaves hundreds of samples per second, or profile a rotating subset of pods GWP-style. And keep opt-out genuinely available and one config line away — six of our nine opt-outs were legitimate hard-real-time paths. The reason to fight for default-on is not that the overhead is zero; it is that opt-in adoption is bounded by how many teams you can personally persuade, and we measured that bound at 11 services out of 400 over eighteen months.
 
 **Q: The change-point detector names a commit. Why is that not the end of the investigation?**
 
@@ -994,7 +997,7 @@ Three separate mechanisms for three separate failure modes, and the ordering mat
 
 **Q: If you had to cut this platform's cost in half tomorrow, what would you cut?**
 
-Sampling rate, and nothing else, because 49% of the bill is agent overhead on production pods and it scales linearly in that one number. Going from 100 Hz to 50 Hz halves roughly $9,800 a month and still yields several hundred samples per second per host, enough to resolve any function above one or two percent of total time. The GWP-style alternative — full rate on a rotating 25% of pods — cuts it 4x and preserves fleet-level resolution, at the cost of per-pod resolution during an incident, which is a real loss worth naming. What you should *not* cut: storage is 2% of the bill and cutting retention saves nothing while destroying the ability to diff against a six-week-old baseline. And cutting the pinned runner pool is the most expensive saving available, because the same bisect that takes 4.8 machine-hours at sigma 0.6% takes 120 at sigma 6% — you would save $7,300 a month in instances and spend far more than that in machine-hours and engineer-days.
+Sampling rate, and nothing else, because 49% of the bill is agent overhead on production pods and it scales linearly in that one number. Going from 100 Hz to 50 Hz halves roughly $9,800 a month and still yields several hundred samples per second per host, enough to resolve any function above one or two percent of total time. The GWP-style alternative — full rate on a rotating 25% of pods — cuts it 4x and preserves fleet-level resolution, at the cost of per-pod resolution during an incident, which is a real loss worth naming. What you should *not* cut: storage is under 2% of the bill and cutting retention saves nothing while destroying the ability to diff against a six-week-old baseline. And cutting the pinned runner pool is the most expensive saving available, because the same bisect that takes 4.8 machine-hours at sigma 0.6% takes 120 at sigma 6% — you would save $7,300 a month in instances and spend far more than that in machine-hours and engineer-days.
 
 ---
 

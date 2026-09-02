@@ -79,10 +79,10 @@ The single most common analytical error is treating a correlated metric as a cau
 | GC pause time | **Cause** | Directly stops threads. Falsifiable: pauses in the slow window, or not |
 | Lock acquire time on a named monitor | **Cause** | Names the exact contended object |
 | Allocation rate | **Cause of GC**, symptom of a code path | Two levels: it causes pauses, and it is caused by an allocation site |
-| Disk `%util` | **Trap** | On NVMe, `%util` from `iostat` is meaningless — it saturates at 100% while the device is nowhere near capacity. Use latency and queue depth (`avgqu-sz`, `await`) instead |
+| Disk `%util` | **Trap** | On NVMe, `%util` from `iostat` is meaningless — it saturates at 100% while the device is nowhere near capacity. Use latency and queue depth (`aqu-sz`, `await`) instead |
 | Network bandwidth | **Rarely either** | Almost never the constraint inside a datacentre; packet loss and RTT are |
 
-**The test for a cause metric**: can you state a mechanism *and* a quantitative prediction? "The pool has 20 connections, each request holds one for 350ms, we serve 112 rps per node, so Little's Law says we need 39 — we are 19 short, and queueing at that shortfall explains ~1.8s of the 3.2s." That is a cause. "DB CPU is high" is not, because it predicts nothing.
+**The test for a cause metric**: can you state a mechanism *and* a quantitative prediction? "The pool has 20 connections, each request holds one for 280ms, we serve 112 rps per node, so Little's Law says we need 31.5 — we are 11.5 short, and queueing at that shortfall explains ~2.4s of the 3.2s." That is a cause. "DB CPU is high" is not, because it predicts nothing.
 
 ### 4.4 The Depth Ladder — and Where to Stop
 
@@ -182,7 +182,7 @@ flowchart LR
     s1 --> s3(["SYMPTOM<br/>error rate 2%<br/>all timeouts"])
     s2 --> h1{"Hypothesis:<br/>DB is the cause?"}
     h1 -->|"killed: DB p99<br/>is 4ms, flat"| h2{"Hypothesis:<br/>we queue before<br/>reaching the DB?"}
-    h2 -->|"confirmed"| c1(["CAUSE<br/>pool 20, need 39<br/>Little's Law"])
+    h2 -->|"confirmed"| c1(["CAUSE<br/>pool 20, need 31.5<br/>Little's Law"])
     c1 --> c2(["ROOT<br/>HTTP call inside<br/>the transaction"])
 
     class s1 lossN
@@ -266,7 +266,7 @@ USE only works if you actually enumerate. Here is the list for a JVM service on 
 |---|---|---|---|
 | CPU | `%usr + %sys` (`mpstat 1`) | run queue length `> ncpu` (`vmstat 1`, col `r`) | throttled periods (`cpu.stat` `nr_throttled` in cgroup v2) |
 | Memory | RSS / limit | swap in/out, cgroup `memory.pressure` | OOM kills (`dmesg`) |
-| Disk | `await` and IOPS, **not** `%util` on NVMe | `avgqu-sz` (`iostat -x 1`) | `/sys/block/*/device/ioerr_cnt` |
+| Disk | `await` and IOPS, **not** `%util` on NVMe | `aqu-sz` (`iostat -x 1`) | `/sys/block/*/device/ioerr_cnt` |
 | Network | bytes/s vs link speed | `netstat -s` retransmits, `ss -ti` cwnd collapse | drops in `ip -s link` |
 | **Connection pool** | active / max | **acquire wait queue depth and wait time** | `SQLTransientConnectionException` (Hikari timeout) |
 | **Thread pool** | active / max | **queue depth** (`ThreadPoolExecutor.getQueue().size()`) | `RejectedExecutionException` count |
@@ -461,7 +461,7 @@ public List<Order> findByUser(long userId) {
 
 **Profiled the wrong process.** An engineer profiled the JVM at 90% CPU on a node where the *actual* latency came from the sidecar proxy's TLS handshakes. The JVM was busy because it was healthy and doing work. Rule: confirm the guilty process from the trace before profiling anything, and remember that in a mesh, `container` is not `pod`.
 
-**Fixed the widest bar.** A flame graph showed 34% of on-CPU time in JSON serialization. Two engineers spent a sprint moving to a binary codec. Serialization time dropped 70%; end-to-end p99 improved by 4%. Serialization was 34% of *CPU*, and CPU was 11% of *wall-clock latency* — 89% of the request was spent waiting. **Amdahl's law is a stopping rule: the ceiling on any optimization is the fraction of the metric you promised to fix that it actually occupies.** Compute that fraction *before* the sprint, not after.
+**Fixed the widest bar.** A flame graph showed 34% of on-CPU time in JSON serialization. Two engineers spent a sprint moving to a binary codec. Serialization time dropped 70%; end-to-end p99 improved by 2.9%. Serialization was 34% of *CPU*, and CPU was 11% of *wall-clock latency*, so the ceiling on the entire sprint was `0.34 x 0.11 = 3.7%` — 89% of the request was spent waiting. **Amdahl's law is a stopping rule: the ceiling on any optimization is the fraction of the metric you promised to fix that it actually occupies.** Compute that fraction *before* the sprint, not after.
 
 **Never wrote down what was ruled out.** A recurring p99 spike was investigated by four different engineers across six months. Three of them independently checked GC, and three independently found it innocent. Nobody recorded it. Roughly 20 engineer-hours re-spent on the same eliminated hypothesis. A three-line "ruled out" note in the incident doc is the highest-leverage artifact the method produces.
 
@@ -500,7 +500,7 @@ The datastore genuinely is the proximate cause maybe a third to 40% of the time,
 **Q: What is the difference between a symptom metric and a cause metric?**
 **Short:** A cause metric comes with a mechanism and a quantitative prediction of how the symptom responds, while a symptom metric only correlates.
 
-Request p99 latency and error rate are symptoms by construction — they are sums of everything. CPU utilization is ambiguous: 95% on a batch job is the goal, 95% with a run queue of 40 is a cause. Connection pool wait time, GC pause duration and lock acquire time on a named monitor are causes because each names a specific mechanism. The test is whether you can state a prediction that could fail: "the pool holds 20, each request holds a connection 350ms, we serve 112 rps per node, Little's Law needs 39, so we are 19 short" is a cause, because measuring an acquire wait of zero would kill it. "DB CPU is high" predicts nothing and therefore cannot be wrong, which is why it is useless.
+Request p99 latency and error rate are symptoms by construction — they are sums of everything. CPU utilization is ambiguous: 95% on a batch job is the goal, 95% with a run queue of 40 is a cause. Connection pool wait time, GC pause duration and lock acquire time on a named monitor are causes because each names a specific mechanism. The test is whether you can state a prediction that could fail: "the pool holds 20, each request holds a connection 280ms, we serve 112 rps per node, Little's Law needs 31.5, so we are 11.5 short" is a cause, because measuring an acquire wait of zero would kill it. "DB CPU is high" predicts nothing and therefore cannot be wrong, which is why it is useless.
 
 **Q: When do you reach for USE and when for RED?**
 **Short:** RED tells you which service is unhealthy, USE tells you which resource inside it is the constraint, so you run RED first and USE second.
@@ -520,7 +520,7 @@ A usable hypothesis has four parts: the claim, the mechanism, a numeric predicti
 **Q: What does saturation mean, and why is it more useful than utilization?**
 **Short:** Saturation measures the work queued and waiting for a resource, which is what actually creates latency, while utilization only says how busy it is.
 
-Utilization is the fraction of time the resource is busy; saturation is the amount of work waiting because it was busy. A connection pool at 100% utilization with zero pending acquires is a correctly sized pool doing exactly its job. The same pool at 100% with 40 threads in the acquire queue is the incident. Saturation is where latency comes from, and it is the signal people omit: run queue length rather than CPU percent, `avgqu-sz` and `await` rather than disk `%util`, `hikaricp_connections_pending` rather than `_active`, executor queue depth rather than active thread count. On NVMe, `%util` is actively misleading — it pins at 100% while the device is far from capacity — which is one more reason to alert on the queue, not the busyness.
+Utilization is the fraction of time the resource is busy; saturation is the amount of work waiting because it was busy. A connection pool at 100% utilization with zero pending acquires is a correctly sized pool doing exactly its job. The same pool at 100% with 40 threads in the acquire queue is the incident. Saturation is where latency comes from, and it is the signal people omit: run queue length rather than CPU percent, `aqu-sz` and `await` rather than disk `%util`, `hikaricp_connections_pending` rather than `_active`, executor queue depth rather than active thread count. On NVMe, `%util` is actively misleading — it pins at 100% while the device is far from capacity — which is one more reason to alert on the queue, not the busyness.
 
 **Q: Why does latency explode at 80% utilization when there is still 20% headroom?**
 **Short:** Queueing makes response time scale as service time divided by one minus utilization, so it is 5x at 80% utilization and 10x at 90%.
@@ -570,7 +570,7 @@ Three candidates, in order of likelihood. First, aggregation is hiding it: an av
 **Q: How do you prove a fix actually worked?**
 **Short:** Show the same SLI on the same population before and after, at the same load, rather than a microbenchmark of the code you changed.
 
-The measurement must be the metric you promised to fix. A microbenchmark showing serialization got 70% faster is not evidence that p99 improved — one real case had exactly that and moved end-to-end p99 by 4%, because serialization was 34% of CPU and CPU was 11% of wall-clock. Compare like for like: the same percentile, the same endpoints, the same traffic mix, ideally the same weekday and hour, and ideally with a canary carrying real traffic so both arms see the same load. State the predicted magnitude before deploying, so a small improvement caused by a coincidental traffic dip does not get claimed as the fix. And record what you ruled out — the eliminations are the durable artifact.
+The measurement must be the metric you promised to fix. A microbenchmark showing serialization got 70% faster is not evidence that p99 improved — one real case had exactly that and moved end-to-end p99 by 2.9%, because serialization was 34% of CPU and CPU was 11% of wall-clock, capping the whole gain at 3.7%. Compare like for like: the same percentile, the same endpoints, the same traffic mix, ideally the same weekday and hour, and ideally with a canary carrying real traffic so both arms see the same load. State the predicted magnitude before deploying, so a small improvement caused by a coincidental traffic dip does not get claimed as the fix. And record what you ruled out — the eliminations are the durable artifact.
 
 **Q: What is drill-down analysis and what is the trap in it?**
 **Short:** Drill-down descends layer by layer, and the trap is that the widest bar at each level is usually where work legitimately happens, not the cause.
@@ -595,7 +595,7 @@ Non-reproducible usually means low-frequency and load-dependent, which is exactl
 **Q: A CPU profile shows one method taking 34% — should you optimize it?**
 **Short:** Only after computing what fraction of the latency you promised to fix that method occupies, since that fraction is the hard ceiling on your gain.
 
-34% of the CPU profile means 34% of on-CPU time, and on-CPU time may be a small slice of wall-clock latency. In one real case serialization was 34% of CPU while CPU was 11% of request duration, so the theoretical ceiling on the whole optimization was under 4% — and a sprint of work delivered exactly that. Amdahl's law is a stopping rule, not a piece of theory: compute the ceiling before committing the work. Get the fraction from a wall-clock profile or a trace-span breakdown, not from a CPU profile, because the CPU profile's denominator is the wrong quantity. If the ceiling is under about 10% of the SLI, the effort is almost always better spent on the thing occupying the other 89%.
+34% of the CPU profile means 34% of on-CPU time, and on-CPU time may be a small slice of wall-clock latency. In one real case serialization was 34% of CPU while CPU was 11% of request duration, so the theoretical ceiling on the whole optimization was `0.34 x 0.11 = 3.7%` — and a sprint of work delivered 2.9%, just under it. Amdahl's law is a stopping rule, not a piece of theory: compute the ceiling before committing the work. Get the fraction from a wall-clock profile or a trace-span breakdown, not from a CPU profile, because the CPU profile's denominator is the wrong quantity. If the ceiling is under about 10% of the SLI, the effort is almost always better spent on the thing occupying the other 89%.
 
 **Q: Your service p99 got worse but nothing in your service changed — where do you look?**
 **Short:** Look at what changed around you: a caller's traffic shape, a dependency's latency, a noisy neighbour, or your own position on the queueing curve.

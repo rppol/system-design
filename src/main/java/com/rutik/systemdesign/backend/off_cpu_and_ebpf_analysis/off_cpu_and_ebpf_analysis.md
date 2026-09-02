@@ -291,7 +291,7 @@ The corollary is the filtering discipline from §2: an unfiltered off-CPU graph 
 ### 6.3 `runqlat` — Proving a Container Is Starved
 
 ```bash
-# 10-second histogram, per-second output, microsecond buckets
+# -m = millisecond buckets; "10 1" = one 10-second histogram, printed once
 sudo runqlat-bpfcc -m 10 1
 ```
 
@@ -305,7 +305,7 @@ sudo runqlat-bpfcc -m 10 1
         32 -> 63         : 311      |                                        |
 ```
 
-**How to read this in one sentence**: 13,222 wakeups — roughly 48% of the total — waited more than 2 milliseconds for a CPU that was, by the container's own metrics, only 40% utilized. That combination is a contradiction unless something is withholding CPU, and the two candidates are (a) the host is oversubscribed and other tenants are winning the scheduler, or (b) this cgroup exhausted its CFS quota and was frozen for the rest of the period. Check `cpu.stat` to decide:
+**How to read this in one sentence**: of 28,585 wakeups, 14,263 — roughly 50% — waited more than 2 milliseconds for a CPU that was, by the container's own metrics, only 40% utilized. That combination is a contradiction unless something is withholding CPU, and the two candidates are (a) the host is oversubscribed and other tenants are winning the scheduler, or (b) this cgroup exhausted its CFS quota and was frozen for the rest of the period. Check `cpu.stat` to decide:
 
 ```bash
 cat /sys/fs/cgroup/cpu.stat
@@ -349,10 +349,10 @@ sudo bpftrace -e '
 [8, 16)               94 |                                        |
 [512, 1K)             12 |                                        |
 [1K, 2K)             203 |@@                                      |    <- 1-2 ms
-[2K, 4K)              71 |                                        |
+[2K, 4K)              71 |                                        |    <- 2-4 ms
 ```
 
-The bimodality is the finding. Most reads are page-cache hits at 1-8 microseconds; a distinct second mode at 1-2 milliseconds is 274 reads that actually went to storage. Nothing about the aggregate mean would have shown you two populations.
+The bimodality is the finding. Most reads are page-cache hits at 1-8 microseconds; a distinct second mode spanning 1-4 milliseconds holds 203 + 71 = 274 reads that actually went to storage. Nothing about the aggregate mean would have shown you two populations.
 
 **The generalization** — sort every syscall this process makes by total time, which is where to start when you have no hypothesis at all:
 
@@ -630,7 +630,7 @@ com/zaxxer/hikari/pool/HikariPool.getConnection
 
 The HikariCP pool was at its default `maximumPoolSize=10` against a Tomcat thread pool of 200. At the offered load, 190 request threads were queueing on a 10-permit semaphore. Every request paid an average 640ms waiting for a connection, and the database itself was answering in 4ms. **`db_query_duration` was green on every dashboard**, because that metric was instrumented around the query — inside the connection, after the wait.
 
-*Fix*: pool sized to 40 after the standard `connections = cores x 2 + effective_spindles` sizing exercise against the database's own capacity, and the wait itself instrumented (`hikaricp_connections_acquire_seconds`, which Micrometer exposes and nobody had scraped). **p99 fell from 820ms to 71ms.** The three weeks of serialization work were not wrong, they were 0.5% of the problem, and the CPU profiler could never have said so.
+*Fix*: the pool sized from Little's Law rather than from a default or an upward guess. At 4,200 rps across the fleet and a 4ms query, `L = 4200 x 0.004 = 17` connections are needed *fleet-wide*, so **4 per pod** — 240 across 60 pods — is already more than an order of magnitude of headroom, with `connection-timeout` set so a burst sheds load instead of queueing. The `connections = cores x 2 + effective_spindles` heuristic that gets reached for here sizes the **database's** total connection budget, not one app pod's slice of it; applying it per pod is how 60 pods end up demanding 2,400 connections from a database that needs 17. The wait itself was also instrumented (`hikaricp_connections_acquire_seconds`, which Micrometer exposes and nobody had scraped). **p99 fell from 820ms to 71ms.** The three weeks of serialization work were not wrong, they were 0.5% of the problem, and the CPU profiler could never have said so.
 
 **What it means.** "A CPU profiler reporting nothing hot is evidence about on-CPU time and evidence about nothing else — treating it as evidence that the service is fine inverts its meaning."
 
@@ -866,7 +866,7 @@ sudo biolatency-bpfcc -D 10 1
 
   27%  <no useful stack, state R at switch-out>
         -> not blocking. preemption or throttle. runqlat confirmed:
-           47% of wakeups waited > 2ms while "CPU utilization" read 41%.
+           50% of wakeups waited > 2ms while "CPU utilization" read 41%.
 
   cpu.stat:
      nr_periods    128,400
@@ -882,14 +882,35 @@ Two independent defects, each invisible to every dashboard the team had.
 
 **FIXED**
 
-```java
-// 1. Pool sized against the database's actual capacity, not left at the default.
-//    Sizing per the standard heuristic (cores x 2 + effective spindles), floored
-//    by what the DB can serve across 48 pods without exhausting max_connections.
-spring.datasource.hikari.maximum-pool-size=40
-spring.datasource.hikari.minimum-idle=40          // no ramp-up stall on a burst
-spring.datasource.hikari.connection-timeout=2000  // fail fast instead of queueing
+The sizing is Little's Law, not a guess and not a heuristic borrowed from the
+database's own tuning guide:
+
 ```
+  L_db = lambda x W_db = 3,200 rps x 0.006 s = 19.2 connections
+                                               FLEET-WIDE, at peak
+
+  over 40 pods that is 0.5 concurrent connections per pod.
+  Set 4 -> 160 fleet-wide, roughly 8x headroom for bursts and slow queries.
+
+  The number that was nearly shipped: 40 per pod x 40 pods = 1,600
+  connections against a database whose steady-state demand is 19.
+```
+
+The `cores x 2 + effective_spindles` heuristic that gets quoted in this situation
+sizes the **database server's** total connection budget — it is not a per-pod
+number, and applying it per pod is exactly how an app tier scales out beautifully
+and drives its database past its own knee
+([Queueing Theory for Capacity §6.6](../queueing_theory_for_capacity/queueing_theory_for_capacity.md), step 8).
+
+```properties
+# 1. Pool sized from Little's Law against measured fleet demand, with the
+#    acquire timeout — not a bigger pool — as the answer to a burst.
+spring.datasource.hikari.maximum-pool-size=4
+spring.datasource.hikari.minimum-idle=4           # no ramp-up stall on a burst
+spring.datasource.hikari.connection-timeout=2000  # fail fast instead of queueing
+```
+
+Four permits against 200 Tomcat threads reads like the original bug repeated, and it is not: at 80 rps per pod and a 6ms query the pool sits at 12% utilization, so a permit is free on arrival. The 2-second `connection-timeout` is what makes that safe — a genuine burst now sheds load at the pool boundary instead of parking 190 threads on a semaphore, which is the behaviour you want and the one the default never gave.
 
 ```yaml
 # 2. Make every JVM-internal pool see the cgroup limit, not the node.

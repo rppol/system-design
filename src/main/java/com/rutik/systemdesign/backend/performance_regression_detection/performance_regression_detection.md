@@ -396,14 +396,14 @@ def best_split(series, min_seg=5):
             best_k, best_q = k, q
     return best_k, best_q
 
-def is_significant(series, observed_q, permutations=1000, alpha=0.05):
+def is_significant(series, observed_q, min_seg=5, permutations=1000, alpha=0.05):
     """Permutation test: how often does shuffled data produce a split this good?
     This is what makes the false-positive rate a knob you set, not one you inherit."""
     shuffled = list(series)
     hits = 0
     for _ in range(permutations):
         random.shuffle(shuffled)
-        _, q = best_split(shuffled)
+        _, q = best_split(shuffled, min_seg)   # same min_seg as the observed statistic
         if q >= observed_q:
             hits += 1
     return (hits + 1) / (permutations + 1) < alpha
@@ -413,7 +413,7 @@ def change_points(series, min_seg=5, depth=0):
     if len(series) < 2 * min_seg or depth > 4:
         return []
     k, q = best_split(series, min_seg)
-    if k is None or not is_significant(series, q):
+    if k is None or not is_significant(series, q, min_seg):
         return []
     left  = change_points(series[:k], min_seg, depth + 1)
     right = [k + i for i in change_points(series[k:], min_seg, depth + 1)]
@@ -426,10 +426,15 @@ location. The permutation test is what decouples the alarm rate from the noise l
 declare the alpha you are willing to live with. And binary segmentation is what finds
 multiple changes, which any six-month series contains.
 
-The naive `best_split` above is O(n²) per level; EDM's mean-based reformulation is what
-production implementations use to keep this cheap at series lengths of 10⁴+. At the
-hundreds-to-thousands of points a real benchmark series has, even the naive version runs in
-under a second — the cost is never the bottleneck.
+The naive `best_split` above is **O(n³) per level** — `_energy` is O(n²) in the segment
+sizes and it is evaluated at roughly n candidate splits — and `is_significant` pays that
+whole cost 1,000 more times to build the permutation null. Measured on this exact code, `best_split`
+costs 2.7ms at n = 60, 24ms at n = 120 and 185ms at n = 240 — a clean cube — so a full
+`change_points` on a 60-point series takes about 3 seconds, and at n = 1,000 a single
+significance test is roughly 10¹² Python operations, about four hours. Not seconds. EDM's mean-based
+reformulation computes the identical statistic incrementally and is what production
+implementations use to stay cheap at series lengths of 10⁴+. Read the code above for the
+mechanism; run a library in anger.
 
 ### 6.3 Storing results as a time series, not a verdict
 
@@ -510,14 +515,19 @@ echo 0 > /proc/sys/kernel/nmi_watchdog
 systemctl stop unattended-upgrades packagekit || true
 
 # Assert the environment before every run. A contaminated run is worse than a missing one.
-steal=$(vmstat 1 5 | tail -1 | awk '{print $16}')
+# vmstat prints 17 columns: r b swpd free buff cache si so bi bo in cs us sy id wa st
+# so steal is $17. $16 is iowait -- a classic off-by-one that silently gates on the
+# wrong signal. vmstat reports whole percent, so -lt 1 is the integer form of the
+# "steal_pct < 0.5" assertion recorded per run in the 6.3 schema.
+steal=$(vmstat 1 5 | tail -1 | awk '{print $17}')
 [ "$steal" -lt 1 ] || { echo "steal=${steal}% -- refusing to run"; exit 75; }
 ```
 
 **What you buy with a pinned bare-metal runner**, stated plainly: a shared CI runner at a
 6–8% noise floor cannot detect a 3% regression at any repetition count you would tolerate
 (`16 × (6/3)² = 64` reps per side, several hours per commit). A pinned metal box at 0.5%
-needs 1 rep to resolve 3% and about 4 reps to resolve 1.5%. One machine converts a class of
+needs 1 rep to resolve 3% and 2 reps to resolve 1.5% (`16 × (0.5/1.5)² = 1.8`; at the
+0.6% of a pinned VM it is 3). One machine converts a class of
 regressions from undetectable to detected-per-commit. That is the whole pitch, and it is
 usually one instance against several engineer-days a quarter of missed-regression
 archaeology.
@@ -547,21 +557,31 @@ that run", the predicate becomes a confidence-interval test with a third outcome
 import subprocess, sys
 from bootstrap_delta import median_delta_ci   # from the methodology module
 
-BASELINE      = load_samples("known_good.jsonl")
+GOOD_REF      = "bisect/known-good"   # the last-good end of the range the detector named
 EFFECT_PCT    = 6.0     # the regression size the change-point detector reported
 MAX_REPS      = 64
 
+def bench(ref):
+    """Build ref and measure it once. Returns that run's median."""
+    subprocess.check_call(["./build.sh", ref])
+    return float(subprocess.check_output(["./bench.sh", "--json-median"]))
+
 def run_reps(k):
-    """Interleave candidate and baseline builds so drift cancels."""
-    out = []
-    for _ in range(k):
-        out.append(float(subprocess.check_output(["./bench.sh", "--json-median"])))
-    return out
+    """Interleave candidate and baseline builds so drift cancels.
+    A/B/B/A ordering: any monotonic drift across the run cancels to first order.
+    Both sides are measured HERE -- comparing against a baseline recorded last
+    week is the sequential anti-pattern in benchmarking_methodology 6.6."""
+    base, cand = [], []
+    for i in range(k):
+        order = ("HEAD", GOOD_REF) if i % 2 == 0 else (GOOD_REF, "HEAD")
+        for ref in order:
+            (cand if ref == "HEAD" else base).append(bench(ref))
+    return base, cand
 
 k = 8
 while k <= MAX_REPS:
-    cand = run_reps(k)
-    point, lo, hi = median_delta_ci(BASELINE, cand)
+    base, cand = run_reps(k)
+    point, lo, hi = median_delta_ci(base, cand)
 
     if lo > EFFECT_PCT / 2:          # clearly regressed
         sys.exit(1)                   # BAD
@@ -573,12 +593,14 @@ while k <= MAX_REPS:
 sys.exit(125)                         # give up on this commit, let git skip it
 ```
 
-Three things make this work. The decision line sits at **half the known effect size**, so
+Four things make this work. The decision line sits at **half the known effect size**, so
 "good" and "bad" are both positive assertions rather than one being the absence of the
 other. Repetitions **escalate adaptively** — cheap when the answer is obvious, expensive
 only near the boundary, which is where the culprit commit actually is. And `125` gives git
 a legitimate `skip`, so a genuinely untestable commit (build broken, flaky dependency) does
-not poison the search.
+not poison the search. And **both sides are built and measured inside the same step**,
+alternating A/B/B/A, so a runner that drifts warmer over fourteen hours of bisecting cannot
+slowly turn every remaining commit "bad" — a baseline file recorded last week would.
 
 **The cost arithmetic, which you should do before starting:**
 
@@ -964,7 +986,7 @@ A re-run of a two-week-old commit writes a row whose run timestamp is today. Ord
 **Q: Why can a shared CI runner not detect a 3% regression?**
 **Short:** Its noise floor is typically 6–8%, and the repetitions needed scale with the square of the noise-to-effect ratio, making it prohibitively slow.
 
-Required repetitions per side are approximately sixteen times the square of sigma over delta. At 6% noise chasing a 3% effect that is sixty-four repetitions per side; interleaved, at ninety seconds each, over three hours of machine time for one commit. That is not viable per-commit, and it assumes the noise is well-behaved, which on a shared runner with co-resident jobs and hypervisor steal it is not. A pinned bare-metal host at 0.5% needs a single repetition to resolve 3% and about four to resolve 1.5%. One machine converts a whole class of regressions from undetectable to detected per commit.
+Required repetitions per side are approximately sixteen times the square of sigma over delta. At 6% noise chasing a 3% effect that is sixty-four repetitions per side; interleaved, at ninety seconds each, over three hours of machine time for one commit. That is not viable per-commit, and it assumes the noise is well-behaved, which on a shared runner with co-resident jobs and hypervisor steal it is not. A pinned bare-metal host at 0.5% needs a single repetition to resolve 3% and two to resolve 1.5%, since sixteen times the square of 0.5 over 1.5 is 1.8. One machine converts a whole class of regressions from undetectable to detected per commit.
 
 **Q: What concretely do you change on a host to lower a benchmark noise floor?**
 **Short:** Leave shared and burstable instances, disable turbo, pin the governor, isolate and pin cores, and confine the runner to a cgroup.
@@ -977,7 +999,7 @@ In order of return: move off shared CI to a fixed-performance instance, which ty
 Bisect's correctness rests on each step's answer being right. With a noisy measurement each step has a misclassification probability, and the probability of reaching the correct commit is that per-step accuracy raised to the number of steps. Over 512 commits, nine steps at a 20% error rate gives about a 13% chance of the right answer — and the search still terminates and still names a commit, confidently and wrongly. One engineer bisected onto a documentation-only commit this way and spent half a day reading three Markdown files. Reduce the per-step error to 2% and the same nine steps succeed 83% of the time.
 
 **Q: How do you define the predicate for a statistical bisect?**
-**Short:** Run k repetitions interleaved against a stored baseline, bootstrap a confidence interval on the delta, and decide against a line at half the known effect size.
+**Short:** Run k repetitions interleaved against the known-good build, bootstrap a confidence interval on the delta, and decide against a line at half the known effect size.
 
 Mark the commit bad when the interval's lower bound clears half the effect size the change-point detector reported, and good when the upper bound falls below it. Both answers are then positive assertions rather than one being the absence of the other. When the interval straddles that line, do not guess — double k and re-run, escalating from about 8 repetitions to 32 or 64 only near the boundary, which is where the culprit actually lives. If it is still inconclusive at the cap, exit 125 so git records a legitimate skip. That third outcome is exactly what plain bisect lacks and why it fails here.
 

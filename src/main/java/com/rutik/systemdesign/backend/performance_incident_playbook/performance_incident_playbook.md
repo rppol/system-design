@@ -405,7 +405,7 @@ HYPOTHESES:
   [KILLED] dependency      - recommendations p99 12ms server-side, flat all night
   [KILLED] noisy neighbour - all 40 pods across 3 AZs degraded identically
   [KILLED] traffic spike   - RPS 2,900 flat, actually 4% DOWN during the incident
-  [OPEN]   lock contention - 214 sessions on wait_event=transactionid at 02:29 (captured)
+  [OPEN]   lock contention - 214 sessions on wait_event=transactionid at 02:20 (captured)
 
 ARTIFACTS: /tmp/INC-4471/{threads.txt,pg_activity.txt,slow_traces.json,pool.json}
   Grafana: https://grafana/d/checkout?from=1756347240000&to=1756351800000
@@ -423,7 +423,7 @@ The general blameless-postmortem template — impact, timeline, five whys, actio
 
 **1. The budget that was violated.** Not "latency was high" but which SLO, by how much, for how long, and how much error budget it consumed. If the service has a per-hop latency budget from [`latency_budgets_and_slo_math`](../latency_budgets_and_slo_math/latency_budgets_and_slo_math.md), name the hop that overspent and by what multiple. "The inventory hop's allocation is 40ms; it spent 4,769ms, 119x its budget" is a sentence a general postmortem never produces.
 
-**2. The signal that should have caught it, and why it did not.** Every performance incident is a detection failure as well as a reliability one. Was there no metric? A metric with no alert? An alert with a threshold above the failure point? An alert on a *mean* that a p99 failure never moved? In the §14 incident the answer was: the p99 alert existed and fired correctly at 02:11, and the flag ramp had no automated canary analysis at all, so a change that a 5-minute automated comparison would have caught went to 25% of traffic unwatched.
+**2. The signal that should have caught it, and why it did not.** Every performance incident is a detection failure as well as a reliability one. Was there no metric? A metric with no alert? An alert with a threshold above the failure point? An alert on a *mean* that a p99 failure never moved? In the §14 incident the answer was: the p99 alert existed and fired correctly at 02:17, and the flag ramp had no automated canary analysis at all, so a change that a 5-minute automated comparison would have caught went to 25% of traffic unwatched.
 
 **3. Whether the load model could ever have produced this.** Ask whether the workload shape that triggered it was in any test. Usually it was not — a hot key, a tenant skew, a specific concurrency level. That gap is an action item against the load model, not against the code: see [`workload_characterization_and_load_modelling`](../workload_characterization_and_load_modelling/workload_characterization_and_load_modelling.md).
 
@@ -524,13 +524,13 @@ psql -qAt -c "SELECT pid,state,wait_event_type,left(query,120) FROM pg_stat_acti
 kubectl delete pod -l app=payments
 ```
 
-**Pitfall 2 — Scaling out into a lock.** A checkout service at 4.8s p99 with 31% database CPU was scaled from 40 to 72 pods. p99 went to 7.1 seconds and throughput fell 9%, because the bottleneck was a row lock whose service rate is fixed and the extra pods only deepened the queue. Nineteen minutes of the incident were spent on this, plus five more scaling back down. The discriminator — throughput per unit of concurrency, which was *falling* — was on an existing dashboard the whole time.
+**Pitfall 2 — Scaling out into a lock.** A checkout service at 4.8s p99 with 31% database CPU was scaled from 40 to 72 pods. p99 went to 7.1 seconds and throughput fell 9%, because the bottleneck was a row lock whose service rate is fixed and the extra pods only deepened the queue. Four minutes of the incident were spent at 72 pods, plus five more recovering after scaling back down. The discriminator — throughput per unit of concurrency, which was *falling* — was on an existing dashboard the whole time.
 
-**Pitfall 3 — "No changes" because only deploys were checked.** The same incident: `kubectl rollout history` showed the last deploy 14 hours earlier, so the responder ruled out change and started looking for a mechanism. The actual trigger was a feature flag ramping to 25% at 02:00, three minutes before onset. Twenty-three minutes lost. **A change window must cover deploys, flags, config, migrations, dependency deploys and vendor status.**
+**Pitfall 3 — "No changes" because only deploys were checked.** The same incident: `kubectl rollout history` showed the last deploy 14 hours earlier, so the responder ruled out change and started looking for a mechanism. The actual trigger was a feature flag ramping to 25% at 02:00, fourteen minutes before onset. Ten minutes lost. **A change window must cover deploys, flags, config, migrations, dependency deploys and vendor status.**
 
 **Pitfall 4 — Profiling at 12% CPU.** A responder attached async-profiler to a service with an 800ms p99 and 12% CPU, spent 22 minutes collecting and reading, and found the widest frame at 4ms — because a CPU profiler structurally cannot see time a thread spends off-CPU. The time was in `epoll_wait` on a dependency socket. An off-CPU profile or, faster, a single trace waterfall would have named it in three minutes.
 
-**Pitfall 5 — Averaging the incident away.** A dashboard showing mean latency stayed at 240ms throughout an incident in which 4 of 40 pods ran at 9 seconds. The mean rose by 220ms, well inside normal variation, while 10% of users saw a 9-second checkout. The team debated whether an incident was even happening for 14 minutes. **Split by instance and look at p99, never a fleet mean.**
+**Pitfall 5 — Averaging the incident away.** A dashboard showing fleet mean latency moved from 240ms to 275ms throughout an incident in which 1 of 40 pods served every request in 1.6 seconds. That is all one bad pod in forty can do to an average — `0.025 x (1600 - 240) = 34ms` — and a 35ms move sits inside normal day-to-day variation. The p99 told the truth the whole time: 2.5% of requests were slow, so the slowest 1% were all on that pod and the fleet p99 sat at 1,600ms, four times the 400ms SLO. The team debated whether an incident was even happening for 14 minutes. **Split by instance and look at p99, never a fleet mean.**
 
 **Pitfall 6 — Raising the pool size.** With `hikaricp.connections.pending` climbing, a responder raised the pool from 20 to 60 per instance across 30 instances. That is 1,800 connections against a Postgres `max_connections` of 500, so connection establishment began failing outright and a latency incident became an availability incident. The queue simply moved from the application to the database, and got worse on the way. Pool sizing arithmetic belongs in daylight — [`connection_pooling_deep_dive`](../connection_pooling_deep_dive/connection_pooling_deep_dive.md).
 
@@ -572,7 +572,7 @@ kubectl delete pod -l app=payments
 **Q: Why is "what deployed" the highest-yield first question, and how does that question mislead people?**
 **Short:** Most regressions correlate with a change, but a change log that only covers deploys will report "nothing changed" when a flag ramped.
 
-Correlation with a change is both the most common situation and the cheapest thing to check, and it yields an immediate mitigation instead of a mechanism. The failure mode is defining change too narrowly: feature-flag ramps, config pushes, schema migrations, a dependency's own deploy, a vendor incident, a table crossing a size threshold that flips a query plan, and a client release that shifted the traffic mix are all changes, and none appear in a deployment history. One measured incident lost 23 minutes because the responder ran `kubectl rollout history`, saw the last deploy 14 hours earlier, and concluded nothing had changed while a flag was ramping to 25%. Script the change window across all the sources so the answer takes 60 seconds and cannot be partial.
+Correlation with a change is both the most common situation and the cheapest thing to check, and it yields an immediate mitigation instead of a mechanism. The failure mode is defining change too narrowly: feature-flag ramps, config pushes, schema migrations, a dependency's own deploy, a vendor incident, a table crossing a size threshold that flips a query plan, and a client release that shifted the traffic mix are all changes, and none appear in a deployment history. One measured incident lost ten minutes because the responder ran `kubectl rollout history`, saw the last deploy 14 hours earlier, and concluded nothing had changed while a flag was ramping to 25%. Script the change window across all the sources so the answer takes 60 seconds and cannot be partial.
 
 **Q: You have a one-command rollback available and no idea what is wrong. Do you take it?**
 **Short:** Yes, after roughly twelve seconds of scripted evidence capture, because the impact clock and the understanding clock are independent.
@@ -627,7 +627,7 @@ A step within a single scrape interval means something switched, which narrows t
 **Q: How do you spot a noisy-neighbour or bad-host problem quickly?**
 **Short:** Plot the latency percentile grouped by instance and look for a bimodal distribution across the fleet.
 
-A fleet mean rises when a handful of instances are badly degraded, which reads as a service-wide problem and sends the investigation down the wrong branch. Grouping by instance immediately shows whether all instances moved together or a few separated — one measured incident had 4 of 40 pods at 9 seconds while 36 stayed at 210ms, and the mean moved only 220ms. Confirm with node-level metrics and CPU steal time, then mitigate by draining or cordoning the affected instances, which costs a fraction of capacity and takes under a minute. Keep one bad instance alive and out of rotation for forensics rather than deleting all of them.
+A fleet mean rises when a handful of instances are badly degraded, which reads as a service-wide problem and sends the investigation down the wrong branch. Grouping by instance immediately shows whether all instances moved together or a few separated — one measured incident had 1 of 40 pods at 1.6 seconds while 39 stayed at 240ms, and the fleet mean moved only 35ms while the p99 sat at 1,600ms. Confirm with node-level metrics and CPU steal time, then mitigate by draining or cordoning the affected instances, which costs a fraction of capacity and takes under a minute. Keep one bad instance alive and out of rotation for forensics rather than deleting all of them.
 
 **Q: During the incident, offered load to a dependency tripled. Is that the cause or a consequence?**
 **Short:** Almost certainly a consequence — retry amplification, where clients retry a slow dependency and multiply its load into a self-sustaining congested state.
@@ -704,13 +704,13 @@ xychart-beta
 
 **02:00** — Feature flag `checkout.addon_recs` begins a scheduled ramp from 0% to 25%. No deploy. No entry in any deployment history.
 
-**02:11** — Alert `CheckoutLatencyBudgetBurn` fires: p99 over 400ms for 3 consecutive minutes, burn rate 14x. On-call acknowledges at 02:13.
+**02:17** — Alert `CheckoutLatencyBudgetBurn` fires: p99 over 400ms for 3 consecutive minutes — 02:14, 02:15 and 02:16 — burn rate 14x. On-call acknowledges at 02:18.
 
-**02:14** — Responder pins the dashboard from 01:44 to now. Onset is a clean **step** at 02:14, 210ms to 4,800ms in one scrape interval. Shape eliminates leaks, growth and cache decay (§5.2). Error rate 0.3%, essentially unchanged — this is a latency incident, not an availability one.
+**02:18** — Responder pins the dashboard from 01:48 to now. Onset is a clean **step** at 02:14, 210ms to 4,800ms in one scrape interval. Shape eliminates leaks, growth and cache decay (§5.2). Error rate 0.3%, essentially unchanged — this is a latency incident, not an availability one.
 
-**02:15 — Q1, what changed.** `kubectl rollout history deployment/checkout` shows the last deploy at 12:07 the previous day, 14 hours earlier. Responder records **"no changes"** — which was wrong, and cost 23 minutes. The flag audit log was not in the change-window script.
+**02:19 — Q1, what changed.** `kubectl rollout history deployment/checkout` shows the last deploy at 12:07 the previous day, 14 hours earlier. Responder records **"no changes"** — which was wrong, and cost ten minutes. The flag audit log was not in the change-window script.
 
-**02:16 — Q3, blast radius.** Three panels:
+**02:19 — Q3, blast radius.** Three panels:
 
 | Split | Result | Eliminates |
 |-------|--------|-----------|
@@ -720,11 +720,11 @@ xychart-beta
 
 One route, all instances. The investigation is now inside the checkout code path.
 
-**02:18 — Q4, getting worse?** RPS is 2,900 and flat — in fact 4% *down*, because slow checkouts mean fewer completed sessions. **Traffic spike eliminated.** Error budget burning at 14x; at that rate the monthly budget is gone in 51 hours.
+**02:20 — Q4, getting worse?** RPS is 2,900 and flat — in fact 4% *down*, because slow checkouts mean fewer completed sessions. **Traffic spike eliminated.** Error budget burning at 14x; at that rate the monthly budget is gone in 51 hours.
 
-**02:19 — capture ran.** `capture.sh INC-4471` — thread dump, `pg_stat_activity`, pool metrics, five slow traces. Twelve seconds. This is what makes the rest of the story possible.
+**02:20 — capture ran.** `capture.sh INC-4471` — thread dump, `pg_stat_activity`, pool metrics, five slow traces. Twelve seconds. This is what makes the rest of the story possible.
 
-**02:20 — trace waterfall.** Exemplar `7f3a91c2e0`, 4,812ms:
+**02:21 — trace waterfall.** Exemplar `7f3a91c2e0`, 4,812ms:
 
 ```
 checkout.POST /v2/checkout            4,812 ms
@@ -739,9 +739,9 @@ Named subsystem in one minute. `recommendations` at 12ms **eliminates the depend
 
 **02:21 — USE on the database.** CPU 31%, disk `%util` 12%, no plan changes in `pg_stat_statements`, replication lag 40ms. **Database saturation eliminated.** High latency with low utilization is the contention signature (§4.1) — but the responder did not read it that way yet.
 
-**02:22 — the wrong mitigation.** With the database "not saturated", the responder concluded the application was under-provisioned and scaled 40 to 72 pods. By 02:26, p99 had risen to **7,100ms** and throughput fell 9%. More pods meant more concurrent transactions queueing on the same lock.
+**02:22 — the wrong mitigation.** With the database "not saturated", the responder concluded the application was under-provisioned and scaled 40 to 72 pods. p99 peaked at **7,100ms** and throughput fell 9%. More pods meant more concurrent transactions queueing on the same lock.
 
-**02:26 — scale back to 40.** p99 returns to 4,700ms. Nineteen minutes spent, plus five recovering. This became the most valuable line in the postmortem.
+**02:26 — scale back to 40.** p99 is back to 4,700ms by 02:31. Four minutes at 72 pods, plus five recovering. This became the most valuable line in the postmortem.
 
 **02:27 — the captured evidence gets read.** From `/tmp/INC-4471/pg_activity.txt`:
 
@@ -755,7 +755,7 @@ Named subsystem in one minute. `recommendations` at 12ms **eliminates the depend
 
 **214 sessions waiting on one transaction id**, and the *holder* is in `ClientRead` — waiting on the network, inside its transaction, while holding the lock. That single row is the entire root cause visible in advance of understanding it: the lock holder is doing network I/O.
 
-**02:29 — the change is found.** Searching for anything that could put a network call inside that transaction, the responder checks the flag audit log and finds `checkout.addon_recs` ramped at 02:00. Three minutes before onset, at the point where the ramp reached enough traffic to matter.
+**02:29 — the change is found.** Searching for anything that could put a network call inside that transaction, the responder checks the flag audit log and finds `checkout.addon_recs` ramped at 02:00. Fourteen minutes before onset, and the step at 02:14 is the point where the ramp reached enough traffic to matter.
 
 **02:31 — mitigate.** Flag to 0%. p99 begins falling within 20 seconds.
 
@@ -813,9 +813,9 @@ Measured after the fix: lock hold time 3.2ms, hot-row ceiling 312/s against 180/
 
 #### Postmortem, performance-specific sections
 
-**Budget violated.** The inventory hop's allocation is 40ms of a 400ms p99 SLO. It spent 4,769ms — **119x its allocation**. Duration 20 minutes at 14x burn, consuming 4.7% of the monthly error budget in a single incident.
+**Budget violated.** The inventory hop's allocation is 40ms of a 400ms p99 SLO. It spent 4,769ms — **119x its allocation**. Duration 20 minutes at 14x burn, consuming 0.65% of the monthly error budget in a single incident (`14 x 20 / 43,200`).
 
-**The signal that should have caught it.** The p99 alert worked correctly and fired at 02:11, 3 minutes after onset — that part was fine. The gap was upstream: the flag ramp had **no automated canary analysis**, so a change reached 25% of production traffic with nothing comparing flag-on to flag-off latency. A 5-minute automated comparison at 5% would have caught it before the top SKU crossed its ceiling.
+**The signal that should have caught it.** The p99 alert worked correctly and fired at 02:17, 3 minutes after onset — that part was fine. The gap was upstream: the flag ramp had **no automated canary analysis**, so a change reached 25% of production traffic with nothing comparing flag-on to flag-off latency. A 5-minute automated comparison at 5% would have caught it before the top SKU crossed its ceiling.
 
 **Could the load model have produced it?** No, and this was the second action item. The load test used uniform random SKUs over a 50,000-SKU catalogue, so no single row ever saw more than 0.06 reservations/s and a lock ceiling of 65/s was unreachable by construction. The production trigger was a promoted SKU taking 180/s. Fix: model SKU access as the fitted Zipf distribution measured from production, per [`workload_characterization_and_load_modelling`](../workload_characterization_and_load_modelling/workload_characterization_and_load_modelling.md). The re-modelled test reproduces the failure in 90 seconds.
 
@@ -832,10 +832,10 @@ void lockHoldTimeStaysUnderBudget() {
 
 Wired into the change-point detection pipeline in [`performance_regression_detection`](../performance_regression_detection/performance_regression_detection.md), so lock hold time is a tracked time series rather than a remembered lesson. A static assertion additionally forbids any network call inside a `@Transactional` method holding a `FOR UPDATE`, enforced by an ArchUnit rule.
 
-**The wrong mitigation, recorded.** Scaling 40 to 72 pods at 02:22 raised p99 from 4.8s to 7.1s and cost 24 minutes. Runbook now states: *low utilization with high latency is contention; the discriminator is throughput per unit concurrency, which falls; do not scale out.* The three panels needed to make that call in 30 seconds were added to the checkout dashboard.
+**The wrong mitigation, recorded.** Scaling 40 to 72 pods at 02:22 raised p99 from 4.8s to 7.1s and cost nine minutes — four at 72 pods, five recovering after the scale-back. Runbook now states: *low utilization with high latency is contention; the discriminator is throughput per unit concurrency, which falls; do not scale out.* The three panels needed to make that call in 30 seconds were added to the checkout dashboard.
 
 **Mitigation half-life.** The flag was locked at 0% with the incident id annotated, owner assigned, and removal criteria "fix merged and the lock-hold regression test green." Re-ramped 5 days later at 5%, then to 100% over 48 hours with automated canary analysis watching. No recurrence.
 
-**Detection improvements shipped.** The change-window script now covers the flag audit log — the 23-minute miss at 02:15 was the single largest avoidable cost of the incident, and it cost one line of shell.
+**Detection improvements shipped.** The change-window script now covers the flag audit log — the ten-minute miss at 02:19 was the single largest avoidable cost of the incident, and it cost one line of shell.
 
 **Cross-links.** The contention arithmetic is developed in [`queueing_theory_for_capacity`](../queueing_theory_for_capacity/queueing_theory_for_capacity.md); the budget decomposition that made "119x its allocation" a computable statement is in [`latency_budgets_and_slo_math`](../latency_budgets_and_slo_math/latency_budgets_and_slo_math.md); the reason the `ClientRead` wait state was the decisive observation is developed in [`off_cpu_and_ebpf_analysis`](../off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md); the ordering discipline behind the whole triage sequence is [`performance_engineering_method`](../performance_engineering_method/performance_engineering_method.md); and the process layer — who was IC, how comms ran, how severity was assigned — is [`devops/incident_management_and_oncall`](../../devops/incident_management_and_oncall/incident_management_and_oncall.md).

@@ -228,9 +228,9 @@ flowchart LR
 
 ### 6.1 Percentile arithmetic — the two rules
 
-**Rule 1: percentiles do not add.** If service A has p99 = 30ms and service B has p99 = 20ms, a request calling both sequentially does **not** have p99 = 50ms. That number is only correct if A's slow requests are perfectly correlated with B's, which they are not. For independent services the composite p99 is *lower* than the sum — but the composite p99.9 can be far *higher* than the sum of the p99.9s if the slowness shares a cause (both behind the same throttled node, both hitting the same GC-paused cache).
+**Rule 1: percentiles do not add.** If service A has p99 = 30ms and service B has p99 = 20ms, a request calling both sequentially does **not** have p99 = 50ms. That number is only correct if A's slow requests are perfectly correlated with B's, which they are not. For independent services the composite p99 is *no greater than* the sum — but the composite p99.9 can be far *higher* than the sum of the p99.9s if the slowness shares a cause (both behind the same throttled node, both hitting the same GC-paused cache).
 
-**Rule 2: percentiles do not average.** Twenty replicas each reporting a p99 cannot be meaned into a fleet p99. Nineteen healthy replicas at 100ms and one sick replica at 5000ms mean to 345ms; the true pooled p99 is 5000ms, a 14x error, and the mean *hides* an outage. That example is worked line by line in [DevOps Performance and Load Testing §10, Pitfall 3](../../devops/performance_and_load_testing/performance_and_load_testing.md) — it is not repeated here.
+**Rule 2: percentiles do not average.** Twenty replicas each reporting a p99 cannot be meaned into a fleet p99. Nineteen healthy replicas at 100ms and one sick replica at 5000ms mean to 345ms; the true pooled p99 is 5000ms, a 14x error, and the mean *hides* an outage. That example is worked line by line in [DevOps Performance and Load Testing §10, Pitfall 3](../../devops/performance_and_load_testing/performance_and_load_testing.md).
 
 The only safe composition is over the **raw or histogram-preserved** data. Everything else is a category error.
 
@@ -279,23 +279,34 @@ public final class HedgedCaller {
     private final Duration hedgeDelay;   // set from the LIVE p95, refreshed every 60s
 
     public CompletableFuture<Response> call(Supplier<CompletableFuture<Response>> attempt) {
-        CompletableFuture<Response> primary = attempt.get();
-        CompletableFuture<Response> winner  = new CompletableFuture<>();
-        primary.whenComplete((r, e) -> complete(winner, r, e));
+        CompletableFuture<Response> winner = new CompletableFuture<>();
+        // Attempts that may still answer: the primary, and the hedge if it is sent.
+        // Only the LAST failure fails the request, so a primary error arriving before
+        // hedgeDelay does NOT pre-empt the peer.
+        AtomicInteger outstanding = new AtomicInteger(2);
+        AtomicReference<Throwable> firstError = new AtomicReference<>();
+
+        attempt.get().whenComplete((r, e) -> settle(winner, outstanding, firstError, r, e));
 
         ScheduledFuture<?> hedge = timer.schedule(() -> {
-            if (winner.isDone()) return;                 // primary already answered
-            if (!hedgeBudget.tryAcquire()) return;        // budget spent: ride it out
-            attempt.get().whenComplete((r, e) -> complete(winner, r, e));
+            if (winner.isDone()) return;                  // primary already succeeded
+            if (!hedgeBudget.tryAcquire()) {              // budget spent: hedge never runs
+                settle(winner, outstanding, firstError, null,
+                       new RejectedExecutionException("hedge budget exhausted"));
+                return;
+            }
+            attempt.get().whenComplete((r, e) -> settle(winner, outstanding, firstError, r, e));
         }, hedgeDelay.toMillis(), TimeUnit.MILLISECONDS);
 
         winner.whenComplete((r, e) -> hedge.cancel(false));
         return winner;
     }
 
-    private static void complete(CompletableFuture<Response> w, Response r, Throwable e) {
-        if (r != null) w.complete(r);
-        else if (!w.isDone()) w.completeExceptionally(e);  // let the peer try first
+    private static void settle(CompletableFuture<Response> w, AtomicInteger outstanding,
+                               AtomicReference<Throwable> firstError, Response r, Throwable e) {
+        if (r != null) { w.complete(r); return; }         // first success wins
+        firstError.compareAndSet(null, e);                // keep the earliest real cause
+        if (outstanding.decrementAndGet() == 0) w.completeExceptionally(firstError.get());
     }
 }
 ```
@@ -304,7 +315,7 @@ Three properties make this safe and are all easy to omit:
 
 1. **The delay is the live p95, not a constant.** A hardcoded 50ms hedge delay on a service whose p95 drifts to 60ms hedges every request and doubles your fleet load.
 2. **The budget is a rate limiter, not a percentage of the current second.** Under an incident every request is past p95, so a percentage-of-current-traffic rule authorises 100% hedging exactly when the fleet cannot take it.
-3. **Losing the race does not fail the request.** `completeExceptionally` only fires when the other attempt has not already succeeded.
+3. **Losing the race does not fail the request, and neither does losing it early.** The request fails only once every attempt that will ever exist has failed — which is why `outstanding` is decremented on the path where the hedge is *skipped* as well as on the path where it fails. The naive version completes `winner` exceptionally the moment the primary errors, which is before the hedge has even been scheduled to fire, so the peer never gets its turn.
 
 The paper's measured result on a BigTable benchmark: hedging after 10ms cut the 99.9th percentile of a 1000-key lookup from **1800ms to 74ms** — a 24x reduction — while sending **2%** more requests.
 
@@ -331,7 +342,7 @@ void onStartedNotice(StartedNotice n) {
 }
 ```
 
-The window in which both servers can start is exactly one network RTT — sub-millisecond inside a datacentre against operations measured in milliseconds, which is why the paper reports under **1%** duplicate disk utilization. Dean and Barroso measured tied requests cutting median latency **16%** and the 99.9th percentile by nearly **40%** on a busy cluster. The technique does not survive a WAN: at 80ms cross-region RTT the cancellation arrives after both replicas have finished.
+The window in which both servers can start is exactly one network RTT — sub-millisecond inside a datacentre against operations measured in milliseconds, which is why the paper reports under **1%** duplicate disk utilization. Dean and Barroso measured tied requests cutting median latency **16%** (19ms to 16ms) and the 99.9th percentile by nearly **40%** (98ms to 61ms) on a **mostly idle** cluster; on a busy one the same technique gave 21% at the median and 32% at the 99.9th. The technique does not survive a WAN: at 80ms cross-region RTT the cancellation arrives after both replicas have finished.
 
 ### 6.5 Measuring the tail honestly with HdrHistogram
 
@@ -352,13 +363,9 @@ metricsSink.publish(endpoint, buf);                  // the AGGREGATOR computes 
 
 HdrHistogram stores values in exponentially-sized buckets with a fixed relative precision, so `p999` is accurate to 0.1% at 3 significant digits regardless of magnitude, in constant memory and with no allocation on the record path. Crucially, `Histogram.add(other)` is exact: merging two histograms produces exactly the histogram you would have built from the union of both sample sets.
 
-**Why merging matters, in numbers.** Twenty hosts, 1,000 requests each:
+**Why merging matters, in numbers.** Take the twenty-host fleet from §6.1 — nineteen hosts serving 1,000 requests each at 100ms, one sick host serving 700 at 100ms and 300 at 5000ms — and compute the p99 the only way that is defensible:
 
 ```
-  19 healthy hosts:  all 1000 requests at 100 ms       -> each reports p99 = 100 ms
-   1 sick host:      700 at 100 ms, 300 at 5000 ms     -> reports      p99 = 5000 ms
-
-  MEAN OF THE 20 REPORTED p99s = (19*100 + 5000)/20    =   345 ms   "healthy"
   MERGED-HISTOGRAM p99:
     pooled requests                                    = 20,000
     rank of the p99 cut  = 0.99 * 20,000               = 19,800
@@ -367,9 +374,9 @@ HdrHistogram stores values in exponentially-sized buckets with a fixed relative 
     TRUE p99                                           =  5000 ms
 ```
 
-The mean of percentiles is off by 14x and points the wrong direction — it says the fleet is fine. Only the merged histogram is right, and it is right because it never threw away the distribution.
+The merged histogram is right because it never threw away the distribution. Every summary-of-summaries alternative is wrong on this same input, which is the entire argument for shipping encoded histograms instead of percentile gauges.
 
-**t-digest and DDSketch** solve the same problem for systems that cannot afford HdrHistogram's fixed bucket layout. Both are mergeable sketches: t-digest (Ted Dunning) clusters samples with high resolution at the extremes and is what Elasticsearch and Datadog historically used; DDSketch (Datadog, 2019) gives a *relative-error guarantee* — configure 1% and every quantile is within 1% of truth, which t-digest does not promise — and is fully mergeable. Prometheus native histograms (stable since 3.0) apply the same idea: exponential buckets that merge exactly, replacing the fixed `le` buckets whose `histogram_quantile()` interpolation was the previous source of wrong p99s.
+**t-digest and DDSketch** solve the same problem for systems that cannot afford HdrHistogram's fixed bucket layout. Both are mergeable sketches: t-digest (Ted Dunning) clusters samples with high resolution at the extremes and is what Elasticsearch and Datadog historically used; DDSketch (Datadog, 2019) gives a *relative-error guarantee* — configure 1% and every quantile is within 1% of truth, which t-digest does not promise — and is fully mergeable. Prometheus native histograms (shipped experimental behind `--enable-feature=native-histograms` in 3.0, **stable since 3.8**, flag retired in 3.9) apply the same idea: exponential buckets that merge exactly, replacing the fixed `le` buckets whose `histogram_quantile()` interpolation was the previous source of wrong p99s.
 
 ### 6.6 Head-of-line blocking and queue discipline
 
@@ -510,9 +517,9 @@ Add a companion panel for `max by (pod)` of the per-pod p99 — the fleet quanti
 
 **Pitfall 3: profiling the tail with a profiler that only sees the p50.** A team spent six weeks optimising a serialization hot path that async-profiler showed as 34% of CPU. The p50 improved 41%, from 12ms to 7ms. The p999 did not move at all: it was CPU quota throttling. The pod had `cpu.limit = 2` against 8 threads doing bursty work, so the CFS scheduler exhausted the quota partway into each 100ms period and froze every thread until the period rolled over — visible as `container_cpu_cfs_throttled_seconds_total` climbing, and completely invisible to a CPU-time profiler because throttled time is not CPU time. Impact: six engineer-weeks, zero SLO movement. The one-line fix was removing the CPU limit (keeping the request), which took p999 from 780ms to 95ms in one deploy. Profile the tail with wall-clock sampling and correlate with the throttling counter before touching code — see [Performance Profiling](../performance_profiling/performance_profiling.md).
 
-**Pitfall 4: retry storms disguised as tail mitigation.** A service with three tiers each configured for 3 retries produces `3 × 3 × 3 = 27` attempts for one user request when the bottom tier browns out. A 20% error rate at the leaf became 8x amplified load at the leaf, converting a partial degradation into a total outage in about 90 seconds. Retries and hedges must be budgeted globally, not per-hop: Envoy's `retry_budget` and gRPC's retry throttling both exist for this. Cap retries at one hop — usually the one closest to the user — and set every other tier to zero.
+**Pitfall 4: retry storms disguised as tail mitigation.** A service with three tiers each configured for 3 attempts produces `3 × 3 × 3 = 27` leaf calls for one user request once every attempt is failing. That 27x is a ceiling, and a 20% leaf error rate is enough to walk toward it: the extra attempts push the leaf further past capacity, the error rate rises, more attempts multiply, and the loop closed in about 90 seconds — converting a partial degradation into a total outage. Retries and hedges must be budgeted globally, not per-hop: Envoy's `retry_budget` and gRPC's retry throttling both exist for this. Cap retries at one hop — usually the one closest to the user — and set every other tier to zero.
 
-**Pitfall 5: an unbounded queue in front of a fast service.** A team sized their thread pool at 32 and left `LinkedBlockingQueue` unbounded because "rejecting requests looks bad." At 1,400 req/s against 1,000 req/s capacity the queue reached 84,000 entries in 3.5 minutes, and every dequeued request had been waiting past the client's 2-second deadline. Throughput on the dashboard read a healthy 1,000 req/s; **goodput was zero** for eleven minutes. The heap also grew 2.1GB, triggering a full GC that made it worse. Fix: bound the queue to roughly 100ms of work at capacity (100 entries here), reject beyond it with a fast 503 plus `Retry-After`, and switch to adaptive LIFO so the requests you do serve are the fresh ones.
+**Pitfall 5: an unbounded queue in front of a fast service.** A team sized their thread pool at 32 and left `LinkedBlockingQueue` unbounded because "rejecting requests looks bad." At 1,400 req/s against 1,000 req/s capacity the queue reached 84,000 entries in the 3.5 minutes before the pods were restarted, and every dequeued request had been waiting far past the client's 2-second deadline. Throughput on the dashboard read a healthy 1,000 req/s; **goodput was zero** from five seconds into the spike — the depth passed 2,000, which is the 2-second deadline at 1,000 req/s — until the restart. The heap grew about 500MB (84,000 queued requests retaining roughly 6KB each), and the resulting full GCs made it worse. Fix: bound the queue to roughly 100ms of work at capacity (100 entries here), reject beyond it with a fast 503 plus `Retry-After`, and switch to adaptive LIFO so the requests you do serve are the fresh ones.
 
 **Pitfall 6: measuring latency at the wrong boundary.** Server-side timers start when the request handler is entered — after the connection was accepted, after TLS, after the request sat in the accept backlog and the thread-pool queue. A service reporting a 9ms p99 from inside the handler was measured at 340ms from the load balancer's `target_processing_time`, and the entire gap was accept-queue wait invisible to the application. Always compare an in-process histogram against an edge-measured one; the difference is your queueing, and queueing is where the tail lives.
 
@@ -525,7 +532,7 @@ Add a companion panel for `max by (pod)` of the per-pod p99 — the fleet quanti
 | HdrHistogram | 2.2.x | Constant-memory, allocation-free latency recording with fixed relative precision; exact merge across hosts |
 | DDSketch | 2.x | Mergeable quantile sketch with a configurable relative-error guarantee; Datadog's percentile backend |
 | t-digest | 3.3+ | Mergeable sketch with high accuracy at the extremes; Elasticsearch `percentiles` aggregation |
-| Prometheus native histograms | 3.x (stable) | Exponential, exactly-mergeable buckets; replaces fixed `le` buckets and their interpolation error |
+| Prometheus native histograms | 3.8+ (stable) | Exponential, exactly-mergeable buckets; replaces fixed `le` buckets and their interpolation error |
 | Micrometer | 1.17+ | `DistributionSummary`/`Timer` with `publishPercentileHistogram()` — publish buckets, never client-computed percentiles |
 | OpenTelemetry | 1.x | Exponential histogram metric type on the wire; trace-based tail sampling for p99 exemplars |
 | Envoy | 1.3x | Hedging (`hedge_on_per_try_timeout`), retry budgets, outlier detection (latency-induced probation) |
@@ -560,7 +567,7 @@ Waiting the p95 before firing is what makes it cheap: by construction only about
 **Q: How do tied requests differ from hedged requests, and when do you prefer them?**
 **Short:** Tied requests enqueue on two replicas at once and cancel the loser at dequeue time, so they act at t equals zero instead of waiting out the p95.
 
-A hedge cannot help a request that was doomed from the first microsecond, because it deliberately waits the p95 first. A tied request goes to both replicas immediately, each carrying the other's identity; whichever server *dequeues* it first — meaning it is about to start work — sends a "started" notice to the peer, which drops its copy before doing any work. The duplicate-work window is one intra-datacentre RTT, well under a millisecond, which is why the paper reports under 1% extra disk utilization while cutting median latency 16% and the 99.9th percentile by nearly 40%. Prefer tied requests when queueing delay dominates the tail and replicas are close. They fail across regions: at an 80ms cross-region RTT the cancellation arrives long after both replicas finished, so you pay full duplicate cost.
+A hedge cannot help a request that was doomed from the first microsecond, because it deliberately waits the p95 first. A tied request goes to both replicas immediately, each carrying the other's identity; whichever server *dequeues* it first — meaning it is about to start work — sends a "started" notice to the peer, which drops its copy before doing any work. The duplicate-work window is one intra-datacentre RTT, well under a millisecond, which is why the paper reports under 1% extra disk utilization while cutting median latency 16% and the 99.9th percentile by nearly 40% on a mostly idle cluster (21% and 32% on a busy one). Prefer tied requests when queueing delay dominates the tail and replicas are close. They fail across regions: at an 80ms cross-region RTT the cancellation arrives long after both replicas finished, so you pay full duplicate cost.
 
 **Q: A team optimized the hot path and improved p50 by 40 percent while p999 did not move at all. What is going on?**
 **Short:** The tail is a different code path, so work that speeds up the common case never touches the stall that produces p999.
@@ -570,7 +577,7 @@ p50 is the cache-hit path; p999 is a GC pause, a CFS quota freeze, a TCP retrans
 **Q: If service A has a p99 of 30ms and service B has a p99 of 20ms, what is the p99 of a request that calls both sequentially?**
 **Short:** Unknown from those two numbers alone — percentiles do not add, and 50ms is only correct if A's and B's slow requests coincide perfectly.
 
-The sum assumes perfect positive correlation: that every request slow in A is also slow in B. For independent services the composite p99 is *lower* than 50ms, because a request is unlikely to draw the tail from both. For services sharing a cause of slowness — the same throttled node, the same paused cache, the same deploy — the composite p99.9 can be far *higher* than the sum of the p99.9s. The only correct method is to measure the composite end to end, or to convolve the actual distributions; there is no arithmetic on the summary numbers that gets you there. This is the same rule as "do not average percentiles," stated for addition rather than the mean. It is why an SLO decomposed into per-hop percentile budgets is a planning heuristic, never a guarantee.
+The sum assumes perfect positive correlation: that every request slow in A is also slow in B. For independent services the composite p99 is *no greater than* 50ms — strictly lower whenever both distributions actually vary, and equal only in the degenerate case where one of them is deterministic — because a request is unlikely to draw the tail from both. For services sharing a cause of slowness — the same throttled node, the same paused cache, the same deploy — the composite p99.9 can be far *higher* than the sum of the p99.9s. The only correct method is to measure the composite end to end, or to convolve the actual distributions; there is no arithmetic on the summary numbers that gets you there. This is the same rule as "do not average percentiles," stated for addition rather than the mean. It is why an SLO decomposed into per-hop percentile budgets is a planning heuristic, never a guarantee.
 
 **Q: Why is LIFO better than FIFO when a service is overloaded?**
 **Short:** FIFO serves the oldest request, whose client has usually already timed out, so it spends full capacity producing answers nobody reads.
@@ -595,7 +602,7 @@ The purpose is to stop a tail mitigation from becoming a load amplifier. Dean an
 **Q: Why does the retry-storm amplification factor multiply across tiers, and where should retries live?**
 **Short:** Each tier multiplies the attempts of the tier below it, so three tiers with three retries each turn one user request into twenty-seven leaf calls.
 
-Retries compose multiplicatively: `3 × 3 × 3 = 27`. A leaf browning out at a 20% error rate therefore sees roughly 8x its normal load precisely when it is least able to serve it, which converts partial degradation into a total outage — commonly in under two minutes. The rule is to retry at exactly one hop, and to prefer the one closest to the user because it has the most context about whether a retry is still worth anything (the deadline may already have passed). Every other tier retries zero times and simply propagates the error. Combine this with deadline propagation — gRPC deadlines and `grpc-timeout` headers travel with the call — so an intermediate tier never retries a request whose remaining budget is already exhausted, and with a shared retry budget so even the one retrying hop is capped.
+Retries compose multiplicatively: `3 × 3 × 3 = 27`, so a leaf that is failing every attempt sees 27x its normal call volume precisely when it is least able to serve it. It never has to reach the ceiling to break — a 20% error rate already amplifies, the amplification raises the error rate, and that feedback loop closes in under two minutes, converting partial degradation into a total outage. The rule is to retry at exactly one hop, and to prefer the one closest to the user because it has the most context about whether a retry is still worth anything (the deadline may already have passed). Every other tier retries zero times and simply propagates the error. Combine this with deadline propagation — gRPC deadlines and `grpc-timeout` headers travel with the call — so an intermediate tier never retries a request whose remaining budget is already exhausted, and with a shared retry budget so even the one retrying hop is capped.
 
 **Q: What is head-of-line blocking and where does it appear in a request path?**
 **Short:** One slow item at the front of a queue delays everything behind it, and it recurs independently at the TCP, HTTP, thread-pool and consumer layers.
@@ -605,7 +612,7 @@ At TCP, a lost segment stalls delivery of every byte after it even though those 
 **Q: How do you record latency so that percentiles are correct across a fleet?**
 **Short:** Record a histogram in-process and ship the encoded histogram, letting the aggregator compute the quantile from the pooled distribution.
 
-Use HdrHistogram in the application: it stores values in exponentially-sized buckets with a fixed relative precision, so p999 is accurate to 0.1% at three significant digits, in constant memory with no allocation on the record path, and `Histogram.add(other)` merges exactly — the merged histogram is identical to one built from the union of the sample sets. Publish the compressed histogram (typically 1–3KB) rather than percentile gauges. In a Prometheus stack, use native histograms (stable since Prometheus 3.0) whose exponential buckets merge exactly, or classic `_bucket` series aggregated with `sum by (le)` before `histogram_quantile`. In sketch-based systems, DDSketch gives a hard relative-error guarantee (configure 1%, every quantile is within 1%) while t-digest gives high accuracy at the extremes without a formal bound. The invariant behind all of them: never reduce to a percentile until you have all the data.
+Use HdrHistogram in the application: it stores values in exponentially-sized buckets with a fixed relative precision, so p999 is accurate to 0.1% at three significant digits, in constant memory with no allocation on the record path, and `Histogram.add(other)` merges exactly — the merged histogram is identical to one built from the union of the sample sets. Publish the compressed histogram (typically 1–3KB) rather than percentile gauges. In a Prometheus stack, use native histograms (experimental behind a feature flag from Prometheus 3.0, stable since 3.8) whose exponential buckets merge exactly, or classic `_bucket` series aggregated with `sum by (le)` before `histogram_quantile`. In sketch-based systems, DDSketch gives a hard relative-error guarantee (configure 1%, every quantile is within 1%) while t-digest gives high accuracy at the extremes without a formal bound. The invariant behind all of them: never reduce to a percentile until you have all the data.
 
 **Q: Your in-process p99 is 9ms and the load balancer reports 340ms for the same endpoint. What is the gap?**
 **Short:** Queueing that happens before your handler runs — accept backlog, TLS handshake, and thread-pool wait — which an in-handler timer starts too late to see.

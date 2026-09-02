@@ -206,7 +206,7 @@ flowchart LR
         u1(["deficit 200 per second"])
         u2("after 60 s<br/>queue = 12000")
         u3("wait = 12 s vs<br/>client deadline 2 s")
-        u4["goodput = 0<br/>heap +2.1 GB"]
+        u4["goodput = 0<br/>heap +70 MB and climbing"]
         u1 --> u2 --> u3 --> u4
     end
 
@@ -454,7 +454,7 @@ A worked plan for a user-facing JSON API with a 250ms p99 budget.
   at rho = 0.70:  400 * 0.70                     = 280 req/s   <- the planning number
 ```
 
-Check the target against the SLO before adopting it: `R = S/(1-ρ) = 25/(1-0.70) = 83ms` mean, comfortably inside a 250ms p99 budget once the tail is added.
+Check the target against the SLO before adopting it, and use `Sc` — the queue is for the CPU, and `W` is wall time that includes waiting elsewhere: `R = Sc/(1-ρ) = 20/(1-0.70) = 67ms` of mean CPU-side residence, plus the non-overlapped DB wait on top. Comfortably inside a 250ms p99 budget once the tail is added.
 
 **5. Instance count for the happy path.**
 
@@ -543,7 +543,7 @@ The asymmetric `behavior` block is not decoration. Scaling up late costs latency
   every dequeued request is 10 s past its deadline
   throughput on the dashboard          = 1,000 req/s     "healthy"
   goodput (answers anyone reads)       = 0
-  plus: 12,000 queued objects, heap +2.1 GB, full GC makes it worse
+  plus: 12,000 queued objects at ~6 KB retained each, heap +70 MB and climbing
 ```
 
 **Bounded queue plus fast reject.** Size the bound from Little's Law, not from intuition: the bound is the wait you are willing to accept, times the service rate.
@@ -573,11 +573,16 @@ ThreadPoolExecutor pool = new ThreadPoolExecutor(
 ResponseEntity<Quote> quote(@RequestBody Req r) {
     try {
         return ResponseEntity.ok(pool.submit(() -> price(r)).get());
-    } catch (RejectedExecutionException e) {
+    } catch (RejectedExecutionException e) {                 // queue full: shed, fast
         shedCounter.increment();
         return ResponseEntity.status(503)
                 .header("Retry-After", "1")                  // tell the caller when
                 .build();
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();                  // NEVER swallow the flag
+        return ResponseEntity.status(503).build();
+    } catch (ExecutionException e) {                         // price() itself threw
+        throw new IllegalStateException(e.getCause());
     }
 }
 ```
@@ -687,7 +692,7 @@ Three details that are routinely wrong: `LinkedBlockingQueue()` with no argument
 
 ## 10. Common Pitfalls
 
-**Pitfall 1: capacity by division, sized to 100% utilization.** A logistics API was sized as `peak QPS / measured max QPS per instance` — 14,000 / 500 = 28 instances, with a "20% buffer" added by hand for 34. The measured 500 req/s per instance had been taken at 99% CPU in a benchmark. In production the fleet ran at ρ = 0.93 and p99 sat at 1.9 seconds against a 400ms SLO. Two months of "the code must be slow" investigation produced a 12% improvement in mean service time and no SLO change, because at ρ = 0.93 the response time is 14.3× S and shaving S by 12% shaves R by 12% — still 1.7 seconds. Re-planning at ρ = 0.70 required 61 instances; p99 fell to **215ms in a single deploy**. Quantified impact: 2 engineer-months wasted, SLO breached for 9 weeks, fixed by a spreadsheet.
+**Pitfall 1: capacity by division, sized to 100% utilization.** A logistics API was sized as `peak QPS / measured max QPS per instance` — 14,000 / 500 = 28 instances, with a "20% buffer" added by hand for 34. The measured 500 req/s per instance had been taken at 99% CPU in a benchmark. In production the fleet ran at ρ = 0.93 and p99 sat at 1.9 seconds against a 400ms SLO. Two months of "the code must be slow" investigation produced a 12% improvement in mean service time and no SLO change, because at ρ = 0.93 the response time is 14.3× S and shaving S by 12% shaves R by 12% — still 1.7 seconds. Re-planning at ρ = 0.70, with the same two-of-three-AZ survival factor the original plan also lacked, required 60 instances — `14,000 / (500 × 0.70 × 2/3) = 60`, against 40 for the happy path alone; p99 fell to **215ms in a single deploy**. Quantified impact: 2 engineer-months wasted, SLO breached for 9 weeks, fixed by a spreadsheet.
 
 ```python
 # BROKEN: sizes the fleet to the point where response time is infinite.
@@ -702,10 +707,10 @@ AZ_SURVIVING = 2/3                        # must serve peak with one of three AZ
 
 usable_qps_per_instance = max_qps_per_instance * TARGET_RHO       # 500 * 0.70 = 350
 instances = math.ceil(peak_qps / (usable_qps_per_instance * AZ_SURVIVING))
-#           ceil(14000 / (350 * 0.6667)) = 60  -> round to 61 for even AZ spread
+#           ceil(14000 / (350 * 0.6667)) = 60   -> 60 instances, 20 per AZ
 ```
 
-**Pitfall 2: an unbounded queue presented as resilience.** A pricing service used `new LinkedBlockingQueue<>()` — the no-argument constructor, which is unbounded at `Integer.MAX_VALUE` — because "rejecting requests looks bad to the client." During a 14-minute marketing spike at 1.6x capacity the queue reached 340,000 entries. Every dequeued request was 40+ seconds past the caller's 3-second deadline, so **goodput was zero for eleven of those fourteen minutes** while the throughput dashboard read a healthy 1,050 req/s. Heap grew 2.1GB and a full GC extended the incident. The bounded replacement (100 entries = 100ms of work) shed 37% of requests in under a millisecond each and held p99 at 118ms through the identical spike the following week. Rejecting a third of traffic instantly beat serving all of it 40 seconds late, and the callers agreed — their failover to a second region worked, which it could not do while the socket was held open.
+**Pitfall 2: an unbounded queue presented as resilience.** A pricing service used `new LinkedBlockingQueue<>()` — the no-argument constructor, which is unbounded at `Integer.MAX_VALUE` — because "rejecting requests looks bad to the client." During a 14-minute marketing spike at 1.6x capacity the queue reached 340,000 entries. Every dequeued request was 40+ seconds past the caller's 3-second deadline, so **goodput was zero for eleven of those fourteen minutes** while the throughput dashboard read a healthy 1,050 req/s. Heap grew 2.1GB — 340,000 queued requests retaining roughly 6KB each — and a full GC extended the incident. The bounded replacement (100 entries = 100ms of work) shed 37% of requests in under a millisecond each and held p99 at 118ms through the identical spike the following week. Rejecting a third of traffic instantly beat serving all of it 40 seconds late, and the callers agreed — their failover to a second region worked, which it could not do while the socket was held open.
 
 **Pitfall 3: `CallerRunsPolicy` mistaken for graceful degradation.** The team above first tried `CallerRunsPolicy` on a bounded queue. It made things worse: when the pool is full the *acceptor* thread runs the task, so it stops accepting connections, and the queue relocates into the kernel accept backlog (`somaxconn`) where no application metric can see it. Connection-establishment time went from 0.4ms to 8 seconds while every in-application metric stayed green. Use `AbortPolicy` and return an explicit 503; degradation must be visible.
 

@@ -159,8 +159,8 @@ zipf     |####|##  |##  |#   |#   |#   |#   |#   |#   |#   |#   |#   |
 
 CACHE OF 100,000 ENTRIES (1% of the key space)
   uniform over 20,000 seeded keys   -> whole key space fits -> hit rate 99.4%
-  zipf s=0.91 over 10.2M keys       -> top 1% carries ~63%  -> hit rate 78.4%
-                                        (LRU + temporal locality lifts 63% -> 78%)
+  zipf s=0.91 over 10.2M keys       -> top 1% carries ~56%  -> hit rate 78.4%
+                                        (LRU + temporal locality lifts 56% -> 78%)
 
   DELTA:      21.0 percentage points of hit rate
   MISS RATE:  0.6%  ->  21.6%          =  36x more requests reach the database
@@ -286,7 +286,9 @@ WITH ordered AS (
 SELECT round(quantile_cont(epoch(ts - prev_ts), 0.50), 2) AS think_p50_s,
        round(quantile_cont(epoch(ts - prev_ts), 0.90), 2) AS think_p90_s,
        round(avg(cnt), 1)                                  AS reqs_per_session
-FROM ordered, (SELECT count(*) AS cnt FROM spans GROUP BY session_id) s
+FROM ordered
+JOIN (SELECT session_id, count(*) AS cnt FROM spans GROUP BY session_id) s
+  USING (session_id)
 WHERE prev_ts IS NOT NULL AND ts - prev_ts < INTERVAL 10 MINUTE;
 ```
 
@@ -320,6 +322,16 @@ def fit_zipf(keys):
     r2 = 1.0 - resid.var() / lc.var()
     return -s, r2, len(counts)
 
+def sample_zipf(rng, s, n, size):
+    """Truncated Zipf over ranks 1..n by inverse CDF.
+
+    numpy.random.zipf(a) requires a > 1 and samples with exponent ~a, so it cannot
+    produce the s = 0.91 of a real web workload. Build the CDF explicitly instead.
+    """
+    cdf = np.cumsum(np.arange(1, n + 1, dtype=np.float64) ** -s)
+    cdf /= cdf[-1]
+    return np.searchsorted(cdf, rng.random(size)) + 1
+
 def hit_rate(keys, cache_size):
     """Exact LRU hit rate over the observed sequence - the number to reproduce."""
     from collections import OrderedDict
@@ -337,7 +349,7 @@ def hit_rate(keys, cache_size):
 if __name__ == "__main__":
     # Synthetic stand-in for one hour of production keys.
     rng = np.random.default_rng(7)
-    keys = rng.zipf(1.91, size=1_000_000) % 10_200_000
+    keys = sample_zipf(rng, s=0.91, n=10_200_000, size=1_000_000)
     s, r2, distinct = fit_zipf(keys)
     print(f"s={s:.2f}  r2={r2:.3f}  distinct={distinct:,}")
     print(f"LRU@100k hit rate = {hit_rate(keys, 100_000):.3f}")
@@ -397,7 +409,7 @@ const model = JSON.parse(open('./workload.json'));
 // Build the CDF once, shared across all VUs (SharedArray is copy-on-read, not per-VU).
 const cdf = new SharedArray('zipf-cdf', function () {
   const { s, n } = model.key_distribution;
-  const TOP = 200000;                    // top ranks carry ~68% of hits at s=0.91
+  const TOP = 200000;                    // top ranks carry ~62% of hits at s=0.91
   const w = new Float64Array(TOP);
   let acc = 0;
   for (let k = 1; k <= TOP; k++) { acc += Math.pow(k, -s); w[k - 1] = acc; }
@@ -623,8 +635,9 @@ def main():
         print(f"{name:<20} {prod:>12,.2f} {model:>12,.2f} {tol:>16}  {verdict}")
 
     # Endpoint mix: chi-square the top-N observed counts against production proportions.
+    # chisquare requires obs and exp to sum to the same total.
     obs = [3810, 1720, 1260, 940, 410]
-    exp = [3811, 1719, 1259, 941, 411]
+    exp = [3811, 1719, 1259, 941, 410]
     chi2, p = chisquare(obs, exp)
     print(f"{'endpoint mix':<20} {'chi2':>12} {chi2:>12.2f} {'p > 0.05':>16}  "
           f"{'PASS' if p > 0.05 else 'FAIL'}")
@@ -647,15 +660,17 @@ Running it on the §1 model:
 
 ```
 dimension              production        model        tolerance  verdict
-cache hit rate %            78.40        77.10         +/- 3 pts  PASS
-zipf exponent s              0.91         0.89          +/- 0.05  PASS
-payload p95 bytes       34,100.00    31,200.00           +/- 20%  PASS
-payload p99 bytes      210,400.00    44,100.00           +/- 20%  FAIL
-orders row count    412,000,000.00 380,000,000.00  >= 50% of prod  PASS
+cache hit rate %            78.40        77.10        +/- 3 pts  PASS
+zipf exponent s              0.91         0.89         +/- 0.05  PASS
+payload p95 bytes       34,100.00    31,200.00          +/- 20%  PASS
+payload p99 bytes      210,400.00    44,100.00          +/- 20%  FAIL
+orders row count     412,000,000.00 380,000,000.00   >= 50% of prod  PASS
 error rate %                 0.70         0.02      +/- 0.5 pts  FAIL
-arrival Ca^2                 2.70         2.60           +/- 25%  PASS
+arrival Ca^2                 2.70         2.60          +/- 25%  PASS
+endpoint mix                 chi2         0.00         p > 0.05  PASS
 
 MODEL INVALID - 2 dimension(s) out of tolerance: payload p99 bytes, error rate %
+Do NOT publish a capacity number from this run.
 ```
 
 Two failures, both instructive. The payload p99 is 4.8x low because the model sampled from a
@@ -680,8 +695,8 @@ Production tenant shape for the service in §1:
 
 | Cohort | Share of tenants | Share of requests | Share of rows |
 |--------|------------------|-------------------|---------------|
-| Top 1% (37 tenants) | 1.0% | 46.0% | 71.0% |
-| Largest single tenant | 0.03% | 11.0% | 38.0% |
+| Top 1% (31 tenants) | 1.0% | 46.0% | 71.0% |
+| Largest single tenant | 0.032% | 11.0% | 38.0% |
 | Middle 20% | 20.0% | 38.0% | 24.0% |
 | Long tail (79%) | 79.0% | 16.0% | 5.0% |
 
@@ -778,7 +793,7 @@ Ranked by observed impact-per-hour-of-work on a typical read-heavy service:
 | Dimension | Effort | Typical error if defaulted | Fix first? |
 |-----------|--------|----------------------------|------------|
 | Key distribution | 4 hours | 15–25 points of hit rate; 20–40x database rate | **yes — highest leverage** |
-| Data volume and skew | 1–2 days | plan changes; 100x–10,000x on individual queries | **yes** |
+| Data volume and skew | 1–2 days | plan changes; 100x–12,400x on individual queries | **yes** |
 | Endpoint mix | 2 hours | the expensive endpoint may be entirely absent | **yes** |
 | Arrival burstiness | 3 hours | 2–4x understatement of queueing delay | yes |
 | Payload size distribution | 2 hours | 10–30% CPU understatement; tail effects | if CPU-bound |
@@ -853,7 +868,7 @@ export default function () {
 // ceiling moved from "50,000 RPS, untested" to a measured 8,400 RPS.
 ```
 
-**Pitfall 2 — The 10,000-row staging database.** A reporting endpoint was measured at 0.3ms in
+**Pitfall 2 — The 10,000-row staging database.** A reporting endpoint was measured at 0.331ms in
 staging and 4,106ms in production, a 12,400x gap, entirely because tenant 4417 owned 38% of
 412M rows and the index did not cover the `status` filter (§6.6). The team had run load tests
 for eight months against a fixture file. Cost: a 3-hour degradation and an emergency covering

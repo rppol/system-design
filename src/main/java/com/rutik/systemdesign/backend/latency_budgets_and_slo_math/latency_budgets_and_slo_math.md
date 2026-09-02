@@ -60,7 +60,7 @@ True p99 of the sum (independent) .. ~126 ms  <- what you will actually measure
 
 ### 4.2 The Physical Floor
 
-Light in a vacuum travels 299,792 km/s. Inside a silica fibre with refractive index around 1.47, the signal propagates at roughly **200,000 km/s** — about 200 km per millisecond, one way. A round trip therefore costs about **1ms per 100km of fibre**, and real fibre routes run roughly 1.3-1.5x the great-circle distance because cables follow terrain, rights of way and undersea corridors.
+Light in a vacuum travels 299,792 km/s. Inside a silica fibre with refractive index around 1.47, the signal propagates at roughly **200,000 km/s** — about 200 km per millisecond, one way. A round trip therefore costs about **1ms per 100km of fibre**, and real fibre routes run roughly 1.2-1.5x the great-circle distance because cables follow terrain, rights of way and undersea corridors.
 
 ```
 RTT_min = 2 x fibre_path_km / 200,000 km/s
@@ -74,13 +74,13 @@ RTT_min = 2 x fibre_path_km / 200,000 km/s
 | Cross-AZ, same region | 5-100 km | 0.05-1 ms | 0.5-2 ms |
 | `us-east-1` to `us-east-2` | ~1,050 km | 10.5 ms | 12-15 ms |
 | `us-east-1` to `us-west-2` | ~5,500 km | 55 ms | 60-70 ms |
-| `us-east-1` to `eu-west-1` | ~7,100 km | 71 ms | 68-80 ms |
+| `us-east-1` to `eu-west-1` | ~6,750 km | 67 ms | 68-80 ms |
 | `eu-west-1` to `ap-southeast-1` | ~15,500 km | 155 ms | 155-180 ms |
 | `us-east-1` to `ap-southeast-1` | ~21,000 km | 210 ms | 210-240 ms |
 
 Two things follow, and both are architectural rather than technical:
 
-1. **Observed RTT is already close to the floor on major routes.** `us-east-1` to `eu-west-1` measures 68-80ms against a 71ms floor. There is nothing left to optimize — no protocol, no compression, no faster NIC, no CDN, no amount of money. Hollow-core fibre pushes the propagation speed toward 99% of `c` and shaves perhaps 30%, and it exists on a handful of financial routes, not on your VPC peering.
+1. **Observed RTT is already close to the floor on major routes.** `us-east-1` to `eu-west-1` measures 68-80ms against a 67ms floor. There is nothing left to optimize — no protocol, no compression, no faster NIC, no CDN, no amount of money. Hollow-core fibre pushes the propagation speed toward 99% of `c` and shaves perhaps 30%, and it exists on a handful of financial routes, not on your VPC peering.
 2. **A synchronous cross-region call is a topology decision, not a performance bug.** If your 200ms p99 budget includes one round trip to Europe, 70ms — 35% of the entire budget — is spent before any code executes. The only fixes are topological: replicate the data, move the computation, or make the call asynchronous.
 
 ### 4.3 Budget Allocation Strategies
@@ -130,7 +130,7 @@ flowchart LR
     sv -->|"gRPC<br/>45ms"| pr(["Pricing<br/>service"])
     db --> resp(["Serialize + egress<br/>11ms"])
     pr --> resp
-    resp --> hd(["Reserve 25ms jitter<br/>Headroom 54ms"])
+    resp --> hd(["Reserve 25ms jitter<br/>Headroom 93ms"])
 
     class cl req
     class gw io
@@ -150,19 +150,18 @@ Note that `Redis` and `Pricing` are drawn as separate branches from the service:
 ```mermaid
 sankey-beta
 
-SLO 200ms,Allocated work,121
+SLO 200ms,Allocated work,82
 SLO 200ms,Jitter reserve,25
-SLO 200ms,Retained headroom,54
+SLO 200ms,Retained headroom,93
 Allocated work,Gateway,12
 Allocated work,Auth,3
 Allocated work,Network hops,2
 Allocated work,Service CPU,14
 Allocated work,Pricing call,45
-Allocated work,Data access,39
 Allocated work,Serialization,6
 ```
 
-Two things a budget sankey makes obvious immediately: how little of the promise is left after the reserve (61% of the pot is allocated work), and that a single remote call — pricing at 45ms — is 37% of all allocated work. That is where the next architectural conversation happens, not in the gateway.
+Two things a budget sankey makes obvious immediately: how little of the promise the work actually needs (41% of the pot is allocated work, because the 39ms data-access branch hides inside pricing's parallel max and never appears as its own flow), and that a single remote call — pricing at 45ms — is 55% of all allocated work. That is where the next architectural conversation happens, not in the gateway.
 
 ### 5.3 Serial Adds, Parallel Maxes
 
@@ -210,16 +209,16 @@ The worked example. Path: mobile client → CloudFront → API Gateway → check
 | 8 | Response serialization (30 KB JSON) | 6 ms | |
 | 9 | Service to gateway, network | 1 ms | |
 | 10 | Gateway egress + gzip | 4 ms | gzip level 4 on 30 KB, ~1.5ms; rest is proxy |
-| | **Allocated (serial path, with 6 and 7 in parallel)** | **121 ms** | `8+3+1+2+12+max(4or35, 45)+6+1+4` |
+| | **Allocated (serial path, with 6 and 7 in parallel)** | **82 ms** | `8+3+1+2+12+max(4or35, 45)+6+1+4` |
 | | GC and scheduler jitter reserve | 25 ms | One G1 mixed pause plus scheduling noise |
-| | Retained headroom (27%) | 54 ms | Unallocated. Do not spend it in the design review |
+| | Retained headroom (46%) | 93 ms | Unallocated. Do not spend it in the design review |
 | | **Total** | **200 ms** | |
 
 Three rules this table encodes:
 
-- **Line 7 is 37% of allocated work.** Any budget where one remote call dominates should trigger the question "must this be synchronous?" before any micro-optimization elsewhere.
-- **The parallel `max` in the middle is load-bearing.** Serialized, lines 6b and 7 would cost 80ms instead of 45ms — the budget would total 235ms and the design would be rejected.
-- **Headroom is a line item with a name.** A budget that sums to exactly 200 is a budget that misses, because the model excludes queueing, retries, cold caches and the day traffic is 1.4x normal.
+- **Line 7 is 55% of allocated work.** Any budget where one remote call dominates should trigger the question "must this be synchronous?" before any micro-optimization elsewhere.
+- **The parallel `max` in the middle is load-bearing.** Serialized, lines 6a, 6b and 7 would cost 84ms instead of 45ms — allocated work rises from 82ms to 121ms and headroom collapses from 93ms to 54ms, leaving nothing for the next dependency somebody asks to add.
+- **Headroom is a line item with a name.** This one retains far more than the 25-30% the discipline asks for, which is what a path with a genuine parallel branch looks like — and naming it is what stops it being quietly spent. A budget that sums to exactly 200 is a budget that misses, because the model excludes queueing, retries, cold caches and the day traffic is 1.4x normal.
 
 ### 6.2 The Budget You Already Spent
 
@@ -227,7 +226,7 @@ Before your first line of handler code runs, the request has already consumed ti
 
 | Cost | Warm path | Cold path | Notes |
 |---|---|---|---|
-| DNS resolution | 0 (OS/JVM cache) | 20-120 ms | The JVM's `networkaddress.cache.ttl` defaults to 30s for positive lookups under a security manager and is often left too high or too low |
+| DNS resolution | 0 (OS/JVM cache) | 20-120 ms | The JVM caches positive lookups for 30s by default (`networkaddress.cache.ttl`), and it is often left too high or too low |
 | TCP handshake | 0 (pooled) | 1 RTT | Intra-AZ ~0.5ms, cross-region 70ms |
 | TLS 1.3 full handshake | 0 (pooled) | 1 RTT | TLS 1.2 costs **2** RTTs — 140ms cross-region |
 | TLS session resumption | 0 | 0-1 RTT | 0-RTT early data only for idempotent requests, and it is replayable |
@@ -435,7 +434,7 @@ spring:
     hikari:
       connection-timeout: 2000      # acquire budget: 2ms of the 35ms DB line,
       validation-timeout: 1000      # 2000ms is the CEILING before we shed load
-      maximum-pool-size: 32         # Little's Law: 112 rps x 0.012s hold x 20x margin
+      maximum-pool-size: 27         # Little's Law: 112 rps x 0.012s = 1.4 busy, x20 burst margin
   cloud:
     openfeign:
       client:
@@ -459,11 +458,11 @@ resilience4j:
 
 **A 95% cache hit rate did nothing for p99.** A catalog service added Redis, hit rate reached 95%, mean latency fell from 180ms to 22ms, and the team declared victory. p99 was unchanged at 840ms, because p99 *is* the miss path — at a 95% hit rate the 99th percentile request is a miss by definition. Worse, the miss path got slower: the cache had absorbed enough load that the origin's connection pool had been downsized, so misses now queued. **A cache improves the mean; only a cache with a hit rate above the SLO percentile improves that percentile.** To move p99 you need 99%+ hits, or you need to fix the miss path.
 
-**Averaged the p99s across 40 instances.** A dashboard computed `avg(p99)` over 40 pods. A single pod with a corrupted index was serving p99 = 9 seconds on 0.4% of traffic; the averaged panel showed 310ms, comfortably inside a 400ms line. Customers on that pod's sticky sessions complained for **six weeks**. Recomputing from summed histogram buckets showed the true fleet p99 at 8.6 seconds. The averaged-percentile panel is the single most common broken dashboard in production, because Grafana makes it trivially easy to build.
+**Averaged the p99s across 80 instances.** A media-metadata service's dashboard computed `avg(p99)` over 80 pods. One pod wedged on a degraded EBS volume was serving essentially every request in 11 seconds — 1.25% of fleet traffic; the averaged panel showed 290ms, comfortably inside a 350ms line. Customers whose sticky sessions landed on that pod complained for **five weeks**. Recomputing from summed histogram buckets showed the true fleet p99 at 10.9 seconds, because once more than 1% of traffic is slow the 99th percentile sits inside the bad pod by construction. The averaged-percentile panel is the single most common broken dashboard in production, because Grafana makes it trivially easy to build.
 
-**Budgeted the fan-out on the leaf's p99.** A search service fanned out to 60 shards and budgeted 40ms because each shard's p99 was 40ms. Measured end-to-end p99 was 310ms. With 60 leaves, `0.99^60 = 55%` of requests hit at least one shard above its own p99, so the fan-out's p99 tracked the leaf's p99.995, not its p99. The fix was hedging — reissue to a replica at the 40ms mark — which brought p99 to 62ms for a 4% increase in leaf load. See [`tail_latency_and_fan_out`](../tail_latency_and_fan_out/tail_latency_and_fan_out.md).
+**Budgeted the fan-out on the leaf's p99.** A search service fanned out to 60 shards and budgeted 40ms because each shard's p99 was 40ms. Measured end-to-end p99 was 310ms. With 60 leaves, only `0.99^60 = 55%` of requests have every shard inside its own p99, so 45% hit at least one slow shard and the fan-out's p99 tracked the leaf's p99.983 (`0.99^(1/60) = 0.99983`), not its p99. The fix was hedging — reissue to a replica at the 40ms mark — which brought p99 to 62ms for a 4% increase in leaf load. See [`tail_latency_and_fan_out`](../tail_latency_and_fan_out/tail_latency_and_fan_out.md).
 
-**Put a cross-region call in a 150ms budget.** A team moved a fraud vendor from a US endpoint to the vendor's EU endpoint for data-residency reasons. Nobody recomputed the budget: the call went from a 12ms p99 to 79ms, of which 71ms is the physics floor between `us-east-1` and `eu-west-1`. p99 went from 118ms to 191ms against a 150ms SLO and stayed there through two sprints of profiling, because there was nothing in the code to find. The eventual fix was a regional deployment of the calling service — a topology change, which is the only category of fix that works against physics.
+**Put a cross-region call in a 150ms budget.** A team moved a fraud vendor from a US endpoint to the vendor's EU endpoint for data-residency reasons. Nobody recomputed the budget: the call went from a 12ms p99 to 79ms, of which 67ms is the physics floor between `us-east-1` and `eu-west-1`. p99 went from 118ms to 191ms against a 150ms SLO and stayed there through two sprints of profiling, because there was nothing in the code to find. The eventual fix was a regional deployment of the calling service — a topology change, which is the only category of fix that works against physics.
 
 **Retry amplification inside a nominally correct budget.** Every service used a sane 3-attempt retry with jittered backoff, and each service's own budget was respected. Across four tiers that is `3^4 = 81` leaf requests per user request in the worst case. A 40-second blip on the leaf produced 81x offered load, which turned a blip into a 22-minute outage. Per-hop retry policies are locally correct and globally catastrophic; the fix is a **retry budget** — a client-side token bucket capping retries at ~10% of successful request volume — plus circuit breaking at each tier.
 
@@ -500,9 +499,9 @@ For a hop to contribute its p99 to a given request, that request must be unlucky
 If every leaf must return, the request time is `max(t_i)`, which looks like a huge win over the sum — four 40ms calls in parallel cost 40ms instead of 160ms. The danger is in the tail. If each leaf has a 1% chance of exceeding its own p99, the probability that all N are fast is `0.99^N`: 90% at ten leaves, 82% at twenty, 37% at a hundred. So a 100-way fan-out's p99 corresponds to the leaf's p99.99, which is the most expensive number in any system to hold. The mitigations are hedged requests, tail-tolerant replication and reducing the fan-out width; the full treatment is in the tail-latency module. The budgeting rule is simple: never budget a fan-out at the leaf's p99.
 
 **Q: How much latency does physics charge between us-east-1 and eu-west-1, and can you engineer it away?**
-**Short:** About 71ms round trip at the speed of light in fibre, and no protocol, hardware, or CDN can recover it because the medium sets the floor.
+**Short:** About 67ms round trip at the speed of light in fibre, and no protocol, hardware, or CDN can recover it because the medium sets the floor.
 
-Light moves at roughly 200,000 km/s in silica fibre, about 200km per millisecond one way, so the round-trip floor is about 1ms per 100km of fibre. Real cable routes run 1.3 to 1.5 times the great-circle distance, giving roughly 7,100km between those regions and a 71ms floor. Observed RTT is 68-80ms, so the route is already at physics — there is nothing left to optimize. Hollow-core fibre and microwave links beat it by changing the medium, but by tens of percent, on a handful of financial routes, at enormous cost. The only real fixes are topological: replicate the data closer, move the computation, or make the call asynchronous. That is why a synchronous cross-region call inside a 200ms budget is an architecture decision, not a performance bug.
+Light moves at roughly 200,000 km/s in silica fibre, about 200km per millisecond one way, so the round-trip floor is about 1ms per 100km of fibre. Real cable routes run 1.2 to 1.5 times the great-circle distance, and the Ashburn-Dublin great circle is about 5,525km, giving roughly 6,750km of fibre and a 67ms floor. Observed RTT is 68-80ms, so the route is already at physics — there is nothing left to optimize. Hollow-core fibre and microwave links beat it by changing the medium, but by tens of percent, on a handful of financial routes, at enormous cost. The only real fixes are topological: replicate the data closer, move the computation, or make the call asynchronous. That is why a synchronous cross-region call inside a 200ms budget is an architecture decision, not a performance bug.
 
 **Q: How do you decompose a 200ms p99 SLO into per-hop budgets?**
 **Short:** Subtract the physics and connection floor first, allocate the remainder by criticality, then hold back 25-30% as named headroom.
@@ -527,7 +526,7 @@ Take 9,900 requests at 10ms and 100 at 10 seconds. The mean is 110ms, which pass
 **Q: Why can you not average p99s across instances or time windows?**
 **Short:** A percentile is a property of a distribution, so averaging per-instance percentiles produces a number that describes no distribution at all.
 
-If instance A serves 10 rps with a p99 of 1 second and instance B serves 1,000 rps with a p99 of 20ms, their averaged p99 of 510ms describes neither instance nor the fleet. The failure is not merely imprecise, it is systematically blind to exactly the case you care about: one bad pod out of forty, serving 0.4% of traffic at nine seconds, disappears completely into an averaged panel while customers on that pod complain for weeks. The correct computation sums the histogram buckets across instances first and takes the quantile of the summed distribution — in Prometheus, `histogram_quantile(0.99, sum by (le) (rate(..._bucket[5m])))`. Better still, use a threshold ratio, which needs no percentile machinery because counters simply add.
+If instance A serves 10 rps with a p99 of 1 second and instance B serves 1,000 rps with a p99 of 20ms, their averaged p99 of 510ms describes neither instance nor the fleet. The failure is not merely imprecise, it is systematically blind to exactly the case you care about: one bad pod out of eighty, serving 1.25% of traffic at eleven seconds, disappears completely into an averaged panel while customers on that pod complain for weeks. The correct computation sums the histogram buckets across instances first and takes the quantile of the summed distribution — in Prometheus, `histogram_quantile(0.99, sum by (le) (rate(..._bucket[5m])))`. Better still, use a threshold ratio, which needs no percentile machinery because counters simply add.
 
 **Q: What latency have you already spent before your handler runs?**
 **Short:** DNS, TCP handshake, TLS handshake and the first byte, which on a cold cross-region connection totals roughly 250ms before any code executes.
@@ -582,7 +581,7 @@ Options in order. Cache the response if it is cacheable at all, even for seconds
 **Q: What does "move the data" mean as a latency fix, and what does it cost?**
 **Short:** It means relocating a read replica or projection next to the compute so the request stops crossing a region, which is the only lever that beats the speed of light.
 
-A cross-region call costs 60-210ms of pure physics, and no code change touches that. Moving the data — a regional read replica, a colocated cache, a denormalized projection maintained by CDC, or a full active-active regional deployment — removes the round trip entirely because the request no longer crosses the boundary. The cost is a consistency change, and it is not small: replication lag becomes a correctness concern, read-your-writes needs explicit handling such as sticky routing or a write-timestamp token, and conflict resolution appears if writes go multi-region. It also multiplies storage and operational cost. Reach for it after the cheaper levers, but reach for it decisively — profiling a request whose latency is 71ms of fibre is time you will not get back.
+A cross-region call costs 60-210ms of pure physics, and no code change touches that. Moving the data — a regional read replica, a colocated cache, a denormalized projection maintained by CDC, or a full active-active regional deployment — removes the round trip entirely because the request no longer crosses the boundary. The cost is a consistency change, and it is not small: replication lag becomes a correctness concern, read-your-writes needs explicit handling such as sticky routing or a write-timestamp token, and conflict resolution appears if writes go multi-region. It also multiplies storage and operational cost. Reach for it after the cheaper levers, but reach for it decisively — profiling a request whose latency is 67ms of fibre is time you will not get back.
 
 **Q: How do you enforce a latency budget before production?**
 **Short:** Assert per-hop p99s in a load test that fails the build, and gate design reviews on the arithmetic summing under the SLO.
@@ -638,7 +637,7 @@ Server-side, measured at the gateway or load balancer, excludes client network, 
 
 The design review had approved this. Nobody summed the column. 497 was never going to be 200.
 
-**Step 2 — Subtract the physics.** The pricing enrichment crossed to `eu-west-1`: a fibre path of about 7,100km, a 71ms round-trip floor, and a measured 148ms of which roughly half was propagation. That 71ms is 36% of the entire SLO and is not addressable by code. Recognizing this reframed the whole problem — the question stopped being "how do we make pricing faster" and became "how does pricing leave the synchronous path".
+**Step 2 — Subtract the physics.** The pricing enrichment crossed to `eu-west-1`: a fibre path of about 6,750km, a 67ms round-trip floor, and a measured 148ms of which roughly half was propagation. That 67ms is 34% of the entire SLO and is not addressable by code. Recognizing this reframed the whole problem — the question stopped being "how do we make pricing faster" and became "how does pricing leave the synchronous path".
 
 **Step 3 — Apply the levers in cost order.**
 
@@ -652,7 +651,7 @@ The design review had approved this. Nobody summed the column. 497 was never goi
 // BROKEN: three independent calls, executed serially. 96 + 148 + 61 = 305 ms.
 public SearchResponse search(Query q, Tenant t) {
     List<Hit> hits   = elastic.search(q, t);                 //  96 ms p99
-    Map<String, Price> prices = pricing.quote(ids(hits));    // 148 ms p99  (EU, 71ms is physics)
+    Map<String, Price> prices = pricing.quote(ids(hits));    // 148 ms p99  (EU, 67ms is physics)
     Map<String, Stock> stock  = inventory.check(ids(hits));  //  61 ms p99
     return assemble(hits, prices, stock);
 }

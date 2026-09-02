@@ -305,8 +305,9 @@ git worktree add /tmp/side-a HEAD
 git worktree add /tmp/side-b HEAD
 (cd /tmp/side-a && ./build.sh) && (cd /tmp/side-b && ./build.sh)
 
-# Run the harness against both as if they differed, interleaved, 20 pairs.
-for i in $(seq 1 20); do
+# Run the harness against both as if they differed, interleaved, 100 pairs.
+# Fewer than ~40 and the 2.5/97.5 indices below degenerate to min and max.
+for i in $(seq 1 100); do
   ./bench.sh /tmp/side-a >> a.jsonl
   ./bench.sh /tmp/side-b >> b.jsonl
 done
@@ -325,6 +326,10 @@ a, b = medians(sys.argv[1]), medians(sys.argv[2])
 deltas = [100.0 * (y - x) / x for x, y in zip(a, b)]
 
 deltas.sort()
+# Nearest-rank percentiles. With n < 40 these indices collapse to deltas[0] and
+# deltas[-1] -- min and max wearing a "95%" label, which is how a noise floor gets
+# reported as twice its real width. Assert rather than trust the caller.
+assert len(deltas) >= 40, f"need >= 40 pairs for a 95% spread, got {len(deltas)}"
 lo = deltas[int(0.025 * len(deltas))]
 hi = deltas[int(0.975 * len(deltas))]
 
@@ -414,7 +419,7 @@ repetitions high enough makes any non-zero difference significant:
   effect = 0.2%, per-sample sigma = 3%
 
     n =    30 per side   ->  95% CI [-1.3%, +1.7%]   not significant
-    n =   500 per side   ->  95% CI [-0.1%, +0.5%]   not significant
+    n =   500 per side   ->  95% CI [-0.17%, +0.57%]  not significant
     n = 5,000 per side   ->  95% CI [+0.1%, +0.3%]   SIGNIFICANT, and worthless
 ```
 
@@ -716,7 +721,8 @@ the application cache, giving a 100% hit rate. Production's working set was 40 G
 Zipf-distributed access pattern and a measured 62% hit rate. The benchmark therefore never
 executed the cache-miss path — the database round trip, the deserialization, the cache
 fill — which is where 61% of production request time actually went. Capacity planning
-built on the benchmark over-provisioned by more than 2x in the wrong direction.
+built on the benchmark **under-provisioned by 2.6x**: it promised 8,000 rps from a fleet that
+delivered 3,100.
 
 **Pitfall 6 — Sequential A-then-B on a thermally-limited machine. (Quantified: manufactured
 a 9% regression from identical code.)**
@@ -924,10 +930,10 @@ added a build-time code-generation step, so the team wanted the number verified 
 committing.
 
 **Step 1 — The A/A test, before anything else.** The original benchmark had been run on the
-team's shared CI runner. Building the same commit twice and running 20 interleaved pairs:
+team's shared CI runner. Building the same commit twice and running 100 interleaved pairs:
 
 ```text
-  A/A deltas      n=20
+  A/A deltas      n=100
     median        +0.31%
     95% spread    -7.20% .. +8.10%
     NOISE FLOOR   8.10%
@@ -952,7 +958,7 @@ taskset -c 4-7 ./bench.sh                                     # pin to isolated 
 Re-running the A/A test in that environment:
 
 ```text
-  A/A deltas      n=20
+  A/A deltas      n=100
     median        +0.05%
     95% spread    -1.80% .. +2.00%
     NOISE FLOOR   2.00%

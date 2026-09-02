@@ -79,15 +79,15 @@ Memorise the order of magnitude, not the digits. The right-hand column scales ev
 | Read 4 KiB from local NVMe | 20-80 us | 6-22 hours |
 | Read 1 MiB sequentially from RAM (single thread) | 50-100 us | 1 day |
 | Major page fault (fault + NVMe read) | 50-150 us | 1.5 days |
+| Read 4 KiB from SATA SSD | 100-150 us | 1.3 days |
 | Read 1 MiB sequentially from local NVMe | 150-250 us | 2.5 days |
 | **TCP round trip, same rack** | **100-250 us** | **2 days** |
 | TCP round trip, same AZ | 0.25-0.5 ms | 5 days |
 | Read 4 KiB from EBS gp3 (network-attached) | 0.5-1 ms | 9 days |
 | `fsync` on EBS gp3 | 0.5-1.5 ms | 12 days |
 | **TCP round trip, cross-AZ (same region)** | **0.5-2 ms** | **15 days** |
-| Read 4 KiB from SATA SSD | 100-150 us | 1.3 days |
+| S3 Express One Zone, GET first byte | 3-8 ms | 1-3 months |
 | Spinning disk seek + rotational latency (7200 rpm) | 8-10 ms | 3 months |
-| S3 Express One Zone, GET first byte | 5-10 ms | 3 months |
 | S3 Standard, GET first byte | 20-60 ms | 8 months to 2 years |
 | **Cross-region RTT (us-east-1 to us-west-2)** | **60-70 ms** | **2 years** |
 | Cross-continent RTT (New York to London) | 70-90 ms | 2.5 years |
@@ -134,11 +134,11 @@ A syscall is a controlled trap into the kernel: `syscall` instruction, privilege
 | **MDS / TAA / MMIO buffer clears** | Microarchitectural data sampling | `VERW` buffer flush on kernel exit |
 | **Retbleed, SRSO, and successors** | Return-stack attacks | Additional entry/exit sequences on affected parts |
 
-Newer silicon fixes several of these in hardware (Intel from Ice Lake onward, AMD from Zen 3), so the same code on a newer instance type can be 2-4x cheaper per syscall with no change on your side. Check what your kernel actually enabled:
+Newer silicon removes some of these costs, and the two vendors are not in the same position. Intel fixed Meltdown in hardware from Ice Lake onward, so KPTI — the dominant term — is no longer enabled there. **AMD parts were never Meltdown-affected at all**, so KPTI has never applied to them and they have never paid that toll; their bill is entirely on the Spectre and speculative-return side, which newer generations make cheaper (Automatic IBRS from EPYC 9004 onward). Either way, the same code on a newer instance type can be 2-4x cheaper per syscall with no change on your side. Read the machine rather than assuming — the vulnerabilities directory says exactly what applies:
 
 ```bash
 grep . /sys/devices/system/cpu/vulnerabilities/*
-# .../meltdown:Mitigation: PTI
+# .../meltdown:Mitigation: PTI        <- on AMD this line reads "Not affected"
 # .../spectre_v2:Mitigation: Enhanced IBRS, IBPB: conditional, RSB filling
 # .../mds:Not affected
 ```
@@ -422,11 +422,11 @@ cat /sys/block/nvme0n1/queue/read_ahead_kb   # 128
 # Run 1 -- cold. Actually measures the device.
 sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
 time cat 4gb-dataset.bin > /dev/null
-# real  0m6.812s     -> 4 GiB / 6.81 s = 601 MB/s   (this is your disk)
+# real  0m6.812s     -> 4 GiB / 6.81 s = 601 MiB/s  (this is your disk)
 
 # Run 2 -- warm. Measures your RAM and reports it as your disk.
 time cat 4gb-dataset.bin > /dev/null
-# real  0m0.402s     -> 4 GiB / 0.40 s = 10.2 GB/s  (this is not your disk)
+# real  0m0.402s     -> 4 GiB / 0.40 s = 9.95 GiB/s (this is not your disk)
 
 # 17x faster. Same command, same file, same hardware.
 ```
@@ -882,31 +882,54 @@ out.flush();                // one write(), one segment, nothing for Nagle to ho
 | six weeks of work | Correctly optimized the 3 ms mode. Moved p99 by 1 ms |
 | the fix | `setTcpNoDelay(true)`, plus buffering two writes into one |
 
-**War Story 2 — The Pod That Stalled at 40% CPU**
+**War Story 2 — The Pod That Stalled at 32% CPU**
 
-A Java API on EKS, `limits.cpu: "4"`, average CPU 41% of the limit on every dashboard, and a p99 of 780 ms against a 200 ms SLO with a periodic tail that recurred every 8-12 seconds. Capacity was the obvious answer, so the deployment was scaled from 48 to 72 pods. **p99 moved by 50 ms and the monthly bill went up 50%.**
+A Node.js 24 catalog-metadata API on EKS: 30 pods, `limits.cpu: "2"`, average CPU 32% of the limit on every dashboard, and a p99 of 112 ms against a 50 ms SLO with a tail that recurred every 3 seconds like a metronome. Capacity was the obvious answer, so the deployment was scaled from 30 to 42 pods. **p99 moved by 4 ms and the monthly bill went up 40%.**
 
 The cgroup told a different story than the dashboard:
 
 ```bash
 cat /sys/fs/cgroup/cpu.stat
-# nr_periods 128400
-# nr_throttled 24120           <- 18.8% of periods
-# throttled_usec 1182000000    <- 1,182 s of forced stall
+# nr_periods 61200
+# nr_throttled 12240           <- 20.0% of periods
+# throttled_usec 1071000000    <- 1,071 s of forced stall
 ```
 
-The JVM was sizing `ForkJoinPool.commonPool`, the GC worker count, and a Netty event loop group from the **node's 16 cores**, not the pod's 4-core limit. A periodic batch flush made roughly 14 threads simultaneously runnable, which burns the period's 400 ms quota in about 29 ms of wall time — leaving the cgroup frozen for the remaining 71 ms. That was the 8-12 second tail: it was the flush interval, and any request unlucky enough to land in a frozen window ate up to 71 ms of pure nothing on top of its real work. Average utilization stayed at 41% precisely *because* most periods were quiet.
+A catalog refresh ran every 3 seconds, fanning its gzip and hashing out over a `worker_threads` pool sized — as every worker-pool library defaults to sizing it — from `os.availableParallelism()`. That call is `uv_available_parallelism()` underneath, which reads the CPU **affinity mask** and knows nothing about cgroup quota, so on this node it returned 16. Nobody chose 16; nobody had to. The refresh put all 16 threads on-CPU at once against a 2-core limit. The arithmetic from §6.7, with this pod's numbers:
 
-Scaling out made it marginally worse per pod: more pods meant the same flush on each, and the per-pod thread count was unchanged.
+```
+  limits.cpu: "2"  ->  cpu.max = 200000 100000  ->  200 ms of CPU per 100 ms
+
+  16 threads burn quota at 16 core-ms per wall-ms
+      200 / 16 = 12.5 ms of wall time until the quota is gone
+      -> FROZEN for the remaining 87.5 ms of that period
+
+  The refresh spanned 6 consecutive periods out of every 30 (3 seconds):
+      6 busy periods   x 200 core-ms (full quota)  = 1,200 core-ms
+     24 quiet periods  x  30 core-ms               =   720 core-ms
+     --------------------------------------------------------------
+      1,920 core-ms consumed against a 2-core limit over 3 s (6,000)
+      AVERAGE UTILIZATION = 1,920 / 6,000 = 32%
+      nr_throttled / nr_periods = 6 / 30 = 20% of periods froze
+
+  p99 request = 25 ms of real work + up to 87 ms of freeze = 112 ms
+```
+
+Every number on the dashboard was correct. The 32% was the mean over thirty periods; the 112 ms was one request landing in one of the six frozen ones, and the 3-second beat was the refresh interval, not a workload property.
+
+Scaling out made it marginally worse per pod: more pods meant the same refresh on each, and the per-pod thread count was unchanged.
 
 *Fix*:
 
 ```yaml
 env:
-  - name: JAVA_TOOL_OPTIONS
-    value: "-XX:ActiveProcessorCount=4 -XX:MaxRAMPercentage=75.0"
-# plus: the batch flush moved to its own Deployment with its own limits, so it
-# can no longer freeze the cgroup that serves requests.
+  # Pin every pool to the cgroup limit rather than to availableParallelism().
+  - name: UV_THREADPOOL_SIZE
+    value: "2"
+  - name: WORKER_POOL_SIZE      # read by the app instead of availableParallelism()
+    value: "2"
+# plus: the catalog refresh moved to its own Deployment with its own limits, so
+# it can no longer freeze the cgroup that serves requests.
 ```
 
 ```promql
@@ -915,7 +938,7 @@ rate(container_cpu_cfs_throttled_periods_total[5m])
   / rate(container_cpu_cfs_periods_total[5m])  > 0.01
 ```
 
-**p99 780 ms -> 96 ms. Throttled period share 18.8% -> 0.4%. Pods 72 -> 40.** Average CPU utilization, before and after: 41% and 42%. The metric everyone was watching never moved, because it was never the metric.
+**p99 112 ms -> 27 ms. Throttled period share 20% -> 0.3%. Pods 42 -> 28.** Average CPU utilization, before and after: 32% and 34%. The metric everyone was watching never moved, because it was never the metric.
 
 **War Story 3 — A Nightly Backup That Broke Every Morning's p99**
 
@@ -985,7 +1008,7 @@ A: The client is doing write-write-read: two small `write()` calls followed by a
 **Q: Why does a syscall cost 300-500 nanoseconds today when it was 60-80 nanoseconds before 2018, and what do you do about it?**
 **Short:** Spectre and Meltdown mitigations sit exactly on the user/kernel boundary, and the fix is to make fewer syscalls rather than to disable them.
 
-A: The dominant cost is KPTI, kernel page-table isolation, which mitigates Meltdown by switching page tables on every kernel entry *and* exit — expensive even with PCID avoiding a full TLB flush. Spectre v2 mitigations (retpoline, IBRS, eIBRS) add indirect-branch overhead throughout the kernel, and the MDS family adds a `VERW` buffer clear on exit. Together that is roughly 4-8x on the transition. Newer silicon fixes several in hardware (Intel from Ice Lake, AMD from Zen 3), so the same binary on a newer instance type can be 2-4x cheaper for free — check `/sys/devices/system/cpu/vulnerabilities/*` to see what your kernel actually enabled. Disabling mitigations is not the answer on multi-tenant infrastructure. The answer is amortizing the toll: `writev` instead of N writes, `sendmmsg` instead of N sends, buffered I/O, and `io_uring` submission batching, which can drive the per-operation syscall count toward zero. Measure first — a service doing 200,000 syscalls/sec at 412ns is burning 8% of a core on transitions alone.
+A: The dominant cost is KPTI, kernel page-table isolation, which mitigates Meltdown by switching page tables on every kernel entry *and* exit — expensive even with PCID avoiding a full TLB flush. Spectre v2 mitigations (retpoline, IBRS, eIBRS) add indirect-branch overhead throughout the kernel, and the MDS family adds a `VERW` buffer clear on exit. Together that is roughly 4-8x on the transition. Newer silicon removes some of it: Intel fixed Meltdown in hardware from Ice Lake onward so KPTI is no longer enabled there, and AMD was never Meltdown-affected in the first place, so it has never run KPTI at all and pays only on the Spectre side. That means the same binary on a newer instance type can be 2-4x cheaper for free — check `/sys/devices/system/cpu/vulnerabilities/*` to see what your kernel actually enabled rather than assuming the 4-8x applies to you. Disabling mitigations is not the answer on multi-tenant infrastructure. The answer is amortizing the toll: `writev` instead of N writes, `sendmmsg` instead of N sends, buffered I/O, and `io_uring` submission batching, which can drive the per-operation syscall count toward zero. Measure first — a service doing 200,000 syscalls/sec at 412ns is burning 8% of a core on transitions alone.
 
 **Q: A Kubernetes pod shows 40% average CPU utilization and yet has a 50ms latency tail. How is that possible?**
 **Short:** CFS quota is consumed by all runnable threads in parallel, so a burst can exhaust the whole period's budget in half the period and freeze the cgroup for the rest.
