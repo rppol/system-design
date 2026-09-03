@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Go**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, **CS Fundamentals**, and **Soft Skills & Leadership** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Go**, **TypeScript**, **Frontend Platform**, **React**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, **CS Fundamentals**, and **Soft Skills & Leadership** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -563,6 +563,166 @@ A guide to **pure Go** — the language nearly every system in the DevOps and Te
 | [Design an Embedded KV Store](src/main/java/com/rutik/systemdesign/go/case_studies/design_an_embedded_kv_store.md) | LSM/WAL in Go: mmap vs `read`, why millions of live pointers wreck GC scan time, off-heap value logs, crash recovery |
 
 See the [Go Master Index](src/main/java/com/rutik/systemdesign/go/README.md) for the full learning path, the Senior/Principal tiers, and the cross-reference map.
+
+---
+
+### TypeScript — Senior Engineer & Interview Prep Guide
+
+The language half of the front-end track. Covers **TypeScript as a language** — structural
+typing and assignability, narrowing, generics and variance, conditional and mapped types,
+the runtime boundary where types stop existing, and the compiler that checks them. Targets
+**TypeScript 7.0** (GA 2026-07-08 — the compiler is now a native Go binary, 8-12x faster).
+JavaScript language semantics and the JS toolchain deliberately live in
+[Frontend Platform](#frontend-platform--senior-engineer--interview-prep-guide) so they are
+taught once rather than three times.
+
+#### Phase 1 — The Type System Core
+| Module | Key Concepts |
+|--------|-------------|
+| [TypeScript Fundamentals & tsconfig](src/main/java/com/rutik/systemdesign/typescript/typescript_fundamentals_and_tsconfig/typescript_fundamentals_and_tsconfig.md) | Erasure vs emit, `tsconfig` anatomy, the TS 6.0 strict defaults, `strict` flag-by-flag |
+| [Structural Typing & Assignability](src/main/java/com/rutik/systemdesign/typescript/structural_typing_and_assignability/structural_typing_and_assignability.md) | Structural vs nominal, excess property checks and freshness, literal widening, `satisfies` |
+| [Unions, Narrowing & Exhaustiveness](src/main/java/com/rutik/systemdesign/typescript/unions_narrowing_and_exhaustiveness/unions_narrowing_and_exhaustiveness.md) | Discriminated unions, control-flow analysis, type predicates, `unknown` vs `any` vs `never` |
+| [Generics & Type Parameters](src/main/java/com/rutik/systemdesign/typescript/generics_and_type_parameters/generics_and_type_parameters.md) | Constraints, inference sites, `const` type params, `NoInfer`, overloads, variance |
+| [Conditional & Mapped Types](src/main/java/com/rutik/systemdesign/typescript/conditional_and_mapped_types/conditional_and_mapped_types.md) | `infer`, distributive conditionals, key remapping, the utility types, recursion depth limits |
+| [Template Literal Types & Type-Level Programming](src/main/java/com/rutik/systemdesign/typescript/template_literal_types_and_type_level_programming/template_literal_types_and_type_level_programming.md) | Template literal types, tuple manipulation, type-level arithmetic, and when to stop |
+
+#### Phase 2 — The Runtime Boundary
+| Module | Key Concepts |
+|--------|-------------|
+| [Classes, Decorators & Resource Management](src/main/java/com/rutik/systemdesign/typescript/classes_decorators_and_resource_management/classes_decorators_and_resource_management.md) | Class typing, `this` types, Stage-3-shaped decorators vs `experimentalDecorators`, `using` |
+| [Modules, Resolution & Package Exports](src/main/java/com/rutik/systemdesign/typescript/modules_resolution_and_package_exports/modules_resolution_and_package_exports.md) | ESM vs CJS, `moduleResolution`, `exports` maps, the dual-package hazard, `verbatimModuleSyntax` |
+| [Declaration Files & Library Authoring](src/main/java/com/rutik/systemdesign/typescript/declaration_files_and_library_authoring/declaration_files_and_library_authoring.md) | `.d.ts` authoring, declaration merging, module augmentation, `isolatedDeclarations` |
+| [Runtime Validation & Parse, Don't Validate](src/main/java/com/rutik/systemdesign/typescript/runtime_validation_and_parse_dont_validate/runtime_validation_and_parse_dont_validate.md) | The type/runtime gap, Zod v4, Standard Schema v1, branded types, trust boundaries |
+| [TypeScript at Runtime — Node, Deno, Bun](src/main/java/com/rutik/systemdesign/typescript/typescript_at_runtime_node_deno_bun/typescript_at_runtime_node_deno_bun.md) | Node type stripping, `--erasableSyntaxOnly` and what it forbids, Deno's type-check, Bun |
+
+#### Phase 3 — Compiler, Scale & the Server
+| Module | Key Concepts |
+|--------|-------------|
+| [The TypeScript Compiler & Type Performance](src/main/java/com/rutik/systemdesign/typescript/the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md) | The pipeline, the TS 7 Go port, `--checkers`, union blowup, `skipLibCheck`, `--generateTrace` |
+| [TypeScript for Node & Backend Services](src/main/java/com/rutik/systemdesign/typescript/typescript_for_node_and_backend_services/typescript_for_node_and_backend_services.md) | Typed HTTP servers, end-to-end contracts with tRPC and OpenAPI codegen, typed env, error types |
+| [TypeScript in Large Codebases](src/main/java/com/rutik/systemdesign/typescript/typescript_in_large_codebases/typescript_in_large_codebases.md) | Project references, composite builds, enforced module boundaries, incremental CI, JS to TS migration |
+
+#### Phase 4 — Practice & Judgment
+| Module | Key Concepts |
+|--------|-------------|
+| [Testing Typed Code](src/main/java/com/rutik/systemdesign/typescript/testing_typed_code/testing_typed_code.md) | `expectTypeOf`, `tsd`, `@ts-expect-error` as an assertion, typing mocks, testing inference |
+| [TypeScript Patterns & Antipatterns](src/main/java/com/rutik/systemdesign/typescript/typescript_patterns_and_antipatterns/typescript_patterns_and_antipatterns.md) | Branded types over `as`, containing `any`, HKT workarounds, over-abstraction, when to stop |
+
+See the [TypeScript Master Index](src/main/java/com/rutik/systemdesign/typescript/README.md) for the full learning path, the Senior/Principal tiers, and the cross-reference map.
+
+---
+
+### Frontend Platform — Senior Engineer & Interview Prep Guide
+
+The platform half of the front-end track: **the browser, the network seen from the client,
+the runtimes, the build pipeline, and the quality gates**. This section exists because the
+rest of this repository already teaches the *server* half of every front-end concern and
+none of the client half — CORS as server config but never preflight from the browser,
+WebSocket framing but never the reconnect client, CDN caching but never the post-deploy
+chunk 404. Nothing here is React-specific.
+
+#### Phase 1 — The Browser
+| Module | Key Concepts |
+|--------|-------------|
+| [JavaScript Language Semantics](src/main/java/com/rutik/systemdesign/frontend_platform/javascript_language_semantics/javascript_language_semantics.md) | Prototypes, closures, `this` binding, coercion, `Proxy`/`Reflect`/`Symbol`/`WeakRef`, ESM live bindings |
+| [Browser Architecture & the Rendering Pipeline](src/main/java/com/rutik/systemdesign/frontend_platform/browser_architecture_and_the_rendering_pipeline/browser_architecture_and_the_rendering_pipeline.md) | Multi-process, site isolation, parse to style to layout to paint to composite, forced synchronous layout |
+| [The DOM & Web APIs](src/main/java/com/rutik/systemdesign/frontend_platform/the_dom_and_web_apis/the_dom_and_web_apis.md) | Capture/bubble/delegation, passive listeners, the three observers, custom elements, shadow DOM |
+| [CSS Layout & the Cascade](src/main/java/com/rutik/systemdesign/frontend_platform/css_layout_and_the_cascade/css_layout_and_the_cascade.md) | Box model, flexbox vs grid, cascade layers, container queries, logical properties and RTL |
+| [CSS Animation & Motion](src/main/java/com/rutik/systemdesign/frontend_platform/css_animation_and_motion/css_animation_and_motion.md) | Compositor-only properties, FLIP, View Transitions API, scroll-driven animation, `prefers-reduced-motion` |
+| [The Event Loop & Scheduling](src/main/java/com/rutik/systemdesign/frontend_platform/the_event_loop_and_scheduling/the_event_loop_and_scheduling.md) | Tasks vs microtasks, `requestAnimationFrame`, long tasks, `scheduler.yield`, Web Workers |
+
+#### Phase 2 — The Network from the Client
+| Module | Key Concepts |
+|--------|-------------|
+| [HTTP in the Browser & fetch](src/main/java/com/rutik/systemdesign/frontend_platform/http_in_the_browser_and_fetch/http_in_the_browser_and_fetch.md) | `fetch`, streams, `AbortController`, the browser HTTP cache, ETag, HTTP/2 and /3 request strategy |
+| [CORS, Cookies & the Same-Origin Model](src/main/java/com/rutik/systemdesign/frontend_platform/cors_cookies_and_the_same_origin_model/cors_cookies_and_the_same_origin_model.md) | Preflight from the browser side, `credentials`, opaque responses, `SameSite`, partitioned cookies |
+| [Browser Security & the Client Threat Model](src/main/java/com/rutik/systemdesign/frontend_platform/browser_security_and_the_client_threat_model/browser_security_and_the_client_threat_model.md) | XSS sinks, CSP and nonces, Trusted Types, SRI, prototype pollution, build-time env leaks |
+| [Auth in the Browser](src/main/java/com/rutik/systemdesign/frontend_platform/auth_in_the_browser/auth_in_the_browser.md) | Token storage tradeoffs, OAuth 2.1 with PKCE, silent refresh, passkeys and WebAuthn |
+| [Realtime in the Browser](src/main/java/com/rutik/systemdesign/frontend_platform/realtime_in_the_browser/realtime_in_the_browser.md) | `WebSocket` and `EventSource` clients, reconnect with backoff and jitter, heartbeats, ordering |
+
+#### Phase 3 — Runtimes, Build & Toolchain
+| Module | Key Concepts |
+|--------|-------------|
+| [Client Memory & Performance Debugging](src/main/java/com/rutik/systemdesign/frontend_platform/client_memory_and_performance_debugging/client_memory_and_performance_debugging.md) | Heap snapshots, detached DOM and listener retention, GC-hostile shapes, the WASM boundary |
+| [The Node & Edge Runtimes](src/main/java/com/rutik/systemdesign/frontend_platform/the_node_and_edge_runtimes/the_node_and_edge_runtimes.md) | libuv event-loop phases, streams and backpressure, worker threads, edge runtime constraints |
+| [Modules, Bundling & the Build Pipeline](src/main/java/com/rutik/systemdesign/frontend_platform/modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md) | Tree-shaking and what defeats it, code splitting, Vite 8 on Rolldown, Turbopack, source maps |
+| [Package Management & Supply Chain](src/main/java/com/rutik/systemdesign/frontend_platform/package_management_and_supply_chain/package_management_and_supply_chain.md) | npm/pnpm/yarn resolution, lockfiles, workspaces, peer deps and duplicate React, provenance |
+| [Linting, Formatting & Code Quality](src/main/java/com/rutik/systemdesign/frontend_platform/linting_formatting_and_code_quality/linting_formatting_and_code_quality.md) | ESLint 10 flat config, typescript-eslint type-aware rules and their cost, Biome, oxlint |
+
+#### Phase 4 — Quality & Delivery
+| Module | Key Concepts |
+|--------|-------------|
+| [Web Performance & Core Web Vitals](src/main/java/com/rutik/systemdesign/frontend_platform/web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | LCP, INP and CLS at p75 via CrUX, lab vs field, resource hints, images and fonts, budgets |
+| [Accessibility & WCAG](src/main/java/com/rutik/systemdesign/frontend_platform/accessibility_and_wcag/accessibility_and_wcag.md) | WCAG 2.2 AA, the accessibility tree, semantic HTML first, keyboard and focus, axe in CI |
+| [PWA, Service Workers & Offline](src/main/java/com/rutik/systemdesign/frontend_platform/pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | Storage APIs and quotas, SW lifecycle and scope traps, caching strategies, background sync |
+| [Frontend Delivery & Observability](src/main/java/com/rutik/systemdesign/frontend_platform/frontend_delivery_and_observability/frontend_delivery_and_observability.md) | Immutable hashed assets, the post-deploy chunk 404, RUM, source-map upload, client OpenTelemetry |
+
+See the [Frontend Platform Master Index](src/main/java/com/rutik/systemdesign/frontend_platform/README.md) for the full learning path, the Senior/Principal tiers, and the cross-reference map.
+
+---
+
+### React — Senior Engineer & Interview Prep Guide
+
+The library half of the front-end track. Covers **React 19.2** — the component and render
+model, the fiber architecture and concurrent rendering, the **React Compiler** that has
+replaced hand memoization, **Server Components** and the client/server boundary, and the
+application concerns a senior React engineer owns. Meta-frameworks (Next.js 16, React
+Router v8, TanStack Start, Astro 7) are covered here rather than split out, because in 2026
+you cannot teach Server Components honestly without the framework that implements them.
+
+#### Phase 1 — The Component Model
+| Module | Key Concepts |
+|--------|-------------|
+| [React Fundamentals & the Render Model](src/main/java/com/rutik/systemdesign/react/react_fundamentals_and_the_render_model/react_fundamentals_and_the_render_model.md) | Elements vs components, the JSX transform, why re-renders happen, `useReducer`, keys and the index-as-key bug |
+| [Hooks Rules & the Hook Model](src/main/java/com/rutik/systemdesign/react/hooks_rules_and_the_hook_model/hooks_rules_and_the_hook_model.md) | The hook dispatcher and its linked list, closure capture, dependency arrays, custom hooks |
+| [Typing React Components](src/main/java/com/rutik/systemdesign/react/typing_react_components/typing_react_components.md) | `ReactNode` vs `ReactElement`, generic components, discriminated prop unions, polymorphic `as`, typing refs |
+| [Effects & Synchronization](src/main/java/com/rutik/systemdesign/react/effects_and_synchronization/effects_and_synchronization.md) | Effects as synchronization not lifecycle, StrictMode double-invoke, `useEffectEvent`, you-might-not-need-an-effect |
+| [Refs & Focus Management](src/main/java/com/rutik/systemdesign/react/refs_and_focus_management/refs_and_focus_management.md) | `useRef` vs state, ref as a prop, `useImperativeHandle`, portals, focus across routes and Suspense |
+| [Context & Component Communication](src/main/java/com/rutik/systemdesign/react/context_and_component_communication/context_and_component_communication.md) | `<Context>` as provider, context re-render cost, tearing, `useSyncExternalStore` |
+
+#### Phase 2 — Internals, Concurrency & Performance
+| Module | Key Concepts |
+|--------|-------------|
+| [Fiber & Reconciliation](src/main/java/com/rutik/systemdesign/react/fiber_and_reconciliation/fiber_and_reconciliation.md) | The fiber node, current/workInProgress double buffering, the work loop, render vs commit, lanes |
+| [Concurrent Rendering & Transitions](src/main/java/com/rutik/systemdesign/react/concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md) | Interruptible rendering, `startTransition`, `useDeferredValue`, priority lanes, effect timing |
+| [Suspense & Error Boundaries](src/main/java/com/rutik/systemdesign/react/suspense_and_error_boundaries/suspense_and_error_boundaries.md) | Boundary placement, the `use()` hook, streaming SSR, request waterfalls, what boundaries miss |
+| [React Performance & Profiling](src/main/java/com/rutik/systemdesign/react/react_performance_and_profiling/react_performance_and_profiling.md) | Profiler API, React Performance Tracks, `<Activity>`, virtualization, `React.lazy`, measuring first |
+| [The React Compiler](src/main/java/com/rutik/systemdesign/react/the_react_compiler/the_react_compiler.md) | Compiler 1.0, Babel AST to HIR, mutability analysis, conditional memoization, the directives |
+
+#### Phase 3 — Data, Forms & Accessible Components
+| Module | Key Concepts |
+|--------|-------------|
+| [Server State & Data Fetching](src/main/java/com/rutik/systemdesign/react/server_state_and_data_fetching/server_state_and_data_fetching.md) | Server vs client state, TanStack Query v5, GraphQL normalized caches, tRPC, codegen, contract drift |
+| [Client State Management](src/main/java/com/rutik/systemdesign/react/client_state_management/client_state_management.md) | Zustand v5, Jotai, Valtio, Redux Toolkit and when it is still right, XState, URL as state |
+| [Forms & Validation](src/main/java/com/rutik/systemdesign/react/forms_and_validation/forms_and_validation.md) | Controlled vs uncontrolled, validation timing, field arrays, error summaries and focus-to-first-error |
+| [Accessible Component Patterns](src/main/java/com/rutik/systemdesign/react/accessible_component_patterns/accessible_component_patterns.md) | Headless primitive a11y contracts, live regions, focus trap, roving tabindex, combobox and dialog |
+
+#### Phase 4 — Server React & Frameworks
+| Module | Key Concepts |
+|--------|-------------|
+| [Server Components & Server Functions](src/main/java/com/rutik/systemdesign/react/server_components_and_server_functions/server_components_and_server_functions.md) | RSC payload, `"use client"` and `"use server"`, serialization rules, `useActionState`, CSRF |
+| [Rendering Strategies, Hydration & SEO](src/main/java/com/rutik/systemdesign/react/rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md) | CSR/SSR/SSG/ISR/PPR on numbers, client hydration and mismatches, Cache Components, SEO and metadata |
+| [Meta-Frameworks & Routing](src/main/java/com/rutik/systemdesign/react/meta_frameworks_and_routing/meta_frameworks_and_routing.md) | Next.js 16 App Router, React Router v8, TanStack Start, Astro 7, nested layouts, i18n routing |
+
+#### Phase 5 — Application Engineering
+| Module | Key Concepts |
+|--------|-------------|
+| [Styling & Design Systems](src/main/java/com/rutik/systemdesign/react/styling_and_design_systems/styling_and_design_systems.md) | Tailwind v4, CSS Modules, vanilla-extract, why runtime CSS-in-JS struggles with RSC, shadcn and Base UI |
+| [Testing & Frontend CI](src/main/java/com/rutik/systemdesign/react/testing_and_frontend_ci/testing_and_frontend_ci.md) | RTL, role queries, `act()`, Vitest browser mode, Playwright, MSW v2, Storybook 10, visual regression |
+| [React Architecture & Antipatterns](src/main/java/com/rutik/systemdesign/react/react_architecture_and_antipatterns/react_architecture_and_antipatterns.md) | Feature-sliced structure, the client/server seam, micro-frontends and Module Federation, migration |
+
+#### React Case Studies
+| Case Study | Focus |
+|-----------|-------|
+| [Design a News Feed with Infinite Scroll](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_news_feed_with_infinite_scroll.md) | Cursor pagination, virtualization plus scroll restoration on back-navigation, optimistic likes, memory growth over a long session |
+| [Design a Checkout & Payment Flow](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_checkout_and_payment_flow.md) | Multi-step form state, client-supplied idempotency keys, 3DS redirect, the cross-origin card iframe and PCI scope |
+| [Design a Search & Typeahead Experience](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_search_and_typeahead_experience.md) | Debounce vs throttle, out-of-order response races, `AbortController`, ARIA combobox and keyboard interaction |
+| [Design a Realtime Collaborative Editor](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_realtime_collaborative_editor.md) | CRDT vs OT, optimistic local state, presence, reconnect and backoff, conflict UI |
+| [Design a Dashboard with Server Components](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_dashboard_with_server_components.md) | The client/server boundary in a real app, streaming a slow widget, per-widget Suspense, `"use cache"` lifetimes |
+| [Design a Micro-Frontend Platform](src/main/java/com/rutik/systemdesign/react/case_studies/design_a_micro_frontend_platform.md) | Module Federation vs Multi-Zones vs iframes, shared-dependency versioning, independent deploys |
+| [Design an AI Chat Streaming UI](src/main/java/com/rutik/systemdesign/react/case_studies/design_an_ai_chat_streaming_ui.md) | Token streaming over SSE, backpressure into the DOM, cancel and regenerate, markdown-safe rendering |
+
+See the [React Master Index](src/main/java/com/rutik/systemdesign/react/README.md) for the full learning path, the Senior/Principal tiers, and the cross-reference map.
 
 ---
 
@@ -1164,6 +1324,8 @@ Each chapter covers the book's sections in depth with Mermaid/ASCII diagrams, a 
 | **Python/FastAPI engineer** | `python/` phases 1-3 (language + async) → `fastapi/` phases 1-3 (ASGI stack) → FastAPI case studies |
 | **ML engineer** | `ml/` phases 1-3 (math + classical) → phase 5 (ML systems) → ML case studies |
 | **Go backend / platform engineer** | `go/` phases 1-3 (language → concurrency → runtime) → phase 4 (stdlib services) → Go case studies → `devops/` for the platform layer |
+| **Frontend / full-stack engineer** | `frontend_platform/` phase 1 (browser + DOM + CSS) → `typescript/` phases 1-2 (language) → `react/` phases 1-4 → React case studies → `frontend_platform/` phase 4 for Web Vitals and a11y |
+| **Frontend system-design interview (2 weeks)** | `react/` phases 1-2 → `frontend_platform/web_performance_and_core_web_vitals` and `accessibility_and_wcag` → all 7 React case studies |
 | **Performance engineer** | `backend/performance_engineering_method/` → `backend/tail_latency_and_fan_out/` → `backend/queueing_theory_for_capacity/` → `backend/off_cpu_and_ebpf_analysis/` → `backend/performance_incident_playbook/` |
 | **LLM/AI engineer** | `llm/foundations_and_architecture/` → `llm/rag_fundamentals/` → `llm/agents_and_tool_use/` → LLM case studies |
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |

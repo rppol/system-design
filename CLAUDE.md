@@ -22,6 +22,9 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **CS Fundamentals** | Language-agnostic CS spine — 28 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium, Apache Iceberg, Apache Flink, Trino, Cilium) — 11 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
 | **Soft Skills** | Behavioural interviewing, leadership, influence, communication, and four professional **vocabularies** (precise-technical, business/finance, leadership/org, hedging and disagreement) — 26 modules, 8 case studies. Template-adapted: §4 "Types / Levels / Modes", §5 "Models & Frameworks Diagrammed", §11 **"Frameworks, Books & Further Reading"** (the §11 retitle is load-bearing — see below) | [soft_skills/CLAUDE.md](src/main/java/com/rutik/systemdesign/soft_skills/CLAUDE.md) |
+| **TypeScript** | TypeScript as a language — the type system, the runtime boundary, the TS 7 native compiler, typed backend services — 16 modules, 0 case studies. Targets **TypeScript 7.0** (GA 2026-07-08). JS language semantics and toolchain deliberately live in `frontend_platform/` | [typescript/CLAUDE.md](src/main/java/com/rutik/systemdesign/typescript/CLAUDE.md) |
+| **Frontend Platform** | The browser, the network seen from the client, the Node and edge runtimes, the build pipeline, and the quality gates (Core Web Vitals, WCAG 2.2 AA, service workers) — 20 modules, 0 standalone case studies. The client half of concerns the repo already covered server-side | [frontend_platform/CLAUDE.md](src/main/java/com/rutik/systemdesign/frontend_platform/CLAUDE.md) |
+| **React** | React 19.2 — the component and render model, fiber and concurrency, the React Compiler, Server Components, and the meta-framework landscape (Next.js 16, React Router v8, TanStack Start, Astro 7) — 21 modules, 7 front-end system-design case studies | [react/CLAUDE.md](src/main/java/com/rutik/systemdesign/react/CLAUDE.md) |
 | **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template; no line ceiling) — DDIA (Kleppmann) 12+preface; DDIA 2e (Kleppmann & Riccomini) 14; The Staff Engineer's Path (Reilly) 9; Staff Engineer (Larson) 5 parts; Database Internals (Petrov) 14; Google SRE 11 of 34 selected; Building Microservices 2e (Newman) 16; AI Engineering (Huyen) 10; GenAI System Design Interview (Aminian & Sheng) 11; SDI Vol 1 (Xu) 16; SDI Vol 2 (Xu & Lam) 13; ML System Design Interview (Aminian & Xu) 11; Designing ML Systems (Huyen) 11; Understanding Distributed Systems (Vitillo) 33 chapters as 5 part-folders. Game shows one Study node per book (`BOOK_LABELS` + `STUDY_ORDER.book` in game/app.js) | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
 | **Game** | **LORA — Learn Often, Recall Always**, by Rutik (Pages-deployed daily learning game; a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). Also ships as a fully-offline sideloadable Android APK — built and released by CI on every push; see `android/`. | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
@@ -45,6 +48,9 @@ src/main/java/com/rutik/systemdesign/
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
 ├── cuda/             ← GPGPU / CUDA programming guide + CLAUDE.md
 ├── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
+├── typescript/       ← TypeScript language guide + CLAUDE.md
+├── frontend_platform/← Browser, network-from-client, build, quality + CLAUDE.md
+├── react/            ← React 19 + meta-frameworks guide + CLAUDE.md
 ├── technologies/     ← Per-technology deep dives + CLAUDE.md
 ├── soft_skills/      ← Behaviour, leadership, vocabulary, communication + CLAUDE.md
 ├── book/             ← Book summaries (chapter-by-chapter) + CLAUDE.md
@@ -58,7 +64,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 18, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 21, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -78,7 +84,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 17 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 20 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -100,7 +106,7 @@ question there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Both passes are COMPLETE for all 15 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every non-book Q&A in
 the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s

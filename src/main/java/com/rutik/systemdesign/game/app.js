@@ -23,6 +23,7 @@ const SECTION_LABELS = {
   go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
+  typescript: "TypeScript", frontend_platform: "Frontend Platform", react: "React",
 };
 
 // Per-section visual identity for the reader: a One-Dark-band accent (readable on
@@ -52,6 +53,9 @@ const SECTION_IDENTITY = {
   lld:             { accent: "#c778e4", glyph: "{ }" },   // 295  purple
   technologies:    { accent: "#ee76c2", glyph: "⌗" },     // 320  magenta
   soft_skills:     { accent: "#eb7099", glyph: "“" },     // 340  rose
+  frontend_platform:{accent: "#d8ed6e", glyph: "▤" },     //  70  lime
+  typescript:      { accent: "#7a6eed", glyph: "TS" },    // 246  indigo
+  react:           { accent: "#ed6ee7", glyph: "⚛" },     // 303  magenta
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
@@ -90,6 +94,16 @@ const bookLabel = (slug) => (BOOK_LABELS[slug] && BOOK_LABELS[slug].name) || tit
 // Only terms that actually appear in this repo's slugs are listed; a word that
 // is not a known acronym keeps ordinary title case.
 const ACRONYMS = new Map(Object.entries({
+  typescript: "TypeScript", javascript: "JavaScript", nodejs: "Node.js", ecmascript: "ECMAScript",
+  jsx: "JSX", tsx: "TSX", dom: "DOM", cssom: "CSSOM", css: "CSS", html: "HTML", svg: "SVG",
+  spa: "SPA", mpa: "MPA", pwa: "PWA", ssr: "SSR", csr: "CSR", ssg: "SSG", isr: "ISR",
+  ppr: "PPR", rsc: "RSC", esm: "ESM", cjs: "CJS", umd: "UMD", hoc: "HOC", hmr: "HMR",
+  npm: "npm", pnpm: "pnpm", csp: "CSP", cors: "CORS", xss: "XSS", csrf: "CSRF", sri: "SRI",
+  lcp: "LCP", inp: "INP", cls: "CLS", ttfb: "TTFB", fcp: "FCP", crux: "CrUX", rum: "RUM",
+  wcag: "WCAG", aria: "ARIA", a11y: "a11y", i18n: "i18n", l10n: "l10n", seo: "SEO",
+  wasm: "WASM", ast: "AST", hir: "HIR", jit: "JIT", tc39: "TC39", crdt: "CRDT",
+  msw: "MSW", rtl: "RTL", e2e: "E2E", pkce: "PKCE", webauthn: "WebAuthn", trpc: "tRPC",
+  graphql: "GraphQL", oauth: "OAuth", sdk: "SDK", cli: "CLI", ui: "UI", ux: "UX",
   api: "API", apis: "APIs", cdn: "CDN", cpu: "CPU", gpu: "GPU", gpus: "GPUs",
   sql: "SQL", nosql: "NoSQL", jvm: "JVM", jwt: "JWT", http: "HTTP", https: "HTTPS",
   tcp: "TCP", udp: "UDP", ip: "IP", dns: "DNS", osi: "OSI", cap: "CAP",
@@ -399,6 +413,25 @@ const STUDY_ORDER = {
     "fastapi/python_api_framework_landscape","fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/routing_and_request_handling","fastapi/dependency_injection_in_fastapi","fastapi/middleware_and_lifecycle","fastapi/configuration_and_settings_management",
     "fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation","fastapi/websockets_sse_and_streaming","fastapi/serving_llm_and_ai_workloads","fastapi/background_jobs_and_task_queues","fastapi/testing_fastapi","fastapi/http_clients_and_external_apis","fastapi/message_queues_and_event_driven",
     "fastapi/production_deployment_and_scaling","fastapi/observability_and_monitoring","fastapi/caching_and_performance","fastapi/api_design_and_versioning","fastapi/security_hardening_and_owasp",
+  ],
+  typescript: [
+    "typescript/typescript_fundamentals_and_tsconfig","typescript/structural_typing_and_assignability","typescript/unions_narrowing_and_exhaustiveness","typescript/generics_and_type_parameters","typescript/conditional_and_mapped_types","typescript/template_literal_types_and_type_level_programming",
+    "typescript/classes_decorators_and_resource_management","typescript/modules_resolution_and_package_exports","typescript/declaration_files_and_library_authoring","typescript/runtime_validation_and_parse_dont_validate","typescript/typescript_at_runtime_node_deno_bun",
+    "typescript/the_typescript_compiler_and_type_performance","typescript/typescript_for_node_and_backend_services","typescript/typescript_in_large_codebases",
+    "typescript/testing_typed_code","typescript/typescript_patterns_and_antipatterns",
+  ],
+  frontend_platform: [
+    "frontend_platform/javascript_language_semantics","frontend_platform/browser_architecture_and_the_rendering_pipeline","frontend_platform/the_dom_and_web_apis","frontend_platform/css_layout_and_the_cascade","frontend_platform/css_animation_and_motion","frontend_platform/the_event_loop_and_scheduling",
+    "frontend_platform/http_in_the_browser_and_fetch","frontend_platform/cors_cookies_and_the_same_origin_model","frontend_platform/browser_security_and_the_client_threat_model","frontend_platform/auth_in_the_browser","frontend_platform/realtime_in_the_browser",
+    "frontend_platform/client_memory_and_performance_debugging","frontend_platform/the_node_and_edge_runtimes","frontend_platform/modules_bundling_and_the_build_pipeline","frontend_platform/package_management_and_supply_chain","frontend_platform/linting_formatting_and_code_quality",
+    "frontend_platform/web_performance_and_core_web_vitals","frontend_platform/accessibility_and_wcag","frontend_platform/pwa_service_workers_and_offline","frontend_platform/frontend_delivery_and_observability",
+  ],
+  react: [
+    "react/react_fundamentals_and_the_render_model","react/hooks_rules_and_the_hook_model","react/typing_react_components","react/effects_and_synchronization","react/refs_and_focus_management","react/context_and_component_communication",
+    "react/fiber_and_reconciliation","react/concurrent_rendering_and_transitions","react/suspense_and_error_boundaries","react/react_performance_and_profiling","react/the_react_compiler",
+    "react/server_state_and_data_fetching","react/client_state_management","react/forms_and_validation","react/accessible_component_patterns",
+    "react/server_components_and_server_functions","react/rendering_strategies_hydration_and_seo","react/meta_frameworks_and_routing",
+    "react/styling_and_design_systems","react/testing_and_frontend_ci","react/react_architecture_and_antipatterns",
   ],
   spring: [
     "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
@@ -5954,6 +5987,7 @@ const LANG_DEFS = {
 };
 const LANG_ALIAS = {
   py: "python", js: "javascript", ts: "javascript", jsx: "javascript", tsx: "javascript",
+  typescript: "javascript", mjs: "javascript", cjs: "javascript",
   sh: "bash", shell: "bash", zsh: "bash", console: "bash", yml: "yaml",
   postgres: "sql", postgresql: "sql", mysql: "sql", plsql: "sql",
   jsonc: "json", docker: "dockerfile", props: "properties",
