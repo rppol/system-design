@@ -145,13 +145,18 @@ jobs:
           # back to the (offline-vendored) engine — the payload is the whole point.
           MMZ=$(zipinfo -1 "$APK" 'assets/www/game/diagrams/*.mmz' | wc -l)
           [ "$MMZ" -ge 3000 ] || { echo "pre-rendered diagrams missing: only $MMZ .mmz in APK"; exit 1; }
-          # ~90 MiB now: the ~59 MB content tree (~2x-compressible) plus ~62 MB of
+          # ~144 MiB at 20 sections: the content tree (~2x-compressible) plus the
           # pre-rendered diagram assets (game/diagrams/*.mmz, already gzipped so they
-          # don't shrink further in the zip). Band widened for the diagram payload;
-          # still catches "content went missing" and "something exploded".
+          # don't shrink further in the zip). The ceiling is a sanity band, not a
+          # product limit -- it exists to catch "content went missing" and "something
+          # exploded", so it has to be raised whenever a section is added rather than
+          # treated as a budget. History: 17 sections / 4,735 mmz = 129.8 MiB, which
+          # sat at 99.8% of the old 130 MiB ceiling; the front-end track (3 sections,
+          # 65 files, 388 diagrams) added 14.1 MiB and crossed it. 200 MiB leaves room
+          # for roughly four more sections at the current per-section cost.
           SIZE=$(stat -c%s "$APK")
-          [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((130*1024*1024)) ] \
-            || { echo "APK size $SIZE outside the 15-130 MiB window"; exit 1; }
+          [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((200*1024*1024)) ] \
+            || { echo "APK size $SIZE outside the 15-200 MiB window"; exit 1; }
           echo "smoke OK: sections=$SEC banks=$BANKS graphs=$GRAPHS mmz=$MMZ size=$SIZE"
 
       - name: Publish GitHub Release
