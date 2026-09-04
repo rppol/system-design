@@ -134,7 +134,7 @@ class OrderSummary(BaseModel):
 
 # Create typed agent
 agent = Agent[CustomerDeps, OrderSummary](
-    model=AnthropicModel("claude-sonnet-4-6"),
+    model=AnthropicModel("claude-sonnet-5"),
     deps_type=CustomerDeps,
     result_type=OrderSummary,
     system_prompt=(

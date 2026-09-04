@@ -10,7 +10,7 @@ Public preview shipped 2025-10-01 (first PyPI beta `1.0.0b251001`, announced the
 
 For the two source lineages this file replaces, read [AutoGen](autogen.md) §1-2 and [Semantic Kernel](semantic_kernel.md) §1-2 — both now document their frameworks as lineage with a successor pointer here, and this file does not restate their history. See also [LangGraph](langgraph.md) for the closest cross-vendor analog to AF's `Workflow` engine, and [Framework Observability](framework_observability.md) for the OpenTelemetry patterns AF implements natively.
 
-**Current version**: `agent-framework` 1.15.0 on PyPI (2026-08-21); `Microsoft.Agents.AI` and `Microsoft.Agents.AI.Workflows` 1.19.0 on NuGet (2026-08-22)
+**Current version**: `agent-framework` 1.17.0 on PyPI (2026-09-03); `Microsoft.Agents.AI` and `Microsoft.Agents.AI.Workflows` 1.19.0 on NuGet (2026-08-22)
 **Production adoption signal**: The SDK underlying Microsoft Foundry Agent Service; AutoGen's own README now calls Agent Framework "the enterprise-ready successor to AutoGen." Microsoft states Semantic Kernel 1.x support continues at least one year past GA (into roughly April 2027), while AutoGen is explicitly in community-managed maintenance mode — the two predecessor frameworks are not being deprecated on the same timeline, which shapes migration urgency differently for each.
 
 ---
@@ -419,7 +419,7 @@ Because `Agent` is built around a swappable `client=` object (§3), the same sea
 
 ### AF vs. Other Agent Frameworks (versions as of 2026-08-26)
 
-| Dimension | Microsoft Agent Framework 1.15.0 | [LangGraph](langgraph.md) 1.2.11 | [OpenAI Agents SDK](openai_agents_sdk.md) `openai-agents` 0.22.0 | [Google ADK](google_adk.md) `google-adk` 2.7.1 | CrewAI `crewai` 1.15.17 |
+| Dimension | Microsoft Agent Framework 1.17.0 | [LangGraph](langgraph.md) 1.2.11 | [OpenAI Agents SDK](openai_agents_sdk.md) `openai-agents` 0.22.0 | [Google ADK](google_adk.md) `google-adk` 2.7.1 | CrewAI `crewai` 1.15.17 |
 |---|---|---|---|---|---|
 | Language surfaces | Python + .NET (not yet fully symmetric) | Python (+ JS) | Python (+ TS) | Python (+ Java) | Python |
 | Orchestration model | Typed data-flow `Workflow` + 5 named builders | Cyclic `StateGraph`, explicit edges | Handoffs between agents-as-tools | `AgentTool` delegation, A2A-native | Role/task delegation (Crew) |
@@ -428,7 +428,7 @@ Because `Agent` is built around a swappable `client=` object (§3), the same sea
 | Hosting story | Microsoft Foundry Agent Service | LangSmith Deployment | OpenAI-hosted or self-hosted | Vertex AI Agent Engine or self-hosted | Self-hosted / CrewAI AMP |
 | Lock-in | Microsoft ecosystem (Foundry, Azure identity) | LangChain ecosystem | OpenAI ecosystem | Google Cloud ecosystem | Low — thin abstraction |
 
-`dspy` 3.3.1 and `haystack-ai` 3.1.0 solve adjacent problems (prompt optimization, RAG pipelines respectively) rather than general multi-agent orchestration, so they are not directly comparable rows here.
+`dspy` 3.3.1 and `haystack-ai` 3.1.1 solve adjacent problems (prompt optimization, RAG pipelines respectively) rather than general multi-agent orchestration, so they are not directly comparable rows here.
 
 ### `Workflow` vs. AutoGen `GraphFlow`
 
@@ -467,7 +467,7 @@ Read the two tables together, not separately: the first table's "Lock-in" row an
 | Does it lean on `GraphFlow`, custom actor-runtime coordination, or SK planners making runtime routing decisions? | Budget real redesign time for the `Workflow` rewrite and the static-typing constraint (see §10 Pitfall 6, §14) |
 | Is it on AutoGen? | Treat migration as the higher-priority of the two — community maintenance mode has a harder ceiling than SK's supported window |
 | Is it on Semantic Kernel? | Plan the move, but there is no fire drill — SK support runs to roughly April 2027 |
-| Does the team need a stable API today more than the newest capability? | Wait a few more minor releases past 1.15.0, or stay on the current predecessor a while longer |
+| Does the team need a stable API today more than the newest capability? | Wait a few more minor releases past 1.17.0, or stay on the current predecessor a while longer |
 
 None of these rows are exclusive-or decisions — a team can, for instance, be on Semantic Kernel with genuinely `GraphFlow`-shaped coordination needs and land in both the "no fire drill" row and the "budget real redesign time" row simultaneously; read the checklist as independent axes to weigh, not a single branch to follow to one conclusion.
 
@@ -548,7 +548,7 @@ Two Azure-facing PyPI packages currently coexist: `agent-framework-foundry` (the
 
 | Package | Registry | Version (2026-08-26) | Purpose |
 |---|---|---|---|
-| `agent-framework` | PyPI | 1.15.0 (2026-08-21) | Bundles `agent-framework-core`; the main Python entry point |
+| `agent-framework` | PyPI | 1.17.0 (2026-09-03) | Bundles `agent-framework-core`; the main Python entry point |
 | `agent-framework-foundry` | PyPI | tracks `agent-framework` | Microsoft Foundry integration (`FoundryChatClient`, etc.) |
 | `agent-framework-azure-ai` | PyPI | 1.0.0rc6 (2026-03-30) | Azure AI integration; coexists with `agent-framework-foundry` — which is canonical going forward is not yet disambiguated in Microsoft's own docs |
 | `agent-framework-copilotstudio` | PyPI | preview, install with `--pre` | Microsoft Copilot Studio integration |
@@ -566,7 +566,7 @@ Two Azure-facing PyPI packages currently coexist: `agent-framework-foundry` (the
 | 2025-10-01 | Public preview; first PyPI beta `1.0.0b251001` |
 | ~2026-02 | Python API rename (`ChatAgent` -> `Agent`, etc.); no backward-compatibility aliases |
 | 2026-04-03 | 1.0 general availability, stated as direct successor to AutoGen and Semantic Kernel |
-| 2026-08-21 / 2026-08-22 | Current releases: `agent-framework` 1.15.0 (PyPI); `Microsoft.Agents.AI[.Workflows]` 1.19.0 (NuGet) |
+| 2026-09-03 | Current releases: `agent-framework` 1.17.0 (PyPI); `Microsoft.Agents.AI[.Workflows]` 1.19.0 (NuGet) |
 
 The gap between GA and the current minor version (1.0 to 1.15 in under five months) is itself a signal worth reading alongside §9's "API stability today" caveat — this is still a framework shipping meaningful minor-version changes at a fast cadence, not one that has settled into a slow maintenance rhythm.
 

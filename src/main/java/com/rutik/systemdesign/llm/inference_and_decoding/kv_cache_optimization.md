@@ -204,12 +204,14 @@ def total_kv_cache_bytes(
 # Llama-3-70B: 80 layers, GQA with 8 KV heads (64 query heads / 8 = 8x sharing),
 # head_dim=128, BF16
 per_token = kv_cache_bytes_per_token(num_layers=80, num_kv_heads=8, head_dim=128)
-print(per_token)               # 327,680 bytes ~= 320 KB/token
+print(per_token)               # 327,680 bytes == 320 KiB/token
 
-print(total_kv_cache_bytes(per_token, seq_len=8_192))                  # ~2.56 GB
-print(total_kv_cache_bytes(per_token, seq_len=32_768))                 # ~10.24 GB
-print(total_kv_cache_bytes(per_token, seq_len=131_072))                # ~40.96 GB
-print(total_kv_cache_bytes(per_token, seq_len=8_192, concurrent_requests=100))  # ~256 GB
+# GB below is 10^9 bytes -- the convention a GPU spec sheet uses when it calls
+# an H100 an "80 GB" card. Do not divide MiB by 1000 to get here.
+print(total_kv_cache_bytes(per_token, seq_len=8_192))                  # ~2.7 GB
+print(total_kv_cache_bytes(per_token, seq_len=32_768))                 # ~10.7 GB
+print(total_kv_cache_bytes(per_token, seq_len=131_072))                # ~42.9 GB
+print(total_kv_cache_bytes(per_token, seq_len=8_192, concurrent_requests=100))  # ~268 GB
 ```
 
 **What the formula is telling you.** "Pick a model and you have fixed the per-token toll forever; after that, GPU memory is spent purely on how many tokens you agreed to remember, multiplied by how many people you agreed to remember them for."

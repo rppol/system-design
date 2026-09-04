@@ -8,7 +8,7 @@ CrewAI is a multi-agent framework built around the metaphor of a "crew" — a te
 
 CrewAI abstracts the complexity of multi-agent coordination behind familiar workplace concepts: agents have job titles, tasks have expected outputs, and the crew has a process (workflow type). This makes it accessible to non-ML engineers who can think in terms of "assign this task to the researcher agent."
 
-**Current version**: crewai 1.15.17 (released 2026-08-20). CrewAI crossed the 1.0 boundary in 2026, so the framework and its `Agent`/`Task`/`Crew`/`Flow` API are now under a stability commitment, not the fast-moving pre-1.0 surface of the framework's first year.
+**Current version**: crewai 1.15.18 (released 2026-08-27). CrewAI crossed the 1.0 boundary in 2026, so the framework and its `Agent`/`Task`/`Crew`/`Flow` API are now under a stability commitment, not the fast-moving pre-1.0 surface of the framework's first year.
 **Production adoption signal**: Used by roughly 60% of the US Fortune 500; CrewAI reports approximately 450 million agent executions per month. Used in content generation pipelines, research automation, and code generation workflows at hundreds of companies.
 
 ---
@@ -162,7 +162,7 @@ web_search = SerperDevTool()  # Google search via Serper API
 web_reader = WebsiteSearchTool()
 
 # Agents — crewai.LLM is the native, LiteLLM-backed class (no LangChain dependency
-# required); model names take a provider prefix, e.g. "openai/gpt-4o", "anthropic/claude-sonnet-4-6"
+# required); model names take a provider prefix, e.g. "openai/gpt-4o", "anthropic/claude-sonnet-5"
 researcher = Agent(
     role="Senior Research Analyst",
     goal="Uncover cutting-edge developments in AI and synthesize key findings",
@@ -472,7 +472,7 @@ The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo d
 |------|----------|-------|
 | `crewai` | Framework core | `pip install crewai` |
 | `crewai-tools` | Pre-built tools | SerperDevTool, WebsiteSearchTool, FileReadTool |
-| `crewai.LLM` | LLM provider (native) | LiteLLM-backed; provider-prefixed model strings (`"openai/gpt-4o"`, `"anthropic/claude-sonnet-4-6"`), no LangChain dependency |
+| `crewai.LLM` | LLM provider (native) | LiteLLM-backed; provider-prefixed model strings (`"openai/gpt-4o"`, `"anthropic/claude-sonnet-5"`), no LangChain dependency |
 | `langchain_openai` | LLM provider (alternative) | `ChatOpenAI` objects still accepted by `llm=` for teams already standardized on LangChain |
 | `langchain_anthropic` | LLM provider (alternative) | `ChatAnthropic` objects still accepted by `llm=` for teams already standardized on LangChain |
 | `SerperDevTool` | Web search | Google search via Serper API |
@@ -482,7 +482,7 @@ The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo d
 - crewai 0.1.x (Jan 2024): initial release
 - crewai 0.30.x (mid 2024): memory system, async tasks, Flow API
 - crewai 0.6x-0.9x (late 2024-2025): native `LLM` class (LiteLLM-backed, dropping the LangChain requirement), improved hierarchical process, enterprise features
-- crewai 1.x (current: 1.15.17, 2026-08-20): stable 1.0 API surface
+- crewai 1.x (current: 1.15.18, 2026-08-27): stable 1.0 API surface
 
 ---
 

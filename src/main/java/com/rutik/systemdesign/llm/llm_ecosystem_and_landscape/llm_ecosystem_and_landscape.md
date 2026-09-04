@@ -103,9 +103,15 @@ Gemini 3.1 Pro (frontier reasoning):
         $4/1M input, $18/1M output above 200K tokens
   Strengths: long context, video understanding, multilingual
 
-Gemini 3.6 Flash (price-performance middle, July 2026):
-  Cost: $1.50/1M input, $7.50/1M output
-  Good balance of quality and cost
+Gemini 3.6 Flash (price-performance middle):
+  Cost: $0.75/1M input, $3.75/1M output through 2026-12-31
+        $1.50/1M input, $7.50/1M output from 2027-01-01
+  Good balance of quality and cost. Note the scheduled doubling: Google publishes
+  the future rate on the same pricing page as the current one, and quoting the
+  2027 column as today's price is an easy and expensive mistake to make in a
+  capacity plan. Gemini 3.5 Flash, by contrast, is a flat $1.50/1M input --
+  so 3.6 Flash is currently HALF the price of the model it replaced, and will
+  merely match it next year.
 
 Gemini 3.5 Flash-Lite (high volume):
   Cost: $0.30/1M input, $2.50/1M output
@@ -325,10 +331,10 @@ Prices as of 2026-09-04.
 | OpenAI | gpt-5.4-nano | $0.20 | $1.25 | — |
 | Google | gemini-3.5-flash-lite | $0.30 | $2.50 | — |
 | DeepSeek | deepseek-v4-pro | $0.44 | $0.87 | 1M |
+| Google | gemini-3.6-flash | $0.75 | $3.75 | — |
 | OpenAI | gpt-5.4-mini | $0.75 | $4.50 | — |
 | Anthropic | claude-haiku-4-5 | $1 | $5 | 200K |
 | OpenAI | gpt-5.6-luna | $1 | $6 | — |
-| Google | gemini-3.6-flash | $1.50 | $7.50 | — |
 | Anthropic | claude-sonnet-5 | $2 | $10 | 1M |
 | Google | gemini-3.1-pro (<=200K) | $2 | $12 | 1M |
 | OpenAI | gpt-5.6-terra / gpt-5.4 | $2.50 | $15 | — |
@@ -340,6 +346,9 @@ Prices as of 2026-09-04.
 
 A dash in the Context column means the provider does not publish a single headline
 number for that tier; check the provider's model page before sizing a prompt against it.
+The `gemini-3.6-flash` row is the promotional rate that runs through 2026-12-31; it doubles
+to $1.50 / $7.50 on 2027-01-01, so an annualised forecast built on $0.75 is wrong for the
+back half of its horizon.
 Serverless open-weight rates move constantly and vary by provider — Llama 3.1/3.3 70B
 is listed between roughly $0.79 and $1.04 per 1M tokens across Groq, Fireworks and
 Together AI, so treat the ~$0.88 row as a mid-range anchor rather than a quote.

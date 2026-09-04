@@ -342,10 +342,10 @@ exactly: approve <order_id> | deny <order_id> <reason>."""
 
 
 def _price_usd(usage, model: str) -> float:
-    # List pricing: Sonnet 5 $3.00 / $15.00 per 1M in/out; thinking tokens
-    # bill at the OUTPUT rate. See Agent Cost & Token Budget §4.1 for the
-    # full pricing table this is drawn from.
-    rates = {"claude-sonnet-5": (3.00e-6, 15.00e-6),
+    # List pricing (2026-09-04): Sonnet 5 $2.00 / $10.00 per 1M in/out,
+    # Opus 5 $5.00 / $25.00; thinking tokens bill at the OUTPUT rate.
+    # See Agent Cost & Token Budget §4.1 for the full pricing table.
+    rates = {"claude-sonnet-5": (2.00e-6, 10.00e-6),
              "claude-opus-5": (5.00e-6, 25.00e-6)}
     rate_in, rate_out = rates[model]
     return usage.input_tokens * rate_in + usage.output_tokens * rate_out

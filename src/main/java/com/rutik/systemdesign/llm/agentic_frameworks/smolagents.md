@@ -132,7 +132,7 @@ def read_url(url: str) -> str:
 
 
 # CodeAgent with sandboxed execution
-model = LiteLLMModel(model_id="anthropic/claude-sonnet-4-6")
+model = LiteLLMModel(model_id="anthropic/claude-sonnet-5")
 
 code_agent = CodeAgent(
     tools=[web_search, read_url],

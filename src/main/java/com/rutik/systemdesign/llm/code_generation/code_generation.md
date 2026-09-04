@@ -367,12 +367,12 @@ Metric: % resolved
 ```mermaid
 xychart-beta
     title "SWE-bench resolve rate progression"
-    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 (2024)", "o3 (2025)", "Claude Fable 5 (2026)"]
+    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 (2024)", "o3 (2025)", "Claude Opus 5 (2026)"]
     y-axis "% issues resolved" 0 --> 100
-    bar [1.7, 12, 13.8, 49, 71.7, 95.0]
+    bar [1.7, 12, 13.8, 49, 71.7, 96.0]
 ```
 
-From 1.7% (raw GPT-4, 2023) to 95.0% (Claude Fable 5, 2026, on SWE-bench Verified) in three years — the jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. Today's frontier models (95.0% Claude Fable 5, 88.6% Opus 4.8, 85.2% Sonnet 5) have pushed SWE-bench Verified itself toward saturation, which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, best public-set score around 60% — is now the benchmark that actually discriminates between them.
+From 1.7% (raw GPT-4, 2023) to 96.0% (Claude Opus 5, 2026, on SWE-bench Verified) in three years — the jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. Today's frontier models (96.0% Claude Opus 5, 95.5% Mythos 5, 95.0% Fable 5, 88.6% Opus 4.8, 85.2% Sonnet 5) have pushed SWE-bench Verified itself toward saturation — the top three are within 1.0 point of each other — which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, best public-set score around 60% — is now the benchmark that actually discriminates between them.
 
 **MBPP** (Mostly Basic Python Problems):
 - 500 simple Python functions from crowdsourcing
@@ -440,16 +440,16 @@ Copilot's approach:
 
 | Model | SWE-bench Verified | Latency | Cost (in/out per 1M tokens) | Context |
 |-------|-----------|---------|------|---------|
+| Claude Opus 5 | 96.0% | 2-5s | $5/$25 | 1M |
 | Claude Fable 5 | 95.0% | 2-5s | $10/$50 | 1M |
-| Claude Opus 5 | — | 2-5s | $5/$25 | 1M |
 | Claude Opus 4.8 | 88.6% | 2-5s | $5/$25 | previous Opus generation |
-| Claude Sonnet 5 | 85.2% | 1-3s | $3/$15 | 1M |
+| Claude Sonnet 5 | 85.2% | 1-3s | $2/$10 | 1M |
 | DeepSeek V4 Pro (open) | 80.6% | 1-2s | Free/self-host | Self-hosted (deployment-dependent) |
 | Qwen 3.6-27B (self-hosted) | 77.2% | <1s | Free/self-host | Self-hosted (deployment-dependent) |
 
-A `—` means no published SWE-bench Verified figure is being cited here, not a weak score: **88.6% belongs to Opus 4.8, not to Opus 5**, and the two are kept as separate rows rather than collapsed so the benchmark number stays attached to the model that actually earned it. Opus 4.8 bills at the same $5/$25 standard rate as Opus 5. Check the current model card before quoting any of these in an interview — attaching last generation's benchmark to this generation's model is the single most common way a candidate gets caught.
+Opus 5 leads at **96.0%**, with Mythos 5 (95.5%, Project Glasswing) and Fable 5 (95.0%) inside a single point of it. Opus 4.8 and Opus 5 are kept as separate rows rather than collapsed so each benchmark number stays attached to the model that actually earned it: **88.6% belongs to Opus 4.8, not to Opus 5** — quoting it for Opus 5 understates the current model by more than seven points. Opus 4.8 bills at the same $5/$25 standard rate as Opus 5. Check the current model card before quoting any of these in an interview — attaching last generation's benchmark to this generation's model is the single most common way a candidate gets caught.
 
-HumanEval no longer appears in this table: frontier models score 96-98% pass@1, which no longer discriminates between them. SWE-bench Verified is itself approaching saturation at the top of this list — SWE-bench Pro (harder, contamination-resistant) is the benchmark to reach for once every candidate model clears ~85% here.
+HumanEval no longer appears in this table: frontier models score 96-98% pass@1, which no longer discriminates between them. SWE-bench Verified is itself approaching saturation at the top of this list — the leaders are clustered within 1.0 point, so a ranking between them is noise. SWE-bench Pro (harder, contamination-resistant) is the benchmark to reach for once every candidate model clears ~85% here.
 
 | Task | Best Approach |
 |------|---------------|
@@ -541,7 +541,7 @@ A: Copilot collects: (1) current file with cursor position; (2) other open tabs,
 
 **Q: What is SWE-bench and why is it a better benchmark than HumanEval?**
 **Short:** SWE-bench uses 2,294 real multi-file GitHub issues scored by test suites, unlike HumanEval's saturated single-function toy problems.
-A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is saturated (96-98% pass@1 across frontier models, so it no longer discriminates between them); SWE-bench Verified is itself now close to saturated (85-95% for frontier models — Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, copyleft-licensed to resist training-set leakage, best public-set score around 60% — is the benchmark that now actually discriminates between top models.
+A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is saturated (96-98% pass@1 across frontier models, so it no longer discriminates between them); SWE-bench Verified is itself now close to saturated (85-96% for frontier models — Claude Opus 5 96.0%, Mythos 5 95.5%, Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, copyleft-licensed to resist training-set leakage, best public-set score around 60% — is the benchmark that now actually discriminates between top models.
 
 **Q: How is pass@k actually computed, and what is the common mistake?**
 **Short:** pass@k is an unbiased estimator over n>k samples per problem, and the common mistake of generating only k samples overestimates the score.
@@ -557,7 +557,7 @@ A: (1) Injection vulnerabilities: LLMs learn SQL injection, XSS, command injecti
 
 **Q: How does SWE-bench scoring work and what does a 20% pass rate mean in practice?**
 **Short:** A SWE-bench resolve rate is the share of real GitHub issues whose generated patch passes the full test suite, with 20% meaning 1 in 5 fixed unaided.
-A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; by 2026, frontier models clear 85-95% on SWE-bench Verified (Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), close enough to saturation that SWE-bench Pro is now used to separate top models. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
+A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; by 2026, frontier models clear 85-96% on SWE-bench Verified (Claude Opus 5 96.0%, Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), close enough to saturation that SWE-bench Pro is now used to separate top models. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
 
 **Q: What are hallucinated APIs in code generation and how do you detect them?**
 **Short:** Hallucinated APIs are syntactically plausible but nonexistent calls, caught by import resolution, AST analysis, or sandboxed execution errors.

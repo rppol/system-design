@@ -47,6 +47,13 @@
 > signature below was checked against the v0.27.1 source. vLLM's CLI and Python API move fast, so
 > re-check against your installed release before copying anything into production — and treat any
 > flag you find in a tutorial as unverified until `vllm serve --help` confirms it.
+>
+> **One breaking change has landed since: v0.28.0 (2026-08-26) moved `bitsandbytes` out of tree.**
+> `--quantization bitsandbytes` and `--load-format bitsandbytes` now require `vllm-bnb-plugin`
+> installed alongside vLLM; without it the model load fails outright. The pin below is kept at
+> v0.27.1 deliberately rather than swept forward, so that every other number in this document
+> stays the one that was actually verified — but §11's quantization table calls the change out
+> where it bites.
 
 vLLM separates concerns into three layers:
 
@@ -928,6 +935,15 @@ online-quantization shorthands (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_chan
 That enum is the whole contract: a value outside it fails argument validation at
 startup. GGUF is served through an out-of-tree plugin rather than a `--quantization` value.
 
+**`bitsandbytes` joined GGUF outside the tree in v0.28.0 (2026-08-26).** It is in-tree at the
+v0.27.1 this document pins, and the enum value still exists on v0.28.0 — but it is now registered
+by the separate `vllm-bnb-plugin` package through the `vllm.general_plugins` entry point, so on a
+v0.28.0-or-later install without that package `--quantization bitsandbytes` fails at model load.
+This is the failure mode that catches small-GPU deployments on a routine `pip install -U vllm`:
+nothing in the flag changed, so the config still looks correct, and the breakage arrives as a load
+error rather than an argument-validation error. Add `pip install vllm-bnb-plugin` to the image, or
+move to a format that is still in-tree.
+
 | Format | Bits | `--quantization` value | Method | Quality loss |
 |---|---|---|---|---|
 | FP16 / BF16 | 16 | (none — baseline) | None | None |
@@ -936,7 +952,7 @@ startup. GGUF is served through an out-of-tree plugin rather than a `--quantizat
 | GPTQ | 4 | `gptq` / `gptq_marlin` | Post-training, weight-only | Small–moderate |
 | AWQ | 4 | `awq` / `awq_marlin` | Activation-aware weight quantization | Small |
 | NVFP4 / MXFP4 | 4 | `modelopt_fp4` / `mxfp4` | Blackwell-class block-scaled FP4 | Small–moderate |
-| bitsandbytes | 4/8 | `bitsandbytes` | On-the-fly NF4/INT8 | Moderate |
+| bitsandbytes | 4/8 | `bitsandbytes` (needs `vllm-bnb-plugin` from v0.28.0 on) | On-the-fly NF4/INT8 | Moderate |
 
 ### Using Quantization
 

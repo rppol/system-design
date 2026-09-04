@@ -202,9 +202,15 @@ curl http://localhost:11434/api/chat -d '{
 
 **Best for:** Development, demos, personal use, testing models locally.
 
-### 4.6 HuggingFace TGI (Text Generation Inference)
+### 4.6 HuggingFace TGI (Text Generation Inference) — ARCHIVED
 
-Production inference server from HuggingFace. Tight integration with HuggingFace Hub.
+Production inference server from HuggingFace, with tight HuggingFace Hub integration.
+**`huggingface/text-generation-inference` was archived read-only on 2026-03-21** and
+accepts no further commits: no new model architectures, no CVE patches, no kernel
+updates. It still runs, and a great deal of production traffic still flows through it,
+but it is a frozen artifact rather than a maintained project. Treat TGI as something you
+*inherit* and plan to migrate off, never as a green-field choice — vLLM and SGLang are
+the live equivalents, and both read HuggingFace Hub checkpoints directly.
 
 ```bash
 docker run --gpus all \
@@ -215,6 +221,9 @@ docker run --gpus all \
     --max-input-tokens 4096 \
     --max-total-tokens 8192
 ```
+
+`3.3.7` is the **final** TGI release, not merely the current one — the tag will not move
+again, so pinning it is correct and "bump the image" is not a remediation path.
 
 **Features:**
 - Continuous batching, flash attention
@@ -716,7 +725,7 @@ replicas.
 | llama.cpp | Good (CPU/edge) | Easy | Any | Wide (GGUF) | MIT |
 | SGLang | Excellent (prefix) | Medium | NVIDIA | Good | Apache 2.0 |
 | Ollama | Good | Easiest | Any | Good | MIT |
-| TGI | Good | Medium | NVIDIA | Wide (HF Hub) | Apache 2.0 |
+| TGI (archived 2026-03-21) | Good | Medium | NVIDIA | Wide (HF Hub) | Apache 2.0 |
 
 ---
 
@@ -763,7 +772,7 @@ replicas.
 | **llama.cpp** | C++; minimal deps; CPU/Metal/CUDA |
 | **SGLang** | Radix attention; constrained gen |
 | **Ollama** | One-command local LLMs |
-| **HuggingFace TGI** | Docker image; HF Hub integration |
+| **HuggingFace TGI** | Docker image; HF Hub integration. Archived read-only 2026-03-21 — inherit-and-migrate, not a new-build choice |
 | **LM Studio** | GUI for local models |
 | **ExLlamaV2** | Fast GPTQ; consumer GPUs |
 | **MLC-LLM** | Mobile/browser inference |
@@ -785,7 +794,7 @@ A: Continuous batching (iteration-level scheduling) admits new requests and reti
 
 **Q: Why can a vLLM server OOM or refuse to start before serving a single request?**
 **Short:** vLLM preallocates GPU memory and KV pages sized to max_model_len at startup, so leaving it at a model's full training context can abort the server before any request.
-A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.92) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
+A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.9, unchanged from v0.4.2 through v0.15.0) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
 
 **Q: When would you use llama.cpp vs vLLM?**
 **Short:** llama.cpp targets CPU and consumer GPU inference with low memory use, while vLLM targets data-center GPU serving for many concurrent users at maximum throughput.
@@ -848,7 +857,7 @@ An engine's router picks which existing replica a request lands on; a fleet orch
 
 ## 13. Best Practices
 
-1. **Set gpu_memory_utilization carefully** — vLLM's 0.92 default is aggressive; start with 0.85 to leave headroom.
+1. **Set gpu_memory_utilization carefully** — the 0.9 default leaves only 10% of the card for CUDA graphs, NCCL buffers and fragmentation; start with 0.85 to buy headroom, and note that the fraction is per vLLM *instance*, so two instances on one GPU need 0.45 each, not 0.9.
 2. **Set max_model_len explicitly** — don't let the engine default to model's maximum; set it to your actual max input + output.
 3. **Enable tensor parallelism across your GPUs** — multi-GPU almost always worth it for batch throughput.
 4. **Monitor queue depth** — if requests are queuing, add replicas; if GPU utilization is low, reduce replicas.
@@ -1013,7 +1022,7 @@ async def generate(prompt: str, request_id: str) -> str:
 
 **What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache reserves one contiguous block per sequence, sized to the maximum sequence length, at request arrival. For a 13B Llama-class model (40 layers, 40 heads, head_dim 128, MHA) that is 2 × 40 × 40 × 128 × 2 bytes = 800KB per token, so 2,048 tokens is ~1.6GB per sequence and 200 concurrent sequences would need ~320GB — four A100s' worth of memory for one model's cache. PagedAttention instead divides KV memory into fixed-size blocks (16 tokens by default) allocated on demand and shared across sampling branches via copy-on-write. The SOSP 2023 paper measured that prior systems put only 20.4-38.2% of their reserved KV memory to actual token state — 60-80% wasted to fragmentation and over-reservation — while vLLM's paged allocator drives that waste to near zero, which is where the paper's 2-4x throughput gain at the same latency comes from.
 
-**When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation; you want a battle-tested production container maintained by HuggingFace. vLLM is preferred when: you want the deepest PagedAttention/scheduler tuning surface; you need speculative decoding; you need fine-grained control over scheduling. Do not memorize a percentage gap between the two — vLLM's own 2023 launch benchmark claimed up to 3.5x over TGI and both projects have leapfrogged each other many times since, so any number you quote is a version-specific artifact. Benchmark both on your own traffic shape.
+**When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation. What you can no longer claim is active maintenance: `huggingface/text-generation-inference` was **archived read-only on 2026-03-21**, so TGI ships no new model architectures, no CVE patches and no kernel work. That inverts the recommendation for anything green-field — pick TGI only when you are already standardised on it (an existing SageMaker fleet, an internal image built on it) and you have an exit plan; pick vLLM or SGLang for a new deployment. If you do stay, pin `3.3.7` deliberately: it is the final release, not merely the latest, so "upgrade the container" is not an available remediation for anything. vLLM is preferred when: you want the deepest PagedAttention/scheduler tuning surface; you need speculative decoding; you need fine-grained control over scheduling. Do not memorize a percentage gap between the two — vLLM's own 2023 launch benchmark claimed up to 3.5x over TGI and both projects have leapfrogged each other many times since, so any number you quote is a version-specific artifact. Benchmark both on your own traffic shape.
 
 **How do you right-size the number of GPU replicas for a 13B model serving 200 RPS with P95 < 500ms SLA?** Start from the memory-bandwidth ceiling, not a remembered benchmark: 13B at FP16 is 26GB of weights, an A100 80GB streams ~2.0 TB/s, so one decode step costs 26GB of reads and the per-step rate is ~77/sec — at a batch of 32 that is ~2,460 tokens/sec aggregate, and ~2,000 tokens/sec is a safe planning figure once attention overhead is included. Demand is 200 RPS × 128 average output tokens = 25,600 tokens/second. Minimum replicas: ceil(25,600 / 2,000) = 13 A100s, but that ignores head-of-line blocking and latency headroom. For P95 < 500ms with queue jitter, size for ~60% utilization at peak → ceil(25,600 / 0.6 / 2,000) = 22 A100s. Add auto-scaling on queue depth (HPA on Kubernetes) to handle bursty traffic.
 
@@ -1022,7 +1031,7 @@ async def generate(prompt: str, request_id: str) -> str:
 | Engine | Throughput (13B, A100) | Best for | Trade-off |
 |---|---|---|---|
 | vLLM (PagedAttention) | High (measure it — the vLLM/TGI ordering flips between releases) | Maximum throughput, speculative decoding, complex batching | Steeper ops complexity; less HuggingFace native integration |
-| TGI (HuggingFace) | High | AWS SageMaker, HuggingFace Hub, production-ready container | Fewer scheduler knobs than vLLM |
+| TGI (HuggingFace) | High | Existing SageMaker / HF-Hub fleets you already run | **Archived read-only 2026-03-21** — no new models, no CVE patches; `3.3.7` is the final release. Fewer scheduler knobs than vLLM |
 | llama.cpp | Low-medium (CPU/low VRAM) | Edge deployment, MacBook M-series, 4-bit quantized models | Not suitable for multi-user high-RPS serving; no continuous batching |
 | SGLang | High (RadixAttention prefix caching) | High prefix reuse (system prompts, RAG boilerplate) | Smaller community; fewer deployment examples |
 
@@ -1050,7 +1059,7 @@ def route_request(prompt: str) -> str:
     return "long-pool" if estimated_tokens > 4096 else "short-pool"
 ```
 
-**How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. That measurement is the whole answer — do not carry a remembered percentage gap between vLLM and TGI into the decision, because it is a version-specific artifact that flips with releases. TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
+**How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. That measurement is the whole answer — do not carry a remembered percentage gap between vLLM and TGI into the decision, because it is a version-specific artifact that flips with releases. TGI wins on ease of deployment and broad model support, but weigh that against its archival: the repository went read-only on 2026-03-21, so its model coverage is frozen at `3.3.7` and a benchmark win today buys you no support for the architecture you adopt next quarter. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
 
 **What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'` — or via the shorthand flags `--spec-method` / `--spec-model` / `--spec-tokens`, which are mutually exclusive with the corresponding keys inside `--speculative-config`. There is no published acceptance-rate threshold to memorize — the operating point is a function of your measured draft cost, not a constant. Log `speculative_tokens_accepted / speculative_tokens_proposed`, then derive your own break-even from `E[accepted] = (1 - a^(K+1)) / (1 - a)` against a draft tax of `1 + K x c`: at K=4 with a *measured* wall-clock draft cost of c ≈ 0.2 target passes per draft token, speculation only starts paying above a ≈ 0.45, and the net speedup peaks at K=4 before falling off. Tune against measured end-to-end TPOT, never against a remembered percentage.
 

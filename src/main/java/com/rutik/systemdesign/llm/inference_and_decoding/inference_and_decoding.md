@@ -236,13 +236,19 @@ The KV cache stores the K and V tensors computed during prefill so that decode o
 2 (K+V) × num_layers × num_kv_heads × head_dim × bytes_per_element
 
 LLaMA 3 70B (80 layers, 8 KV heads via GQA, head_dim=128, BF16):
-  Per token: 2 × 80 × 8 × 128 × 2 = 327,680 bytes ≈ 320 KB
+  Per token: 2 × 80 × 8 × 128 × 2 = 327,680 bytes ≈ 320 KiB
 
-  At 8K context, 1 request:    2.56 GB
-  At 32K context, 1 request:   10.2 GB
-  At 128K context, 1 request:  40.9 GB
-  At 128K context, 10 users:   409 GB ← requires ~6× H100 just for KV cache
+  At 8K context, 1 request:    2.7 GB
+  At 32K context, 1 request:   10.7 GB
+  At 128K context, 1 request:  42.9 GB
+  At 128K context, 10 users:   429 GB ← requires ~6× H100 just for KV cache
 ```
+
+Units matter here and they are easy to fumble: the per-token figure is 320 **KiB**
+(327,680 bytes), while every GB above is 10^9 bytes — the same decimal convention a
+GPU spec sheet uses when it calls an H100 an "80 GB" card. Mixing the two (dividing
+MiB by 1000 to reach "GB") understates every row by about 7%, which is exactly the
+size of error that makes a capacity plan fit on paper and OOM in production.
 
 This is why KV cache, not model weights, is the **primary memory bottleneck** in production LLM serving.
 
@@ -467,7 +473,7 @@ Read the two right-hand columns against each other. `E[tokens]` climbs 1.70 → 
 
 ### 4.6 Flash Attention
 
-Flash Attention reorders attention computation into SRAM-resident tiles with an online-softmax accumulation, never materializing the full O(n²) attention matrix in HBM — O(n) memory and 2-4× faster for long sequences, since decode is memory-bandwidth bound (Section 6). Flash Attention 2/3 add further kernel-level optimizations for A100/H100.
+Flash Attention reorders attention computation into SRAM-resident tiles with an online-softmax accumulation, never materializing the full O(n²) attention matrix in HBM — O(n) memory and 2-4× faster for long sequences, since decode is memory-bandwidth bound (Section 6). Flash Attention 2 adds further kernel-level optimizations and runs on Ampere (A100) and later. **Flash Attention 3 is Hopper-only (SM90)** — it is built around the H100's warp-group MMA (`wgmma`) and TMA async copies, so an A100 silently falls back to FA2 rather than erroring. Quoting an FA3 speedup for an A100 fleet is a common and expensive planning mistake.
 
 → Full mechanics and the online-softmax derivation: [Attention Mechanisms](../foundations_and_architecture/attention_mechanisms.md). Kernel-level and quantization context: [Optimization & Quantization](../optimization_and_quantization/optimization_and_quantization.md).
 
@@ -1166,7 +1172,7 @@ The trick is that batching moves *your* intensity without changing the *hardware
 
 Every token from B=1 to B=156 is free throughput — the weight bytes were being loaded anyway. Past 156 you are paying real compute per added request and step time starts to stretch, so throughput flattens while latency climbs.
 
-**Why you almost never reach the ridge point.** Serving B=156 concurrent 8K requests on LLaMA 3 70B needs `156 × 8,192 × 320 KB ≈ 399 GB` of KV cache by the Section 4.3 formula — five H100s of KV alone, on top of the 140 GB of weights. You hit KV OOM around B=30-40 and stop there. This is the punchline that ties the whole module together: the *compute* crossover is theoretical, the *memory* wall is what you actually operate against, and that is why PagedAttention, GQA, KV quantization, and eviction all attack the same term.
+**Why you almost never reach the ridge point.** Serving B=156 concurrent 8K requests on LLaMA 3 70B needs `156 × 8,192 × 327,680 B ≈ 419 GB` of KV cache by the Section 4.3 formula — more than five H100s of KV alone, on top of the 140 GB of weights. You hit KV OOM around B=30-40 and stop there. This is the punchline that ties the whole module together: the *compute* crossover is theoretical, the *memory* wall is what you actually operate against, and that is why PagedAttention, GQA, KV quantization, and eviction all attack the same term.
 
 ### Latency vs Throughput Optimization
 

@@ -24,6 +24,8 @@ MCP defines three primitives that **servers** offer to clients:
 
 Three further primitives run the other way — features **clients** offer to servers: **Sampling** (a server asks the client's LLM to generate text, enabling server-side agentic logic that delegates generation back to the host model), **Roots** (the server asks which URI or filesystem boundaries it may operate in), and **Elicitation** (the server asks the user for additional information mid-interaction). An experimental **Tasks** utility covers long-running, pollable requests.
 
+**Two of those three are deprecated in the current `2026-07-28` revision, on 12-month removal windows — do not build on them.** **Sampling** is superseded by simply calling your own LLM provider from the server, and **Roots** by ordinary tool parameters, resource URIs, or server configuration; server-side **Logging** is deprecated alongside them in favour of `stderr` on stdio and OpenTelemetry over HTTP. Only **Elicitation** survives as a live client-offered feature. They are described here because a large installed base still speaks `2025-11-25`, where all three are current — but a new server should treat Sampling and Roots the way you would treat any API with a published sunset date. See [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md#what-the-2026-07-28-revision-changes) for the full deprecation table.
+
 The wire format is JSON-RPC 2.0. The spec defines two standard transports: **stdio** (standard input/output, used for local subprocess servers) and **Streamable HTTP** (used for remote servers). The protocol is transport-agnostic by design; custom transports can be layered on top.
 
 MCP operates as a client-server architecture. The **host** is the LLM application (Claude Desktop, an IDE plugin, a custom agent). Each host contains one or more **MCP clients**, each maintaining a 1:1 stateful session with one **MCP server**. Servers expose capabilities; clients consume them.
@@ -654,10 +656,10 @@ All SDKs below are **official**, hosted under the `modelcontextprotocol` GitHub 
 
 | SDK | Language | Tier | Notes |
 |-----|----------|------|-------|
-| `@modelcontextprotocol/sdk` | TypeScript/Node.js | Tier 1 | The v1 package: full client and server in one; stdio + Streamable HTTP |
-| `@modelcontextprotocol/server` | TypeScript/Node.js | Tier 1 | The v2 server half, split out of the v1 package; v2 implements the 2026-07-28 revision |
-| `@modelcontextprotocol/client` | TypeScript/Node.js | Tier 1 | The v2 client half; install only the side you need, plus optional Express/Fastify/Hono/Node adapters |
-| `mcp` | Python | Tier 1 | Full client and server; asyncio-based. v1.x is the production line; `mcp` 2.x is in pre-release |
+| `@modelcontextprotocol/sdk` | TypeScript/Node.js | Tier 1 | The v1 package (1.30.0): full client and server in one; stdio + Streamable HTTP. Superseded by the split `server`/`client` v2 packages below |
+| `@modelcontextprotocol/server` | TypeScript/Node.js | Tier 1 | The v2 server half, split out of the v1 package. **2.0.0 shipped stable on 2026-07-27** and implements the 2026-07-28 revision |
+| `@modelcontextprotocol/client` | TypeScript/Node.js | Tier 1 | The v2 client half, **2.0.0 stable since 2026-07-27**; install only the side you need, plus optional Express/Fastify/Hono/Node adapters |
+| `mcp` | Python | Tier 1 | Full client and server; asyncio-based. **2.x is the current stable line** (2.0.0 on 2026-07-28, 2.1.1 on 2026-08-25) and implements the 2026-07-28 revision; v1.x is maintenance-only |
 | `modelcontextprotocol/go-sdk` | Go | Tier 1 | Client and server |
 | `modelcontextprotocol/csharp-sdk` | C# | Tier 1 | Client and server |
 | `modelcontextprotocol/java-sdk` | Java | Tier 2 | Client and server for the JVM |

@@ -33,7 +33,7 @@ Key insight: The hardest problems are not the happy path (send task, get result)
 
 **Capability advertisement**: Agents declare what they can do before a task is submitted. Callers can route intelligently without trial-and-error.
 
-**Explicit task lifecycle**: A task moves through well-defined states (submitted, working, input-required, auth-required, completed, failed, canceled, rejected). Both parties know exactly where the task stands at any moment.
+**Explicit task lifecycle**: A task moves through well-defined states (`TASK_STATE_SUBMITTED`, `TASK_STATE_WORKING`, `TASK_STATE_INPUT_REQUIRED`, `TASK_STATE_AUTH_REQUIRED`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_CANCELED`, `TASK_STATE_REJECTED`). Both parties know exactly where the task stands at any moment.
 
 **Authentication at the protocol layer**: Agents authenticate each other using standard mechanisms (API keys, OAuth 2.0, JWT) before any task data is exchanged. Security is not an afterthought.
 
@@ -58,11 +58,23 @@ A2A is an open specification published by Google in April 2025 and donated to th
   "name": "DataAnalystAgent",
   "description": "Analyzes structured datasets and produces statistical summaries",
   "version": "1.0.0",
-  "url": "https://analyst.example.com/a2a",
+  "supportedInterfaces": [
+    {
+      "url": "https://analyst.example.com/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
+    {
+      "url": "https://analyst.example.com/grpc",
+      "protocolBinding": "GRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
   "capabilities": {
     "streaming": true,
     "pushNotifications": true,
-    "stateTransitionHistory": true
+    "stateTransitionHistory": true,
+    "extendedAgentCard": true
   },
   "skills": [
     {
@@ -73,22 +85,54 @@ A2A is an open specification published by Google in April 2025 and donated to th
       "outputModes": ["text", "data"]
     }
   ],
-  "authentication": {
-    "schemes": ["Bearer", "ApiKey"]
-  }
+  "signatures": [
+    { "...": "JWS over the JCS-canonicalized card, signatures[] excluded" }
+  ]
 }
 ```
 
-**Task Lifecycle States** — the v1.0 `TaskState` enum has nine values, not the six that early write-ups list:
-- `submitted`: task received, queued for processing
-- `working`: actively being processed by the agent
-- `input-required`: agent needs clarification from caller (multi-turn)
-- `auth-required`: agent needs additional credentials before it can proceed
-- `completed`: task finished successfully, result available
-- `failed`: terminal failure, error details available
-- `canceled`: explicitly cancelled by caller (note the single-`l` spelling in the wire enum)
-- `rejected`: the agent declined the task outright, without attempting it
-- `unspecified`: the default/unknown zero value
+**Two v1.0 changes to this document break v0.3 clients.**
+
+*Shape.* The top-level `url`, `protocolVersion`, `preferredTransport` and
+`additionalInterfaces` fields are **gone**, replaced by a single `supportedInterfaces[]`
+array whose entries each carry their own `url`, `protocolBinding` and `protocolVersion` —
+so an agent advertises JSON-RPC and gRPC endpoints as two peer entries rather than one
+preferred transport plus a list of alternates. `supportsAuthenticatedExtendedCard` moved
+inside `capabilities` as `extendedAgentCard`. Code that reads `card["url"]` gets a
+`KeyError` against a v1.0 card, which at least fails loudly — unlike the `TaskState`
+rename below.
+
+*Signing.* v1.0 adds the **Signed Agent Card**: a `signatures[]` array on the card holding
+JWS signatures (RFC 7515) computed over the card canonicalized with JCS (RFC 8785), with
+the `signatures` field itself excluded from the canonical form. This is what makes a card
+fetched from a well-known path trustworthy rather than merely reachable — without it, a
+card is an unauthenticated claim about an agent's identity, capabilities and auth
+requirements, served over a URL an attacker may control via DNS or a compromised registry
+entry. Verify signatures before you route a task based on a card, and treat an unsigned
+card the way you would treat an unsigned package: usable inside a trust boundary you
+already control, never across one.
+
+**Task Lifecycle States** — the v1.0 `TaskState` enum has nine values, not the six that early write-ups list, and **v1.0 renamed every one of them**:
+- `TASK_STATE_SUBMITTED`: task received, queued for processing
+- `TASK_STATE_WORKING`: actively being processed by the agent
+- `TASK_STATE_INPUT_REQUIRED`: agent needs clarification from caller (multi-turn)
+- `TASK_STATE_AUTH_REQUIRED`: agent needs additional credentials before it can proceed
+- `TASK_STATE_COMPLETED`: task finished successfully, result available
+- `TASK_STATE_FAILED`: terminal failure, error details available
+- `TASK_STATE_CANCELED`: explicitly cancelled by caller (note the single-`l` spelling, preserved in the new name)
+- `TASK_STATE_REJECTED`: the agent declined the task outright, without attempting it
+- `TASK_STATE_UNSPECIFIED`: the default/unknown zero value
+
+**This rename is a documented breaking change, and it is the one that silently breaks clients.**
+Through v0.3 the wire values were lowercase and kebab-cased — `submitted`, `working`,
+`input-required`. v1.0 moved the whole data model from Pydantic models to Protobuf-derived types
+and adopted **ProtoJSON** as the canonical JSON serialization, which requires enum values in
+SCREAMING_SNAKE_CASE with the enum name as a prefix. Every enum in the protocol changed the same
+way, `Role` included — not just `TaskState`. A v0.3-era client comparing `status == "completed"`
+against a v1.0 server does not raise: it simply never matches, so the task looks like it is still
+running and the poll loop spins until it times out. Match on the new constants, and if you must
+interoperate with both, normalize by stripping the `TASK_STATE_` prefix and lowercasing rather
+than maintaining two comparison sets.
 
 **Transport**: A2A v1.0 defines three bindings — **JSON-RPC 2.0**, **gRPC**, and **HTTP+JSON/REST**. Under the JSON-RPC binding the core methods are `a2a.message.send`, `a2a.message.sendStreaming`, `a2a.tasks.get`, `a2a.tasks.list`, `a2a.tasks.cancel`, `a2a.tasks.subscribe`, the `a2a.tasks.pushNotificationConfig.*` family, and `a2a.agent.getExtendedAgentCard`. Server-Sent Events (SSE) carry streaming responses; webhook callbacks carry push notifications on long tasks.
 
@@ -162,10 +206,10 @@ sequenceDiagram
     O->>S: GET /.well-known/agent-card.json
     S-->>O: Agent Card (capabilities)
     O->>S: POST /tasks {id: "t-001", message: {...}}
-    S-->>O: 202 Accepted {taskId: "t-001", status: "submitted"}
+    S-->>O: 202 Accepted {taskId: "t-001", status: "TASK_STATE_SUBMITTED"}
     Note over O,S: SSE stream open
-    S-->>O: event: task-update {status: "working"}
-    S-->>O: event: task-update {status: "completed", result: {...}}
+    S-->>O: event: task-update {status: "TASK_STATE_WORKING"}
+    S-->>O: event: task-update {status: "TASK_STATE_COMPLETED", result: {...}}
 ```
 
 ### 5.2 A2A Multi-Turn (input-required state)
@@ -176,10 +220,10 @@ sequenceDiagram
     participant O as Orchestrator
     participant S as Specialist
     O->>S: POST /tasks {task: "analyze"}
-    S-->>O: {status: "input-required", question: "Which column is the target variable?"}
+    S-->>O: {status: "TASK_STATE_INPUT_REQUIRED", question: "Which column is the target variable?"}
     O->>S: POST /tasks/t-001/messages {content: "column: revenue"}
-    S-->>O: {status: "working"}
-    S-->>O: {status: "completed", result: {...}}
+    S-->>O: {status: "TASK_STATE_WORKING"}
+    S-->>O: {status: "TASK_STATE_COMPLETED", result: {...}}
 ```
 
 ### 5.3 A2A with Push Notifications (long tasks)
@@ -193,7 +237,7 @@ sequenceDiagram
     S-->>O: 202 {taskId: "t-002"}
     Note over O: Orchestrator continues other work
     Note over S: 10 minutes later — task completes
-    S->>O: POST https://orch.example.com/cb {taskId: "t-002", status: "completed"}
+    S->>O: POST https://orch.example.com/cb {taskId: "t-002", status: "TASK_STATE_COMPLETED"}
 ```
 
 ### 5.4 Multi-Agent System with Protocol Layers
@@ -290,15 +334,30 @@ class AgentSkill:
 
 
 @dataclass
+class AgentInterface:
+    """One entry of v1.0's supportedInterfaces[]. Replaces the v0.3
+    top-level `url` + `preferredTransport` + `additionalInterfaces` trio."""
+    url: str
+    protocol_binding: str   # "JSONRPC" | "GRPC" | "HTTP_JSON"
+    protocol_version: str
+
+
+@dataclass
 class AgentCard:
     name: str
     description: str
     version: str
-    url: str
+    interfaces: list[AgentInterface]
     skills: list[AgentSkill]
-    auth_schemes: list[str]
     supports_streaming: bool
     supports_push: bool
+    signatures: list[dict[str, Any]]   # JWS entries; empty means UNSIGNED
+
+    def endpoint(self, binding: str = "JSONRPC") -> str:
+        for iface in self.interfaces:
+            if iface.protocol_binding == binding:
+                return iface.url
+        raise ValueError(f"agent advertises no {binding} interface")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentCard":
@@ -313,16 +372,27 @@ class AgentCard:
             for s in data.get("skills", [])
         ]
         caps = data.get("capabilities", {})
-        auth = data.get("authentication", {})
+        # v0.3 put a single endpoint at data["url"]; v1.0 removed that key.
+        # Reading it unconditionally is a KeyError against any current agent.
+        interfaces = [
+            AgentInterface(
+                url=i["url"],
+                protocol_binding=i.get("protocolBinding", "JSONRPC"),
+                protocol_version=i.get("protocolVersion", "1.0"),
+            )
+            for i in data.get("supportedInterfaces", [])
+        ]
+        if not interfaces:
+            raise ValueError("card has no supportedInterfaces (pre-v1.0 card?)")
         return cls(
             name=data["name"],
             description=data["description"],
             version=data["version"],
-            url=data["url"],
+            interfaces=interfaces,
             skills=skills,
-            auth_schemes=auth.get("schemes", []),
             supports_streaming=caps.get("streaming", False),
             supports_push=caps.get("pushNotifications", False),
+            signatures=data.get("signatures", []),
         )
 
 
@@ -369,17 +439,20 @@ from typing import Any
 class TaskStatus(str, Enum):
     """Subset of the A2A v1.0 TaskState enum that a client must handle.
 
-    The full enum also carries AUTH_REQUIRED, REJECTED and UNSPECIFIED.
-    Note the wire spelling of "canceled" -- one 'l'.
+    The full enum also carries TASK_STATE_UNSPECIFIED.
+    v1.0 wire values are ProtoJSON SCREAMING_SNAKE_CASE with a TASK_STATE_
+    prefix -- the v0.3 lowercase/kebab forms ("submitted", "input-required")
+    will never match against a v1.0 server.
+    Note the wire spelling of "CANCELED" -- one 'l'.
     """
-    SUBMITTED = "submitted"
-    WORKING = "working"
-    INPUT_REQUIRED = "input-required"
-    AUTH_REQUIRED = "auth-required"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELED = "canceled"
-    REJECTED = "rejected"
+    SUBMITTED = "TASK_STATE_SUBMITTED"
+    WORKING = "TASK_STATE_WORKING"
+    INPUT_REQUIRED = "TASK_STATE_INPUT_REQUIRED"
+    AUTH_REQUIRED = "TASK_STATE_AUTH_REQUIRED"
+    COMPLETED = "TASK_STATE_COMPLETED"
+    FAILED = "TASK_STATE_FAILED"
+    CANCELED = "TASK_STATE_CANCELED"
+    REJECTED = "TASK_STATE_REJECTED"
 
 
 @dataclass
@@ -748,10 +821,10 @@ event ends up with only the final fragment of a streamed report.
 | Transport | JSON-RPC 2.0, gRPC, or HTTP+JSON/REST; SSE for streaming | REST HTTP/JSON | HTTP + DID resolution | HTTP/JSON-RPC |
 | Discovery | Registry / `/.well-known/agent-card.json` | ACP directory | DID (decentralized) | Configured at startup |
 | Authentication | API key / OAuth 2.0 / JWT | Bearer token / API key | DID-linked signatures | API key / local |
-| Task state machine | Yes (9 `TaskState` values) | Simplified (3 states) | None (message-based) | None (request/response) |
+| Task state machine | Yes (9 `TASK_STATE_*` values, ProtoJSON-cased since v1.0) | Simplified (3 states) | None (message-based) | None (request/response) |
 | Streaming | SSE | Webhook / polling | Not specified | Yes (SSE) |
 | Push notifications | Yes | Yes | Yes (via DID service) | No |
-| Multi-turn | Yes (input-required state) | Yes (message threads) | Yes (message exchange) | No |
+| Multi-turn | Yes (`TASK_STATE_INPUT_REQUIRED`) | Yes (message threads) | Yes (message exchange) | No |
 | Decentralization | Central registry | Central directory | Fully decentralized | Central config |
 | Standard maturity | Published April 2025; donated to the Linux Foundation June 2025; spec at v1.0.1 (May 2026); 150+ supporting organizations at the April 2026 one-year mark | **Merged into A2A August 2025; repo archived** | Early specification | Published Nov 2024 |
 | Best for | Structured task delegation | Historical reference — migrate to A2A | Cross-org open networks | Tool invocation |
@@ -1104,7 +1177,7 @@ An agent card is a JSON document served at `/.well-known/agent-card.json` that a
 
 **Q: Walk through the A2A task lifecycle states and explain why input-required exists.**
 **Short:** input-required pauses a task to ask the caller a clarifying question instead of guessing or failing outright.
-Tasks start as `submitted` (received, queued), transition to `working` (actively processing), then reach `completed`, `failed`, `canceled` or `rejected`; the v1.0 `TaskState` enum has nine values in total, adding `input-required`, `auth-required` and an `unspecified` zero value. The `input-required` state exists for multi-turn scenarios: if the agent discovers mid-task that it needs clarification (ambiguous instruction, missing parameter, conflicting constraints), it pauses and prompts the caller rather than making an assumption or failing. The caller provides the answer via a follow-up message to the same task ID, resuming work without losing accumulated context. `auth-required` is the same idea for credentials, and `rejected` distinguishes "I declined this" from "I tried and failed."
+Tasks start as `TASK_STATE_SUBMITTED` (received, queued), transition to `TASK_STATE_WORKING` (actively processing), then reach `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_CANCELED` or `TASK_STATE_REJECTED`; the v1.0 `TaskState` enum has nine values in total, adding `TASK_STATE_INPUT_REQUIRED`, `TASK_STATE_AUTH_REQUIRED` and a `TASK_STATE_UNSPECIFIED` zero value. Those `TASK_STATE_` prefixes are a v1.0 breaking change — v0.3 used lowercase kebab-case (`submitted`, `input-required`) and v1.0 moved to ProtoJSON-compliant SCREAMING_SNAKE_CASE — so a client that string-matches the old values against a v1.0 server never matches and polls forever. The input-required state exists for multi-turn scenarios: if the agent discovers mid-task that it needs clarification (ambiguous instruction, missing parameter, conflicting constraints), it pauses and prompts the caller rather than making an assumption or failing. The caller provides the answer via a follow-up message to the same task ID, resuming work without losing accumulated context. `auth-required` is the same idea for credentials, and `rejected` distinguishes "I declined this" from "I tried and failed."
 
 **Q: How does A2A differ from MCP, and when would an agent use both simultaneously?**
 **Short:** MCP connects an LLM host to tool servers; A2A lets autonomous peer agents delegate tasks to each other.
@@ -1184,7 +1257,7 @@ Implement retry with exponential backoff on the caller side: attempt submission 
 
 **Register agents with TTL-based heartbeats.** If using a central registry, re-register the agent card every 30 seconds (or half the TTL). A dead agent's entry expires automatically, preventing other agents from routing tasks to unreachable endpoints.
 
-**Log every task state transition with caller identity.** Each state change (submitted, working, input-required, completed, failed) should emit a structured log record containing: task ID, caller agent ID (from verified JWT), target skill, state, and timestamp. This log is your audit trail for debugging and compliance.
+**Log every task state transition with caller identity.** Each state change (`TASK_STATE_SUBMITTED`, `TASK_STATE_WORKING`, `TASK_STATE_INPUT_REQUIRED`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`) should emit a structured log record containing: task ID, caller agent ID (from verified JWT), target skill, state, and timestamp. This log is your audit trail for debugging and compliance.
 
 **Apply rate limits per caller identity.** Use the verified JWT issuer claim as the rate limit key. Protect against runaway agents or compromised agents flooding your specialist with tasks. Return 429 with `Retry-After` rather than silently dropping requests.
 

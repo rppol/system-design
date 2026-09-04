@@ -104,8 +104,8 @@ with the same prefix skip the attention computation for the cached portion.
 | Provider | Feature | Cache-read price | Min cacheable tokens |
 |----------|---------|------------------|---------------------|
 | Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off) on every model **except Claude Fable 5.1 and Mythos 5.1, which read at 0.025x — $0.25/1M against a $10/1M base**; writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
-| OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.50 in / $0.25 cached). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
-| Google Gemini | Implicit caching (on by default) plus explicit cache objects | 0.1x base input (Gemini 3.5/3.6 Flash: $1.50 in / $0.15 cached; 2.5 Pro: $1.25 / $0.125 under 200k, $2.50 / $0.25 above), **plus a storage rent no other provider charges** — $1.00 per 1M cached tokens per hour, $4.50 on 2.5 Pro. Flash-Lite on 3.5 has no caching at all | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
+| OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.00 in / $0.20 cached, $12.00 out, after OpenAI's 2026-07-30 cut). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
+| Google Gemini | Implicit caching (on by default) plus explicit cache objects | 0.1x base input (Gemini 3.5 Flash: $1.50 in / $0.15 cached; **Gemini 3.6 Flash is cheaper — $0.75 in / $0.075 cached through 2026-12-31, doubling to $1.50 / $0.15 on 2027-01-01**; 2.5 Pro: $1.25 / $0.125 under 200k, $2.50 / $0.25 above), **plus a storage rent no other provider charges** — $1.00 per 1M cached tokens per hour, $4.50 on 2.5 Pro. Flash-Lite on 3.5 has no caching at all | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
 
 Two traps live in that last column. First, Anthropic's minimum is **per model and not monotonic in
 model size** — Opus 5 caches from 512 tokens while the older Opus 4.5 and Haiku 4.5 need 4,096, so
@@ -174,7 +174,7 @@ because reads and writes are fixed multiples of the base input price.)
   Same 70% hit rate, very different outcomes: the 0.1x tier converts it into 63%
   savings, the 0.5x tier into 35%. Check which tier your model is on before
   promising a number -- current OpenAI models are also 0.1x (gpt-5.6-terra is
-  $2.50 in / $0.25 cached), so both major providers now land near 63% at h = 0.70;
+  $2.00 in / $0.20 cached), so both major providers now land near 63% at h = 0.70;
   but gpt-5.6 and later additionally bill cache WRITES at 1.25x, which the
   gpt-4o-era models did not.
 ```

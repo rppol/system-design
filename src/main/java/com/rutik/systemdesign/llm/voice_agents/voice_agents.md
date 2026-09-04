@@ -531,7 +531,7 @@ flowchart TD
     TWILIO -->|"raw audio stream"| PIPECAT["Pipecat (Python orchestration layer)\nAudio framing and buffering\nVAD: Silero (90ms response) — detects barge-in\nBarge-in handler: interrupts TTS when user speaks\nTurn detection: 900ms silence + semantic check"]
     PIPECAT --> STT[["Deepgram Nova-2\nSTT streaming\nsub-50ms partials"]]
     PIPECAT --> TTS[["ElevenLabs Flash\nTTS streaming (75ms first chunk)\nVoice cloned: Alex (company brand voice)"]]
-    STT -->|"transcript"| LLM["LLM Layer — Claude Sonnet 4.6 (streaming)\nSystem prompt: insurance agent persona + policy rules\nTools: lookup_claim(), check_billing(), escalate_human()\nContext window: full call transcript + customer profile"]
+    STT -->|"transcript"| LLM["LLM Layer — Claude Sonnet 5 (streaming)\nSystem prompt: insurance agent persona + policy rules\nTools: lookup_claim(), check_billing(), escalate_human()\nContext window: full call transcript + customer profile"]
     LLM -->|"text chunks"| TTS
     LLM -->|"tool calls"| APIS[["Internal APIs (sub-100ms SLA)\nClaims API (policy DB)\nBilling API (payment processor)\nCRM (customer history, notes)"]]
     APIS -->|"escalation path"| HUMAN["Human Agent Handoff (Twilio Transfer)\nSummary sent to agent screen before transfer\nTransfer completes in under 5 seconds"]
@@ -685,7 +685,7 @@ class VoiceAgentPipeline:
 
         # Stream LLM response
         async with self._llm.messages.stream(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=512,
             system=self._system,
             messages=self._conversation,

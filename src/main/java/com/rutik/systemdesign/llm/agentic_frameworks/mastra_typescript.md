@@ -139,7 +139,7 @@ const memory = new Memory({
 const researchAgent = new Agent({
   name: "research-agent",
   instructions: "You are a research assistant. Use web_search to find current info.",
-  model: anthropic("claude-sonnet-4-6"),
+  model: anthropic("claude-sonnet-5"),
   tools: { searchTool },
   memory,
 });

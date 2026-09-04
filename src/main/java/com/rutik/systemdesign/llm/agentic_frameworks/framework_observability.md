@@ -363,14 +363,21 @@ metrics = langfuse.get_usage(
 )
 
 # Manual cost calculation if not using built-in pricing
+# Prices are per token (dollars-per-1M / 1e6), checked 2026-09-04.
 MODEL_PRICES = {
-    "gpt-4o": {"input": 5e-6, "output": 15e-6},     # per token
-    "gpt-4o-mini": {"input": 0.15e-6, "output": 0.6e-6},
-    "claude-3-5-sonnet": {"input": 3e-6, "output": 15e-6},
+    "claude-opus-5":    {"input": 5e-6,   "output": 25e-6},
+    "claude-sonnet-5":  {"input": 2e-6,   "output": 10e-6},
+    "claude-haiku-4-5": {"input": 1e-6,   "output": 5e-6},
+    "gpt-5.6-terra":    {"input": 2e-6,   "output": 12e-6},
+    "gpt-5.4-nano":     {"input": 0.2e-6, "output": 1.25e-6},
 }
 
 def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    prices = MODEL_PRICES.get(model, {"input": 0, "output": 0})
+    # Defaulting an unknown model to zero silently under-reports spend: a model
+    # id you forgot to add shows up as free traffic on the dashboard. Fail loud.
+    if model not in MODEL_PRICES:
+        raise KeyError(f"no price entry for {model!r} - add it before shipping")
+    prices = MODEL_PRICES[model]
     return (input_tokens * prices["input"]) + (output_tokens * prices["output"])
 ```
 

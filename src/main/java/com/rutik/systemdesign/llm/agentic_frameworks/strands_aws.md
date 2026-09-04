@@ -14,7 +14,7 @@ Strands distinguishes itself with: (a) deep Bedrock integration (Claude, Nova, T
 
 **One-line analogy**: Strands is to AWS what the OpenAI Agents SDK is to OpenAI — opinionated production agents, tightly integrated with the host cloud, low friction to deploy.
 
-**Mental model**: Define tools as decorated functions. Create an `Agent(model=BedrockModel("claude-sonnet-4"), tools=[...])`. Call `agent("user input")` and get a response. Multi-agent: wrap one agent as a tool with `agent_as_tool(specialist_agent)` and give it to an orchestrator agent.
+**Mental model**: Define tools as decorated functions. Create an `Agent(model=BedrockModel("claude-sonnet-5"), tools=[...])`. Call `agent("user input")` and get a response. Multi-agent: wrap one agent as a tool with `agent_as_tool(specialist_agent)` and give it to an orchestrator agent.
 
 **Why it matters**: AWS-heavy organizations face friction integrating non-AWS agent frameworks (auth, networking, observability all need glue code). Strands eliminates that — IAM-based auth, VPC-friendly, CloudWatch metrics built-in. Time from "concept" to "running in our AWS account" is measured in hours, not weeks.
 
@@ -56,7 +56,7 @@ Yields events as the agent runs — tool calls, text deltas, completion.
 
 ## 5. Architecture Diagrams
 
-**Strands Agent Execution** — `agent = Agent(model=BedrockModel("us.anthropic.claude-sonnet-4-..."), tools=[search, lookup, write_file])`, then `response = agent("user query")` drives one runtime pass:
+**Strands Agent Execution** — `agent = Agent(model=BedrockModel("us.anthropic.claude-sonnet-5"), tools=[search, lookup, write_file])`, then `response = agent("user query")` drives one runtime pass:
 
 ```mermaid
 flowchart LR
@@ -159,7 +159,7 @@ def write_report(content: str, filename: str) -> str:
 
 # Create agent with Bedrock Claude
 model = BedrockModel(
-    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    model_id="us.anthropic.claude-sonnet-5",
     region_name="us-east-1",
     streaming=True,
 )
@@ -204,7 +204,7 @@ result = orchestrator("Q4 sales analysis report")
 
 # LiteLLM fallback to non-Bedrock
 from strands.models.litellm import LiteLLMModel
-fallback_model = LiteLLMModel(model_id="anthropic/claude-sonnet-4-6")  # Direct Anthropic
+fallback_model = LiteLLMModel(model_id="anthropic/claude-sonnet-5")  # Direct Anthropic
 backup_agent = Agent(model=fallback_model, tools=[...])
 ```
 
@@ -262,7 +262,7 @@ client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 ```python
 # FIXED: BedrockModel uses IAM
-model = BedrockModel(model_id="us.anthropic.claude-sonnet-4-...")
+model = BedrockModel(model_id="us.anthropic.claude-sonnet-5")
 # No API key; IAM role auth; CloudWatch metrics on requests
 ```
 
@@ -324,7 +324,7 @@ All Bedrock-available models: Anthropic Claude (Opus, Sonnet, Haiku), AWS Nova (
 
 **Q: Why does BedrockModel sometimes fail with a ValidationException even though the model is enabled in the console?**
 **Short:** Newer models require a geography-prefixed cross-region inference profile ID instead of the bare model ID.
-Because many newer Bedrock models can only be invoked through a cross-region inference profile, whose ID carries a geography prefix (`us.anthropic.claude-sonnet-4-...`, `eu.`, `apac.`) rather than the bare `anthropic.claude-...` model ID. Invoking the bare ID returns "Invocation of model ID ... with on-demand throughput isn't supported" — confusing, since model access shows as granted. Note the compliance angle: a cross-region profile may route requests to any region within that geography, which matters for data-residency reviews. Always pass the full inference-profile ID (with prefix) to `BedrockModel`, matching the geography your compliance posture requires.
+Because many newer Bedrock models can only be invoked through a cross-region inference profile, whose ID carries a geography prefix (`us.anthropic.claude-sonnet-5`, `eu.`, `apac.`) rather than the bare `anthropic.claude-...` model ID. Invoking the bare ID returns "Invocation of model ID ... with on-demand throughput isn't supported" — confusing, since model access shows as granted. Note the compliance angle: a cross-region profile may route requests to any region within that geography, which matters for data-residency reviews. Always pass the full inference-profile ID (with prefix) to `BedrockModel`, matching the geography your compliance posture requires.
 
 **Q: How does Strands handle observability?**
 **Short:** Built-in OpenTelemetry instrumentation with exporters to CloudWatch, X-Ray, Honeycomb, Datadog, and Jaeger.
@@ -400,7 +400,7 @@ Yes — AWS reached general availability for Strands Agents 1.0 in June 2026 (an
 **Architecture**:
 - Strands Agent on Lambda (triggered by EventBridge on alarm)
 - Tools: `query_cloudwatch_logs`, `get_metric_data`, `list_recent_deployments`, `find_related_alarms`, `post_to_slack` (with approval gate for "restart" actions)
-- Model: BedrockModel("us.anthropic.claude-sonnet-4...")
+- Model: BedrockModel("us.anthropic.claude-sonnet-5")
 - OTEL → X-Ray for tracing
 
 **Flow**:

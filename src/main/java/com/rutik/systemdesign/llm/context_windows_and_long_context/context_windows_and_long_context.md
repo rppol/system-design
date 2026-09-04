@@ -1069,7 +1069,7 @@ Prompt caching:
 Result:
   Specific query cost: $0.02 avg
   Architecture query cost: $0.04 avg (with caching)
-  Full codebase query: $0.30 (500K read at 0.1x, with caching)
+  Full codebase query: $0.25 (500K x Opus 5 cache read $0.50/1M, with caching)
   Architecture accuracy: 91% (vs. 73% with RAG-only) — illustrative
 ```
 

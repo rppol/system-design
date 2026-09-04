@@ -184,7 +184,7 @@ from browser_use.llm import ChatAnthropic
 async def main():
     agent = Agent(
         task="Find the cheapest flight from JFK to SFO on December 15, 2025 on Google Flights and report the airline and price",
-        llm=ChatAnthropic(model="claude-sonnet-4-6"),
+        llm=ChatAnthropic(model="claude-sonnet-5"),
         max_actions_per_step=3,  # Allow chained actions
         max_failures=5,
         use_vision=True,  # Fall back to vision when DOM ambiguous
@@ -206,7 +206,7 @@ const stagehand = new Stagehand({
   env: "BROWSERBASE",  // or "LOCAL"
   apiKey: process.env.BROWSERBASE_API_KEY!,
   projectId: process.env.BROWSERBASE_PROJECT_ID!,
-  modelName: "claude-sonnet-4-6",
+  modelName: "claude-sonnet-5",
   modelClientOptions: { apiKey: process.env.ANTHROPIC_API_KEY! },
 });
 
@@ -613,7 +613,7 @@ async def run_portal_agent(
     order: OrderEntry,
     recipe: PortalRecipe,
     session_state_path: Path,
-    llm_model: str = "claude-sonnet-4-6",
+    llm_model: str = "claude-sonnet-5",
 ) -> dict[str, Any]:
     """
     Execute a single order entry on a supplier portal.
@@ -678,10 +678,10 @@ def _extract_confirmation(text: str) -> str:
 
 def _estimate_cost(result: Any) -> float:
     # ~800 input tokens + 200 output tokens per step, 15 steps avg
-    # claude-sonnet-4-6: $3/$15 per 1M in/out
+    # claude-sonnet-5: $2/$10 per 1M in/out
     avg_steps = 15
     # Prices are per 1M tokens, so divide by 1e6 (not 1e9).
-    return round((800 * avg_steps * 3 + 200 * avg_steps * 15) / 1e6, 4)
+    return round((800 * avg_steps * 2 + 200 * avg_steps * 10) / 1e6, 4)
 ```
 
 **Read it like this.** "Each step of the agent buys one LLM turn — a page of accessibility tree in, a short action out — and the per-order bill is just that turn's price multiplied by how many steps the task takes."

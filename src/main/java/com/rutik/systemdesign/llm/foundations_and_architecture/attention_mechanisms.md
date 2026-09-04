@@ -985,7 +985,7 @@ Trainable sparse attention learns its sparsity pattern during pre-training rathe
 **Q: How does the KV cache grow and what strategies exist to manage it?**
 **Short:** KV cache grows linearly with sequence length, so production systems combine GQA, INT8/FP8 quantization, PagedAttention, prefix caching, and sink-preserving eviction to control it.
 
-KV cache size = 2 (K+V) × num_kv_heads × d_head × seq_len × num_layers × bytes_per_element. It grows linearly with sequence length. At 128K tokens with LLaMA 3 70B (GQA, 8 KV heads, 80 layers, d_head 128, FP16): ~42GB per sequence. Strategies: (1) GQA/MQA: reduce num_kv_heads (most impactful; discussed above); (2) KV cache quantization: INT8 or FP8 KV cache reduces by 2-4x with <0.5 PPL loss; (3) PagedAttention (vLLM): virtualizes KV cache into fixed-size pages, eliminating fragmentation and enabling 100% KV cache utilization; (4) Prefix caching: share KV cache across requests with common prefixes (e.g., same system prompt); (5) KV eviction (H2O, StreamingLLM): evict low-importance tokens from cache; must keep attention sinks; (6) Sliding window cache: discard all but recent W tokens (loses long-range context).
+KV cache size = 2 (K+V) × num_kv_heads × d_head × seq_len × num_layers × bytes_per_element. It grows linearly with sequence length. At 128K tokens with LLaMA 3 70B (GQA, 8 KV heads, 80 layers, d_head 128, FP16): ~42GB per sequence. Strategies: (1) GQA/MQA: reduce num_kv_heads (most impactful; discussed above); (2) KV cache quantization: INT8 or FP8 KV cache reduces by 2-4x with <0.5 PPL loss; (3) PagedAttention (vLLM): virtualizes KV cache into fixed-size pages, cutting waste from the 60-80% the SOSP 2023 paper measured in pre-paged systems to under 4% — better than 96% utilization, not a literal 100%, since the last page of a sequence is still partly empty; (4) Prefix caching: share KV cache across requests with common prefixes (e.g., same system prompt); (5) KV eviction (H2O, StreamingLLM): evict low-importance tokens from cache; must keep attention sinks; (6) Sliding window cache: discard all but recent W tokens (loses long-range context).
 
 **Q: How much does Flash Attention actually speed things up in practice?**
 **Short:** FA-2 reaches 50-73% of peak A100 FLOPs versus FA-1's 25-40%, giving roughly 2x kernel speedup that grows with sequence length as memory traffic dominates.
@@ -1069,7 +1069,7 @@ KV cache per user: 2 × 80 × 8 × 128 × 128K × 2 = 42GB
 
 1. KV cache INT8 quantization: 42GB → 21GB per user
 2. Prefix caching: System prompt (8K tokens, common to all users) shared: saves 8K/128K = 6.25% → ~21GB × (1-0.0625) = 19.7GB
-3. vLLM PagedAttention: Eliminates fragmentation, allows 95% KV cache utilization
+3. vLLM PagedAttention: cuts fragmentation waste to under 4%, so better than 96% KV cache utilization
 4. Tensor parallelism across 8 GPUs for weights: 140GB / 8 = 17.5GB per GPU for weights
 5. Pipeline parallelism for KV cache distribution: each GPU stores KV for 10 layers
 
@@ -1098,6 +1098,6 @@ TTFT: 128K prefill on 8×H100 with FA-3
 **Key decisions:**
 - GQA 8:1 ratio: 8× KV cache reduction vs MHA — the enabling technology
 - INT8 KV quant: additional 2× at a small quality cost (measure on your own eval; vendors quote sub-0.5 PPL but it is workload-dependent)
-- vLLM PagedAttention: prevents 20-30% KV fragmentation that would otherwise reduce effective users
+- vLLM PagedAttention: prevents the 60-80% KV fragmentation the SOSP 2023 paper measured in pre-paged systems, which would otherwise reduce effective users
 - Prefix caching: modest but free optimization for shared system prompts
 - Result: 24 concurrent users at 128K context, ~11s TTFT — meets the revised requirement

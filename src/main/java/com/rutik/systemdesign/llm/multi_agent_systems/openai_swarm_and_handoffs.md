@@ -8,7 +8,7 @@ The **OpenAI Agents SDK** (`pip install openai-agents`) is the framework for bui
 
 This file also uses **Swarm** (October 2024) as a teaching foil. Swarm is a ~100-line experimental repo, never published to PyPI, that OpenAI now points at the Agents SDK for anything real — but its source is short enough to read end to end, which makes it the clearest way to see that *a handoff is just a tool call whose return value happens to be an agent*. Read §4.1 and §6.1 for the mechanism, then build on the SDK. The two APIs are not interchangeable: they differ in the fields you pass, the return types, and where handoffs are declared (§4.1 vs §4.2).
 
-**Version this file targets (checked July 2026).** Agents SDK code below targets the `openai-agents` PyPI package (current release line 0.18.x) and was checked signature-by-signature against `openai/openai-agents-python` on `main`. Swarm code targets `openai/swarm` on `main`.
+**Version this file targets (checked September 2026).** Agents SDK code below targets the `openai-agents` PyPI package (current release line 0.22.x) and was checked signature-by-signature against `openai/openai-agents-python` on `main`. Swarm code targets `openai/swarm` on `main`.
 
 Both frameworks solve the same problem: a single LLM context window is not the right place to handle every subtask. Routing specialised work to specialised agents keeps prompts short, tools focused, and behaviour predictable.
 
@@ -560,7 +560,7 @@ PR arrives. Triage Agent determines language and scope. Style Agent checks forma
 
 | Dimension | Swarm (2024) | Agents SDK (2025) |
 |-----------|--------------|-------------------|
-| Status | Experimental / educational reference source | Production, actively maintained (0.18.x as of July 2026) |
+| Status | Experimental / educational reference source | Production, actively maintained (0.22.0 as of September 2026) |
 | Async | No (synchronous) | Yes (asyncio native) |
 | Streaming | No | Yes (run_streamed) |
 | Persistence | Caller manages messages | RunResult manages internally |
@@ -749,7 +749,7 @@ async def lookup_account(ctx: RunContextWrapper[SupportContext]) -> str:
 
 | Tool / Library | Role | Notes |
 |----------------|------|-------|
-| openai-agents | Agents SDK core | `pip install openai-agents`; MIT license; 0.18.x as of July 2026 |
+| openai-agents | Agents SDK core | `pip install openai-agents`; MIT license; 0.22.0 as of September 2026 |
 | swarm | Reading-only reference implementation of handoffs | `git clone https://github.com/openai/swarm` — never on PyPI (the PyPI `swarm` package is unrelated), so it cannot enter a lockfile by accident |
 | openai Python SDK | Underlying LLM calls | The Agents SDK uses the async client; Swarm wraps the sync `openai.OpenAI` |
 | asyncio | Async runtime | Required by Agents SDK |
@@ -810,7 +810,7 @@ Use Runner.run in a pytest-asyncio test with a FakeModel or by patching openai.A
 
 **Q: What is the token cost implication of multi-agent handoffs?**
 **Short:** Each handoff resends the full conversation history, so a multi-agent chain's token cost grows roughly linearly with agent count.
-Each handoff triggers a new LLM call. The new call includes the full conversation history, so token cost grows linearly with conversation length. A 3-agent chain on a 10-turn conversation may pay 3x the token cost of a single-agent approach. Mitigation: summarise earlier turns before handoff, or use a cheaper model (gpt-5.4-nano at $0.20/1M input tokens) for triage and reserve gpt-5.6-terra ($2.50/1M) for specialists.
+Each handoff triggers a new LLM call. The new call includes the full conversation history, so token cost grows linearly with conversation length. A 3-agent chain on a 10-turn conversation may pay 3x the token cost of a single-agent approach. Mitigation: summarise earlier turns before handoff, or use a cheaper model (gpt-5.4-nano at $0.20/1M input tokens) for triage and reserve gpt-5.6-terra ($2.00/1M input, $12.00/1M output) for specialists.
 
 **Q: How would you prevent a triage agent from looping back to itself?**
 **Short:** Remove any transfer-to-triage tool from specialists entirely and give them an escape hatch instead of a way back.
@@ -826,7 +826,7 @@ Every Runner.run call automatically creates a trace on the OpenAI platform, view
 
 **Q: What is the recommended model size split for triage vs specialist agents in production?**
 **Short:** Put the cheapest adequate model on triage classification and reserve a stronger reasoning model for specialist work.
-Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-5.4-nano at $0.20/1M input is a common choice; reserve a stronger model such as gpt-5.6-terra ($2.50/1M) for specialists that need reasoning, tool use, or domain knowledge. Never put a reasoning model on triage: hidden thinking tokens are billed as output and add seconds of latency to a call whose entire job is picking one of four labels. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
+Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-5.4-nano at $0.20/1M input is a common choice; reserve a stronger model such as gpt-5.6-terra ($2.00/1M input, $12.00/1M output) for specialists that need reasoning, tool use, or domain knowledge. Never put a reasoning model on triage: hidden thinking tokens are billed as output and add seconds of latency to a call whose entire job is picking one of four labels. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
 
 **Q: When do you use `Agent.as_tool()` instead of a handoff in the Agents SDK?**
 **Short:** Use as_tool for bounded work that returns control to the manager, and a handoff when the specialist should own the conversation.
