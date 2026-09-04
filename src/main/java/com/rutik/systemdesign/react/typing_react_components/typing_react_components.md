@@ -364,7 +364,7 @@ function TextField({ ref, ...rest }: InputProps) {
 }
 ```
 
-`forwardRef` still compiles and still works — a library supporting React 18 has to keep it — but it is not how new code is written, and `@types/react` 19 marks it as such.
+`forwardRef` still compiles and still works — a library supporting React 18 has to keep it — but it is not how new code is written. Note that nothing in the type system will tell you: `@types/react` 19.2 carries no `@deprecated` tag on `forwardRef`, only a source comment hoping React removes it first, so the overload documents itself in full and your editor stays silent. A lint rule or review is what catches it.
 
 `useRef` has exactly three overloads in `@types/react` 19, and it now **requires an argument**:
 

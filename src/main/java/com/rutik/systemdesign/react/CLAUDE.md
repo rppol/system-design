@@ -39,7 +39,9 @@ version number, never memory.
 
 **Removed in 19.0 — never present these as available:** `propTypes` and `defaultProps` on
 function components, string refs, legacy context, `ReactDOM.render`, `ReactDOM.hydrate`,
-`react-test-renderer/shallow`, `findDOMNode`.
+`react-test-renderer/shallow`, `findDOMNode`, the `react-dom/test-utils` helpers (`act`
+moved to the `react` package, the rest throw), and the **UMD builds** (use an ESM CDN such
+as esm.sh).
 
 **REPLACE, DO NOT ANNOTATE.** Never write "`forwardRef` is deprecated, use a ref prop" —
 write the ref prop. The three exceptions are in root `CLAUDE.md`. The one place this bites
@@ -54,7 +56,8 @@ never as the way to write new code.
    Any module that teaches manual memoization as the *primary* optimization technique is
    teaching 2023. Meta reports up to 12% faster loads and ~2.5x on some interactions.
 2. **Remix v3 is not React.** It is a separate framework on a **Preact fork**, previewed
-   July 2026. What would have been Remix v3 shipped as **React Router v7**; React Router is
+   **2026-04-30** (the July press coverage is not the release date). What would have been
+   Remix v3 shipped as **React Router v7**; React Router is
    now at **v8** (2026-06-17). Never present Remix v3 as a React upgrade path — this is the
    easiest factual error in the section.
 3. **Next.js 16** (2025-10-21, current 16.3.x) made Turbopack default, replaced
@@ -66,9 +69,13 @@ never as the way to write new code.
 **React Foundation** under the Linux Foundation. This comes up in questions about
 ecosystem risk and is worth one line in §1 of module 1.
 
-**Security:** `react-server-dom-*` denial-of-service and source-exposure advisories were
-patched in **19.0.4 / 19.1.5 / 19.2.4** (2026-01-26). This belongs in a §10 Common Pitfalls
-entry in `server_components_and_server_functions`, not a footnote.
+**Security:** the `react-server-dom-*` packages carry **three** separate advisories, routinely
+conflated. Source exposure: **CVE-2025-55183** (CVSS 5.3, 2025-12-11), patched 19.0.2 /
+19.1.3 / 19.2.2. Denial of service: **CVE-2026-23864** (CVSS 7.5, 2026-01-26), patched
+19.0.4 / 19.1.5 / 19.2.4. A second denial of service: **CVE-2026-23869** (CVSS 7.5,
+2026-04-08), patched **19.0.5 / 19.1.6 / 19.2.5** — which is the recommended floor. Never
+quote 19.2.4 as safe, and never merge the DoS and source-exposure issues into one advisory. This belongs
+in a §10 Common Pitfalls entry in `server_components_and_server_functions`, not a footnote.
 
 ### Ecosystem pins — verified 2026-09-02
 
@@ -82,8 +89,8 @@ entry in `server_components_and_server_functions`, not a footnote.
 | Tailwind CSS | **v4** | Oxide engine, CSS-first `@theme`; no `tailwind.config.js` required |
 | shadcn/ui | defaults to **Base UI** since 2026-07 | Radix is **not** deprecated; `radix-ui` is now a single package. React Aria is also first-class |
 | styled-components | **maintenance mode** (since Jan 2024) | runtime injection is fundamentally incompatible with RSC — a good teaching point, not a slur |
-| MUI | **v7 still defaults to Emotion** | Pigment CSS is opt-in since v6, repo alpha/on-hold. **Do not write that MUI "moved to" Pigment** |
-| Testing | RTL **16.3.2**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
+| MUI | **v9** (2026-04-08), current 9.4 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6, repo alpha/on-hold. **Do not write that MUI "moved to" Pigment** |
+| Testing | RTL **16.3.3**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
 | Forms | React Hook Form, TanStack Form v1, Conform | Zod v4 via `@hookform/resolvers` v5 / Standard Schema |
 
 ---

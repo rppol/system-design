@@ -164,7 +164,7 @@ approach at what cost, what the failure modes are, and what you tell a team *not
 Principal is the smaller list, and roughly half of it is material Senior never sees.
 
 <!-- study-path-table senior -->
-### Senior Path (20 modules)
+### Senior Path (14 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -175,45 +175,31 @@ Principal is the smaller list, and roughly half of it is material Senior never s
 | 5 | [refs_and_focus_management](refs_and_focus_management/refs_and_focus_management.md) | module page only |
 | 6 | [context_and_component_communication](context_and_component_communication/context_and_component_communication.md) | module page only |
 | 7 | [fiber_and_reconciliation](fiber_and_reconciliation/fiber_and_reconciliation.md) | module page only |
-| 8 | [concurrent_rendering_and_transitions](concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md) | module page only |
 | 9 | [suspense_and_error_boundaries](suspense_and_error_boundaries/suspense_and_error_boundaries.md) | module page only |
 | 10 | [react_performance_and_profiling](react_performance_and_profiling/react_performance_and_profiling.md) | module page only |
-| 11 | [the_react_compiler](the_react_compiler/the_react_compiler.md) | module page only |
 | 12 | [server_state_and_data_fetching](server_state_and_data_fetching/server_state_and_data_fetching.md) | module page only |
-| 13 | [client_state_management](client_state_management/client_state_management.md) | module page only |
 | 14 | [forms_and_validation](forms_and_validation/forms_and_validation.md) | module page only |
-| 15 | [accessible_component_patterns](accessible_component_patterns/accessible_component_patterns.md) | module page only |
 | 16 | [server_components_and_server_functions](server_components_and_server_functions/server_components_and_server_functions.md) | module page only |
 | 17 | [rendering_strategies_hydration_and_seo](rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md) | module page only |
-| 18 | [meta_frameworks_and_routing](meta_frameworks_and_routing/meta_frameworks_and_routing.md) | module page only |
-| 19 | [styling_and_design_systems](styling_and_design_systems/styling_and_design_systems.md) | module page only |
 | 20 | [testing_and_frontend_ci](testing_and_frontend_ci/testing_and_frontend_ci.md) | module page only |
 
-**Not in this path** (1 of 21, Full Path only): `react_architecture_and_antipatterns`
+**Not in this path** (7 of 21, Full Path only): `concurrent_rendering_and_transitions`, `the_react_compiler`, `client_state_management`, `accessible_component_patterns`, `meta_frameworks_and_routing`, `styling_and_design_systems`, `react_architecture_and_antipatterns`
 <!-- /study-path-table -->
 
 <!-- study-path-table principal -->
-### Principal Path (15 modules)
+### Principal Path (7 modules)
 
 | # | Module | Files |
 |---|--------|-------|
-| 2 | [hooks_rules_and_the_hook_model](hooks_rules_and_the_hook_model/hooks_rules_and_the_hook_model.md) | module page only |
-| 3 | [typing_react_components](typing_react_components/typing_react_components.md) | module page only |
-| 4 | [effects_and_synchronization](effects_and_synchronization/effects_and_synchronization.md) | module page only |
-| 6 | [context_and_component_communication](context_and_component_communication/context_and_component_communication.md) | module page only |
 | 7 | [fiber_and_reconciliation](fiber_and_reconciliation/fiber_and_reconciliation.md) | module page only |
-| 9 | [suspense_and_error_boundaries](suspense_and_error_boundaries/suspense_and_error_boundaries.md) | module page only |
-| 10 | [react_performance_and_profiling](react_performance_and_profiling/react_performance_and_profiling.md) | module page only |
 | 11 | [the_react_compiler](the_react_compiler/the_react_compiler.md) | module page only |
 | 12 | [server_state_and_data_fetching](server_state_and_data_fetching/server_state_and_data_fetching.md) | module page only |
-| 14 | [forms_and_validation](forms_and_validation/forms_and_validation.md) | module page only |
-| 15 | [accessible_component_patterns](accessible_component_patterns/accessible_component_patterns.md) | module page only |
-| 16 | [server_components_and_server_functions](server_components_and_server_functions/server_components_and_server_functions.md) | module page only |
+| 13 | [client_state_management](client_state_management/client_state_management.md) | module page only |
 | 17 | [rendering_strategies_hydration_and_seo](rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md) | module page only |
 | 18 | [meta_frameworks_and_routing](meta_frameworks_and_routing/meta_frameworks_and_routing.md) | module page only |
 | 21 | [react_architecture_and_antipatterns](react_architecture_and_antipatterns/react_architecture_and_antipatterns.md) | module page only |
 
-**Not in this path** (6 of 21, Full Path only): `react_fundamentals_and_the_render_model`, `refs_and_focus_management`, `concurrent_rendering_and_transitions`, `client_state_management`, `styling_and_design_systems`, `testing_and_frontend_ci`
+**Not in this path** (14 of 21, Full Path only): `react_fundamentals_and_the_render_model`, `hooks_rules_and_the_hook_model`, `typing_react_components`, `effects_and_synchronization`, `refs_and_focus_management`, `context_and_component_communication`, `concurrent_rendering_and_transitions`, `suspense_and_error_boundaries`, `react_performance_and_profiling`, `forms_and_validation`, `accessible_component_patterns`, `server_components_and_server_functions`, `styling_and_design_systems`, `testing_and_frontend_ci`
 <!-- /study-path-table -->
 
 ---
@@ -231,7 +217,9 @@ patches are **19.2.8 / 19.1.9 / 19.0.8** (2026-07-21). Verified 2026-09-02 — r
 
 **Removed in 19.0** — do not teach these as available: `propTypes` and `defaultProps` on
 function components, string refs, legacy context, `ReactDOM.render`, `ReactDOM.hydrate`,
-`react-test-renderer/shallow`, `findDOMNode`.
+`react-test-renderer/shallow`, `findDOMNode`, the `react-dom/test-utils` helpers (`act`
+moved to the `react` package, the rest throw), and the **UMD builds** (use an ESM CDN such
+as esm.sh).
 
 **React Compiler 1.0** is stable (2025-10-07), `babel-plugin-react-compiler`, with its
 ESLint rules shipping inside `eslint-plugin-react-hooks`. It works back to React 17. This
@@ -242,9 +230,13 @@ the primary optimization story.
 **React Foundation** under the Linux Foundation (platinum founders include Amazon,
 Callstack, Expo, Huawei, Meta, Microsoft, Software Mansion and Vercel).
 
-**Security:** `react-server-dom-*` denial-of-service and source-exposure advisories were
-patched in **19.0.4 / 19.1.5 / 19.2.4** (2026-01-26). This belongs in a §10 pitfall, not a
-footnote.
+**Security:** the `react-server-dom-*` packages carry **three** separate advisories, routinely
+conflated. Source exposure: **CVE-2025-55183** (CVSS 5.3, 2025-12-11), patched 19.0.2 /
+19.1.3 / 19.2.2. Denial of service: **CVE-2026-23864** (CVSS 7.5, 2026-01-26), patched
+19.0.4 / 19.1.5 / 19.2.4. A second denial of service: **CVE-2026-23869** (CVSS 7.5,
+2026-04-08), patched **19.0.5 / 19.1.6 / 19.2.5** — which is the recommended floor. Never
+quote 19.2.4 as safe, and never merge the DoS and source-exposure issues into one advisory. This
+belongs in a §10 pitfall, not a footnote.
 
 ### Ecosystem pins — verified 2026-09-02
 
@@ -252,7 +244,7 @@ footnote.
 |------|-----|------|
 | Next.js | **16** (2025-10-21), current **16.3.x** | Turbopack is default; Cache Components and `"use cache"` replace `experimental.ppr`/`dynamicIO`; `middleware.ts` is now **`proxy.ts`** on the Node runtime |
 | React Router | **v8** (2026-06-17) | v7 was the Remix merge — "framework mode" is the former Remix |
-| Remix v3 | **not React** | a separate framework on a Preact fork, previewed July 2026. Never present it as a React upgrade path |
+| Remix v3 | **not React** | a separate framework on a Preact fork; **beta preview 2026-04-30** (the July press coverage is not the release date). Never present it as a React upgrade path |
 | TanStack Start | **Release Candidate** | not 1.0 — say so |
 | Astro | **7** (2026-06-22) | Rust compiler, on Vite 8 |
 | RSC outside Next | `@vitejs/plugin-rsc`, Waku, Parcel | a framework-agnostic Vite RSC story now exists |
@@ -260,8 +252,8 @@ footnote.
 | Tailwind CSS | **v4** | Oxide engine, CSS-first `@theme`; no `tailwind.config.js` required |
 | shadcn/ui | defaults to **Base UI** since 2026-07 | Radix is not deprecated; `radix-ui` is now a single package. React Aria is also a first-class option |
 | styled-components | **maintenance mode** (since Jan 2024) | its runtime injection model is fundamentally incompatible with RSC |
-| MUI | **v7 still defaults to Emotion** | Pigment CSS is opt-in since v6 and its repo is alpha/on-hold. Do **not** write that MUI "moved to" Pigment |
-| Testing | RTL **16.3.2**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
+| MUI | **v9** (2026-04-08), current 9.4 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6 and its repo is alpha/on-hold. Do **not** write that MUI "moved to" Pigment |
+| Testing | RTL **16.3.3**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
 
 **REPLACE, DO NOT ANNOTATE.** An answer names the current API, never "`foo()` is
 deprecated, use `bar()`". The three exceptions are in root `CLAUDE.md`.
@@ -301,6 +293,142 @@ path outright. That is the rule working, not a bug.
 | REST, GraphQL and gRPC contracts | [`../backend/rest_api_design/`](../backend/rest_api_design/rest_api_design.md), [`../backend/graphql/`](../backend/graphql/graphql.md), [`../backend/grpc_and_protobuf/connect_and_browser_rpc.md`](../backend/grpc_and_protobuf/connect_and_browser_rpc.md) | those own the server contract; module 12 owns consuming it |
 | CDN and asset caching | [`../hld/cdn/`](../hld/cdn/cdn.md), [`../devops/cloud_networking_and_cdn/`](../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) | those own CDN mechanics; `frontend_platform` owns invalidation |
 | LLM streaming and token economics | [`../llm/`](../llm/README.md) | that owns the model side; the AI-chat case study owns the UI |
+
+---
+
+## Known Gaps & Planned Work
+
+Recorded 2026-09-04 from a gap review of all 28 files. Nothing here is a defect in what is
+written; every entry is something the section does not yet cover, sized so it can be picked
+up cold. Counts are measured over the 28 content files (module pages and case studies),
+excluding this README and `CLAUDE.md`.
+
+### Planned module — `view_transitions_and_animation` (Phase 2)
+
+Sits beside `concurrent_rendering_and_transitions`. It is the one first-class React concern
+with no home in the section: **`<ViewTransition>`, `addTransitionType` and
+`startViewTransition` have zero mentions across all 28 files**, even though this section's
+own `CLAUDE.md` cites the React 19.2 `useId` prefix change as being *"for View Transitions
+compatibility"* — a topic set up and never paid off.
+
+Also uncovered and belonging here: exit animations and why unmounting fights React; animating
+a list under concurrent rendering; layout animation and FLIP inside a reconciled tree;
+`useDeferredValue`-driven crossfades; and `prefers-reduced-motion` treated as a React-level
+concern rather than a CSS one.
+
+`frontend_platform/css_animation_and_motion` owns the CSS and the browser API and should keep
+owning them — it is linked exactly twice from this entire section. It should not own the React
+mechanics.
+
+### Planned expansion — static generation and the `react-dom` APIs
+
+Probably a **§6 expansion of module 17 (`rendering_strategies_hydration_and_seo`)** rather than
+a new module. Module 17 teaches the strategies and never the APIs that implement them, so a
+reader finishes it unable to answer "what does your framework actually call".
+
+Measured across the 28 files: `react-dom/static` and `prerenderToNodeStream` appear **zero**
+times; `renderToReadableStream` twice in one file; `hydrateRoot` and `createRoot` in two files
+each. Uncovered: `prerender` and `prerenderToNodeStream`, the options bag on
+`renderToPipeableStream`, and the `onRecoverableError` / `onUncaughtError` / `onCaughtError`
+callbacks on `hydrateRoot` and `createRoot`.
+
+### Open scope decision — React Native
+
+Only 5 of the 28 files mention React Native, all in passing, yet the section twice notes that
+the React Foundation stewards React **and** React Native. Two acceptable resolutions, and the
+current state is neither:
+
+- write `react_native_and_cross_platform` as a Phase 5 module, or
+- state web-only scope explicitly in the README boundary table.
+
+As it stands it reads as an omission rather than a decision.
+
+### Planned §-level expansion — the section's main depth gap
+
+Mean lines per section, per module page, against three peer sections:
+
+| Template section | react | go (peer) | ml | backend | deficit |
+|---|---|---|---|---|---|
+| §6 How It Works | 280 | 377 | 361 | 287 | -26% vs go |
+| §10 Common Pitfalls | 48 | 143 | 39 | 39 | **-66% vs go** |
+| §12 Interview Q&As | 98 | 231 | 92 | 92 | **-58% vs go** |
+| §14 Case Study | 71 | 167 | 192 | 61 | **-58% vs go** |
+| §4 Types/Strategies | 46 | 79 | 79 | 61 | -42% |
+| §8 Tradeoffs | 17 | 42 | 30 | 29 | -60% |
+
+**Expand §10, §12, §14, §8 and §6 in that order. Do NOT expand §1, §2, §3, §7, §11 or §13** —
+they are already at or above every peer section's depth, and that density is what makes this
+section readable.
+
+**Priority modules for §10 expansion** (target ~90 lines each, 3-4 broken to fixed pairs),
+highest interview value first:
+
+- **`react_fundamentals_and_the_render_model`** — §10 is 35 lines, the thinnest in the section,
+  inside the module that owns the classic pitfalls. Missing as code pairs: the three
+  `setCount(count + 1)` snapshot bug (asserted in §2 prose, never shown), `useState(expensive())`
+  versus the lazy initializer with a measured cost, a mutating-props example, a `key` on a
+  fragment, `setState` during render, and an object-literal prop defeating `memo` on 800
+  children. Separately, §6.8 "Keys and list reconciliation" and §6.11 on signals have **zero
+  code fences**.
+- **`effects_and_synchronization`** — §10 is 36 lines with 8 pitfalls but only **one** broken to
+  fixed pair. Add: the `AbortError` catch that renders an error banner on every keystroke; the
+  object-in-deps infinite loop with the real `Maximum update depth exceeded` text;
+  `useLayoutEffect` promotion with a measured dropped frame; the `didInit` StrictMode guard that
+  hides a leak. §6.7 and §6.8 have no fences, and cleanup ordering is unteachable in prose.
+- **`hooks_rules_and_the_hook_model`** — §6 and §12 here are the section's best; **§10 alone is
+  the gap** at 40 lines, 8 pitfalls, 1 code pair. Add the loop-over-array hook count, a custom
+  hook renamed to `getX` so the linter stops checking it, a `ref.current` write during render,
+  and the two-copies-of-React `npm ls react` transcript.
+- **`concurrent_rendering_and_transitions`** — §6 is 216 lines, the thinnest §6. §6.1 has one
+  fence and is the module's physical foundation: it needs the `MessageChannel` macrotask handoff,
+  the 5 ms `shouldYield()` check, and a frame-budget diagram. Transition **entanglement** is set
+  up by `fiber_and_reconciliation` §6.8 and never paid off.
+
+**Also recorded, module by module:**
+
+- `fiber_and_reconciliation` has the section's thinnest §9 (17 lines) and §11 (14 lines, fewest
+  tools named — it should list React DevTools fiber inspection, `react-devtools-core`, the
+  Performance Tracks scheduler row, `why-did-you-render`, `react-scan`, and
+  `bippy` / `__REACT_DEVTOOLS_GLOBAL_HOOK__`). It compresses `completeWork` and the effect-flag
+  bitmask into one subsection, and never explains the React 18 removal of the effect list — a
+  top-tier internals question. It also has only **1 outbound sibling link**, the fewest in the
+  section, in the module every Phase 2 module depends on.
+- `the_react_compiler` §6 never covers HIR, SSA, mutability aliasing or reactive-scope inference
+  despite its own §1 promising them, and it has no bail-out catalogue.
+- `react_performance_and_profiling` §6.2 (Performance Tracks, a `[19.2]` selling point) has
+  **zero code fences**, and the `<Profiler>` `onRender` argument list is never given in full.
+- `typing_react_components` §14 is 44 lines, the thinnest case study in the section.
+
+### Q&A parity
+
+Seven modules sit at 16 Q&As against this README's own 18 target: `refs_and_focus_management`,
+`context_and_component_communication`, `client_state_management`, `accessible_component_patterns`,
+`styling_and_design_systems`, `testing_and_frontend_ci`, `react_architecture_and_antipatterns`.
+All clear the repo-wide 15 floor, so this is parity work, not a build failure.
+
+### Planned eighth case study (optional)
+
+**Design a Data-Grid / Spreadsheet at 100k Cells** — the one front-end system-design prompt with
+no home here, and the natural capstone: virtualization, `useSyncExternalStore`, concurrent
+rendering, keyboard accessibility, clipboard and paste, and undo. It sits beside `news_feed`
+under Concern 1.
+
+### Planned cross-links
+
+`typescript/` is linked from only 3 of 21 modules despite being a declared Phase 1 prerequisite,
+and seven `frontend_platform/` modules this section leans on have zero inbound links.
+
+| Missing link | Where it belongs |
+|---|---|
+| `frontend_platform/the_event_loop_and_scheduling` | `concurrent_rendering_and_transitions` §1, §6.1 — the most glaring gap; that module explains `MessageChannel`, 5 ms yields and frame budgets from first principles |
+| `frontend_platform/client_memory_and_performance_debugging` | `react_performance_and_profiling` §6, `refs_and_focus_management` §7, `case_studies/news_feed` |
+| `typescript/unions_narrowing_and_exhaustiveness` | `typing_react_components` §6, §13 |
+| `typescript/conditional_and_mapped_types` | `typing_react_components` §6 (polymorphic `as`) |
+| `typescript/runtime_validation_and_parse_dont_validate` | `forms_and_validation` §6.3, `server_components_and_server_functions` §13 |
+| `frontend_platform/linting_formatting_and_code_quality` | `hooks_rules_and_the_hook_model` §6.10, `the_react_compiler` §13 |
+| `frontend_platform/the_node_and_edge_runtimes` | `meta_frameworks_and_routing` §6.6, §8 |
+| `frontend_platform/auth_in_the_browser` | `server_components_and_server_functions` §6.7, `case_studies/checkout` |
+| `frontend_platform/css_animation_and_motion` | `styling_and_design_systems`, `suspense_and_error_boundaries` — linked twice section-wide |
 
 ---
 
@@ -377,41 +505,41 @@ lines**, 11-section principal template, 10-16 Q&As.
 react_fundamentals_and_the_render_model
   react_fundamentals_and_the_render_model.md  senior
 hooks_rules_and_the_hook_model
-  hooks_rules_and_the_hook_model.md  senior, principal
+  hooks_rules_and_the_hook_model.md  senior
 typing_react_components
-  typing_react_components.md  senior, principal
+  typing_react_components.md  senior
 refs_and_focus_management
   refs_and_focus_management.md  senior
 context_and_component_communication
-  context_and_component_communication.md  senior, principal
+  context_and_component_communication.md  senior
 effects_and_synchronization
-  effects_and_synchronization.md  senior, principal
+  effects_and_synchronization.md  senior
 fiber_and_reconciliation
   fiber_and_reconciliation.md  senior, principal
 concurrent_rendering_and_transitions
-  concurrent_rendering_and_transitions.md  senior
+  concurrent_rendering_and_transitions.md  -
 suspense_and_error_boundaries
-  suspense_and_error_boundaries.md  senior, principal
+  suspense_and_error_boundaries.md  senior
 react_performance_and_profiling
-  react_performance_and_profiling.md  senior, principal
+  react_performance_and_profiling.md  senior
 server_state_and_data_fetching
   server_state_and_data_fetching.md  senior, principal
 the_react_compiler
-  the_react_compiler.md  senior, principal
+  the_react_compiler.md  principal
 client_state_management
-  client_state_management.md  senior
+  client_state_management.md  principal
 server_components_and_server_functions
-  server_components_and_server_functions.md  senior, principal
+  server_components_and_server_functions.md  senior
 accessible_component_patterns
-  accessible_component_patterns.md  senior, principal
+  accessible_component_patterns.md  -
 forms_and_validation
-  forms_and_validation.md  senior, principal
+  forms_and_validation.md  senior
 rendering_strategies_hydration_and_seo
   rendering_strategies_hydration_and_seo.md  senior, principal
 meta_frameworks_and_routing
-  meta_frameworks_and_routing.md  senior, principal
+  meta_frameworks_and_routing.md  principal
 styling_and_design_systems
-  styling_and_design_systems.md  senior
+  styling_and_design_systems.md  -
 testing_and_frontend_ci
   testing_and_frontend_ci.md  senior
 react_architecture_and_antipatterns

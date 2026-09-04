@@ -10,7 +10,7 @@ That framing decides the whole design. React Testing Library exists because the 
 
 **This module owns test-runner mechanics for the whole front-end track.** Query selection, `act()`, `userEvent`, network mocking, browser-mode component tests, Playwright, and the CI pipeline that runs all of it. Type-level assertions — `expectTypeOf`, `tsd`, testing that a generic infers what you claimed — belong to [Testing Typed Code](../../typescript/testing_typed_code/testing_typed_code.md), which defers runner mechanics here. WCAG success criteria and axe rule mapping belong to [Accessibility and WCAG](../../frontend_platform/accessibility_and_wcag/accessibility_and_wcag.md); the React-level ARIA patterns the tests here assert on belong to [Accessible Component Patterns](../accessible_component_patterns/accessible_component_patterns.md).
 
-The versions this module is written against, verified 2026-09-02: `@testing-library/react` **16.3.2** (React 19 compatible), **Vitest 4.1.11**, **Jest 30.4.2**, **MSW v2**, **Storybook 10** (ESM-only). Playwright and Cypress move fast enough that pinning a number here would be wrong within a quarter, so this module describes their capabilities and not their release numbers.
+The versions this module is written against, verified 2026-09-04: `@testing-library/react` **16.3.3** (React 19 compatible), **Vitest 4.1.11**, **Jest 30.4.2**, **MSW v2**, **Storybook 10** (ESM-only). Playwright and Cypress move fast enough that pinning a number here would be wrong within a quarter, so this module describes their capabilities and not their release numbers.
 
 ---
 
@@ -248,7 +248,7 @@ test("saving a draft shows a confirmation and clears the dirty marker", async ()
 });
 ```
 
-RTL 16.3.2 auto-cleans up after each test when the runner exposes a global `afterEach`, which both Vitest and Jest do. Without it, every test would render into the same body and `getByRole` would find three Save buttons on the third test.
+RTL 16.3.3 auto-cleans up after each test when the runner exposes a global `afterEach`, which both Vitest and Jest do. Without it, every test would render into the same body and `getByRole` would find three Save buttons on the third test.
 
 ### 6.2 `userEvent` over `fireEvent`
 
@@ -468,7 +468,7 @@ On a 40-spec suite with a 3.2-second login, that removes roughly 128 seconds per
 
 **Do not chase 100% coverage.** Coverage tells you which lines ran, not which behaviours are protected — a suite that renders every component and asserts nothing reports 90%. Use it to find whole untested files, and ignore the last 15 points.
 
-**Server Components are the honest gap in the tooling.** An async Server Component returns a Promise, and `render` from RTL 16.3.2 does not accept one. The practical strategy has three parts, and it is what the Next.js docs recommend as well:
+**Server Components are the honest gap in the tooling.** An async Server Component returns a Promise, and `render` from RTL 16.3.3 does not accept one. The practical strategy has three parts, and it is what the Next.js docs recommend as well:
 
 ```tsx
 // 1. The data work is a plain async function, unit-tested with no React at all.
@@ -630,7 +630,7 @@ expect(await screen.findByRole("status")).toHaveTextContent("Preparing export");
 
 | Tool | Purpose |
 |------|---------|
-| Testing Library | Role-based DOM queries; `@testing-library/react` 16.3.2 for React 19 |
+| Testing Library | Role-based DOM queries; `@testing-library/react` 16.3.3 for React 19 |
 | user-event | Realistic event sequences, keyboard traversal and pointer simulation |
 | Vitest | Vite-native runner, 4.1.11, with stable browser mode and blob-report sharding |
 | Jest | 30.4.2, still the default in React Native and older CRA-era codebases |

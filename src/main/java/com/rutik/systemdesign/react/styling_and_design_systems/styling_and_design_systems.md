@@ -12,7 +12,7 @@ What replaced it is a single idea in four costumes: **styles are a build artifac
 
 This module owns the React and design-system half of that: which approach to pick, how tokens are layered, how theming survives first paint, how a component exposes style hooks without leaking internals, and what it costs to build a component library versus adopt one. It does **not** re-teach CSS. The cascade, specificity, layout, container queries and logical properties belong to [CSS Layout and the Cascade](../../frontend_platform/css_layout_and_the_cascade/css_layout_and_the_cascade.md); transitions and `prefers-reduced-motion` to [CSS Animation and Motion](../../frontend_platform/css_animation_and_motion/css_animation_and_motion.md); ARIA and keyboard contracts to [Accessible Component Patterns](../accessible_component_patterns/accessible_component_patterns.md); the RSC boundary itself to [Server Components and Server Functions](../server_components_and_server_functions/server_components_and_server_functions.md).
 
-Versions verified 2026-09-02: React 19.2, Tailwind CSS v4, MUI v7, Storybook 10.
+Versions verified 2026-09-04: React 19.2, Tailwind CSS v4, MUI v9 (current 9.4), Storybook 10.
 
 ---
 
@@ -70,12 +70,12 @@ A runtime library is not banned from a React 19.2 application — it is confined
 
 ### 4.4 Build versus adopt, over three years
 
-| | Headless primitives plus your CSS | A styled kit (MUI v7) |
+| | Headless primitives plus your CSS | A styled kit (MUI v9) |
 |---|---|---|
 | Week 1 | a button, an input, a dialog | forty components, themed |
 | Month 6 | your visual language, exactly | your visual language, approximately |
 | Year 3 | you own 8-30 kB per widget family and every upgrade | you fight the theme for every custom design, and a major version is a migration |
-| Server Components | native — Base UI and Radix parts are mostly client, the styling is not | MUI v7 defaults to Emotion, so styled leaves need `"use client"` |
+| Server Components | native — Base UI and Radix parts are mostly client, the styling is not | MUI v9 defaults to Emotion, so styled leaves need `"use client"` |
 | Accessibility | supplied by the primitive, see [Accessible Component Patterns](../accessible_component_patterns/accessible_component_patterns.md) | supplied by the kit |
 
 ---
@@ -461,7 +461,7 @@ export function Button({ asChild, className, tone, size, ...rest }: ButtonProps)
 
 Headless primitives plus your own styles is the right default in 2026 for any product with a real visual identity: **shadcn/ui defaults to Base UI** for new installs since July 2026, Radix is not deprecated and now installs as a single `radix-ui` package, and React Aria is a first-class option too. You get the accessibility and interaction contracts for free and own every pixel. The shadcn model — generate the source into your repository rather than depending on a package — is a deliberate trade: no upgrade path, total control, and a diff you review.
 
-A styled kit is right when the interface is internal, the visual identity is "clean and consistent", and forty components in week one beats forty components in month three. **MUI v7 still defaults to Emotion**, a runtime engine, so styled leaves need `"use client"` and the RSC constraint in §6.1 applies. Pigment CSS is MUI's zero-runtime option, opt-in since v6, and its repository is in an alpha and on-hold state — plan against Emotion, not against a migration that has not shipped.
+A styled kit is right when the interface is internal, the visual identity is "clean and consistent", and forty components in week one beats forty components in month three. **MUI v9 still defaults to Emotion**, a runtime engine, so styled leaves need `"use client"` and the RSC constraint in §6.1 applies. (There was no MUI v8: Material UI jumped v7 to v9 on 2026-04-08 to re-align its major with MUI X, so a codebase on v7 is two majors behind, not one.) Pigment CSS is MUI's zero-runtime option, opt-in since v6, and its repository is in an alpha and on-hold state — plan against Emotion, not against a migration that has not shipped. Removing the Emotion dependency is named as future work in the v9 announcement, not something v9 did.
 
 The honest three-year cost: a kit is cheapest in year one and most expensive in year three, when every bespoke design lands as a fight with someone else's theme abstraction and a major version is a migration project. Primitives are the reverse. Pick by how distinctive the product's visual language has to be, and note that the accessibility half of the decision is already made for you by any of the four — see [Accessible Component Patterns](../accessible_component_patterns/accessible_component_patterns.md).
 
@@ -540,7 +540,7 @@ Visual regression (Chromatic, or Playwright's `toHaveScreenshot`) screenshots ea
 - The team is small enough that discipline works, or the project is short-lived enough that drift never compounds.
 - You need full CSS with no abstraction — complex grid, container queries, `@supports` branching.
 
-**Reach for a styled kit (MUI v7) when:**
+**Reach for a styled kit (MUI v9) when:**
 
 - The interface is internal tooling and consistency matters more than distinctiveness.
 - Forty components in week one is the actual requirement, and you accept `"use client"` on styled leaves.
@@ -610,7 +610,7 @@ const statusClass = { ok: "text-green-500", warn: "text-amber-500", err: "text-r
 | CSS Modules | Locally scoped class names, native to Vite and Next.js |
 | vanilla-extract | Zero-runtime CSS-in-TypeScript, compile-time theme contracts |
 | Panda CSS | Zero-runtime style functions and recipes with static extraction |
-| Emotion | Runtime CSS-in-JS, still MUI v7's default engine |
+| Emotion | Runtime CSS-in-JS, still MUI v9's default engine |
 | styled-components | Runtime CSS-in-JS, in maintenance mode since January 2024 |
 | Lightning CSS | Rust CSS transformer and minifier under Tailwind v4 and Vite |
 | class-variance-authority | Typed variant API generating class strings from props |
@@ -681,7 +681,7 @@ Without it, a `Button` that must navigate produces a `button` inside an `a` or v
 **Q: Build your own component library or adopt a styled kit?**
 **Short:** Adopting a styled kit is cheapest in year one and most expensive by year three, when every bespoke design becomes a fight with someone else's theme abstraction.
 
-A kit gives forty themed components in week one, which is the right call for internal tooling where consistency beats distinctiveness — accepting that MUI v7 still defaults to Emotion, so styled leaves need `"use client"` and the RSC constraint applies. Headless primitives plus your own CSS invert the curve: more work up front, exact visual control, and styling that is RSC-native. Base UI is shadcn/ui's default for new installs since July 2026, Radix is not deprecated and now installs as a single `radix-ui` package, and React Aria is first-class. Roughly two engineer-quarters for forty accessible components is the number to plan against.
+A kit gives forty themed components in week one, which is the right call for internal tooling where consistency beats distinctiveness — accepting that MUI v9 still defaults to Emotion, so styled leaves need `"use client"` and the RSC constraint applies. Headless primitives plus your own CSS invert the curve: more work up front, exact visual control, and styling that is RSC-native. Base UI is shadcn/ui's default for new installs since July 2026, Radix is not deprecated and now installs as a single `radix-ui` package, and React Aria is first-class. Roughly two engineer-quarters for forty accessible components is the number to plan against.
 
 **Q: How do you style something with a value only known at runtime, without a runtime engine?**
 **Short:** Passing the value through a CSS custom property in an inline style keeps the class name static, so build-time extraction still sees it.

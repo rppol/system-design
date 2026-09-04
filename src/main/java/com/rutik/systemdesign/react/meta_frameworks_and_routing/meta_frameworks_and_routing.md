@@ -84,7 +84,7 @@ This module covers the routing and application-shell layer: file-based routing, 
 | Remix v1 and v2 | the React framework, now merged away |
 | **React Router v7** | what would have shipped as Remix v3 — the merge that moved Remix v2's bundler and server runtime into React Router as **framework mode** |
 | **React Router v8** | the current React framework, released 2026-06-17 |
-| **Remix v3** | a **separate, non-React framework on a Preact fork**, previewed July 2026, focused on web-platform primitives |
+| **Remix v3** | a **separate, non-React framework on a Preact fork**, beta preview 2026-04-30, focused on web-platform primitives |
 
 **Remix v3 is not an upgrade path from Remix v2 and is not a React framework.** A Remix v2 application upgrades to React Router v7 and then v8. This is the single easiest factual error in the whole front-end ecosystem, and it appears in interviews precisely because it separates people who read release notes from people who read headlines.
 
@@ -426,6 +426,29 @@ export default [
 ] satisfies RouteConfig;
 ```
 
+**What v8 actually broke** (2026-06-17) is short, and every item is a migration question:
+
+| Change | Consequence |
+|--------|-------------|
+| **`react-router-dom` was dropped** | the mirror package that eased v6 to v7 no longer exists. Import core APIs from `react-router` and browser-only ones from `react-router/dom` |
+| **ESM-only** | no CommonJS build. A `require("react-router")` anywhere in your pipeline — a Jest transform, a legacy config loader, a CJS server entry — is the most common upgrade blocker. The published `tsconfig` baseline moved to ES2022 |
+| **Middleware is on by default** | the v7 `future.unstable_middleware` flag became the behaviour. Remove the flag; a route that assumed no middleware chain now runs one |
+| **Raised baselines** | Node **22.22.0+**, React **19.2.7+**, Vite **7+** |
+
+```ts
+// BROKEN on v8 — the package does not exist any more.
+import { BrowserRouter, Link, useNavigate } from "react-router-dom";
+
+// FIX — everything comes from react-router; react-router/dom is the small
+// browser-only surface: RouterProvider, HydratedRouter, and the RSC helpers.
+import { BrowserRouter, Link, useNavigate } from "react-router";
+import { RouterProvider, HydratedRouter } from "react-router/dom";
+```
+
+`react-router@8.3` declares `"engines": { "node": ">=22.22.0" }` and a `react` / `react-dom` peer of `>=19.2.7`, so the version floor is enforced by the install, not by a runtime warning.
+
+Most of v8 is otherwise uneventful, because the behavioural changes shipped as opt-in future flags across v7. That is the point of the release: if you had already enabled the flags, the upgrade is an import rewrite and a Node bump.
+
 The upgrade path matters as much as the feature list. A Remix v2 application becomes a React Router v7 application, then v8; a v6 SPA can stay in library mode indefinitely, adopt data mode when waterfalls hurt, and adopt framework mode only if it turns out to need a server. That gradient is React Router's real differentiator against Next.js, where the App Router is the entry price.
 
 **A SPA with a data router is the right answer more often than framework marketing suggests.** An authenticated internal tool — an admin console, a support desk, a trading dashboard — has no SEO stake, no cold-load first-paint story worth optimising because users keep a tab open all day, and an existing API. Adding a server rendering tier buys nothing and costs a deployment target, a Node process to operate and a second place where environment variables must be correct.
@@ -640,7 +663,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 **Q: How do Remix v3, Remix v2 and React Router v7 relate to each other?**
 **Short:** What shipped as React Router v7 was the Remix merge, while Remix v3 is a separate non-React framework built on a Preact fork.
 
-The React lineage runs Remix v1 to v2, then into React Router v7 — Remix v2's bundler and server runtime became React Router's **framework mode** — and on to React Router v8, released 2026-06-17. Remix v3 was previewed in July 2026 as an entirely different project on a Preact fork, oriented around web-platform primitives, and it is **not an upgrade path from Remix v2 and not a React framework**. So a Remix v2 application upgrades to React Router v7 and then v8; adopting Remix v3 would be a rewrite onto a different runtime. Getting this backwards is the single most common factual error in the front-end ecosystem, which is exactly why it is asked.
+The React lineage runs Remix v1 to v2, then into React Router v7 — Remix v2's bundler and server runtime became React Router's **framework mode** — and on to React Router v8, released 2026-06-17. Remix v3's beta preview landed 2026-04-30 (the widely-cited July date is when the press coverage ran, not the release) as an entirely different project on a Preact fork, oriented around web-platform primitives, and it is **not an upgrade path from Remix v2 and not a React framework**. So a Remix v2 application upgrades to React Router v7 and then v8; adopting Remix v3 would be a rewrite onto a different runtime. Getting this backwards is the single most common factual error in the front-end ecosystem, which is exactly why it is asked.
 
 **Q: What did Cache Components and the "use cache" directive change in Next.js 16?**
 **Short:** An explicit directive replaced the experimental ppr and dynamicIO flags, so cacheability is now declared per function rather than inferred from which APIs a component happened to call.

@@ -484,7 +484,15 @@ Next.js 16 encrypts closed-over values by default with a per-build key, which st
 
 Third, **CSRF is in scope precisely because the browser invokes it.** A Server Function call is a POST with cookies attached, which is the exact shape of a cross-site forgery. Next.js compares the `Origin` header against `Host` and rejects mismatches, with `serverActions.allowedOrigins` for legitimate proxy setups; behind a proxy that rewrites `Host`, that check silently stops matching and must be configured. Do not disable it, and do not assume a non-Next RSC setup has it — verify.
 
-Finally, patch. The `react-server-dom-*` packages carried denial-of-service and source-exposure advisories fixed in **19.0.4, 19.1.5 and 19.2.4 on 2026-01-26**. The source-exposure issue is the sharper one for this section: a flaw in the RSC transport can leak server module source to a client request, which turns every hard-coded value in your server code into a disclosed value. Pin the whole `react`/`react-dom`/`react-server-dom-*` set to one patched version and keep them in step.
+Finally, patch. The `react-server-dom-*` packages carried **three separate advisories**, and they are routinely conflated — each has its own CVE and its own patch line:
+
+| Advisory | CVE | Class | CVSS | Disclosed | Patched in |
+|----------|-----|-------|------|-----------|-----------|
+| GHSA-925w-6v3x-g4j4 | CVE-2025-55183 | Source code exposure | 5.3 | 2025-12-11 | 19.0.2 / 19.1.3 / 19.2.2 |
+| GHSA-83fc-fqcc-2hmg | CVE-2026-23864 | Multiple denial of service | 7.5 | 2026-01-26 | 19.0.4 / 19.1.5 / 19.2.4 |
+| GHSA-479c-33wc-g2pg | CVE-2026-23869 | Denial of service, cyclic deserialization | 7.5 | 2026-04-08 | 19.0.5 / 19.1.6 / 19.2.5 |
+
+**Source exposure** (CVE-2025-55183) is the sharper one for this section: a request to a Server Function that stringifies an argument could come back carrying that function's own compiled source, which turns every hard-coded value in your server code into a disclosed value. Only literals in source are exposed — `process.env.SECRET` read at runtime is not. **The two DoS advisories** (CVE-2026-23864, CVE-2026-23869) are crafted payloads to a Server Function endpoint that crash the process, exhaust memory, or burn CPU for up to a minute; the endpoint is public and unauthenticated on many routes, and the second was found because the first fix was incomplete. The intermediate 19.0.3 / 19.1.4 / 19.2.3 releases are incomplete and do not count as patched. Pin the whole `react`/`react-dom`/`react-server-dom-*` set to one version at or above **19.2.5** (or 19.0.5 / 19.1.6 on an older line) and keep them in step.
 
 ### 6.8 Where RSC actually runs
 
@@ -598,7 +606,7 @@ export async function deleteOrder(rawId: string) {
 
 **Calling `useFormStatus` in the component that renders the `<form>`.** It returns `pending: false` forever. The hook must run in a descendant of the form element.
 
-**Running an unpatched `react-server-dom-*`.** The 2026-01-26 denial-of-service and source-exposure advisories are fixed in 19.0.4, 19.1.5 and 19.2.4. Pin the whole React set together; a mixed set is how one package stays behind.
+**Running an unpatched `react-server-dom-*`.** Three advisories, three patch lines, and the common mistake is pinning to the middle one: source exposure (CVE-2025-55183) landed in 19.0.2 / 19.1.3 / 19.2.2, the first DoS set (CVE-2026-23864) in 19.0.4 / 19.1.5 / 19.2.4, and the cyclic-deserialization DoS (CVE-2026-23869) in 19.0.5 / 19.1.6 / 19.2.5. Only the last of those is fully patched. Pin the whole React set together at or above 19.2.5; a mixed set is how one package stays behind.
 
 ---
 
@@ -709,9 +717,9 @@ The server starts the work without awaiting it, passes the promise as a prop, an
 The model needs a build that can produce two module graphs plus a server that can serve the payload, which is why it cannot be dropped into a plain SPA build or a static export. Next.js 16 remains the reference implementation and where the semantics are pinned down in practice, with Turbopack as its default bundler. `@vitejs/plugin-rsc` is a two-line config away from a working Vite setup, and Waku and Parcel give the same answer from different directions. The practical caveat is ecosystem maturity: RSC-safe library coverage and documentation are thinner outside Next, so a team adopting the Vite path should expect to debug third-party packages that assume a client environment.
 
 **Q: What were the react-server-dom advisories and why do they matter more than a typical CVE?**
-**Short:** Denial-of-service and source-exposure flaws in the RSC transport were patched on 2026-01-26 in 19.0.4, 19.1.5 and 19.2.4, and the second class leaks server module source to a client request.
+**Short:** Three distinct advisories hit the RSC transport: source exposure CVE-2025-55183, then DoS CVE-2026-23864 and CVE-2026-23869, so the safe floor is 19.2.5 and not the widely quoted 19.2.4.
 
-Source exposure is worse than most front-end vulnerabilities precisely because RSC's premise is that server code never reaches the browser — every hard-coded connection string, internal hostname and business rule in a Server Component was written under that assumption. The denial-of-service half matters because the payload endpoint is public and unauthenticated on many routes. The remediation is mechanical: pin `react`, `react-dom` and every `react-server-dom-*` package to the same patched version, since a mixed set is how one transport package silently stays behind. Add a dependency-audit gate to CI rather than relying on someone reading release notes.
+They are usually described as one incident and they are not. CVE-2025-55183 (CVSS 5.3, 2025-12-11) is **source exposure**: a request to a Server Function that stringifies an argument could return that function's compiled source, patched in 19.0.2 / 19.1.3 / 19.2.2. CVE-2026-23864 (CVSS 7.5, 2026-01-26) is a set of **denial-of-service** flaws patched in 19.0.4 / 19.1.5 / 19.2.4. CVE-2026-23869 (CVSS 7.5, 2026-04-08) is a further DoS via cyclic deserialization in the Flight reply parser, patched in 19.0.5 / 19.1.6 / 19.2.5. Source exposure is worse than most front-end vulnerabilities precisely because RSC's premise is that server code never reaches the browser — every hard-coded connection string, internal hostname and business rule in a Server Component was written under that assumption, though a value read from `process.env` at runtime is not in scope. The DoS half matters because the payload endpoint is public and unauthenticated on many routes. The remediation is mechanical: pin `react`, `react-dom` and every `react-server-dom-*` package to the same version at or above 19.2.5, since a mixed set is how one transport package silently stays behind. Add a dependency-audit gate to CI rather than relying on someone reading release notes.
 
 ---
 
@@ -727,7 +735,7 @@ Source exposure is worse than most front-end vulnerabilities precisely because R
 - Guard server-only modules with the `server-only` package so a mistaken import fails the build instead of the bundle report.
 - Give every form field a real `name` and test one submit with JavaScript disabled, which is the only proof progressive enhancement exists.
 - Track per-route First Load JS in CI and treat a 100 KB jump as a moved boundary until proven otherwise.
-- Pin `react`, `react-dom` and every `react-server-dom-*` package to the same patched version, at or above 19.2.4.
+- Pin `react`, `react-dom` and every `react-server-dom-*` package to the same patched version, at or above 19.2.5 (19.0.5 or 19.1.6 on an older line).
 
 ---
 
@@ -790,7 +798,7 @@ export async function voidInvoice(rawId: string) {
 }
 ```
 
-The list rows became Server Components again, so the currency table, the PDF library and the ORM types left the client graph with them. `VoidButton` stayed a `"use client"` leaf receiving the plain id it needed. The `react-server-dom-webpack` package was moved from 19.2.1 to 19.2.4 in the same release.
+The list rows became Server Components again, so the currency table, the PDF library and the ORM types left the client graph with them. `VoidButton` stayed a `"use client"` leaf receiving the plain id it needed. The `react-server-dom-webpack` package was moved from 19.2.1 to 19.2.5 in the same release, which is the first version past all three advisories.
 
 **Results.**
 
