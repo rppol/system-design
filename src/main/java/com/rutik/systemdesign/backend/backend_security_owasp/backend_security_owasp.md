@@ -489,7 +489,7 @@ Rules for secrets:
 <plugin>
     <groupId>org.owasp</groupId>
     <artifactId>dependency-check-maven</artifactId>
-    <version>12.2.2</version>
+    <version>13.0.0</version>
     <configuration>
         <failBuildOnCVSS>7</failBuildOnCVSS>  <!-- fail on CVSS >= 7.0 (High) -->
         <suppressionFile>owasp-suppressions.xml</suppressionFile>

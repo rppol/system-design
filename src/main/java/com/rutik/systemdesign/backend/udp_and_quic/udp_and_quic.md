@@ -25,7 +25,7 @@ Understanding UDP is essential for designing low-latency systems (gaming, VoIP, 
 - **UDP datagrams**: Fixed-size, self-contained. No state between datagrams. Drop on error, never retransmit.
 - **Checksum**: UDP has a 16-bit checksum (optional in IPv4, mandatory in IPv6). Detects corruption but does not prevent it.
 - **Multiplexing**: Port numbers distinguish services. Source port is ephemeral (client); destination port is well-known (server).
-- **QUIC connection**: Identified by a 64-bit Connection ID (not IP:port), enabling connection migration when the client's IP changes.
+- **QUIC connection**: Identified by a Connection ID (not IP:port) — a variable-length value of 0 to 20 bytes chosen by the endpoint that has to route on it — enabling connection migration when the client's IP changes.
 - **QUIC streams**: Independent byte streams multiplexed over one QUIC connection. Loss in one stream does not block others.
 - **0-RTT**: QUIC clients with a cached server token can send application data in the first packet (0 round trips to establish).
 
@@ -221,7 +221,7 @@ sequenceDiagram
     Note over C,S: Sub-millisecond migration, no reconnect, no TLS re-handshake
 ```
 
-TCP identifies a connection by its 4-tuple, so a WiFi-to-LTE IP change looks like a brand-new connection and forces a full reconnect plus TLS re-handshake; QUIC identifies the connection by a 64-bit Connection ID that survives the IP change, so the server only needs to validate the new path.
+TCP identifies a connection by its 4-tuple, so a WiFi-to-LTE IP change looks like a brand-new connection and forces a full reconnect plus TLS re-handshake; QUIC identifies the connection by a Connection ID — variable length, 0 to 20 bytes — that survives the IP change, so the server only needs to validate the new path.
 
 ---
 

@@ -194,7 +194,7 @@ The `GatewayClass` is cluster-scoped and owned by whoever installed the controll
 ### 6.2 ReferenceGrant: cross-namespace references are deny-by-default
 
 ```yaml
-apiVersion: gateway.networking.k8s.io/v1beta1
+apiVersion: gateway.networking.k8s.io/v1
 kind: ReferenceGrant
 metadata:
   name: allow-shop-to-payments

@@ -8,7 +8,7 @@ RabbitMQ is a message broker written in Erlang/OTP. Its native protocol is AMQP 
 
 That single design choice is the whole difference between RabbitMQ and a partitioned log. [Kafka](../kafka_deep_dive/kafka_deep_dive.md) is a dumb broker with a smart consumer: the broker appends bytes to a partition and the consumer owns its offset. RabbitMQ is a smart broker with a dumb consumer: the broker owns the routing table, tracks per-message delivery state, pushes messages to consumers, and remembers which of them have been acknowledged. Everything else — per-message TTL, dead-lettering, priorities, competing consumers without a partition count — falls out of the broker holding that state.
 
-**This module targets RabbitMQ 4.3.x** (latest patch at time of writing: **4.3.4**, released 23 July 2026; the 4.2 series reached end of community support on 31 July 2026). The 4.x line is not a cosmetic increment over 3.13, and the changes matter enough that most RabbitMQ material written before September 2024 now teaches things the broker will refuse to do:
+**This module targets RabbitMQ 4.3.x** (latest patch at time of writing: **4.3.5**, released 23 July 2026; the 4.2 series reached end of community support on 31 July 2026). The 4.x line is not a cosmetic increment over 3.13, and the changes matter enough that most RabbitMQ material written before September 2024 now teaches things the broker will refuse to do:
 
 - **Classic queue mirroring was removed in 4.0.** There is no `ha-mode` policy any more. A classic queue is a single-node, non-replicated queue, full stop. Replication is quorum queues (Raft) or streams (Raft-replicated log).
 - **Streams shipped in 3.9 and super streams in 3.11.** RabbitMQ has had non-destructive, replayable, offset-addressed reads for years. "RabbitMQ cannot replay" is a statement about *classic and quorum queues*, not about RabbitMQ.
@@ -1200,7 +1200,7 @@ A retry service consumed from a DLQ and republished with the original message's 
 ## 11. Technologies and Tools
 
 **Broker and core**
-- **RabbitMQ** — the broker. Current series 4.3.x (4.3.4 at time of writing). Requires Erlang/OTP 27.0 as a minimum for 4.3, with OTP 27.x as the supported maximum; OTP 28 is supported for brand-new clusters only. Keep the same Erlang major version across every node in a cluster.
+- **RabbitMQ** — the broker. Current series 4.3.x (4.3.5 at time of writing). Requires Erlang/OTP 27.0 as a minimum for 4.3, with OTP 27.x as the supported maximum; OTP 28 is supported for brand-new clusters only. Keep the same Erlang major version across every node in a cluster.
 - **Khepri** — the Raft-based metadata store, default for new clusters in 4.2 and the only store in 4.3. Replaces Mnesia and, with it, the entire partition-handling-strategy configuration family.
 - **Ra** — the Erlang Raft implementation underneath both Khepri and quorum queues. You do not configure it directly, but its WAL settings (`raft.wal_max_size_bytes`, default 512 MB) are the knobs behind quorum queue disk behaviour.
 

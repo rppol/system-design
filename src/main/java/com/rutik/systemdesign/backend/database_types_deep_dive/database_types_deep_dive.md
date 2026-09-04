@@ -513,7 +513,7 @@ flowchart LR
 - Betweenness centrality: nodes that lie on many shortest paths
 - Recommendation: collaborative filtering via graph walks
 
-**Neo4j concrete numbers**:
+**Neo4j concrete numbers** (fixed-size **record-store** format, Neo4j 3.x-4.x; Neo4j 5's block format packs a node and its relationships together and does not use these sizes or ceilings):
 - Node record: 15 bytes
 - Relationship record: 34 bytes
 - Node labels and relationship types stored in label store (fixed size)
@@ -525,8 +525,8 @@ flowchart LR
 ### NewSQL — CockroachDB, TiDB, Spanner
 
 **CockroachDB**:
-- Built on RocksDB (LSM-tree) per node
-- Raft consensus per "range" (64MB key-range slices); each range has 3 replicas on different nodes
+- Built on Pebble (a Go LSM-tree storage engine, RocksDB-compatible on-disk format) per node
+- Raft consensus per "range" (contiguous key-range slices, `range_max_bytes` default **512 MiB**); each range has 3 replicas on different nodes
 - MVCC for transactions: each write has a timestamp; read at a specific timestamp sees consistent snapshot
 - Serializable isolation by default (PostgreSQL is read committed by default)
 - Geo-partitioning: constrain specific rows to specific geographic regions (data residency compliance)
@@ -545,7 +545,7 @@ flowchart LR
 - Percolator transaction model: two-phase commit using timestamps from TSO (Timestamp Oracle); optimistic concurrency
 
 **NewSQL concrete numbers**:
-- CockroachDB range size: 64MB; Raft heartbeat: 200ms
+- CockroachDB range size: 512 MiB default (`range_max_bytes`); Raft heartbeat: 200ms
 - Spanner TrueTime uncertainty: ~1-7ms; globally consistent reads at any timestamp
 - TiKV region size: 96MB default; split at 144MB
 

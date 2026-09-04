@@ -237,6 +237,8 @@ spec:
   volumes:
     - name: shared-logs
       emptyDir: {}
+    - name: app-config          # every mounted name MUST be declared here, or the
+      emptyDir: {}              # API server rejects the Pod outright
 
   containers:
     # Main application container
@@ -247,6 +249,9 @@ spec:
       volumeMounts:
         - name: shared-logs
           mountPath: /var/log/app
+        - name: app-config      # the sidecar's output is only useful if the app reads it
+          mountPath: /vault/secrets
+          readOnly: true
 
     # Sidecar: log shipping agent
     # Reads logs from shared volume, ships to centralized logging system
@@ -667,7 +672,7 @@ Both patterns deploy a helper container alongside the main application, but they
 **Q: What is graceful shutdown and why is the preStop hook important in Kubernetes?**
 **Short:** A preStop sleep bridges the gap while endpoint removal propagates, so a pod stops receiving new traffic before it drains in-flight requests.
 
-Graceful shutdown ensures that when a pod is terminated, it completes in-flight requests before shutting down. In Spring Boot, `server.shutdown=graceful` stops the Tomcat acceptor from accepting new connections and waits for active requests to complete (up to `timeout-per-shutdown-phase`). The Kubernetes preStop hook is important because Kubernetes sends SIGTERM to the container and simultaneously removes the pod from Service endpoints. iptables rules take 1-5 seconds to propagate across all nodes. Without a preStop sleep (typically 5-10 seconds), traffic continues arriving at the pod from load balancers that haven't yet received the endpoint update, resulting in connection reset errors for in-flight requests.
+Graceful shutdown ensures that when a pod is terminated, it completes in-flight requests before shutting down. In Spring Boot 4.x this is the default for every embedded server — the acceptor stops taking new connections and active requests are given until `spring.lifecycle.timeout-per-shutdown-phase` to complete; `server.shutdown=immediate` opts back out. The Kubernetes preStop hook is important because Kubernetes sends SIGTERM to the container and simultaneously removes the pod from Service endpoints. iptables rules take 1-5 seconds to propagate across all nodes. Without a preStop sleep (typically 5-10 seconds), traffic continues arriving at the pod from load balancers that haven't yet received the endpoint update, resulting in connection reset errors for in-flight requests.
 
 **Q: How do you implement feature flags safely at scale?**
 **Short:** Evaluate flags client-side against downloaded rules from a dedicated flag service, and give every flag an owner and a removal date.
@@ -726,7 +731,7 @@ Use a semaphore bulkhead when call latency is low and you just want to cap concu
 - Size thread pool bulkheads based on expected concurrency per dependency + 20% headroom
 - Use separate circuit breakers and bulkheads per downstream service, not one shared instance
 - Document strangler fig migration with a public decision log — capture why each service was extracted when
-- Run preStop hooks for at least `terminationGracePeriodSeconds / 2` to allow clean draining
+- Size the preStop sleep to endpoint-propagation time only (5-10 s), then keep `preStop + timeout-per-shutdown-phase + @PreDestroy work` strictly below `terminationGracePeriodSeconds` — a preStop of half the budget starves the HTTP drain and the Kafka flush of the time they actually need (see the §6 budget walkthrough)
 - Version all configuration changes in Git (Spring Cloud Config is backed by Git for audit trail)
 - Set feature flag defaults to the safe/off state — flag service outage should not enable incomplete features
 - Use gradual rollout percentages with monitoring gates: pause at 1%, 10%, 50% to check error rates

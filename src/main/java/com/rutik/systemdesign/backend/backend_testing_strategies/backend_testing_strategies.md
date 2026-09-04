@@ -75,7 +75,7 @@ flowchart TD
     E2E("E2E Tests<br/>10% - critical flows only")
     CONTRACT("Contract Tests<br/>5% - consumer-driven Pact")
     INTEGRATION("Integration Tests<br/>20% - Testcontainers, real DB/queue")
-    UNIT("Unit Tests<br/>70% - JUnit 5 + Mockito")
+    UNIT("Unit Tests<br/>70% - JUnit 6 + Mockito")
 
     E2E --> CONTRACT --> INTEGRATION --> UNIT
 
@@ -218,8 +218,11 @@ class OrderRepositoryIntegrationTest {
         .withUsername("test")
         .withPassword("test");
 
+    // org.testcontainers.kafka.KafkaContainer: KRaft mode, broker on 9092, and
+    // getBootstrapServers() returns a bare host:port with no PLAINTEXT:// prefix.
+    // (Use org.testcontainers.kafka.ConfluentKafkaContainer for confluentinc/cp-kafka images.)
     @Container
-    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.4.0"));
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:4.3.1"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
@@ -404,7 +407,7 @@ Do NOT use `@SpringBootTest` for unit tests — it starts the full context and t
 
 **Testing implementation details**: An engineer wrote tests that verified which private methods were called and in what order. When the service was refactored to be more efficient (fewer internal calls), all tests broke despite the behavior being identical. Fix: test the public interface contract, not the implementation.
 
-**Shared state across tests**: A test class had a static `List<Order>` accumulating across test methods. Tests 1-5 passed in isolation. Test 6 failed because it expected an empty list but found 5 entries from previous tests. JUnit 5 creates a new instance per test method by default, but static fields are shared. Fix: use `@BeforeEach` to reset state, never use static mutable state.
+**Shared state across tests**: A test class had a static `List<Order>` accumulating across test methods. Tests 1-5 passed in isolation. Test 6 failed because it expected an empty list but found 5 entries from previous tests. JUnit 6 creates a new instance per test method by default, but static fields are shared. Fix: use `@BeforeEach` to reset state, never use static mutable state.
 
 **Slow unit tests from Spring context loading**: A developer annotated every test class with `@SpringBootTest`. The test suite grew to 500 tests. Running the full suite took 25 minutes because each `@SpringBootTest` class started a full application context (no context caching when configurations differ). Fix: use the appropriate test slice (`@WebMvcTest`, `@DataJpaTest`) and mark integration tests with a separate Maven profile.
 
@@ -416,7 +419,7 @@ Do NOT use `@SpringBootTest` for unit tests — it starts the full context and t
 
 | Tool | Purpose |
 |------|---------|
-| JUnit 5 | Test framework, lifecycle annotations, parameterized tests |
+| JUnit 6 | Test framework, lifecycle annotations, parameterized tests |
 | Mockito | Mocking framework, `@Mock`, `@InjectMocks`, `verify()` |
 | AssertJ | Fluent assertions, better failure messages than JUnit assertions |
 | Testcontainers | Real Docker containers (PostgreSQL, Kafka, Redis) for integration tests |
@@ -499,7 +502,7 @@ A Fake is a working implementation with shortcuts, while a Stub only returns pre
 **Q: Why must Testcontainers be declared as static @Container fields rather than instance fields?**
 **Short:** Static @Container fields create one container per test class instead of a costly new one per test method.
 
-A static @Container field creates one container per test class instead of one per test method, avoiding minutes of redundant startup and teardown. JUnit 5 instantiates a new test class instance for every test method by default, so an instance-level container field would start and stop a fresh Docker container for each of the class's tests. A class with 20 test methods and an instance-level PostgreSQL container adds roughly 10 minutes of pure container churn to the suite. Declare shared infrastructure containers as static so they start once and are reused across all methods in the class.
+A static @Container field creates one container per test class instead of one per test method, avoiding minutes of redundant startup and teardown. JUnit 6 instantiates a new test class instance for every test method by default, so an instance-level container field would start and stop a fresh Docker container for each of the class's tests. A class with 20 test methods and an instance-level PostgreSQL container adds roughly 10 minutes of pure container churn to the suite. Declare shared infrastructure containers as static so they start once and are reused across all methods in the class.
 
 **Q: What are Google's test size annotations and what do they enforce?**
 **Short:** Google's test size annotations cap small, medium, and large tests by allowed I/O and runtime, keeping fast tests on every commit.
@@ -523,7 +526,7 @@ WireMock stubs HTTP responses in-process so tests never make a real network call
 - Use `Awaitility` for all async assertions — never `Thread.sleep(1000)` in tests
 - Capture test coverage in CI but treat 80% mutation score as the real quality gate, not line coverage
 - Write contract tests before implementing the provider — contract-first development
-- Tag slow tests with JUnit 5 `@Tag("slow")` and exclude from default `mvn test` with Surefire configuration
+- Tag slow tests with JUnit 6 `@Tag("slow")` and exclude from default `mvn test` with Surefire configuration
 
 ---
 

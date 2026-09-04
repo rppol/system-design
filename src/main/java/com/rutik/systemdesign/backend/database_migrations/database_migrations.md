@@ -184,7 +184,10 @@ ALTER TABLE orders ADD COLUMN discount_amount DECIMAL(10,2);
 ALTER TABLE orders ADD COLUMN processed BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- SAFE: Adding an index CONCURRENTLY (no table lock)
--- Runs in background, slower, but does not block reads/writes
+-- Runs in background, slower, but does not block reads/writes.
+-- Flyway wraps each migration in a transaction and CONCURRENTLY cannot run inside one,
+-- so this statement needs its own file with the directive below at the top:
+--   -- flyway:executeInTransaction=false
 CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status);
 
 -- SAFE: Adding a NOT NULL constraint via check constraint + validate
@@ -200,9 +203,15 @@ ALTER TABLE orders ADD CONSTRAINT fk_orders_users
   FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID;
 ALTER TABLE orders VALIDATE CONSTRAINT fk_orders_users;
 
--- UNSAFE: ALTER COLUMN type (full table rewrite)
-ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(50);  -- locks table
--- SAFER approach: expand-contract pattern or cast-compatible type change
+-- SAFE since PostgreSQL 9.2: widening a varchar length limit, or dropping it for TEXT,
+-- is metadata-only -- the ACCESS EXCLUSIVE lock is taken but released immediately
+ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(100);
+ALTER TABLE orders ALTER COLUMN status TYPE TEXT;
+
+-- UNSAFE: a type change that needs every row re-encoded or re-checked
+ALTER TABLE orders ALTER COLUMN id TYPE BIGINT;              -- full rewrite, holds the lock
+ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(20);     -- NARROWING rescans every row
+-- SAFER approach: expand-contract pattern
 ```
 
 ### 6.3 gh-ost for Large Table Alterations
@@ -257,7 +266,7 @@ gh-ost \
   --initially-drop-ghost-table
 
 # PostgreSQL: pg_repack (online table bloat removal) or native DDL
-# PostgreSQL 12+: Most ADD COLUMN DEFAULT is metadata-only (no table rewrite)
+# PostgreSQL 11+: Most ADD COLUMN DEFAULT is metadata-only (no table rewrite)
 # PostgreSQL: CREATE INDEX CONCURRENTLY (non-blocking)
 ```
 
@@ -392,6 +401,8 @@ void v15MigrationAddsPhoneNumberColumn() {
 
 **Missing CONCURRENTLY on index creation**: `CREATE INDEX ON orders(status)` takes a ShareLock on the table — blocks all writes while building. On a table with millions of rows, this can take minutes. All writes queue behind the lock. In production, always use `CREATE INDEX CONCURRENTLY`.
 
+**Putting CONCURRENTLY in an ordinary Flyway migration**: Flyway runs each migration inside a transaction, and PostgreSQL rejects `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY` there with `cannot run inside a transaction block`. The migration fails on the very first deploy that includes it, which is a broken release rather than a slow one. Give the statement its own migration file headed by `-- flyway:executeInTransaction=false`, and put nothing else in that file: without the transaction there is no rollback, so a second statement failing leaves the first one applied and the history row marked failed.
+
 **DROP COLUMN without checking application usage**: Dropping a column while old application code still reads from it causes SQL errors on SELECT queries that name the column. The safe sequence: (1) deploy new code that does not reference the column; (2) verify old version is completely removed; (3) run the DROP COLUMN migration. Use usage tracking (query logging, code review) to confirm no references.
 
 **Long-running migration holding a transaction**: Running a migration that updates millions of rows in a single transaction (`UPDATE users SET ... WHERE TRUE`) holds a transaction open for minutes, blocking other operations. Break large data migrations into batches with committed transactions between batches.
@@ -427,12 +438,12 @@ Expand-contract (also called parallel change) is a three-phase approach: (1) Exp
 **Q: How does Flyway track which migrations have been applied?**
 **Short:** Flyway records each applied migration's version, checksum, and status in a flyway_schema_history table.
 
-Flyway maintains a `flyway_schema_history` table in the target database. Each row records: version number, description, script filename, checksum (SHA-256 of the file content), whether it succeeded, and the timestamp. On application startup, Flyway reads this table, compares against the available migration files, and applies any pending migrations in version order. If a migration file's checksum does not match the stored checksum, Flyway throws an error — preventing silent script modifications.
+Flyway maintains a `flyway_schema_history` table in the target database. Each row records: version number, description, script filename, checksum (a CRC-32 of the file content, not a cryptographic hash), whether it succeeded, and the timestamp. On application startup, Flyway reads this table, compares against the available migration files, and applies any pending migrations in version order. If a migration file's checksum does not match the stored checksum, Flyway throws an error — preventing silent script modifications.
 
 **Q: What is CREATE INDEX CONCURRENTLY and when must you use it?**
 **Short:** CREATE INDEX CONCURRENTLY builds an index without an exclusive lock, essential on busy production tables to avoid blocking writes.
 
-`CREATE INDEX CONCURRENTLY` builds an index without taking an exclusive table lock. It performs multiple passes: first scan creates the index structure without blocking writes; subsequent passes catch up with changes made during the first scan. The downside: takes significantly longer than regular CREATE INDEX. Always use CONCURRENTLY for adding indexes to production tables with significant write traffic — a regular CREATE INDEX on a busy table blocks all writes until the index builds, potentially causing timeouts and cascading failures.
+`CREATE INDEX CONCURRENTLY` builds an index without taking an exclusive table lock. It performs multiple passes: first scan creates the index structure without blocking writes; subsequent passes catch up with changes made during the first scan. The downside: takes significantly longer than regular CREATE INDEX. Always use CONCURRENTLY for adding indexes to production tables with significant write traffic — a regular CREATE INDEX on a busy table blocks all writes until the index builds, potentially causing timeouts and cascading failures. The migration-tool trap: `CONCURRENTLY` cannot run inside a transaction block, and Flyway wraps every migration in one by default, so a `CREATE INDEX CONCURRENTLY` in a normal migration fails with `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. Put it in its own file with `-- flyway:executeInTransaction=false` at the top, and keep that file to a single statement, since with the transaction gone a mid-file failure leaves the earlier statements committed.
 
 **Q: How do you handle a migration that fails in production?**
 **Short:** Repair the failed history entry, revert any partial change manually, and ship the fix as a new migration version, never editing the failed one.
@@ -519,30 +530,47 @@ The `out-of-order` setting controls whether Flyway will apply a migration whose 
 **Problem**: An order management system needed to rename the `customer_name` column to `buyer_name` and change its type from VARCHAR(100) to TEXT, across a 200M row `orders` table in production. Zero downtime required.
 
 **Plan**:
+The index steps get their own single-statement files. `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` cannot run inside a transaction block, and Flyway wraps a migration in one unless the file says otherwise — combining the `ALTER TABLE` and the index into one migration is what makes the first deploy fail.
+
 ```sql
 -- V20__expand_buyer_name.sql
 -- Phase 1: ADD new column (metadata-only for TEXT, no table rewrite)
 ALTER TABLE orders ADD COLUMN buyer_name TEXT;
-CREATE INDEX CONCURRENTLY idx_orders_buyer_name ON orders(buyer_name);
+```
 
--- V21__migrate_buyer_name_data.sql
--- Phase 2: Backfill in batches (run separately, not in migration transaction)
+```sql
+-- V21__index_buyer_name.sql
+-- flyway:executeInTransaction=false
+-- One statement only: with the transaction disabled there is no rollback.
+CREATE INDEX CONCURRENTLY idx_orders_buyer_name ON orders(buyer_name);
+```
+
+```sql
+-- V22__migrate_buyer_name_data.sql
+-- Phase 2: Backfill in batches (run separately, not in one migration transaction)
 -- (This migration calls a custom Flyway Java callback that does batched updates)
 -- Or: use a separate batch job outside migration:
 -- UPDATE orders SET buyer_name = customer_name WHERE buyer_name IS NULL LIMIT 10000;
 -- (repeat 20,000 times for 200M rows, ~2 rows/ms = ~28 hours for 200M)
+```
 
--- V22__contract_buyer_name.sql (deployed after code switches to buyer_name)
--- Phase 3: Contract: drop old column
+```sql
+-- V23__drop_customer_name_index.sql (deployed after code switches to buyer_name)
+-- flyway:executeInTransaction=false
 DROP INDEX CONCURRENTLY idx_orders_customer_name;
+```
+
+```sql
+-- V24__contract_buyer_name.sql
+-- Phase 3: Contract: drop old column
 ALTER TABLE orders DROP COLUMN customer_name;
 ```
 
 **Code changes**:
-- V20 deployed: writes to both `customer_name` and `buyer_name` (dual-write)
-- V21 data migration complete (backfilled all rows)
+- V20/V21 deployed: writes to both `customer_name` and `buyer_name` (dual-write)
+- V22 data migration complete (backfilled all rows)
 - New code deployed: reads from `buyer_name` only, writes to both
 - After full rollout: writes to `buyer_name` only
-- V22 deployed: `customer_name` dropped
+- V23/V24 deployed: `customer_name` index and column dropped
 
 **Outcome**: Zero downtime. 200M rows backfilled over 28 hours using a background job. No table locks taken during business hours. Entire migration completed over 2 weeks with full rollback capability at each step.

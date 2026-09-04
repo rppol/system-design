@@ -87,10 +87,10 @@ Endpoint health mix (by count, not by volume):
   10% effectively dead   times out at the 3 s connect / 10 s read ceiling every time
 
 Weighted mean per-attempt latency (endpoint-count-weighted):
-  0.65 x 0.30s + 0.25 x 3.5s + 0.10 x 10s  =  0.195 + 0.875 + 1.0  =  1.6 s
+  0.65 x 0.30s + 0.25 x 3.5s + 0.10 x 10s  =  0.195 + 0.875 + 1.0  =  2.07 s
 ```
 
-Production traffic is not endpoint-count-weighted — high-volume tenants tend to run better-maintained infrastructure — but 1.6 s is a defensible planning number, and it is deliberately not the throughput-derived number. **This is where Little's Law bites.**
+Production traffic is not endpoint-count-weighted — high-volume tenants tend to run better-maintained infrastructure — but 2.07 s is a defensible planning number, and it is deliberately not the throughput-derived number. **This is where Little's Law bites.**
 
 ### Retry Amplification
 
@@ -125,18 +125,18 @@ Attempts, not raw deliveries, are the number that sizes the dispatcher fleet.
 ```
 L = lambda x W     (concurrent in-flight calls = arrival rate x mean service time)
 
-Average: L = 8,632 attempts/sec  x 1.6 s  = 13,811 concurrent in-flight HTTP calls
-Peak:    L = 34,528 attempts/sec x 1.6 s  = 55,245 concurrent in-flight HTTP calls
+Average: L = 8,632 attempts/sec  x 2.07 s = 17,868 concurrent in-flight HTTP calls
+Peak:    L = 34,528 attempts/sec x 2.07 s = 71,473 concurrent in-flight HTTP calls
 ```
 
-Fifty-five thousand concurrent in-flight requests is the number that decides everything downstream. A platform-thread-per-request model at ~1 MB of stack per thread would need **~55 GB of stack memory alone** at peak — before a byte of business logic runs. Java 25 virtual threads, at a few KB of stack each, make 55,000 concurrent in-flight calls a non-event: the limiting resource becomes the OS file-descriptor / ephemeral-port budget and the connection pool to each endpoint, not thread memory. This is the single most consequential technology decision in the design, and it is made by the arithmetic above, not by taste.
+Seventy-one thousand concurrent in-flight requests is the number that decides everything downstream. A platform-thread-per-request model at ~1 MB of stack per thread would need **~71 GB of stack memory alone** at peak — before a byte of business logic runs. Java 25 virtual threads, at a few KB of stack each, make 71,000 concurrent in-flight calls a non-event: the limiting resource becomes the OS file-descriptor / ephemeral-port budget and the connection pool to each endpoint, not thread memory. This is the single most consequential technology decision in the design, and it is made by the arithmetic above, not by taste.
 
 ```
 Assume one dispatcher instance sustains 6,000 concurrent in-flight calls comfortably
 (bounded by NIC throughput and per-instance connection-pool ceilings, not stack memory):
 
-Peak instances needed: 55,245 / 6,000  = 9.2  -> 10 minimum
-Headroom for one instance loss + 20%:  = 12 instances
+Peak instances needed: 71,473 / 6,000  = 11.9 -> 12 minimum
+Headroom for one instance loss + 20%:  = 15 instances
 ```
 
 ### Delivery-Attempt Storage
@@ -827,10 +827,10 @@ Redrive is dangerous specifically because it lets an operator generate deliverie
 ### Dispatcher Fleet
 
 ```
-Peak concurrent in-flight calls (from §2):     55,245
+Peak concurrent in-flight calls (from §2):     71,473
 Per-instance sustainable concurrency:           6,000
-Instances at peak:                              55,245 / 6,000 = 9.2 -> 10
-Headroom (1 instance loss + 20%):               12 instances
+Instances at peak:                              71,473 / 6,000 = 11.9 -> 12
+Headroom (1 instance loss + 20%):               15 instances
 
 Per instance (Java 25, virtual threads):
   heap: 4 GB is generous — virtual-thread stacks are a few KB each, so 6,000
@@ -964,7 +964,7 @@ The redrive replayed deliveries indiscriminately over a time window rather than 
 **Q: What decides how big the dispatcher fleet needs to be — event volume, or something else?**
 **Short:** Concurrency equals arrival rate times mean service time, and slow endpoints dominate that.
 
-Little's Law: concurrent in-flight calls equal the arrival rate times the mean service time, and the mean service time here is dominated by the slow and dead endpoints in the tail, not the healthy majority. At this design's numbers, a raw-throughput read of 8,632 attempts/sec average looks modest; multiplied by a 1.6-second mean latency (pulled up hard by the 10% of endpoints that time out at the 10-second ceiling every single time), the actual concurrency requirement is nearly 14,000 in-flight calls at steady state and over 55,000 at peak. Sizing a webhook fleet off requests-per-second alone — the instinct from every other high-throughput system — systematically under-provisions it, because the bottleneck resource here is concurrent connections, not CPU cycles per request.
+Little's Law: concurrent in-flight calls equal the arrival rate times the mean service time, and the mean service time here is dominated by the slow and dead endpoints in the tail, not the healthy majority. At this design's numbers, a raw-throughput read of 8,632 attempts/sec average looks modest; multiplied by a 2.07-second mean latency (pulled up hard by the 10% of endpoints that time out at the 10-second ceiling every single time), the actual concurrency requirement is nearly 18,000 in-flight calls at steady state and over 71,000 at peak. Sizing a webhook fleet off requests-per-second alone — the instinct from every other high-throughput system — systematically under-provisions it, because the bottleneck resource here is concurrent connections, not CPU cycles per request.
 
 **Q: Why is delivery order only per-endpoint and only best-effort, never global or strict?**
 **Short:** Strict per-endpoint ordering reintroduces the head-of-line blocking a bulkhead exists to remove.

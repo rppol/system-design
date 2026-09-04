@@ -300,17 +300,21 @@ public class OutboxRelayJob {
             String topic = resolveKafkaTopic(event.getAggregateType());
             String partitionKey = event.getAggregateId(); // same aggregate = same partition = ordered
 
-            kafkaTemplate.send(topic, partitionKey, event.getPayload())
-                .addCallback(
-                    result -> markPublished(event),
-                    failure -> log.error("Failed to publish event {}: {}", event.getId(), failure.getMessage())
-                );
-        }
-    }
+            try {
+                // send() returns CompletableFuture<SendResult> (spring-kafka 3.0+).
+                // Block on purpose: publishedAt must be set on THIS thread, inside THIS
+                // transaction. Setting it from a producer callback runs after the commit,
+                // on Kafka's I/O thread, with no JPA session — the write is silently lost
+                // and the event is republished on every subsequent poll, forever.
+                kafkaTemplate.send(topic, partitionKey, event.getPayload())
+                    .get(5, TimeUnit.SECONDS);
 
-    private void markPublished(OutboxEvent event) {
-        event.setPublishedAt(Instant.now());
-        outboxEventRepository.save(event);
+                event.setPublishedAt(Instant.now());  // managed entity — flushed on commit
+            } catch (Exception ex) {
+                // Leave publishedAt null; the next poll retries. At-least-once by design.
+                log.error("Failed to publish event {}, will retry next poll", event.getId(), ex);
+            }
+        }
     }
 
     private String resolveKafkaTopic(String aggregateType) {

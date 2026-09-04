@@ -13,6 +13,10 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ## Module List — 50 modules (9 Phases)
 
+The **Q&As** column is the **module total**: the module page plus every deep-dive sub-file
+the module owns. Counts here must match `<section>/README.md`'s `<!-- study-paths -->`
+inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
+
 ### Phase 1 — Networking Fundamentals
 
 | Module | Topic | Q&As |
@@ -20,7 +24,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `osi_model_and_networking/` | 7 layers, TCP/IP mapping, packet encapsulation, ARP, NAT, MTU | 15 |
 | `tcp_ip_deep_dive/` | 3-way handshake, congestion control, TIME_WAIT, socket tuning | 19 |
 | `udp_and_quic/` | UDP characteristics, QUIC 0-RTT, HTTP/3, DTLS | 16 |
-| `http_protocols/` | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS | 15 |
+| `http_protocols/` | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS; `transport_security_frontier.md` (post-quantum TLS, ECH, QUIC multipath, cert-lifetime compression) | 31 |
 
 ### Phase 2 — API Design & Protocols
 
@@ -28,10 +32,10 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 18 |
 | `api_contracts_and_schema_governance/` | OpenAPI 3.2, AsyncAPI 3.1, Spectral/oasdiff/buf gates, compatibility modes, Deprecation/Sunset | 18 |
-| `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 |
+| `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines; `connect_and_browser_rpc.md` | 31 |
 | `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 |
 | `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 |
-| `webhooks_and_event_delivery/` | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 18 |
+| `webhooks_and_event_delivery/` | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 20 |
 
 ### Phase 3 — Performance Engineering
 
@@ -48,7 +52,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 |
 | `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 17 |
 | `async_and_concurrency_patterns/` | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 |
-| `serving_ai_workloads/` | Streaming transport, admission control, cancellation, per-tenant token budgets, GPU queueing | 18 |
+| `serving_ai_workloads/` | Streaming transport, admission control, cancellation, per-tenant token budgets, GPU queueing | 19 |
 
 ### Phase 4 — Database Engineering (overview; `database/` has the deep-dives)
 
@@ -68,14 +72,15 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `fault_tolerance_patterns/` | Circuit breaker states, Resilience4j, retry with jitter, bulkhead | 15 |
 | `rate_limiting_in_depth/` | Token bucket, sliding window, Redis Lua, adaptive throttling | 17 |
-| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 17 |
+| `multi_tenancy_and_isolation/` | Pooled vs bridge vs silo, tenant routing, noisy-neighbour containment, shuffle sharding, per-tenant SLOs | 17 |
+| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI; `modern_otel_stack.md` | 33 |
 
 ### Phase 6 — Security
 
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `backend_security_owasp/` | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 |
-| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 24 |
+| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation; `passkeys_and_authn_frontier.md` | 40 |
 
 ### Phase 7 — Testing & Quality
 
@@ -96,6 +101,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 20 |
 | `rabbitmq_deep_dive/` | AMQP object model, confirms vs transactions, quorum queues (Raft), streams, prefetch, DLX, Khepri | 42 |
 | `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 16 |
+| `durable_execution_and_workflows/` | Deterministic replay, event-history workflows, Temporal/Restate, activity retries, versioning a running workflow | 20 |
 | `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 18 |
 
 ### Phase 9 — Microservices Architecture
@@ -103,8 +109,8 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `microservices_fundamentals/` | Decomposition, bounded contexts, data ownership, strangler fig | 15 |
-| `api_gateway_patterns/` | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong | 15 |
-| `service_mesh_and_service_discovery/` | Istio/Envoy, mTLS, service discovery mechanisms, health probes | 16 |
+| `api_gateway_patterns/` | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong; `gateway_api_and_modern_proxies.md` | 31 |
+| `service_mesh_and_service_discovery/` | Istio/Envoy, mTLS, service discovery mechanisms, health probes; `ambient_mesh_and_workload_identity.md` | 33 |
 | `distributed_system_operational_patterns/` | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 16 |
 | `container_and_deployment_patterns/` | 12-factor, Docker multi-stage, Kubernetes strategies, HPA, PDB | 16 |
 
@@ -113,7 +119,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 50 modules = the "9-Phase Learning Path")
-plus two curated tiers: **Senior** (22 modules) and **Principal** (18). They are
+plus two curated tiers: **Senior** (32 modules) and **Principal** (30). They are
 different cuts, not nested depths — senior is the craft (build it, debug it at 3am),
 principal is the judgment (which approach at what cost, what you tell a team *not* to
 do), so principal is usually the smaller list and much of it is material senior never
@@ -130,7 +136,7 @@ The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` ma
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
 are tiered the same way, from the same block in `README.md` under the `case_studies`
-entry (3 senior / 3 principal) — `case_studies/case_studies.md` has no block of its own;
+entry (6 senior / 5 principal) — `case_studies/case_studies.md` has no block of its own;
 it is the learning-path index only. The tiers drive the Level filter on the game's Case
 Studies tab. The README also
 carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact).
@@ -148,6 +154,11 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | `design_payment_processor/` | Saga orchestration, outbox pattern, idempotency keys |
 | `design_event_driven_order_system/` | CQRS, Kafka EOS, transactional outbox, DLQ handling |
 | `design_microservices_migration/` | Strangler fig, shared DB migration, traffic cutover |
+| `design_llm_serving_api/` | Continuous batching, GPU capacity from Little's Law, streaming transport, token budgets |
+| `design_webhook_delivery_service/` | Per-endpoint isolation, retry ladders, HMAC signing, SSRF defence, Little's Law fleet sizing |
+| `design_rate_limiter_service/` | Distributed token bucket, Redis Lua atomicity, cell-local vs global counters |
+| `design_multi_tenant_saas_backend/` | Pooled/bridge/silo tiers, shuffle sharding, per-tenant quotas, tenant offboarding |
+| `design_continuous_performance_platform/` | Benchmark result stores, change-point detection, statistical bisect, canary analysis |
 
 ---
 

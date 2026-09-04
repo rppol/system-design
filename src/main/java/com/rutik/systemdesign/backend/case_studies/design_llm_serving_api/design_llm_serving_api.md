@@ -117,10 +117,14 @@ Avg input tokens/sec (prefill work, not a steady rate but a load proxy):
 ### GPU Count — Two Independent Derivations That Should Agree
 
 **Assumption (stated, not sourced — no vendor publishes a single "tokens/sec/GPU" number
-because it depends on model size, batch composition, and sequence-length mix):** a 70B-class
-model on one H100 80GB, served with continuous batching at roughly 90 concurrent sequences,
-sustains **~3,000 output tokens/sec aggregate** at a TPOT around 30 ms/token per sequence
-(90 seqs x 33.3 tok/s ≈ 3,000 tok/s). Every downstream number in this section inherits this
+because it depends on model size, batch composition, and sequence-length mix):** the serving unit is a
+**tensor-parallel pair of H100 80GB** running a 70B-class model **quantized to FP8**. The pair,
+not the card, is the unit for a reason: 70B parameters at fp16 is ~140 GB of weights and does not
+fit on one 80 GB GPU at all, and even at FP8 (~70 GB) a single card has nothing left for the KV
+cache. Across two cards FP8 weights cost ~35 GB each, leaving ~45 GB per card for KV cache and
+activations. Such a pair, with continuous batching at roughly 180 concurrent sequences, sustains
+**~6,000 output tokens/sec aggregate** at a TPOT around 30 ms/token per sequence
+(180 seqs x 33.3 tok/s ≈ 6,000 tok/s), i.e. **~3,000 tok/s per GPU**. Every downstream number in this section inherits this
 assumption; replace it with a measured number from a load test before trusting it for a real
 capacity plan.
 

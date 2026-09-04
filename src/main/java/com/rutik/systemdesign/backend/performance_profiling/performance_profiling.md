@@ -194,19 +194,19 @@ not a tuning problem.
 
 ```bash
 # Attach to running JVM (PID 12345) for 30 seconds
-./profiler.sh -d 30 -f /tmp/flamegraph.html 12345
+asprof -d 30 -f /tmp/flamegraph.html 12345
 
 # CPU profiling with 1ms interval (production-safe)
-./profiler.sh -e cpu -i 1ms -d 60 -f /tmp/cpu.html 12345
+asprof -e cpu -i 1ms -d 60 -f /tmp/cpu.html 12345
 
 # Allocation profiling (track allocations, every 512KB sample)
-./profiler.sh -e alloc -i 512k -d 60 -f /tmp/alloc.html 12345
+asprof -e alloc -i 512k -d 60 -f /tmp/alloc.html 12345
 
 # Lock contention profiling
-./profiler.sh -e lock -d 60 -f /tmp/lock.html 12345
+asprof -e lock -d 60 -f /tmp/lock.html 12345
 
 # Wall clock profiling (includes threads waiting for I/O)
-./profiler.sh -e wall -d 60 -f /tmp/wall.html 12345
+asprof -e wall -d 60 -f /tmp/wall.html 12345
 # Useful for identifying latency from I/O, not just CPU hotspots
 ```
 
@@ -419,7 +419,7 @@ Traditional JVM profilers (VisualVM, JProfiler with some modes) take stack sampl
 **Q: How do you diagnose a memory leak in a Java application?**
 **Short:** Diagnose a memory leak by comparing heap histograms over time and analyzing a full heap dump's dominator tree for growth.
 
-(1) Take a heap histogram: `jcmd <pid> GC.heap_info` or `jmap -histo:live <pid>`. Look for unexpected object counts growing over time. (2) Compare two heap histograms taken minutes apart — objects growing are suspects. (3) Take a full heap dump and analyze in Eclipse MAT: the Dominator Tree shows which objects hold the most memory; Leak Suspects report automates analysis. (4) Look for classic patterns: static collections growing, ThreadLocal not removed, listeners not unregistered, session objects accumulating.
+(1) Take a heap histogram: `jcmd <pid> GC.class_histogram` or `jmap -histo:live <pid>` (`GC.heap_info` is a different command — it prints generation capacity and occupancy, not per-class counts). Look for unexpected object counts growing over time. (2) Compare two heap histograms taken minutes apart — objects growing are suspects. (3) Take a full heap dump and analyze in Eclipse MAT: the Dominator Tree shows which objects hold the most memory; Leak Suspects report automates analysis. (4) Look for classic patterns: static collections growing, ThreadLocal not removed, listeners not unregistered, session objects accumulating.
 
 **Q: How do you read a flamegraph?**
 **Short:** A flamegraph's x-axis is time spent, and its widest top-of-stack frames reveal the hottest executing methods.
@@ -439,7 +439,7 @@ Use async-profiler with `-e alloc`: samples allocation sites, showing which code
 **Q: What is the difference between heap dump and heap histogram?**
 **Short:** A heap histogram is a fast, low-impact object-count snapshot; a full heap dump captures every object reference for deep analysis.
 
-A heap histogram (jmap -histo or jcmd GC.heap_info) lists object counts and sizes by class — fast (seconds), low impact. Good for initial diagnosis. A full heap dump (jmap -dump or -XX:+HeapDumpOnOutOfMemoryError) captures the entire heap with object references — can take seconds to minutes for large heaps, requires significant disk space (heap size bytes), and pauses the JVM during dump (for jmap; JFR heap dumps are asynchronous). Use histogram first; full dump for deep investigation.
+A heap histogram (`jmap -histo` or `jcmd <pid> GC.class_histogram`) lists object counts and sizes by class — fast (seconds), low impact. Good for initial diagnosis. A full heap dump (jmap -dump or -XX:+HeapDumpOnOutOfMemoryError) captures the entire heap with object references — can take seconds to minutes for large heaps, requires significant disk space (heap size bytes), and pauses the JVM during dump (for jmap; JFR heap dumps are asynchronous). Use histogram first; full dump for deep investigation.
 
 **Q: How do you diagnose thread contention?**
 **Short:** Diagnose thread contention with a thread dump's BLOCKED count and async-profiler's lock event to find the hot lock.
@@ -471,7 +471,7 @@ async-profiler is a low-overhead profiler for Java that uses AsyncGetCallTrace (
 **Q: How do you find the root cause of a garbage collection spike?**
 **Short:** Find a GC spike's cause by checking the GC log's event type and heap occupancy, then profiling allocation for a young GC spike.
 
-(1) Check GC logs for the spike: what GC event type (Young, Mixed, Full)? What was the heap occupancy before and after? (2) Full GC: old generation full — memory pressure, possibly a leak. (3) Young GC spike: high allocation rate, possibly a hot code path creating many objects. Use async-profiler `-e alloc` to find the allocation site. (4) Check promotion rate — if young objects are surviving to old gen quickly, the survivor spaces are too small (increase -XX:SurvivorRatio) or objects live too long. (5) Check for humongous object allocations (objects > half a G1 region, default 1 MB/2 = 512 KB) — these bypass young gen and go directly to old gen.
+(1) Check GC logs for the spike: what GC event type (Young, Mixed, Full)? What was the heap occupancy before and after? (2) Full GC: old generation full — memory pressure, possibly a leak. (3) Young GC spike: high allocation rate, possibly a hot code path creating many objects. Use async-profiler `-e alloc` to find the allocation site. (4) Check promotion rate — if young objects are surviving to old gen quickly, the survivor spaces are too small — **lower** `-XX:SurvivorRatio`, which is the eden-to-survivor size ratio, so a smaller value means larger survivor spaces (raising it shrinks them) — or objects genuinely live too long, in which case raise `-XX:MaxTenuringThreshold`. (5) Check for humongous object allocations (objects > half a G1 region, default 1 MB/2 = 512 KB) — these bypass young gen and go directly to old gen.
 
 **Q: What is the difference between wall-clock profiling and CPU profiling?**
 **Short:** CPU profiling samples only running threads, while wall-clock profiling also captures threads blocked or waiting on I/O.
@@ -481,7 +481,7 @@ CPU profiling (`-e cpu`) samples threads only when they are running on CPU (RUNN
 **Q: How do you detect and fix high allocation pressure?**
 **Short:** Detect high allocation with async-profiler's alloc event, then fix it with object pooling and primitives in hot paths.
 
-Detection: async-profiler `-e alloc` shows top allocation sites. JFR's jdk.ObjectAllocationInNewTLAB shows allocations per code path. GC frequency > once every 5 seconds for a typical service indicates high allocation. Fix strategies: (1) Object pooling for frequently created/destroyed objects (e.g., StringBuilder, ByteBuffer, database result objects). (2) Replace boxed types with primitives in hot paths (Integer → int, HashMap<Long,Long> → use a primitive map library). (3) Reduce intermediate object creation in streams/lambdas (use traditional for-loops for allocation-sensitive code). (4) Escape analysis: the JVM may already eliminate allocations (stack allocation) for short-lived objects — check with JFR AllocationInOldGen event.
+Detection: async-profiler `-e alloc` shows top allocation sites. JFR's jdk.ObjectAllocationInNewTLAB shows allocations per code path. GC frequency > once every 5 seconds for a typical service indicates high allocation. Fix strategies: (1) Object pooling for frequently created/destroyed objects (e.g., StringBuilder, ByteBuffer, database result objects). (2) Replace boxed types with primitives in hot paths (Integer → int, HashMap<Long,Long> → use a primitive map library). (3) Reduce intermediate object creation in streams/lambdas (use traditional for-loops for allocation-sensitive code). (4) Escape analysis: the JVM may already eliminate short-lived non-escaping allocations by scalar replacement, and an eliminated allocation is emitted by no JFR event at all — so a path that looks allocation-heavy in source but never appears under `jdk.ObjectAllocationSample` is most likely already optimized away, and adding a pool there buys nothing.
 
 **Q: What production signals indicate a need for profiling?**
 **Short:** High CPU without high throughput, growing heap usage, low GC throughput, and a widening p99-to-p50 gap all signal profiling is needed.

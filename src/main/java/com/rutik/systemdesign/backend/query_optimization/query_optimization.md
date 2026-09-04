@@ -475,21 +475,37 @@ public void batchInsert(List<Order> orders) {
 }
 
 // For very large inserts (millions of rows): use COPY with PostgreSQL.
-// CopyManager.copyIn(String, Reader) is declared "throws SQLException, IOException" --
-// both must be handled or rethrown or this will not compile.
-public void bulkCopy(List<Order> orders) throws SQLException, IOException {
-    Connection conn = dataSource.getConnection();
-    CopyManager copyManager = new CopyManager((BaseConnection) conn);
-    StringBuilder sb = new StringBuilder();
-    for (Order order : orders) {
-        sb.append(order.getUserId()).append('\t')
-          .append(order.getAmount()).append('\t')
-          .append(order.getStatus()).append('\n');
+// Two things this has to get right to survive "millions of rows":
+//   1. Take an Iterator, and stream in fixed-size chunks. Buffering every row into one
+//      StringBuilder (or accepting a fully materialized List) is an OOM at this size --
+//      the whole point of COPY is that neither side has to hold the set.
+//   2. Close the Connection. try-with-resources, always: a leaked pooled connection here
+//      is not a slow query, it is a pool exhausted after N bulk loads and every unrelated
+//      request in the service blocking on getConnection().
+public long bulkCopy(Iterator<Order> orders) throws SQLException {
+    try (Connection conn = dataSource.getConnection()) {
+        CopyManager copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
+        CopyIn copyIn = copyManager.copyIn("COPY orders (user_id, amount, status) FROM STDIN");
+        StringBuilder buf = new StringBuilder(64 * 1024);
+        while (orders.hasNext()) {
+            Order order = orders.next();
+            buf.append(order.getUserId()).append('\t')
+               .append(order.getAmount()).append('\t')
+               .append(order.getStatus()).append('\n');
+            if (buf.length() >= 64 * 1024) {
+                flush(copyIn, buf);
+            }
+        }
+        flush(copyIn, buf);
+        return copyIn.endCopy();          // rows actually written
     }
-    copyManager.copyIn(
-        "COPY orders (user_id, amount, status) FROM STDIN",
-        new StringReader(sb.toString())
-    );
+}
+
+private void flush(CopyIn copyIn, StringBuilder buf) throws SQLException {
+    if (buf.isEmpty()) return;
+    byte[] chunk = buf.toString().getBytes(StandardCharsets.UTF_8);
+    copyIn.writeToCopy(chunk, 0, chunk.length);
+    buf.setLength(0);
 }
 ```
 

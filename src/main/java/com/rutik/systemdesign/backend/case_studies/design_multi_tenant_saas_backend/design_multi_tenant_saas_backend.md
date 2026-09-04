@@ -820,8 +820,9 @@ no corresponding traffic increase platform-wide.
 2. Confirm with the per-org rate-limit dashboard: a bulk import or webhook replay shows as a
    sustained request-count plateau, not a single spike.
 3. Immediate mitigation: apply a temporary tighter `Bulkhead` limit scoped to that tenant's two
-   partitions only — every other tenant in the cell, including the ~63% who share at least one
-   partition but not both, is unaffected by this step.
+   partitions only. Read the §4.4 combinatorics the right way round: ~62% of the cell's tenants
+   share **neither** partition and never touch it, ~36% share exactly one and still have their
+   second partition at full capacity, and only the ~2% on the identical pair are fully exposed.
 4. If the tenant's legitimate workload has simply outgrown the Standard tier, open a promotion
    to Premium/Bridge (§4.6's migration workflow, shorter path since it stays pooled) rather than
    repeatedly tuning around it.

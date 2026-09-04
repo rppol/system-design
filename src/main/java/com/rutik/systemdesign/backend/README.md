@@ -338,7 +338,9 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 
 ---
 
-## Module Table — 35 Modules
+## Module Table — 50 Modules
+
+The **Q&As** column is the module total: the module page plus every deep-dive sub-file it owns.
 
 ### Phase 1 — Networking Fundamentals (MAJOR DEEP DIVE)
 
@@ -347,16 +349,18 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | [OSI Model & Networking](osi_model_and_networking/osi_model_and_networking.md) | 7 layers, TCP/IP mapping, packet encapsulation, ARP, NAT, MTU | 15 | Intermediate |
 | [TCP/IP Deep Dive](tcp_ip_deep_dive/tcp_ip_deep_dive.md) | 3-way handshake, congestion control, TIME_WAIT, socket tuning | 19 | Advanced |
 | [UDP & QUIC](udp_and_quic/udp_and_quic.md) | UDP characteristics, QUIC 0-RTT, HTTP/3, DTLS | 16 | Intermediate |
-| [HTTP Protocols](http_protocols/http_protocols.md) | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS | 15 | Intermediate |
+| [HTTP Protocols](http_protocols/http_protocols.md) | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS; `transport_security_frontier.md` | 31 | Intermediate |
 
 ### Phase 2 — API Design & Protocols (DEEP DIVE)
 
 | Module | Topic | Q&As | Difficulty |
 |--------|-------|------|------------|
 | [REST API Design](rest_api_design/rest_api_design.md) | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 18 | Intermediate |
-| [gRPC & Protobuf](grpc_and_protobuf/grpc_and_protobuf.md) | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 | Advanced |
+| [API Contracts & Schema Governance](api_contracts_and_schema_governance/api_contracts_and_schema_governance.md) | OpenAPI 3.2, AsyncAPI 3.1, Spectral/oasdiff/buf gates, compatibility modes, Deprecation/Sunset | 18 | Advanced |
+| [gRPC & Protobuf](grpc_and_protobuf/grpc_and_protobuf.md) | Protobuf wire format, 4 RPC modes, interceptors, deadlines; `connect_and_browser_rpc.md` | 31 | Advanced |
 | [GraphQL](graphql/graphql.md) | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 | Intermediate |
 | [WebSockets & SSE](websockets_and_sse/websockets_and_sse.md) | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 | Intermediate |
+| [Webhooks & Event Delivery](webhooks_and_event_delivery/webhooks_and_event_delivery.md) | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 20 | Advanced |
 
 ### Phase 3 — Performance Engineering
 
@@ -373,6 +377,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | [Connection Pooling Deep Dive](connection_pooling_deep_dive/connection_pooling_deep_dive.md) | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 | Advanced |
 | [Caching Strategies Deep Dive](caching_strategies_deep_dive/caching_strategies_deep_dive.md) | Cache-aside/read-through/write-behind, stampede, Redis structures | 17 | Advanced |
 | [Async & Concurrency Patterns](async_and_concurrency_patterns/async_and_concurrency_patterns.md) | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 | Advanced |
+| [Serving AI Workloads](serving_ai_workloads/serving_ai_workloads.md) | Streaming transport, admission control, cancellation, per-tenant token budgets, GPU queueing | 19 | Advanced |
 
 ### Phase 4 — Database Engineering
 
@@ -392,7 +397,8 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 |--------|-------|------|------------|
 | [Fault Tolerance Patterns](fault_tolerance_patterns/fault_tolerance_patterns.md) | Circuit breaker states, Resilience4j, retry with jitter, bulkhead | 15 | Advanced |
 | [Rate Limiting In Depth](rate_limiting_in_depth/rate_limiting_in_depth.md) | Token bucket, sliding window, Redis Lua, adaptive throttling | 17 | Advanced |
-| [Observability & Monitoring](observability_and_monitoring/observability_and_monitoring.md) | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 17 | Advanced |
+| [Multi-Tenancy & Isolation](multi_tenancy_and_isolation/multi_tenancy_and_isolation.md) | Pooled vs bridge vs silo, tenant routing, noisy-neighbour containment, shuffle sharding, per-tenant SLOs | 17 | Expert |
+| [Observability & Monitoring](observability_and_monitoring/observability_and_monitoring.md) | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI; `modern_otel_stack.md` | 33 | Advanced |
 
 ### Phase 6 — Security
 
@@ -420,6 +426,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | [Kafka Deep Dive](kafka_deep_dive/kafka_deep_dive.md) | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 20 | Expert |
 | [RabbitMQ Deep Dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | AMQP object model, confirms vs transactions, quorum queues, streams, prefetch, DLX, Khepri | 42 | Expert |
 | [Event Sourcing & CQRS](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | Event store, aggregates, snapshots, CQRS read models, Axon | 16 | Expert |
+| [Durable Execution & Workflows](durable_execution_and_workflows/durable_execution_and_workflows.md) | Deterministic replay, event-history workflows, Temporal/Restate, activity retries, versioning a running workflow | 20 | Expert |
 | [Messaging Patterns](messaging_patterns/messaging_patterns.md) | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 18 | Advanced |
 
 ### Phase 9 — Microservices Architecture (MAJOR DEEP DIVE)
@@ -427,8 +434,8 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | Module | Topic | Q&As | Difficulty |
 |--------|-------|------|------------|
 | [Microservices Fundamentals](microservices_fundamentals/microservices_fundamentals.md) | Decomposition, bounded contexts, data ownership, strangler fig | 15 | Intermediate |
-| [API Gateway Patterns](api_gateway_patterns/api_gateway_patterns.md) | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong | 15 | Advanced |
-| [Service Mesh & Service Discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | Istio/Envoy, mTLS, service discovery mechanisms, health probes | 16 | Advanced |
+| [API Gateway Patterns](api_gateway_patterns/api_gateway_patterns.md) | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong; `gateway_api_and_modern_proxies.md` | 31 | Advanced |
+| [Service Mesh & Service Discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | Istio/Envoy, mTLS, service discovery mechanisms, health probes; `ambient_mesh_and_workload_identity.md` | 33 | Advanced |
 | [Distributed System Operational Patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 16 | Advanced |
 | [Container & Deployment Patterns](container_and_deployment_patterns/container_and_deployment_patterns.md) | 12-factor, Docker multi-stage, Kubernetes strategies, HPA, PDB | 16 | Advanced |
 
@@ -443,6 +450,11 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 | [Design a Payment Processor](case_studies/design_payment_processor/design_payment_processor.md) | Payment saga with rollback | Saga orchestration, outbox pattern, idempotency keys |
 | [Design an Event-Driven Order System](case_studies/design_event_driven_order_system/design_event_driven_order_system.md) | Order lifecycle via Kafka | CQRS, Kafka EOS, transactional outbox, DLQ handling |
 | [Design a Microservices Migration](case_studies/design_microservices_migration/design_microservices_migration.md) | Strangler fig from monolith | Decomposition steps, shared DB migration, traffic cutover |
+| [Design an LLM Serving API](case_studies/design_llm_serving_api/design_llm_serving_api.md) | Token-streaming inference at scale | Continuous batching, GPU sizing from Little's Law, admission control |
+| [Design a Webhook Delivery Service](case_studies/design_webhook_delivery_service/design_webhook_delivery_service.md) | At-least-once outbound delivery | Per-endpoint isolation, retry ladders, HMAC signing, SSRF defence |
+| [Design a Rate Limiter Service](case_studies/design_rate_limiter_service/design_rate_limiter_service.md) | Shared limiter for many callers | Distributed token bucket, Redis Lua atomicity, cell-local vs global counters |
+| [Design a Multi-Tenant SaaS Backend](case_studies/design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md) | Tenant isolation across tiers | Pooled/bridge/silo, shuffle sharding, per-tenant quotas and offboarding |
+| [Design a Continuous Performance Platform](case_studies/design_continuous_performance_platform/design_continuous_performance_platform.md) | Regression detection in CI | Benchmark result stores, change-point detection, statistical bisect, canary analysis |
 
 ---
 

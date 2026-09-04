@@ -1,12 +1,12 @@
 # Transport Security Frontier: Post-Quantum TLS, ECH, and QUIC Multipath
 
-The parent module and its sibling [UDP & QUIC](../udp_and_quic/udp_and_quic.md) cover TLS 1.3's handshake, ALPN, SNI, and QUIC's connection-migration basics — but neither names the four things reshaping transport security handling right now: quantum-resistant key exchange, hiding the hostname itself, using more than one network path at once, and a certificate lifetime that is about to collapse from a year to under two months. This deep-dive covers those four, what a backend team actually has to change for each, and how to verify the claims yourself rather than trust a blog post.
+The parent module and its sibling [UDP & QUIC](../udp_and_quic/udp_and_quic.md) cover TLS 1.3's handshake, ALPN, SNI, and QUIC's connection-migration basics — but neither names the four things reshaping transport security handling right now: quantum-resistant key exchange, hiding the hostname itself, using more than one network path at once, and a certificate lifetime already cut to 200 days and headed for under two months. This deep-dive covers those four, what a backend team actually has to change for each, and how to verify the claims yourself rather than trust a blog post.
 
 ---
 
 ## 1. Concept Overview
 
-Four independent, mostly-unrelated changes are landing on the TLS/QUIC stack at once. **Post-quantum key exchange** (a hybrid of classical elliptic-curve Diffie-Hellman and a NIST-standardized lattice algorithm) is already the default for most browser-to-CDN traffic, defending against an attacker who records encrypted traffic today to decrypt it once a cryptographically relevant quantum computer exists. **Encrypted Client Hello (ECH)** hides the one plaintext field TLS 1.3 still leaked — the hostname — by encrypting the real ClientHello inside a decoy outer one. **QUIC multipath** extends QUIC's existing single-path connection-migration trick (already free, already in RFC 9000) into genuinely using two network paths — Wi-Fi and cellular — at the same time, and it is not yet a finished standard. **Certificate lifetime compression**, driven by a CA/Browser Forum ballot rather than a protocol change, is shrinking the maximum TLS certificate validity from 398 days today to 47 days by 2029, which makes manual certificate renewal operationally impossible and ACME automation mandatory.
+Four independent, mostly-unrelated changes are landing on the TLS/QUIC stack at once. **Post-quantum key exchange** (a hybrid of classical elliptic-curve Diffie-Hellman and a NIST-standardized lattice algorithm) is already the default for most browser-to-CDN traffic, defending against an attacker who records encrypted traffic today to decrypt it once a cryptographically relevant quantum computer exists. **Encrypted Client Hello (ECH)** hides the one plaintext field TLS 1.3 still leaked — the hostname — by encrypting the real ClientHello inside a decoy outer one. **QUIC multipath** extends QUIC's existing single-path connection-migration trick (already free, already in RFC 9000) into genuinely using two network paths — Wi-Fi and cellular — at the same time, and it is not yet a finished standard. **Certificate lifetime compression**, driven by a CA/Browser Forum ballot rather than a protocol change, has already cut the maximum TLS certificate validity from 398 days to **200 days**, in force since 15 March 2026, and takes it to 47 days by 2029 — which makes manual certificate renewal operationally impossible and ACME automation mandatory.
 
 None of these four is optional infrastructure work a backend team can defer indefinitely — the first two are already live in the browsers and CDNs your users connect through today, whether or not your own stack has adopted them.
 
@@ -67,8 +67,8 @@ CA/Browser Forum **Ballot SC-081v3** passed April 2025 (29 in favor, 0 opposed; 
 
 | Effective date | Max certificate validity | Max domain-validation (DCV) reuse |
 |---|---|---|
-| Today (pre-ballot baseline) | 398 days | 398 days |
-| March 15, 2026 | 200 days | shortened per schedule |
+| Pre-ballot baseline (through 14 March 2026) | 398 days | 398 days |
+| March 15, 2026 — **in force today** | **200 days** | shortened per schedule |
 | March 15, 2027 | 100 days | shortened per schedule |
 | March 15, 2029 | **47 days** | **10 days** |
 
@@ -241,7 +241,7 @@ openssl s_client -connect lb.example.com:443 -groups X25519MLKEM768 -tls1_3 </de
 
 **Do not architect around QUIC multipath yet.** It is not standardized; building a system that depends on simultaneous dual-path QUIC today means depending on an Internet-Draft that could still change before becoming an RFC. Track it, do not deploy against it in production.
 
-**Start building or verifying your ACME automation now, regardless of your current certificate lifetime** — by the 2029 deadline, 47-day certificates make manual renewal impossible at any scale beyond a handful of hosts, and the 2026/2027 intermediate steps (200 days, then 100 days) are close enough that the automation work should already be in progress, not deferred until the deadline is imminent.
+**Start building or verifying your ACME automation now, regardless of your current certificate lifetime** — by the 2029 deadline, 47-day certificates make manual renewal impossible at any scale beyond a handful of hosts, and the intermediate steps have already started biting — the 200-day cap has been in force since 15 March 2026 and the 100-day cap lands 15 March 2027 — so the automation work belongs in progress now, not deferred until the deadline is imminent.
 
 ---
 
@@ -255,7 +255,7 @@ openssl s_client -connect lb.example.com:443 -groups X25519MLKEM768 -tls1_3 </de
 
 **Treating QUIC connection migration and QUIC multipath as the same feature.** Migration (one active path, can switch) has been standard since RFC 9000 and needs nothing from a backend team beyond running QUIC at all. Multipath (multiple simultaneous active paths) is still a draft. A design doc that says "QUIC gives us multipath for free" is describing the wrong feature — it has migration for free; multipath is neither free nor finished.
 
-**Discovering the certificate-lifetime ballot only when a renewal fails.** A team running certificates issued under the current 398-day maximum, with a manual or semi-manual renewal process, has years of runway before the 47-day endpoint bites — but the 200-day step lands March 2026 and the 100-day step March 2027, which is close enough that manual processes tuned for "renew once a year, comfortably" will start missing windows well before the 2029 deadline if automation isn't already in place.
+**Discovering the certificate-lifetime ballot only when a renewal fails.** A team with a manual or semi-manual renewal process has years of runway before the 47-day endpoint bites — but the 200-day cap has been in force since 15 March 2026 and the 100-day cap lands 15 March 2027, so a process tuned for "renew once a year, comfortably" is already missing windows, not about to. Any certificate issued today expires inside seven months whether or not the runbook was updated.
 
 ---
 
@@ -317,14 +317,14 @@ Russia's Roskomnadzor began blocking a specific network-level signature — Clou
 QUIC's connection IDs (RFC 9000, already standardized) decouple a connection's identity from any single IP/port tuple, letting a client's connection survive switching networks — Wi-Fi to cellular — by migrating to a new path, one active path at a time, with essentially no application-visible interruption. This has been in the base spec since QUIC's original standardization. Multipath is a materially different, larger claim: using two or more paths *simultaneously* for the same connection, each with independent congestion-control state, roughly analogous to Multipath TCP. That capability is specified in `draft-ietf-quic-multipath`, which remained a late-stage IETF Internet-Draft, not yet an RFC, as of this writing — do not describe it as standardized.
 
 **Q: What does the CA/Browser Forum's Ballot SC-081v3 actually change, and by when?**
-**Short:** It phases the max public TLS certificate lifetime down from 398 to 47 days by March 2029.
+**Short:** It steps the max public TLS certificate lifetime down from 398 days to 200 (in force since March 2026), 100 in 2027, and 47 in 2029.
 
 Ballot SC-081v3, passed by the CA/Browser Forum in April 2025 with unanimous support from Apple, Google, Mozilla, and Microsoft, sets a phased schedule reducing the maximum validity period of a publicly trusted TLS certificate: 200 days starting March 15, 2026; 100 days starting March 15, 2027; and 47 days starting March 15, 2029, alongside a matching reduction in how long domain-control validation can be reused before it must be repeated. This is a CA/Browser Forum governance decision, not a TLS protocol RFC — it changes an operational deadline every publicly trusted certificate is subject to, not the wire format.
 
 **Q: Why does the shortening certificate-lifetime schedule make ACME automation mandatory rather than merely convenient?**
 **Short:** At 47 days per certificate, manual renewal cannot keep pace at any meaningful scale without near-certain outages.
 
-A team manually renewing certificates on a roughly annual cadence has enough slack to survive occasional lapses in process discipline. At a 47-day maximum lifetime, a single missed renewal window causes an outage within weeks rather than months, and any fleet larger than a handful of hosts makes tracking renewal dates by hand infeasible. ACME (the protocol behind Let's Encrypt and most modern CAs' automated issuance) turns renewal into a scheduled, unattended job — the practical response to the ballot's schedule is standing up or verifying an ACME pipeline well before the 2029 deadline, not scaling up a manual process that was already fragile at 398 days.
+A team manually renewing certificates on a roughly annual cadence has enough slack to survive occasional lapses in process discipline. At a 47-day maximum lifetime, a single missed renewal window causes an outage within weeks rather than months, and any fleet larger than a handful of hosts makes tracking renewal dates by hand infeasible. ACME (the protocol behind Let's Encrypt and most modern CAs' automated issuance) turns renewal into a scheduled, unattended job — the practical response to the ballot's schedule is standing up or verifying an ACME pipeline well before the 2029 deadline, not scaling up a manual process that is already fragile at today's 200-day maximum.
 
 **Q: A backend engineer says "we need to add post-quantum key exchange to our microservice's HTTP client code." Is that usually correct?**
 **Short:** Usually no — PQ key exchange lives in the TLS library at the terminator, not in application code.

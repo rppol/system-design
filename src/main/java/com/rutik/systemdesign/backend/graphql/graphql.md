@@ -192,7 +192,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    C([Client]) --> GW["Apollo Gateway<br/>routes and composes"]
+    C([Client]) --> GW["Apollo Router<br/>routes and composes"]
     GW --> US["User Service<br/>owns User.id, name"]
     GW --> OS["Order Service<br/>extends User: orders"]
     GW --> PS["Product Service<br/>extends Order: items"]
@@ -451,10 +451,12 @@ sequenceDiagram
 
 The client sends only a hash at runtime; on a miss the server asks for the full query once, then remembers it under that hash for every later request.
 
-Benefits:
+The flow above is **Automatic Persisted Queries (APQ)**, and its benefits are purely about the wire:
+
 - GET requests (cacheable by CDN) for queries with persisted hashes
 - Reduced request payload size
-- Security: reject arbitrary query strings (only allow registered hashes)
+
+APQ gives you **no safelisting**. The server populates its APQ cache dynamically from whatever operation a client registers on a miss, so any client can register any query and then execute it by hash — the registry is a cache, not an allowlist. Safelisting comes from a separate mechanism: a **persisted query list (trusted documents)**, where a build step extracts the operations your first-party clients actually ship and publishes that list to the server, which then rejects every hash it was not given ahead of time. Because APQ lets clients register operations at runtime, you must turn APQ **off** for a trusted-document safelist to mean anything.
 
 ---
 
@@ -554,12 +556,12 @@ Schema stitching merges multiple GraphQL schemas at the gateway level using shar
 **Q: How do you prevent abuse of GraphQL with malicious queries?**
 **Short:** Guard against malicious GraphQL queries with depth limiting, complexity limiting, persisted queries, rate limiting, and disabled introspection.
 
-Bound every query before it executes, using five layers that each cap a different axis of cost. Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), query whitelisting / persisted queries (only allow registered query hashes in production), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
+Bound every query before it executes, using five layers that each cap a different axis of cost. Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), operation safelisting via trusted documents (a build-time persisted query list; not APQ, which registers whatever it is sent), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
 
 **Q: What are persisted queries and why are they used?**
 **Short:** Persisted queries send only a query hash at runtime, shrinking requests and letting a CDN cache GET requests.
 
-Persisted queries associate a hash (SHA-256 of the query string) with the full query on the server. Clients send only the hash at runtime. Benefits: (1) reduced request size; (2) GET requests with hash + variables are cacheable by CDN (unlike POST with full query body); (3) security — reject any query not in the registry, preventing query injection; (4) performance — queries can be pre-validated and pre-analyzed. Used in production by most large GraphQL deployments.
+Persisted queries associate a hash (SHA-256 of the query string) with the full query on the server, and clients send only the hash at runtime. Benefits: (1) reduced request size; (2) GET requests with hash + variables are cacheable by CDN, unlike a POST carrying the full query body; (3) performance — a registered operation can be pre-validated and pre-analyzed. The distinction that matters in production is which of the two variants you are running. **Automatic Persisted Queries (APQ)** register on a cache miss: the server stores whatever operation the client sends, so the registry is a cache and provides no security — any client can register any query and then run it by hash. **Trusted documents (a persisted query list)** are extracted from your clients at build time and published to the server ahead of any traffic, so the server can reject every hash it was not given; that is what delivers safelisting, and it requires APQ to be disabled, since APQ would otherwise let a caller add to the list at runtime.
 
 **Q: How do you implement pagination in GraphQL?**
 **Short:** Relay-style cursor connections are the GraphQL pagination standard, staying consistent under concurrent writes unlike offset pagination.
@@ -613,7 +615,7 @@ Field-level authorization is enforced per-field, either inside a resolver or via
 - Always use DataLoader for resolving related entities — no exceptions.
 - Set MaxQueryDepthInstrumentation (10 recommended) and MaxQueryComplexityInstrumentation (100–200 recommended) before going to production.
 - Disable introspection in production or restrict it to authenticated requests.
-- Use persisted queries in production for security and CDN cacheability.
+- Use persisted queries in production: APQ for CDN cacheability and smaller requests, and a build-time trusted-document list (with APQ off) when you need operation safelisting.
 - Follow Relay connection spec for paginated lists.
 - Deprecate, never remove fields; monitor usage with Apollo GraphOS Studio or similar.
 - Return structured errors with error codes in extensions: `{"code": "NOT_FOUND", "field": "userId"}`.
