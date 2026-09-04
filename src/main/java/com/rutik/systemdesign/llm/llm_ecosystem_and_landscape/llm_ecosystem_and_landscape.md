@@ -81,7 +81,7 @@ Claude Opus 5 (flagship for agentic coding and enterprise work):
 
 Claude Sonnet 5 (balanced):
   Near-Opus quality on coding and agentic work at Sonnet cost; 1M context
-  Cost: input $3/1M, output $15/1M
+  Cost: input $2/1M, output $10/1M   (prices as of 2026-09-04)
 
 Claude Haiku 4.5 (efficient):
   Fast and affordable; 200K context
@@ -251,8 +251,8 @@ quadrantChart
     "Claude Fable 5": [0.92, 0.97]
     "Claude Opus 5": [0.78, 0.95]
     "gpt-5.6-sol": [0.75, 0.93]
-    "Claude Sonnet 5": [0.62, 0.90]
-    "Gemini 3.1 Pro": [0.50, 0.88]
+    "Claude Sonnet 5": [0.45, 0.90]
+    "Gemini 3.1 Pro": [0.46, 0.88]
     "DeepSeek V4 self-hosted": [0.22, 0.85]
     "Mistral Large 3 self-hosted": [0.19, 0.78]
     "Llama 4 Maverick self-hosted": [0.16, 0.74]
@@ -261,7 +261,7 @@ quadrantChart
     "Gemini 3.5 Flash-Lite": [0.15, 0.50]
 ```
 
-The upper-left quadrant (high quality, low cost) is where self-hosted open-weight models sit — DeepSeek V4, Mistral Large 3 and Llama 4 buy most of the quality axis for infrastructure cost alone; frontier API models buy the top of that axis at 10-70x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (input price per 1M tokens, matching the Section 6 table): far left = free/self-hosted (infra cost only), ~0.15 = $0.20-$0.30 (gpt-5.4-nano, Gemini Flash-Lite), ~0.30 = $1 (Claude Haiku 4.5), ~0.6 = $3 (Sonnet 5), ~0.78 = $5 (Opus 5, gpt-5.6-sol), far right = $10 (Fable 5).
+The upper-left quadrant (high quality, low cost) is where self-hosted open-weight models sit — DeepSeek V4, Mistral Large 3 and Llama 4 buy most of the quality axis for infrastructure cost alone; frontier API models buy the top of that axis at 10-70x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (input price per 1M tokens, matching the Section 6 table): far left = free/self-hosted (infra cost only), ~0.15 = $0.20-$0.30 (gpt-5.4-nano, Gemini Flash-Lite), ~0.30 = $1 (Claude Haiku 4.5), ~0.45 = $2 (Sonnet 5, Gemini 3.1 Pro), ~0.78 = $5 (Opus 5, gpt-5.6-sol), far right = $10 (Fable 5). Sonnet 5 sits at $2 rather than the $3 once scheduled for 2026-09-01, which is why it plots left of the midline.
 
 ### LLM Timeline (Key Milestones)
 
@@ -317,6 +317,8 @@ flowchart TD
 
 ### Cost Analysis: API vs. Self-Hosted
 
+Prices as of 2026-09-04.
+
 | Provider | Model | Input $/1M | Output $/1M | Context |
 |----------|-------|-----------|------------|---------|
 | DeepSeek | deepseek-v4-flash | $0.14 | $0.28 | 1M |
@@ -327,9 +329,9 @@ flowchart TD
 | Anthropic | claude-haiku-4-5 | $1 | $5 | 200K |
 | OpenAI | gpt-5.6-luna | $1 | $6 | — |
 | Google | gemini-3.6-flash | $1.50 | $7.50 | — |
+| Anthropic | claude-sonnet-5 | $2 | $10 | 1M |
 | Google | gemini-3.1-pro (<=200K) | $2 | $12 | 1M |
 | OpenAI | gpt-5.6-terra / gpt-5.4 | $2.50 | $15 | — |
-| Anthropic | claude-sonnet-5 | $3 | $15 | 1M |
 | Anthropic | claude-opus-5 | $5 | $25 | 1M |
 | OpenAI | gpt-5.5 / gpt-5.6-sol | $5 | $30 | 1M |
 | Anthropic | claude-fable-5 | $10 | $50 | 1M |
@@ -366,7 +368,7 @@ though the table is identical.
     deepseek-v4-flash  1.0 x  $0.14 + 0.2 x  $0.28 =  $0.196
     gpt-5.4-nano       1.0 x  $0.20 + 0.2 x  $1.25 =  $0.450
     claude-haiku-4-5   1.0 x  $1.00 + 0.2 x  $5.00 =  $2.000
-    claude-sonnet-5    1.0 x  $3.00 + 0.2 x $15.00 =  $6.000
+    claude-sonnet-5    1.0 x  $2.00 + 0.2 x $10.00 =  $4.000
     gpt-5.6-sol        1.0 x  $5.00 + 0.2 x $30.00 = $11.000
     claude-fable-5     1.0 x $10.00 + 0.2 x $50.00 = $20.000
 
@@ -806,7 +808,7 @@ flowchart TD
 
 - LiteLLM as the abstraction layer: all model calls go through LiteLLM; swapping providers requires only config changes
 - Request classifier is a fine-tuned Llama 3.2 3B running locally; adds <20ms overhead; cost is negligible
-- Short copy: gpt-5.4-nano at $1.25/1M output is 12x cheaper than claude-sonnet-5 with acceptable quality
+- Short copy: gpt-5.4-nano at $1.25/1M output is 8x cheaper than claude-sonnet-5 with acceptable quality
 - Long-form: claude-sonnet-5 chosen over gpt-5.6-sol after domain eval showed 8% better user ratings on long-form narrative
 - Style analysis: batched offline; self-hosted Llama 3 8B fine-tuned on 500 brand style examples achieves 94% agreement with human raters at $0.10/1M tokens equivalent cost
 
@@ -846,14 +848,14 @@ Volume at scale: 5M tokens/day output
 Distribution: 70% short copy, 20% long-form, 10% style analysis
 
 Short copy: 3.5M tokens/day * $1.25/1M * 30 days = $131.25/month
-Long-form:  1.0M tokens/day * $15/1M   * 30 days = $450/month
+Long-form:  1.0M tokens/day * $10/1M   * 30 days = $300/month
 Style:      0.5M tokens/day * $0.10/1M * 30 days = $1.50/month
-Total:      ~$582.75/month
+Total:      ~$432.75/month
 
-Comparison: all traffic on claude-sonnet-5 ($15/1M output):
-  5M tokens/day * $15/1M * 30 days = $2,250/month
+Comparison: all traffic on claude-sonnet-5 ($10/1M output):
+  5M tokens/day * $10/1M * 30 days = $1,500/month
 
-Savings: $1,667/month (74% reduction)
+Savings: $1,067/month (71% reduction)
 Engineering cost of routing system: ~40 hours initial + 4 hours/month maintenance
 Payback period: < 1 month
 ```
@@ -862,11 +864,11 @@ Payback period: < 1 month
 
 - Alternative: use a single model for simplicity — valid at low volume (<500K tokens/day) where cost difference is below $100/month; routing adds complexity not worth the saving
 - Risk: quality regression if classifier misroutes — mitigated by logging all routing decisions and sampling 1% for human review weekly
-- Future: as open-weight 70B-class quality improves and self-hosting cost falls, migrate long-form from claude-sonnet-5 to self-hosted to eliminate the $450/month variable cost at high volume
+- Future: as open-weight 70B-class quality improves and self-hosting cost falls, migrate long-form from claude-sonnet-5 to self-hosted to eliminate the $300/month variable cost at high volume
 
 **Interview Discussion Points**
 
-- The 74% cost reduction is only realized if the classifier accurately routes queries — a 10% misroute rate on long-form queries to cheap models reduces output quality for those sessions
+- The 71% cost reduction is only realized if the classifier accurately routes queries — a 10% misroute rate on long-form queries to cheap models reduces output quality for those sessions
 - Domain evaluation was essential: initial assumption was the OpenAI flagship would win on long-form; the 100-sample domain eval revealed claude-sonnet-5 was consistently preferred by users on narrative continuity and brand voice adherence
 - The style analysis fine-tune required 500 labeled examples and 2 days of engineering; ROI was immediate since it replaced a manual human review step that was costing $1,500/month in contractor time
 

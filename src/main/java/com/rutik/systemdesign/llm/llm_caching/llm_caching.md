@@ -35,7 +35,8 @@ of this context? Only if all caches miss do you pay the full inference cost.
 questions — plan on 40-70% as a sizing heuristic, then measure your own logs, since nobody publishes
 these — are semantically equivalent to previously answered questions. For multi-user agents sharing
 a common system prompt, the identical prefix routinely dominates the input token count and is
-cache-read at 0.1x the base input price. Caching is usually the highest-ROI optimization available.
+cache-read at 0.1x the base input price (0.025x on Claude Fable 5.1 and Mythos 5.1). Caching is
+usually the highest-ROI optimization available.
 
 **Key insight:** The right cache for your workload depends on query distribution. Power-law query
 distributions (a few questions asked many times) favor exact and semantic caching. Token-repeat
@@ -102,7 +103,7 @@ with the same prefix skip the attention computation for the cached portion.
 
 | Provider | Feature | Cache-read price | Min cacheable tokens |
 |----------|---------|------------------|---------------------|
-| Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off); writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
+| Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off) on every model **except Claude Fable 5.1 and Mythos 5.1, which read at 0.025x — $0.25/1M against a $10/1M base**; writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
 | OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.50 in / $0.25 cached). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
 | Google Gemini | Implicit caching (on by default) plus explicit cache objects | 0.1x base input (Gemini 3.5/3.6 Flash: $1.50 in / $0.15 cached; 2.5 Pro: $1.25 / $0.125 under 200k, $2.50 / $0.25 above), **plus a storage rent no other provider charges** — $1.00 per 1M cached tokens per hour, $4.50 on 2.5 Pro. Flash-Lite on 3.5 has no caching at all | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
 
@@ -140,26 +141,26 @@ constant handed to you.
 |--------|---------------------|
 | `h` | Fraction of input tokens served from cache. A number from 0 to 1 |
 | `1 - h` | The share you still pay full freight on. Always the expensive half |
-| `p_cached` | Price per 1M cache-*read* tokens. $0.30/1M on Claude Sonnet 5; $1.25/1M on the legacy 0.5x-tier gpt-4o |
+| `p_cached` | Price per 1M cache-*read* tokens. $0.20/1M on Claude Sonnet 5; $1.25/1M on the legacy 0.5x-tier gpt-4o |
 | `p_full` | List price per 1M uncached input tokens. The number on the pricing page |
 | `E` | The blended price per 1M — the number that actually shows up on the invoice |
 | `S` | How much of the list price you avoided. What you should report, not the discount |
 
 **Walk one example.** The 70% prompt cache hit rate from the cost anchor in Section 1, priced on a
-0.1x cache-read tier and on a legacy 0.5x tier. (The Sonnet 5 figures below use its $3/$15 per MTok
-list price; introductory pricing of $2/$10 runs through 2026-08-31 and scales every dollar figure by
-2/3 while leaving every percentage unchanged, because reads and writes are fixed multiples of the
-base input price.)
+0.1x cache-read tier and on a legacy 0.5x tier. (Prices as of 2026-09-04: Sonnet 5 is $2/$10 per
+MTok. The $2/$10 rate launched as introductory pricing through 2026-08-31 and is now the standard
+price — the scheduled rise to $3/$15 was cancelled. Every percentage below is scale-invariant,
+because reads and writes are fixed multiples of the base input price.)
 
 ```
-  Claude Sonnet 5:   p_full = $3.00/1M, p_cached = $0.30/1M (0.1x), h = 0.70
+  Claude Sonnet 5:   p_full = $2.00/1M, p_cached = $0.20/1M (0.1x), h = 0.70
 
-      hit  portion:   0.70 x $0.30   =  $0.210
-      miss portion:   0.30 x $3.00   =  $0.900
+      hit  portion:   0.70 x $0.20   =  $0.140
+      miss portion:   0.30 x $2.00   =  $0.600
                                         -------
-      E                              =  $1.110   per 1M input tokens
+      E                              =  $0.740   per 1M input tokens
 
-      S = 1 - 1.110 / 3.00 = 0.63    ->  63% off the list price, NOT 90%
+      S = 1 - 0.740 / 2.00 = 0.63    ->  63% off the list price, NOT 90%
 
   Legacy 0.5x tier (gpt-4o):  p_full = $2.50/1M, p_cached = $1.25/1M, same h = 0.70
 
@@ -180,12 +181,12 @@ base input price.)
 
 **Why the `(1 - h)` term is the one that bites.** Because `p_full` is 10x `p_cached` on Claude, the
 miss portion dominates the blend long after the hit rate looks healthy. At `h = 0.70` the misses are
-30% of the tokens but $0.90 of the $1.11 — **81% of the bill**. Push `h` to 0.90 and E drops to
-`0.90 x 0.30 + 0.10 x 3.00 = $0.57`, halving the bill again. Drop the `(1 - h)` term from your
+30% of the tokens but $0.60 of the $0.74 — **81% of the bill**. Push `h` to 0.90 and E drops to
+`0.90 x 0.20 + 0.10 x 2.00 = $0.38`, halving the bill again. Drop the `(1 - h)` term from your
 mental model and you will over-report savings by exactly the amount you are still spending.
 
 **When does writing to the cache pay for itself?** Cache writes cost *more* than an uncached token
-(Claude: $3.75/1M vs $3.00/1M) because the provider has to store the KV tensors. So there is a
+(Claude Sonnet 5: $2.50/1M vs $2.00/1M) because the provider has to store the KV tensors. So there is a
 break-even:
 
 ```
@@ -207,32 +208,32 @@ take to earn that back?"
 **Walk one example.** The 7,000-token cached prefix from the Section 5 layout, over 100 requests:
 
 ```
-  N* = (3.75 - 3.00) / (3.00 - 0.30)
-     =  0.75 / 2.70
+  N* = (2.50 - 2.00) / (2.00 - 0.20)
+     =  0.50 / 1.80
      =  0.278   ->  ceil  ->  1 read
 
   So ONE reuse inside the 5-minute TTL already pays back the write.
 
   100 requests against that 7,000-token prefix:
 
-      no cache:  100 x 7,000  =  700,000 tok x $3.00/1M  =  $2.1000
-      cached:      1 x 7,000  =    7,000 tok x $3.75/1M  =  $0.0263   (the write)
-                  99 x 7,000  =  693,000 tok x $0.30/1M  =  $0.2079   (the reads)
+      no cache:  100 x 7,000  =  700,000 tok x $2.00/1M  =  $1.4000
+      cached:      1 x 7,000  =    7,000 tok x $2.50/1M  =  $0.0175   (the write)
+                  99 x 7,000  =  693,000 tok x $0.20/1M  =  $0.1386   (the reads)
                                                              -------
-                                                            $0.2342
+                                                            $0.1561
 
-      saving = 1 - 0.2342 / 2.1000 = 0.889   ->  88.9%
+      saving = 1 - 0.1561 / 1.4000 = 0.889   ->  88.9%
 
-  Same sum for the 1-hour TTL, where p_write = 2.0 x p_full = $6.00/1M:
+  Same sum for the 1-hour TTL, where p_write = 2.0 x p_full = $4.00/1M:
 
-      N* = (6.00 - 3.00) / (3.00 - 0.30) = 3.00 / 2.70 = 1.11  ->  ceil  ->  2 reads
+      N* = (4.00 - 2.00) / (2.00 - 0.20) = 2.00 / 1.80 = 1.11  ->  ceil  ->  2 reads
 
   So the 5-minute TTL repays on the FIRST reuse; the 1-hour TTL needs TWO reuses
   (three requests total) before it beats paying full price every time.
 ```
 
-**Why `N* = 1` is the whole argument for prefix caching.** The write penalty is only $0.75/1M while
-each read saves $2.70/1M — a 3.6:1 payoff. That is why you should mark a prefix cacheable even when
+**Why `N* = 1` is the whole argument for prefix caching.** The write penalty is only $0.50/1M while
+each read saves $1.80/1M — a 3.6:1 payoff. That is why you should mark a prefix cacheable even when
 you are unsure it will be reused: the downside of a wasted write is 25% of one request, the upside
 is 90% off every subsequent one. The only case where it loses is a prefix that is *never* hit again
 inside the TTL.
@@ -307,9 +308,9 @@ Request:
 +--[14,000]-[14,200] User message         (NOT cached — dynamic)
 
 Billing:
-  tokens [0-7,000] cache write: $3.75/1M (first time)
-  tokens [0-7,000] cache read:  $0.30/1M (subsequent, 90% discount)
-  tokens [7,000-14,200]: full input price $3.00/1M
+  tokens [0-7,000] cache write: $2.50/1M (first time)
+  tokens [0-7,000] cache read:  $0.20/1M (subsequent, 90% discount)
+  tokens [7,000-14,200]: full input price $2.00/1M   (Sonnet 5, as of 2026-09-04)
 
 
 Semantic Cache — False-Positive Risk
@@ -363,8 +364,8 @@ on Claude Sonnet 5, whose minimum cacheable prefix is `M` = 1,024, under three s
       6,992 >= M (1,024)                              -> cache applies
       remaining 14,200 - 6,992 = 7,208 tokens         -> full price
 
-      billed = 6,992 x $0.30/1M + 7,208 x $3.00/1M
-             = $0.002098        + $0.021624          = $0.02372
+      billed = 6,992 x $0.20/1M + 7,208 x $2.00/1M
+             = $0.001398        + $0.014416          = $0.01581
 
   Scenario 2: a timestamp lands at token 500 of the system prompt (Pitfall 4)
 
@@ -372,12 +373,12 @@ on Claude Sonnet 5, whose minimum cacheable prefix is `M` = 1,024, under three s
       496 < M (1,024)                                 -> NOTHING is cached
       all 14,200 tokens                               -> full price
 
-      billed = 14,200 x $3.00/1M                      = $0.04260
+      billed = 14,200 x $2.00/1M                      = $0.02840
                                                         ^ 1.80x scenario 1
 
   Scenario 3: the timestamp moves to the user turn, at token 14,050 (the fix)
 
-      L = 7,000       -> identical to scenario 1      = $0.02372
+      L = 7,000       -> identical to scenario 1      = $0.01581
 ```
 
 **Why the `floor(L / B) x B` term exists.** KV tensors are stored per block, not per token — a
@@ -597,7 +598,7 @@ def call_with_prompt_cache(
     user_message: str,
 ) -> str:
     response = _client.messages.create(
-        # Sonnet 5: $3/$15 per MTok list, minimum cacheable prefix 1,024 tokens.
+        # Sonnet 5: $2/$10 per MTok, minimum cacheable prefix 1,024 tokens.
         # The minimum is per-model — Opus 5 caches from 512, Opus 4.5 and
         # Haiku 4.5 need 4,096. Check before assuming your prefix qualifies.
         model="claude-sonnet-5",
@@ -647,7 +648,7 @@ incremental hit rate comes from, because users paraphrase.
 than response caching: the repository index and system prompt sit in a cached prefix block that is
 byte-identical across a session, while the user turn changes every request. Cursor's pricing docs
 publish separate cache-write and cache-read token rates for the Claude models it offers (a
-Sonnet-class model bills $3.75/1M written against $0.30/1M read), which is direct evidence that
+Sonnet 5 bills $2.50/1M written against $0.20/1M read), which is direct evidence that
 provider prompt caching is in play on those requests; no hit rate is published, so do not quote one.
 
 ---
@@ -738,13 +739,13 @@ that one key and how long generation takes:
   A hot FAQ entry at 20 req/s during an incident, 2.5s to generate:
       N_dup = 20 x 2.5 = 50 concurrent calls where 1 was needed
 
-  Priced on the Section 14 workload (6,000 in + 500 out, Sonnet 5 $3/$15):
-      one call   = 6,000 x $3/1M + 500 x $15/1M      = $0.0255
-      the burst  = 50 x $0.0255                      = $1.2750
-      wasted     = 49 x $0.0255                      = $1.2495 per expiry
+  Priced on the Section 14 workload (6,000 in + 500 out, Sonnet 5 $2/$10):
+      one call   = 6,000 x $2/1M + 500 x $10/1M      = $0.0170
+      the burst  = 50 x $0.0170                      = $0.8500
+      wasted     = 49 x $0.0170                      = $0.8330 per expiry
 
   50 hot keys on the Section 14 six-hour TTL expire four times a day each:
-      50 x 4 x $1.2495 = $250/day re-answering questions the cache knew.
+      50 x 4 x $0.8330 = $167/day re-answering questions the cache knew.
 ```
 
 Fix: single-flight. On a miss, take a short-lived lock (`SET key:lock <id> NX EX 10`); the winner
@@ -785,7 +786,7 @@ savings for identical queries. (2) Semantic cache: returns a cached response whe
 semantically similar above a cosine threshold; handles paraphrased queries. (3) Provider prompt
 caching (Anthropic cache_control, OpenAI automatic): caches KV-attention tensors for a stable
 context prefix; cache reads bill at 0.1x the base input rate on current Anthropic and OpenAI models
-(0.5x on the legacy gpt-4o tier), so shared system prompts get 50-90% off their cached tokens. (4) Self-hosted
+(0.025x on Claude Fable 5.1 and Mythos 5.1; 0.5x on the legacy gpt-4o tier), so shared system prompts get 50-90% off their cached tokens. (4) Self-hosted
 KV-prefix caching (vLLM APC, SGLang RadixAttention): GPU-resident LRU cache of KV tensors;
 reduces time-to-first-token for requests sharing a prefix. (5) Embedding cache: avoids re-embedding
 unchanged documents; critical for RAG performance.
@@ -836,7 +837,8 @@ via `"ttl": "1h"`. To maximize hit rate: place the system prompt and tool defini
 blocks at the front of every request; ensure these blocks are byte-identical across requests — no
 timestamps, user IDs, or dynamic content; track `cache_read_input_tokens` vs
 `cache_creation_input_tokens` in usage metadata. Cache reads bill at 0.1x the base input price
-($3.00 → $0.30/1M on a Sonnet-class model). A prefix under the minimum fails silently — both usage
+($2.00 → $0.20/1M on Sonnet 5), with one documented exception: Claude Fable 5.1 and Mythos 5.1 read
+at 0.025x ($10.00 → $0.25/1M). A prefix under the minimum fails silently — both usage
 counters come back 0 and you are billed full price with no error.
 
 **Q: How does vLLM automatic prefix caching (APC) work?**
@@ -893,8 +895,8 @@ constraint in the vector search.
 **Short:** Each cache read resets the 5-minute TTL, so steady reuse keeps it alive, while a traffic gap forces a costlier rewrite that a periodic keep-alive ping avoids.
 Each cache read refreshes the 5-minute TTL, so steady traffic (more than one request per 5 minutes
 per unique prefix) keeps the entry alive indefinitely; a traffic gap lets it expire, and the next
-request pays the write price again. Writes carry a 25% premium over normal input ($3.75 vs
-$3.00/1M for Sonnet-class models), so caching pays for itself as soon as a prefix is reused even
+request pays the write price again. Writes carry a 25% premium over normal input ($2.50 vs
+$2.00/1M on Sonnet 5), so caching pays for itself as soon as a prefix is reused even
 once within the TTL (break-even at ~1.3 uses). For low-traffic but cost-sensitive prefixes, a
 keep-alive ping (a max_tokens=1 request every ~4 minutes) costs far less than repeated cache
 re-writes of a 10k-token prefix; Anthropic also offers a 1-hour TTL tier at a higher write premium.
@@ -977,9 +979,9 @@ a clean end-of-stream event.
 **Problem Statement**
 
 A B2B SaaS company runs an AI customer support chatbot handling 500,000 requests/day on a
-Sonnet-class model ($3/$15 per 1M list). Analysis: 65% of queries are from a shared pool of ~2,000
-FAQ topics; system prompt is 4,000 tokens; average context is 6,000 tokens. That is 90B input
-tokens/month, about $270,000/month in input-token spend alone. No caching is in place.
+Sonnet 5 ($2/$10 per 1M, prices as of 2026-09-04). Analysis: 65% of queries are from a shared pool
+of ~2,000 FAQ topics; system prompt is 4,000 tokens; average context is 6,000 tokens. That is 90B
+input tokens/month, about $180,000/month in input-token spend alone. No caching is in place.
 
 **Architecture Overview**
 
@@ -1005,23 +1007,23 @@ L3: Anthropic prompt cache
   Discount: 90% on cached portion
 
 
-Cost model (per 1,000 requests, Claude Sonnet 5 $3/$15 per 1M list):
-  Without cache:   6,000 input tokens * $3/1M * 1,000 = $18.00
+Cost model (per 1,000 requests, Claude Sonnet 5 $2/$10 per 1M):
+  Without cache:   6,000 input tokens * $2/1M * 1,000 = $12.00
 
   After L1 (18% hit, 0 model cost):
-    820 requests pass through  -> cost $14.76
+    820 requests pass through  -> cost $9.84
 
   After L2 (33% of 820 = 270 hits; 820 queries embedded at ~500 tok,
             820 * 500 * $0.02/1M = ~$0.01):
-    550 requests pass through  -> cost $9.90
+    550 requests pass through  -> cost $6.60
 
   After L3 (80% of 550 = 440 prefix-cache reads, 110 writes):
-    440 reads   on the 4,000-tok prefix: 440 * 4,000 * $0.30/1M = $0.53
-                                          (the same tokens at full price: $5.28)
-    110 writes  on the 4,000-tok prefix: 110 * 4,000 * $3.75/1M = $1.65
-    dynamic remainder, all 550 requests:  550 * 2,000 * $3.00/1M = $3.30
+    440 reads   on the 4,000-tok prefix: 440 * 4,000 * $0.20/1M = $0.35
+                                          (the same tokens at full price: $3.52)
+    110 writes  on the 4,000-tok prefix: 110 * 4,000 * $2.50/1M = $1.10
+    dynamic remainder, all 550 requests:  550 * 2,000 * $2.00/1M = $2.20
 
-  Total with cache: 0.53 + 1.65 + 3.30 + 0.01 = $5.49  vs  $18.00 without
+  Total with cache: 0.35 + 1.10 + 2.20 + 0.01 = $3.66  vs  $12.00 without
   Savings: 69%
 
   The remainder line is the one teams forget: L3 only covers the 4,000-token
@@ -1045,7 +1047,7 @@ complexity.
 
 **Interview Discussion Points**
 
-- Monthly input spend: $270,000 → $82,350 (15,000 x $5.49; savings $187,650). Cache infra cost:
+- Monthly input spend: $180,000 → $54,900 (15,000 x $3.66; savings $125,100). Cache infra cost:
   $400/month. ROI: day 1.
 - Three false-positive incidents in the first month prompted raising the threshold from 0.90 to
   0.92 for product-pricing queries, dropping hit rate by 3pp but eliminating false positives.

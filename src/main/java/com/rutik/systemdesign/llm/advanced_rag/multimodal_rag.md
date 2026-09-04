@@ -506,11 +506,11 @@ The bill is storage, exactly as with ColBERT. A page is 1,024 patch vectors of 1
 Image tokens bill as ordinary input tokens on every major provider, so the "cost" column is the
 input-token price. List prices move often — re-check the vendor pricing page before budgeting.
 
-| Vision Model | Quality | Input-token cost (per 1M, July 2026) | Latency |
+| Vision Model | Quality | Input-token cost (per 1M, as of 2026-09-04) | Latency |
 |-------------|---------|------|---------|
 | OpenAI GPT-5.6 (sol / terra / luna tiers) | Excellent | $5.00 / $2.50 / $1.00 | provider-dependent; measure per model |
 | GPT-4o (2024 tier, still served but off OpenAI's headline price table) | Very good | $2.50 | provider-dependent; measure per model |
-| Claude Sonnet 5 | Excellent | $2.00 introductory through 2026-08-31, $3.00 after | provider-dependent; measure per model |
+| Claude Sonnet 5 | Excellent | $2.00 | provider-dependent; measure per model |
 | Gemini 3.5 Flash | Good/Excellent | $1.50 | provider-dependent; measure per model |
 | Open-weight VLM (self-hosted) | Good | GPU cost only | usually lowest, if the GPU is warm |
 
