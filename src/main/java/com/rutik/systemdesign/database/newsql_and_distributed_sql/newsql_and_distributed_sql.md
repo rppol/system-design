@@ -565,7 +565,7 @@ PlanetScale uses Vitess, which is a sharding middleware for MySQL. Each shard is
 - **Instrument retries**: log every transaction retry with the error code, attempt number, and latency. A spike in retries signals a hot key or a schema design issue.
 - **Benchmark with production-realistic concurrency**: distributed SQL overhead is concurrency-dependent. A benchmark at 1 connection proves nothing; test at peak concurrency.
 - **Evaluate the extension ecosystem**: if you need PostGIS, pgvector, or TimescaleDB, verify they are available in the distributed SQL system before committing.
-- **Understand your TCO**: managed Spanner at Google-scale is ~$0.30/node/hour plus storage. Self-hosted CockroachDB or TiDB requires significant ops investment. Compare against PostgreSQL + read replicas + PgBouncer before deciding.
+- **Understand your TCO**: managed Spanner regional on-demand is ~$0.90/node-hour plus storage (list price, September 2026; 1 node = 1000 processing units, so ~$657/node/month at 730 hours), falling to ~$0.72 on a 1-year and ~$0.54 on a 3-year committed-use discount; multi-region is ~$3.00/node-hour. Prices move, so re-check `cloud.google.com/spanner/pricing` — the *shape* of the comparison is what to remember. Self-hosted CockroachDB or TiDB requires significant ops investment. Compare against PostgreSQL + read replicas + PgBouncer before deciding.
 
 ---
 

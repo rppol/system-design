@@ -2,8 +2,9 @@
 
 > **Version anchor — August 2026.** **MySQL 9.7 LTS** (2026) is the current
 > long-term-support line and, per the MySQL manual, "the final release line using the
-> sequential versioning model." Everything after it — Innovation *and* LTS — uses
-> **calendar versioning** in `YY.M` form, where `YY` is the year and `M` the scheduled
+> sequential versioning model." Innovation releases moved to **calendar versioning** at
+> **26.7**; Oracle has announced that future LTS lines will use it too, but no CalVer LTS
+> has shipped yet, so treat that half as forward-looking. CalVer is `YY.M` form, where `YY` is the year and `M` the scheduled
 > release month with no leading zero: **26.7** is the July 2026 release, 27.7 would be
 > July 2027. An LTS keeps its `YY.M` fixed for its whole lifecycle (all 26.7 LTS
 > releases stay `26.7.x`). The two tracks are otherwise unchanged: LTS gets bug and

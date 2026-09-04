@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 33 Modules (7 Phases)
+## Module List — 34 Modules (7 Phases)
 
 ### Phase 1 — Foundations
 
@@ -47,6 +47,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `vector_databases/` | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | `newsql_and_distributed_sql/` | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
 | `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| `embedded_and_edge_databases/` | Advanced | 17 | SQLite (WAL, single-writer, `busy_timeout`), DuckDB in-process OLAP, RocksDB/LMDB as libraries, litestream/LiteFS replication, local-first sync and CRDT reconciliation, edge read replicas |
 | `lakehouse_and_table_formats/` | Expert | 16 | Metadata-pointer CAS commit, snapshot isolation, time travel and retention cost, column-ID schema evolution, hidden partitioning, CoW vs MoR, deletion vectors, small-file economics, Iceberg vs Delta vs Hudi, the catalog tier |
 
 ### Phase 5 — Distributed Database Concepts
@@ -79,9 +80,9 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 33 modules — the 7-phase order in
+`README.md` documents the **Full Path** (all 34 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
-**Senior** (21 modules) and **Principal** (14). They are different cuts, not nested
+**Senior** (24 modules) and **Principal** (16). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
 what migration, what you tell a team *not* to do), so principal is usually the smaller
 list and much of it is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
@@ -93,13 +94,13 @@ in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
 fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-from a block in `case_studies/case_studies.md` (3 senior / 3 principal), driving the Level
+in the same `README.md` block (6 senior / 7 principal), driving the Level
 filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
 and a 6-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 8 Total
+## Case Studies — 11 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
@@ -111,6 +112,11 @@ and a 6-week Study Plan (prose; no path impact).
 | `design_realtime_analytics_platform/` | ClickHouse, Kafka, Redis | Expert |
 | `design_multitenant_saas_database/` | PostgreSQL (RLS), PgBouncer | Advanced |
 | `design_monolith_to_polyglot_migration/` | Debezium, dual-write, CDC | Expert |
+| `design_global_multiregion_oltp/` | CockroachDB, Spanner | Expert |
+| `design_vector_search_platform/` | pgvector, Qdrant, Elasticsearch | Expert |
+| `design_chat_message_store/` | Cassandra, PostgreSQL, Redis | Advanced |
+| `design_job_queue_on_postgres/` | PostgreSQL (`SKIP LOCKED`) | Advanced |
+| `design_10tb_table_migration/` | PostgreSQL, gh-ost, pg_repack | Expert |
 
 ---
 
@@ -138,7 +144,7 @@ and a 6-week Study Plan (prose; no path impact).
 | Database | Version |
 |----------|---------|
 | PostgreSQL | 18 (2025) — 19 in beta (beta 1 June 2026, feature-frozen July 2026, GA expected Sept/Oct 2026) |
-| MySQL | 9.7 LTS (2026) — the last sequential version; Innovation and LTS now use `YY.M` calendar versioning (26.7 = July 2026) |
+| MySQL | 9.7 LTS (2026) — the last sequential version; Innovation moved to `YY.M` calendar versioning at 26.7 (July 2026). Oracle says future LTS lines will use CalVer too, but none has shipped — treat that half as forward-looking |
 | MongoDB | 8.3 (2026) |
 | Redis | 8.10 (2026) |
 | Valkey | 9.1 (2026) |
@@ -146,8 +152,8 @@ and a 6-week Study Plan (prose; no path impact).
 | ScyllaDB | separate C++ shard-per-core codebase, Cassandra wire-compatible — not a Cassandra version |
 | Neo4j | 2026.07 (calendar versioning since 2025.01); Cypher 25 is the shipped default from 2026.02 |
 | GQL | ISO/IEC 39075:2024 (April 2024) — the ISO standard graph query language |
-| Elasticsearch | 9.5 (2026), Lucene 10.5 — OpenSearch 3.7, forked at 7.10.2 |
-| ClickHouse | 26.x (2026) |
+| Elasticsearch | 9.5 (2026), Lucene 10.5 — OpenSearch 3.7.0 (9 June 2026), forked at 7.10.2 |
+| ClickHouse | 26.x (2026) — latest stable 26.7.5.10 (21 Aug 2026); newest LTS 26.8.2.7 (1 Sept 2026) |
 
 ---
 

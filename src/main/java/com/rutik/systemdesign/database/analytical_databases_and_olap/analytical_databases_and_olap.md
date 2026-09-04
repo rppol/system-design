@@ -1,10 +1,11 @@
 # Analytical Databases and OLAP
 
 > **Version anchor — August 2026.** **ClickHouse 26.7.5.10-stable** (21 Aug 2026) is the current
-> stable line and **26.3.22.7-lts** (25 Aug 2026) the current LTS; versions are `YY.M.patch.build`,
+> stable line and **26.8.2.7-lts** (1 Sept 2026) the newest LTS (the 26.3 LTS line is still
+> patched, latest 26.3.29.7-lts, 2 Sept 2026); versions are `YY.M.patch.build`,
 > stable cut monthly with ~3 months of patches, LTS cut in March and August with 12+ months.
 > **Apache Druid 37.0.0** (8 May 2026), **Apache Pinot 1.5.1** (5 Jun 2026), **Apache Doris
-> 4.1.3** (13 Jul 2026), **StarRocks 4.1.0** (29 May 2026), **DuckDB 1.5.5** (21 Jul 2026, with
+> 4.1.3** (13 Jul 2026), **StarRocks 4.1.3** (14 Jul 2026), **DuckDB 1.5.5** (21 Jul 2026, with
 > 2.0 announced for autumn 2026), **Apache Arrow 25.0.0** (10 Jul 2026). Version-dependent
 > behaviour is tagged inline like `[26.3]`. Cross-links: the row-vs-column storage primitive lives in
 > [Storage Engines Internals](../storage_engines_internals/storage_engines_internals.md);

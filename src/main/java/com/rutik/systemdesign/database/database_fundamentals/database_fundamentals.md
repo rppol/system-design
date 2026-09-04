@@ -128,7 +128,7 @@ Examples:
 
 ---
 
-## 4. Consistency Models
+## 4. Types / Architectures / Strategies — Consistency Models
 
 From strongest to weakest:
 
@@ -181,7 +181,7 @@ Read the bottom row carefully: a globally distributed linearizable store can ser
 
 ---
 
-## 5. Transaction Isolation Levels
+## 5. Architecture Diagrams — Transaction Isolation Levels
 
 SQL standard defines four isolation levels, each preventing certain anomalies:
 

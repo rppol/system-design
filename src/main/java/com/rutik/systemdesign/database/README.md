@@ -14,10 +14,11 @@ Phase 2: Relational Databases
   postgresql_internals → mysql_innodb_internals → sql_query_optimization → schema_design_and_normalization → database_migrations_zero_downtime
 
 Phase 3: NoSQL Databases
-  document_databases → key_value_stores → redis_internals → wide_column_databases → search_engines → elasticsearch_internals → graph_databases → time_series_databases
+  document_databases → key_value_stores → redis_internals → wide_column_databases → search_engines → elasticsearch_internals → graph_databases → time_series_databases → analytical_databases_and_olap
 
 Phase 4: Emerging Databases
-  vector_databases → newsql_and_distributed_sql → in_memory_databases
+  vector_databases → newsql_and_distributed_sql → in_memory_databases →
+  embedded_and_edge_databases → lakehouse_and_table_formats
 
 Phase 5: Distributed Database Concepts
   replication_and_high_availability → sharding_and_partitioning → distributed_transactions → consistency_models_and_consensus → database_caching_patterns
@@ -65,6 +66,8 @@ Phase 7: Architecture & Selection
 | [Graph Databases](graph_databases/graph_databases.md) | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
 | [Time-Series Databases](time_series_databases/time_series_databases.md) | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 
+| [Analytical Databases & OLAP](analytical_databases_and_olap/analytical_databases_and_olap.md) | Advanced | 18 | Columnar storage, vectorized execution, late materialization, MergeTree parts and the part-count cliff, sparse index granules, ClickHouse/Druid/Pinot vs warehouses vs DuckDB, HTAP |
+
 ### Phase 4 — Emerging Databases
 
 | Module | Level | Q&As | Key Concepts |
@@ -72,6 +75,8 @@ Phase 7: Architecture & Selection
 | [Vector Databases](vector_databases/vector_databases.md) | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | [NewSQL & Distributed SQL](newsql_and_distributed_sql/newsql_and_distributed_sql.md) | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
 | [In-Memory Databases](in_memory_databases/in_memory_databases.md) | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| [Embedded & Edge Databases](embedded_and_edge_databases/embedded_and_edge_databases.md) | Advanced | 17 | SQLite, DuckDB, RocksDB, LMDB, litestream, local-first sync, CRDT replication |
+| [Lakehouse & Table Formats](lakehouse_and_table_formats/lakehouse_and_table_formats.md) | Expert | 16 | Iceberg v3, Delta Lake, Hudi, catalogs, snapshot isolation, compaction, time travel |
 
 ### Phase 5 — Distributed Database Concepts
 
@@ -115,8 +120,8 @@ flowchart TD
 
     p1("Phase 1: Foundations<br/>fundamentals -&gt; storage_engines -&gt;<br/>indexing -&gt; locking")
     p2("Phase 2: Relational<br/>postgresql -&gt; mysql -&gt; sql_opt -&gt;<br/>schema -&gt; migrations")
-    p3("Phase 3: NoSQL<br/>document -&gt; kv -&gt; redis_internals -&gt;<br/>wide_col -&gt; search -&gt; graph -&gt; timeseries")
-    p4("Phase 4: Emerging<br/>vector -&gt; newsql -&gt; in_memory")
+    p3("Phase 3: NoSQL &amp; Analytical<br/>document -&gt; kv -&gt; redis_internals -&gt; wide_col -&gt;<br/>search -&gt; graph -&gt; timeseries -&gt; analytical_olap")
+    p4("Phase 4: Emerging<br/>vector -&gt; newsql -&gt; in_memory -&gt;<br/>embedded -&gt; lakehouse")
     p5("Phase 5: Distributed Concepts<br/>replication -&gt; sharding -&gt; dist_tx -&gt;<br/>consensus -&gt; caching")
     p6("Phase 6: Production Ops<br/>conn_pool -&gt; perf_tuning -&gt;<br/>backup -&gt; security")
     p7("Phase 7: Architecture<br/>selection_framework -&gt;<br/>polyglot_persistence")
@@ -225,11 +230,11 @@ embedded_and_edge_databases
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 31 modules spanning storage internals, relational and NoSQL engines, distributed-systems theory, and production operations. That is the right depth for a reference and the wrong shape for someone two weeks from a database-heavy interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 34 modules spanning storage internals, relational and NoSQL engines, distributed-systems theory, and production operations. That is the right depth for a reference and the wrong shape for someone two weeks from a database-heavy interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (31 modules)
+### Full Path (34 modules)
 
-The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the emerging-database frontier (NewSQL, in-memory), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
+The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the analytical and emerging-database frontier (OLAP, NewSQL, in-memory, embedded/edge, lakehouse), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
 
 <!-- study-path-table senior -->
 ### Senior Path (24 modules)
@@ -299,7 +304,7 @@ A ruthless cut to what a **senior backend / database-heavy interview** actually 
 **Not in this path** (18 of 34, Full Path only): `database_fundamentals`, `indexing_deep_dive`, `concurrency_control_and_locking`, `postgresql_internals`, `mysql_innodb_internals`, `sql_query_optimization`, `document_databases`, `key_value_stores`, `redis_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `vector_databases`, `in_memory_databases`, `embedded_and_edge_databases`, `database_caching_patterns`, `connection_pool_management`, `database_performance_tuning`
 <!-- /study-path-table -->
 
-A different cut, not senior-plus-extras. The Principal Path probes the decisions that outlive a schema: engine and topology selection, the migration path off a wrong choice, and the failure modes that only appear at production scale. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
+A different cut, not senior-plus-extras. The Principal Path probes the decisions that outlive a schema: engine and topology selection, the migration path off a wrong choice, and the failure modes that only appear at production scale. Five of its sixteen modules -- 31%, not half -- are material the Senior Path never covers (`newsql_and_distributed_sql`, `lakehouse_and_table_formats`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`); the other eleven overlap. It is still the smaller list -- depth of judgment, not depth of syllabus. Whether 31% is the right shape is an open owner decision; see [Known Gaps & Planned Work](#known-gaps--planned-work).
 
 ---
 
@@ -359,6 +364,104 @@ A 6-week plan over the Senior Path. Each week pairs modules with one case study 
 | [Real-Time Analytics Platform](case_studies/design_realtime_analytics_platform/design_realtime_analytics_platform.md) | 1B events/day, sub-second dashboards, 90-day retention | ClickHouse, Kafka, Redis | Expert |
 | [Multi-Tenant SaaS Database](case_studies/design_multitenant_saas_database/design_multitenant_saas_database.md) | 10K tenants, varying sizes, isolation, compliance | PostgreSQL (RLS), PgBouncer | Advanced |
 | [Monolith to Polyglot Migration](case_studies/design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md) | Migrate 5TB MySQL monolith without downtime | Debezium, dual-write, CDC | Expert |
+| [Global Multi-Region OLTP](case_studies/design_global_multiregion_oltp/design_global_multiregion_oltp.md) | Sub-10ms regional writes under global ACID, EU data residency | CockroachDB, Spanner | Expert |
+| [Vector Search Platform](case_studies/design_vector_search_platform/design_vector_search_platform.md) | 500M embeddings, filtered ANN, hybrid BM25 + dense retrieval | pgvector, Qdrant, Elasticsearch | Expert |
+| [Chat Message Store](case_studies/design_chat_message_store/design_chat_message_store.md) | Ordered, resumable message history at messenger scale | Cassandra, PostgreSQL, Redis | Advanced |
+| [Job Queue on PostgreSQL](case_studies/design_job_queue_on_postgres/design_job_queue_on_postgres.md) | `SKIP LOCKED` work queue before reaching for a broker | PostgreSQL | Advanced |
+| [10TB Table Migration](case_studies/design_10tb_table_migration/design_10tb_table_migration.md) | Change a 10TB table's type/schema with no downtime | PostgreSQL, gh-ost, pg_repack | Expert |
+
+---
+
+## Known Gaps & Planned Work
+
+Recorded 2026-09-04 from a verified gap review. Everything here is measured, not estimated.
+Nothing in this block is a defect that has been left in place — the defects were fixed; these
+are shortfalls against the section's own quality bars, plus decisions that need an owner.
+
+### Case studies below the bar
+
+The section's own bar is 900-1100 lines and 4+ cross-cutting references.
+
+| Case study | Lines | Cross-references | Gap |
+|---|---|---|---|
+| `design_10tb_table_migration` | 818 | 20 (1 module) | ~80 lines short of the 900 floor |
+| `design_ecommerce_catalog` | 1098 | **0** | no cross-references at all |
+| `design_realtime_analytics_platform` | 902 | **0** | no cross-references at all |
+| `design_social_media_feed_storage` | 909 | **0** | no cross-references at all |
+| `design_vector_search_platform` | 1100 | 1 | 3 short |
+| `design_global_multiregion_oltp` | 1100 | 3 unique modules | 1 short |
+
+Note this section has **no `cross_cutting/` directory** — the shared primitives are the
+deep-dive modules themselves, so the bar is met by linking sibling modules
+(`../<module>/<module>.md`). The Cross-Cutting table in
+[case_studies/case_studies.md](case_studies/case_studies.md) maps which primitive belongs where;
+the six files above should link the modules that table already names for them.
+
+### Thin sections relative to the section's ~1,070-line bar
+
+| Module | Lines | Thin sections | Why it matters |
+|---|---|---|---|
+| `storage_engines_internals` | 699 | §7 (10 lines), §8 (12), §9 (12) | on **both** tiers — the most-read thin file in the section |
+| `mysql_innodb_internals` | 669 | §7 (8), §8 (10), §9 (10) | the only relational-engine peer to `postgresql_internals`, and on **neither** tier |
+| `newsql_and_distributed_sql` | 688 | §3 (14), §4 (15) | both thinner than the module's own §14 (116 lines); principal-only |
+| `in_memory_databases` | 617 | §4 (12) | Full-path only |
+
+Separately, `embedded_and_edge_databases` is 975 lines carrying **one** Mermaid fence — the most
+diagram-starved file per line in the section.
+
+### Open owner decisions
+
+**1. Principal-tier shape.** The Principal Path is 16 modules, 11 of which the Senior Path also
+carries, so only **31%** of it is principal-exclusive. The section's stated intent is that
+"roughly half" should be material Senior never sees. Either the sentence is wrong or the cut is;
+this was fixed as a *sentence* and the cut left alone, because re-cutting tiers is an owner call,
+not an editorial one. Candidates for dropping from Principal to restore the shape, all four
+being product-internals craft that reads as Senior's register:
+`elasticsearch_internals`, `wide_column_databases`, `analytical_databases_and_olap`,
+`schema_design_and_normalization`.
+
+### Cross-section overlap — proposals only, not scheduled work
+
+These four touch sections this repo's database owner does not own alone. Recorded so the
+duplication is visible; **do not execute any of them without a cross-section decision.**
+
+**1. Distributed transactions are taught at full depth in three sections** — `backend/` 1,123
+lines, `hld/` 1,098, `database/` 874. Only **56 of this section's 874 lines (6.4%)** are content
+no other section has: the Percolator / Spanner / CockroachDB Parallel Commits / Calvin
+commit-protocol comparison, plus roughly 35 lines of genuinely storage-tier SQL (idempotent
+`INSERT ... ON CONFLICT`, an inbox CTE, an `idempotency_keys` table). The rest is
+application-tier Spring/JPA — `@Transactional` XA, a saga orchestrator, a Spring outbox —
+indistinguishable in register from the other two. *Proposal:* `hld/` owns the pattern layer (it
+has the coordination/contention treatment the others lack and is the only file linking all three
+siblings); this section shrinks to the ~90 storage-tier lines, renamed toward
+`distributed_commit_protocols`. **Caution: the module is on both tiers and contributes 20 Q&As —
+the 4th-largest bank contribution in the section — so tier membership must be revisited in the
+same commit.**
+
+**2. Caching is taught three times** — `backend/` 777, `hld/` 936, `database/` 956. The
+`@Cacheable(value="products")` example is the same textbook example in two of them (not
+byte-identical). *Proposal:* `hld/` owns strategy, `backend/` owns the Spring implementation,
+`database/` keeps only DB-adjacent caching (materialized views, buffer pool / page cache
+interaction, replicas-as-cache) and drops its `@Cacheable` block and Spring Cache Q&A.
+`database_caching_patterns` is Full-path-only, making it the cheapest of the three to cut.
+
+**3. `backend/database_types_deep_dive` (779 lines) re-teaches eight of this section's modules**
+in its §6 — Postgres, MongoDB/WiredTiger, Redis, Cassandra, time-series, Elasticsearch, Neo4j,
+NewSQL — and `grep '\.\./database/'` on it returns **zero** matches. Against 2,770 lines here on
+Elasticsearch it has 36; against 2,247 on Redis it has 29. *Proposal:* `database/` owns product
+internals unconditionally; that file becomes a pure decision module with eight short subsections
+each linking here.
+
+**4. Link asymmetry.** `hld/` -> `database/` is ~30 files / 120 matches. The reverse is
+`database/` -> `hld/` **2 files / 10 matches**, -> `backend/` **2 / 10**, -> `spring/` **zero** —
+despite this section carrying Spring-annotated Java in two modules.
+
+### Template conformance
+
+`database_fundamentals` §4 and §5 were retitled to the canonical template slots
+("Types / Architectures / Strategies", "Architecture Diagrams") with their original subject kept
+in the heading. §5 still carries **no architecture diagram** — it is the isolation-level anomaly
+table — so the slot is named but not yet filled.
 
 ---
 
@@ -379,7 +482,7 @@ A 6-week plan over the Senior Path. Each week pairs modules with one case study 
 | Valkey | 9.1 (2026) | BSD-3 fork at 9.1.1; lock-free I/O-thread queues, database-level ACLs, multi-DB cluster mode and atomic slot migration from 9.0 |
 | Cassandra | 5.0 (2024) | Storage-Attached Indexes (SAI), vector type + ANN search, trie memtables/SSTables, dynamic data masking |
 | Elasticsearch | 9.5 (2026) | Lucene 10.5, Better Binary Quantization GA, ES\|QL JOIN, search/IO parallelism — OpenSearch 3.7, forked at 7.10.2 |
-| ClickHouse | 26.x (2026) | Calendar versioning (YY.M); latest stable 26.5 |
+| ClickHouse | 26.x (2026) | Calendar versioning (YY.M); latest stable 26.7.5.10 (21 Aug 2026), newest LTS 26.8.2.7 (1 Sept 2026) |
 
 ---
 
@@ -427,11 +530,15 @@ HTAP (hybrid tx + analytics)         → TiDB / AlloyDB / BigQuery
 
 ### Latency Reference Numbers
 
+Order-of-magnitude only, as of September 2026. Use them to reason about which tier a
+design lives in, never as a target or an SLO — every one of these moves with hardware,
+payload size, and how far the network hop actually goes.
+
 ```
 L1 cache hit        ~1 ns
 L2 cache hit        ~5 ns
 RAM access          ~100 ns
-Redis GET           ~0.5 ms
+Redis GET           ~0.1-0.3 ms (same-LAN round trip)
 PostgreSQL query    ~1-50 ms
 Cassandra read      ~1-5 ms (local DC)
 Elasticsearch query ~10-100 ms

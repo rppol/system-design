@@ -76,7 +76,8 @@ Concrete numbers:
 ### B+Tree Storage Engine
 
 ```
-Internal Node (fanout ~400 for 16KB page, 8-byte keys):
+Internal Node (fanout ~400 for 8KB page, ~20-byte entries: key + child pointer + header;
+                InnoDB's 16KB page roughly doubles this at the same entry width):
 +--------+--------+--------+--------+
 |  key1  | ptr1   |  key2  | ptr2   |
 +--------+--------+--------+--------+

@@ -7,7 +7,7 @@
 > May 2026), **9.3** (latest 9.3.8, series GA February 2026) and **8.19** (GA July 2025,
 > supported to July 2027). 9.2 went end-of-support in May 2026, 9.1 in February 2026, 9.0 in
 > October 2025 — Elastic maintains a major for the longer of 30 months after its own GA or 18
-> months after the next major's GA. **OpenSearch 3.7.0** (July 2026) is the fork's current
+> months after the next major's GA. **OpenSearch 3.7.0** (9 June 2026) is the fork's current
 > release; it forked from Elasticsearch **7.10.2** in January 2021 and now runs its own Lucene
 > 10 line. Behaviour that arrived in a specific release is tagged inline as `[9.5]`, `[9.1]`,
 > `[8.17]`, `[7.0]`, `[Lucene 10.3]`, `[OpenSearch 2.7]` — nothing here is called "current"

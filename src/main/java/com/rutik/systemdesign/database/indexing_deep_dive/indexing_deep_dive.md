@@ -50,7 +50,7 @@ This is the single most useful piece of arithmetic in indexing, because it is wh
 
 | Symbol | What it is |
 |--------|------------|
-| `page_size` | The fixed block a B+tree node occupies. 8192 bytes (8 KB) in PostgreSQL and InnoDB |
+| `page_size` | The fixed block a B+tree node occupies. 8192 bytes (8 KB) in PostgreSQL; 16384 bytes (16 KB) in InnoDB (`innodb_page_size` default) |
 | `entry_size` | Bytes for one key plus its child pointer plus per-tuple header, in an internal node |
 | `fanout` | `page_size / entry_size` — how many children one node can point at |
 | `height` | Number of levels traversed root to leaf. Each level costs one page read |
@@ -66,6 +66,10 @@ This is the single most useful piece of arithmetic in indexing, because it is wh
     entry_size = 80 bytes (wide composite key)  ->  8192 / 80 = 102
 
   This is exactly the quoted "fan-out ~100-400" -- it is a key-width statement.
+
+  The divisor above is PostgreSQL's 8 KB page. InnoDB's default page is 16 KB, so at the
+  same entry width its fanout is ~2x these numbers (16384 / 20 = 819), and an InnoDB tree
+  is often one level shallower than a PostgreSQL tree over the same rows and key.
 
   Now compound it. Take fanout = 400:
 
