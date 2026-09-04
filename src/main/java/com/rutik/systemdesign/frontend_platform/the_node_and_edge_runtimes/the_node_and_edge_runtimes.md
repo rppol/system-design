@@ -32,7 +32,8 @@ edge runtimes that look like Node and are not. It does not own:
 | `epoll`, readiness vs completion, the general theory | [Async I/O and Event Loops](../../cs_fundamentals/processes_threads_and_context_switching/async_io_and_event_loops.md) |
 
 **Versions, verified 2026-09-02:** Node **26** Current, Node **24 "Krypton"** Active LTS
-(started 2025-05-06, a 30-month window), Node **22** in Maintenance. Deno **2.9**,
+(initial release 2025-05-06, promoted to Active LTS in October 2025; the 30-month support
+window is measured from the initial release), Node **22** in Maintenance. Deno **2.9**,
 Bun **1.4.0**. Node's native TypeScript type stripping is stable and unflagged.
 
 ---
@@ -470,13 +471,14 @@ connection.
 ### 6.9 Choosing a runtime per route
 
 ```ts
-export const config = { matcher: ["/((?!_next|favicon).*)"] };  // proxy.ts, Node by default
+export const config = { matcher: ["/((?!_next|favicon).*)"] };  // proxy.ts, always Node
 export const runtime = "nodejs";  // app/api/thumbnail/route.ts - needs sharp, a native addon
 export const runtime = "edge";    // app/api/flag/route.ts - a 3 ms KV read, wants to be near
 ```
 
-In Next.js 16 `proxy.ts` sits in front of every matched request and defaults to the Node
-runtime, and each route segment then declares its own target. Decide per route on one question: **does this handler need a Node-only capability?** If yes it
+In Next.js 16 `proxy.ts` sits in front of every matched request and runs on the Node runtime
+— that is fixed, not a default you can override — while each route segment declares its own
+target independently. Decide per route on one question: **does this handler need a Node-only capability?** If yes it
 is Node and the placement argument is over. If no, the edge removes a 200-500 ms cold start
 and a round trip to the origin region. Route conventions belong to
 [Meta-Frameworks and Routing](../../react/meta_frameworks_and_routing/meta_frameworks_and_routing.md).
@@ -772,8 +774,9 @@ flush logs, with an `unref()`ed hard-cap timer below the grace period. Never end
 If the route needs a filesystem, a native addon, a raw database socket or more than a few
 milliseconds of CPU, it is Node and there is no argument to have. If it needs none of those — a
 redirect, an auth-cookie check, geolocation, A/B bucketing — the edge removes a 200-500 ms cold
-start and a round trip to the origin region. In Next.js 16 the proxy entry point is `proxy.ts`
-and defaults to Node, while each route segment sets its own `export const runtime`.
+start and a round trip to the origin region. In Next.js 16 the proxy entry point is `proxy.ts`,
+which always runs on Node and offers no runtime knob, while each route segment sets its own
+`export const runtime`.
 
 **Q: How do you debug a memory or CPU problem on a live Node server?**
 **Short:** Attaching a debugger binds an unauthenticated port that grants full code execution, so bind the inspector to loopback and tunnel to it rather than exposing it.

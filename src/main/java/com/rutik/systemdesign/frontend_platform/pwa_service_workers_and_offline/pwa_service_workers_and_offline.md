@@ -763,6 +763,11 @@ IndexedDB — though eviction pressure drops, since installation feeds the heuri
 
 ## 14. Case Study
 
+> **This case study is an illustrative composite.** The data model, sync protocol, conflict
+> rules and the mechanics of every fix are exact and reproducible; the product, its user counts
+> and the measured deltas are constructed so the narrative is followable end to end on a real
+> system.
+
 ### An offline-first notes app, and the conflicts it has to answer for
 
 **The system.** Fieldnotes: 41,000 technicians on Android and iOS, 34 notes per user per

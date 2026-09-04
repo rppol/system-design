@@ -100,7 +100,9 @@ gives you the chance to reimplement four of them wrong.
 
 ### 4.2 The 2.2 AA criteria that audits actually flag
 
-These nine account for the large majority of findings in a typical commercial audit.
+These thirteen account for the large majority of findings in a typical commercial audit. The
+six marked **new in 2.2** are the ones a team that last audited against 2.1 has never been
+tested on, and they are disproportionately represented in first-time 2.2 findings.
 
 | SC | Level | Requirement | The concrete number |
 |----|-------|-------------|--------------------|
@@ -110,7 +112,11 @@ These nine account for the large majority of findings in a typical commercial au
 | **2.1.2** No Keyboard Trap | A | focus can always move back out | Escape, or Tab out |
 | **2.4.7** Focus Visible | AA | the focused element has a visible indicator | any visible change; `outline: none` alone fails |
 | **2.4.11** Focus Not Obscured | AA, **new in 2.2** | the focused element is not fully hidden by author content | sticky headers and cookie bars are the usual cause |
+| **2.5.7** Dragging Movements | AA, **new in 2.2** | anything done by dragging has a single-pointer alternative | a reorder list needs move-up/move-down buttons; a slider needs arrow keys and a number input |
 | **2.5.8** Target Size (Minimum) | AA, **new in 2.2** | pointer targets are large enough | **24 x 24 CSS px**, or spaced so 24px circles do not overlap |
+| **3.2.6** Consistent Help | A, **new in 2.2** | help mechanisms appear in the same relative order on every page that has them | the support link moving from header to footer between routes fails it |
+| **3.3.7** Redundant Entry | A, **new in 2.2** | information already given is not asked for again in the same process | a checkout re-asking for the shipping address at the billing step, with no copy-forward |
+| **3.3.8** Accessible Authentication (Minimum) | AA, **new in 2.2** | no cognitive function test without an alternative | no puzzle, no transcription, no recall test; the field must accept paste and autofill |
 | **3.3.1 / 3.3.3** Error Identification / Suggestion | A / AA | errors named in text, with a correction where known | "Enter a date as DD/MM/YYYY", not "Invalid" |
 | **4.1.2** Name, Role, Value | A | custom widgets expose all three programmatically | the criterion every hand-built `div` widget fails |
 
@@ -406,7 +412,54 @@ half, and the second sentence satisfies 3.3.3 by naming the correction. A red bo
 summaries and their focus behaviour are owned by
 [Forms and Validation](../../react/forms_and_validation/forms_and_validation.md).
 
-### 6.7 Screen readers in practice
+### 6.7 Accessible Authentication: 3.3.8 in a real login flow
+
+3.3.8 is the criterion most likely to be failed by a login screen that everyone considers
+finished, because it is the only success criterion that tests the *user's memory and
+reasoning* rather than the markup. A **cognitive function test** is anything that asks the
+user to remember, transcribe or solve — a password typed from memory, a code copied out of a
+second device, a "select the traffic lights" puzzle, a security question, a maths problem.
+At AA, each step of the process must offer a route that does not require one.
+
+Three things satisfy it, and only three in practice:
+
+| Mechanism | Why it passes | The failure right next to it |
+|-----------|---------------|------------------------------|
+| Passkeys / WebAuthn | authentication is a biometric or device gesture; nothing is remembered or transcribed | none — this is the cleanest pass available |
+| A password field that accepts paste and autofill | the password manager does the remembering, so the *user* performs no cognitive function test | `onpaste="return false"`, or `autocomplete="off"` on the password field, reinstates the test and fails |
+| Object recognition or personal-content CAPTCHA | recognising a common object or your own photo is exempted by the criterion | text-transcription and puzzle CAPTCHAs are not exempt and fail at AA |
+
+```html
+<!-- FAILS 3.3.8: paste blocked, autofill suppressed, a memory test with no way out. -->
+<input type="password" name="pw" autocomplete="off" onpaste="return false">
+
+<!-- PASSES: the manager can fill it, the user can paste it, and nothing is remembered. -->
+<input type="password" name="pw" autocomplete="current-password">
+```
+
+The trap is that blocking paste is almost always argued for on *security* grounds, and the
+argument is backwards — it forces short, memorable, reused passwords, which is the outcome
+the policy was meant to prevent. Two more that a review misses: an SMS or TOTP code the user
+must read from another device and retype is a transcription test unless the field carries
+`autocomplete="one-time-code"` so the platform can fill it, and an email "magic link" passes
+cleanly because the user copies nothing. The strongest answer is to make passkeys the primary
+path, which satisfies 3.3.8 and 3.3.9 (the AAA form, which drops the object-recognition
+exception) at the same time. The protocol mechanics — credential creation, the authenticator,
+discoverable credentials, fallback ordering — are owned by
+[Auth in the Browser](../auth_in_the_browser/auth_in_the_browser.md), and 3.3.8 is the
+accessibility reason to prefer them, on top of the phishing-resistance reason that module
+gives.
+
+The other three new criteria have a similarly narrow test. **2.5.7** asks whether every
+drag interaction has a single-pointer alternative: a kanban board needs a keyboard or menu
+move, a range slider needs arrow keys, a signature pad needs a typed-name fallback.
+**3.2.6** asks whether the help affordance — a phone number, a chat launcher, a contact link
+— sits in the same relative place on every page that has one; moving it between header and
+footer across routes is the failure. **3.3.7** asks whether a multi-step process re-requests
+information the user already gave it; a checkout that cannot copy the shipping address
+forward to billing fails, and the fix is usually a checkbox, not new markup.
+
+### 6.8 Screen readers in practice
 
 Three matter, and they differ enough that testing one is not testing the others.
 
@@ -434,7 +487,7 @@ this finds things no tool reports: a name that parses but means nothing ("button
 reading order that jumps, an error announced before the field it refers to. Four keys make you
 productive: Tab, the element-list shortcut, H for headings, and the mode-toggle modifier.
 
-### 6.8 Testing and CI
+### 6.9 Testing and CI
 
 ```ts
 // Component level: jest-axe over the rendered output. Fast, runs on every commit.
@@ -487,7 +540,7 @@ Lighthouse's accessibility score is a **weighted average of a subset of axe rule
 page state**, so an unopened modal and an untriggered error state both score 100 by not
 existing. Treat it as a smoke test, never as the gate.
 
-### 6.9 Building it in rather than bolting it on
+### 6.10 Building it in rather than bolting it on
 
 The leverage point is the **design system**. Fixing the icon button once fixes it in all 340
 usages; finding it in an audit means 340 tickets across 12 teams. Concretely:

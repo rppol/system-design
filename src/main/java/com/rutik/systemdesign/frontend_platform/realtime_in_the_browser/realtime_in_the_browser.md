@@ -619,6 +619,49 @@ function connect() {
 `ws.onmessage = fn` is assignment and safe on a fresh socket; `addEventListener` on anything
 longer-lived than the socket is not. The tell is a render count growing by one per reconnect.
 
+### Pitfall 3: one socket per tab instead of one per user
+
+A user with the dashboard open in six tabs opens six sockets, and the server counts six
+subscribers where there is one person. At 5,000 users averaging 2.4 tabs that is 12,000
+connections and 12,000 fan-out writes for 5,000 readers, and every one of them re-sends the
+same payload to the same machine. It is also how an app hits the browser's per-origin
+connection ceiling from nothing but ordinary tab habits.
+
+```ts
+// BROKEN: every tab connects. Nothing coordinates them.
+const ws = new WebSocket(URL);
+ws.onmessage = render;
+```
+
+```ts
+// FIX A -- one SharedWorker holds the only socket; tabs are ports.
+// worker.js
+const ports = [];
+const ws = new WebSocket(URL);
+ws.onmessage = (e) => ports.forEach(p => p.postMessage(e.data));
+onconnect = (e) => { const p = e.ports[0]; ports.push(p); p.start(); };
+```
+
+```ts
+// FIX B -- leader election, when SharedWorker is not an option.
+// navigator.locks holds the lock for the leader tab's whole lifetime; when that tab
+// closes the lock releases and the next waiting tab immediately becomes leader.
+const bus = new BroadcastChannel("rt");
+navigator.locks.request("rt-leader", { mode: "exclusive" }, () => {
+  const ws = new WebSocket(URL);                       // only the leader connects
+  ws.onmessage = (e) => bus.postMessage(e.data);       // fan out to the followers
+  return new Promise(() => {});                        // hold the lock until this tab dies
+});
+bus.onmessage = (e) => render(e.data);                 // every tab, leader included
+```
+
+Prefer FIX B unless you need the worker for other reasons: `navigator.locks` handles the
+handover for free, where a SharedWorker still needs a per-port cleanup path and is
+unsupported in some mobile browsers. Either way the outbound path has to route through the
+leader too, or a follower tab's send has nowhere to go. The signature of the bug is a
+connection count that tracks tabs rather than users, and a fan-out cost that scales with a
+number nobody is measuring.
+
 ### Pitfall 4: a socket outliving the token that authenticated it
 
 A WebSocket authenticated at handshake time stays open long after its access token expires, so

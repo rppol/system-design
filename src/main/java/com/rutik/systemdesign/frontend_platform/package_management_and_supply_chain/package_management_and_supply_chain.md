@@ -41,7 +41,14 @@ something you never ordered.
 your credentials before a single test runs. In September 2025 the **Shai-Hulud** worm did
 exactly that: a `postinstall` script scanned the runner for npm and cloud tokens, exfiltrated
 them, and used the stolen npm tokens to publish itself onward — self-propagating across roughly
-500 packages in under two days.
+500 packages in under two days. It came back in November 2025 as **Shai-Hulud 2.0**, which
+moved the payload to a `preinstall` script so it ran even when installation failed, and pushed
+stolen secrets into **more than 25,000 public GitHub repositories** in roughly two days. npm's
+answer was structural: classic tokens could no longer be created, and every existing one was
+**permanently revoked on 2025-12-09**, replaced by 2-hour session tokens and granular tokens
+capped at 90 days. Any pipeline still authenticating with a classic token broke that morning,
+which is the durable lesson — a credential with no expiry is a credential someone else will
+eventually revoke for you, on their schedule.
 
 **Key insight, and the one people get wrong.** Your dependency tree is not the list in
 `package.json` — it is the transitive closure, it changes when *someone else's* range resolves,
@@ -459,7 +466,7 @@ short-lived cloud credentials from OIDC.
 | **Compromised build of a legitimate package** | the published artifact differs from the public source | **XZ Utils, CVE-2024-3094**, March 2024 — a backdoor present in the release tarball and absent from the git repository, after two years of social engineering to obtain co-maintainer status |
 | **Ownership transfer** | a burned-out maintainer hands the package to a volunteer | `event-stream` 3.3.6, 2018 — the new owner added `flatmap-stream`, whose encrypted payload targeted the Copay bitcoin wallet only |
 | **Maintainer sabotage** | the legitimate owner ships destructive code deliberately | `colors` 1.4.44-liberty-2 and `faker` 6.6.6, January 2022 — infinite loop breaking thousands of builds. `node-ipc` 10.1.1, March 2022 — overwrote files by geolocation |
-| **Self-propagating worm** | stolen publish tokens inject the payload into further packages | **Shai-Hulud**, September 2025 — scanned runners for npm and cloud credentials, exfiltrated them, republished itself; roughly 500 packages affected. The same month a phish of the `chalk` and `debug` maintainer poisoned 18 packages with 2 billion combined weekly downloads with a browser wallet-address swapper |
+| **Self-propagating worm** | stolen publish tokens inject the payload into further packages | **Shai-Hulud**, September 2025 — scanned runners for npm and cloud credentials, exfiltrated them, republished itself; roughly 500 packages affected. The same month a phish of the `chalk` and `debug` maintainer poisoned 18 packages with 2 billion combined weekly downloads with a browser wallet-address swapper. **Shai-Hulud 2.0**, November 2025 — the same worm on a `preinstall` hook, exposing secrets in over **25,000** GitHub repositories and forcing npm to revoke every classic token on 2025-12-09 |
 
 Two patterns recur across the whole table. **The name is the identity** — nothing binds
 `ua-parser-js` on the registry to the GitHub repository people read; and **the maintainer is a

@@ -345,8 +345,16 @@ This document requires 'TrustedHTML' assignment.
 ```
 
 The audit changes shape, from "every sink" to "every policy". Roll it out in Report-Only
-first, because every third-party script that touches the DOM will violate it. Firefox does not
-implement Trusted Types, so it is Chromium hardening on top of a sanitizer, not instead of one.
+first, because every third-party script that touches the DOM will violate it. Trusted Types is
+**Baseline Newly available since February 2026** — Chrome and Edge shipped it in 83 (May 2020),
+Safari in 26 (September 2025), Firefox last — so it is now a portable defence rather than
+Chromium-only hardening, and it is reasonable to require it in production.
+
+It still does not replace the sanitizer. Trusted Types enforces *provenance*, not safety: it
+proves a value came from a named policy, and says nothing about whether that policy returned
+something safe. The sanitizer is what the policy calls. What the pairing buys you is that
+review shifts from auditing every sink to auditing the two or three policies, which is a
+finite job.
 
 ### 6.6 CSP that is worth having
 
@@ -411,8 +419,9 @@ Object.freeze(Object.prototype);
 ```
 
 Other sources: query-string parsers that build nested objects from `a[b]=c`, and
-`structuredClone` of untrusted data into a config object. Node 22 and later accept
-`--disable-proto=throw`, worth setting on any server-rendering process.
+`structuredClone` of untrusted data into a config object. Node accepts
+`--disable-proto=throw` (the flag has been there since Node 13), worth setting on any
+server-rendering process.
 
 ### 6.8 `postMessage`, sandboxing and cross-origin isolation
 
@@ -709,7 +718,10 @@ gives it code. If the frame is same-origin with the parent, that code walks up t
 A sanitizer only helps where someone remembered to call it. With
 `require-trusted-types-for 'script'`, assigning a string to `innerHTML` raises
 `TypeError: This document requires 'TrustedHTML' assignment`, and the only way through is a
-named policy. Firefox does not implement it, so keep the sanitizer as the portable layer.
+named policy. It reached Baseline in February 2026 once Firefox shipped, so it is no longer a
+Chromium-only measure — but it enforces provenance, not safety: it proves the value came from a
+policy and says nothing about what the policy returned. The sanitizer is what the policy calls,
+and the win is that review moves from every sink to the two or three policies.
 
 **Q: Why does Subresource Integrity not work for a tag manager or analytics loader?**
 **Short:** Subresource Integrity pins one exact byte sequence, so a script the vendor intends to update fails the check on its first legitimate release.

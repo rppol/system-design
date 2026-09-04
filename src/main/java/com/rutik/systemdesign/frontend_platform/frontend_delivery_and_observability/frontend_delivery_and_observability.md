@@ -703,6 +703,10 @@ The old HTML lives only in that tab's memory; it was never re-fetched, so it sti
 `Settings-P4v.js` from build 118 while the bucket now holds build 119's names. The failure is a
 rejected `import()` — `TypeError: Failed to fetch dynamically imported module` — which no error
 boundary catches by default, so the route renders blank. Staging never reproduces it because
+you deploy and then open a fresh tab, so nobody is holding the old HTML. Reproduce it on
+purpose: load the app, deploy, then navigate to a lazy route in the tab you left open. The fix
+is to retain the previous build's assets for a release or two and catch the rejected import to
+prompt a reload.
 
 **Q: Why do content-hashed assets get `immutable` while the HTML that references them gets `no-cache`?**
 **Short:** A content hash makes the URL change whenever the bytes change, so the file can be cached forever, but the list of those URLs must be revalidated every load or the new names are never discovered.
@@ -711,6 +715,9 @@ The pair is what makes invalidation unnecessary: `app-B7x.js` can never be stale
 different bytes would be `app-Q8m.js`. The HTML is the single mutable pointer, so it costs one
 conditional request — about 350 bytes and a 304 from a nearby PoP — to learn the entire new
 graph. `immutable` matters beyond `max-age` because a reload otherwise forces revalidation of
+every subresource, so a user pressing refresh pays one conditional request per file; `immutable`
+tells the browser not to bother. Apply `max-age=31536000, immutable` to anything with a hash in
+its name, and to nothing without one.
 
 **Q: Why must source maps not be served publicly?**
 **Short:** Serving maps publicly hands anyone your full unminified source, comments and internal paths, so upload them to the error tracker at build time and delete them from the deploy artifact.
@@ -719,6 +726,9 @@ A `.map` is not a debugging hint, it is the original source embedded in JSON, an
 it automatically from the `sourceMappingURL` comment. Build with `sourcemap: "hidden"` so the
 map is emitted without that comment, upload it via the tracker's build plugin, and delete the
 files before the upload step runs. For an open-source front end this does not apply. If you need
+maps in production for a first-party debugging tool, serve them from a path behind
+authentication rather than from the directory next to the bundle, and check the deploy artifact
+for stray `.map` files in CI rather than trusting the build config.
 
 **Q: Why do lab performance numbers and field numbers legitimately disagree?**
 **Short:** Lab runs one scripted load on fixed emulated hardware and a throttled link, while field data is the p75 of every real device, network, cache state and interaction the site actually gets.
@@ -727,6 +737,8 @@ A Lighthouse LCP of 1.2 s and a CrUX p75 of 4.9 s can both be accurate: the lab 
 with no cookie banner, no logged-in shell, no third-party ad, on a machine faster than a
 mid-range Android. CWV grades you at the **75th percentile** of real users, so a quarter of your
 traffic is worse than the number you are judged on, and one median lab run cannot represent that
+tail. Use the lab to compare two builds under identical conditions, where its determinism is the
+point, and use the field to decide whether you have a problem at all.
 
 **Q: What is the difference between a CDN purge and an invalidation, and when do you need either?**
 **Short:** Invalidation marks cached objects stale so the next request revalidates against origin, a purge evicts them outright, and with content-hashed filenames a normal deploy needs neither.
@@ -735,6 +747,8 @@ CloudFront invalidations are asynchronous, usually complete inside 60 seconds, a
 path beyond 1,000 a month; Fastly's purge is roughly 150 ms globally and supports surrogate keys
 so you can drop everything tagged with one build. Because only the HTML changes on a hashed
 deploy, and the HTML is `no-cache`, the deploy invalidates nothing. Keep purge for two cases: an
+unhashed asset you had no choice but to ship, and a security incident where a bad object has to
+stop being served immediately. If a routine deploy needs a purge, the filenames are the bug.
 
 **Q: What is an atomic deploy, and what exactly goes wrong without one?**
 **Short:** Uploading every file first and flipping a single pointer last makes the deploy atomic, while an in-place sync serves a mix of two builds for the whole length of the upload.
@@ -743,6 +757,8 @@ During a non-atomic upload the site can serve build 119's HTML naming assets not
 build 118's HTML naming assets already deleted — a self-inflicted chunk 404 hitting every visitor
 rather than only mid-session ones. It is the worst failure mode here because it heals itself when
 the upload finishes, so the postmortem finds a green site and no evidence. If your platform has
+no atomic switch, build one: upload to a new immutable prefix, then move a pointer yourself.
+Never let CI run a bare `sync --delete` against the live prefix.
 
 **Q: How does rollback work on a static front end, and what makes it fail?**
 **Short:** Rollback is a pointer flip back to the previous immutable build, so it takes seconds and needs no rebuild — provided old builds were retained rather than overwritten.
@@ -751,6 +767,9 @@ Every build lives under its own immutable key space, so "roll back" means pointi
 reference at the previous one and invalidating the HTML. It fails for exactly one reason: a
 deploy job that prunes old objects, which turns a 5-second metadata change into a rebuild from a
 commit that may no longer compile on the current toolchain. Prune on a schedule, 30 days back,
+never as a step inside the deploy job, and keep the last ten builds unconditionally. Rehearse
+the rollback the same week you build the pipeline, because the failure mode only shows up when
+you need it.
 
 **Q: What is the flash of wrong content with client-side feature flags, and how do you avoid it?**
 **Short:** Evaluating a flag in the browser means the first paint renders the default variant and swaps when the payload lands, producing both a visible flicker and a layout shift.
@@ -759,6 +778,8 @@ The flag response typically arrives 200-600 ms after first paint, so users see v
 variant B, and if the two differ in height that is a CLS contribution — 0.31 in one real case
 against a 0.1 threshold. Best fix is server-side evaluation with the result inlined into the
 HTML shell, which costs edge cacheability of that HTML. Otherwise bootstrap synchronously from a
+cookie or `localStorage` copy of the last known assignment, and reserve the height of the taller
+variant so that even a wrong first guess cannot shift layout.
 
 **Q: What does it take to propagate a trace from the browser into the backend?**
 **Short:** The browser cannot send traceparent cross-origin unless the server lists it in Access-Control-Allow-Headers, and adding that header turns a simple request into a preflighted one.
@@ -767,6 +788,9 @@ You configure `propagateTraceHeaderCorsUrls` on the fetch instrumentation with a
 your API origin, and the server must answer the preflight with
 `Access-Control-Allow-Headers: traceparent, tracestate`. Miss that and the browser blocks the
 request outright, so enabling tracing breaks your API calls. Set `Access-Control-Max-Age: 86400`
+on the preflight response so each browser pays that extra round trip once a day rather than once
+per call, and roll tracing out behind a sampling flag so a CORS misconfiguration cannot take the
+whole API down at once.
 
 **Q: Why tag errors with a release id when the source map already resolves the stack?**
 **Short:** Tagging every error with the release that produced it is what lets the tracker say which deploy introduced a regression and pick the right map among many builds.
@@ -775,6 +799,9 @@ Debug ids handle the map-to-bundle pairing, but they do not tell you *when* a gr
 started. A release tag turns "41 new occurrences of this TypeError" into "first seen in 9f2c1ab,
 41 minutes after deploy", which is usually the entire investigation. It also drives release
 health — crash-free session rate per build — which is what you watch during a staged rollout to
+decide whether to continue or roll back. Tag the release from the same commit SHA the build
+embedded, not from a timestamp, or the two halves stop lining up the first time a build is
+retried.
 
 **Q: What does the `web-vitals` attribution build give you that the standard build does not?**
 **Short:** The attribution build reports which element, which resource and which phase produced the score, turning a bare LCP number into a named image and the sub-parts that made it slow.
@@ -783,6 +810,9 @@ For LCP it gives the element selector, the resource URL and a four-way split int
 load delay, resource load duration and element render delay; for INP the interaction target plus
 input delay, processing duration and presentation delay; for CLS the largest shift's source
 element. "LCP 3.4 s, `img.hero`, 2.1 s of it resource load delay" says the browser found the
+image late, so the fix is a preload or `fetchpriority="high"`, not a smaller file — and the bare
+number would have sent you to the image compression settings. The build costs about 3 KB gzipped
+over the standard one, which is worth it on any site you actually intend to fix.
 
 **Q: Why is an unfiltered client error feed unreadable, and what do you drop?**
 **Short:** Browser extensions, bots and cancelled navigations generate errors your code cannot fix, and an unfiltered feed buries real regressions under them at roughly ten to one.
@@ -791,6 +821,9 @@ Drop frames whose URL scheme is `chrome-extension://` or `moz-extension://`, dro
 bot user agents, drop `AbortError` and `Failed to fetch` raised while `document.visibilityState`
 is hidden, drop `ResizeObserver loop limit exceeded`, and route third-party script errors to a
 separate project. One thing you must **not** drop is the literal message `Script error.` — that
+is the browser withholding detail from a cross-origin script, and the fix is `crossorigin` on the
+script tag plus `Access-Control-Allow-Origin` on the response. Filter in the SDK's `beforeSend`
+rather than in the tracker's UI, so you also stop paying for the events.
 
 **Q: How does the `Vary` header affect front-end asset caching?**
 **Short:** Vary adds a request header to the cache key, so varying on a header with many values fragments one object into thousands of copies and collapses the edge hit ratio.
@@ -799,6 +832,8 @@ separate project. One thing you must **not** drop is the literal message `Script
 compression. `Vary: User-Agent` produces a distinct cached object per UA string and can take a
 97 percent hit ratio below 40; `Vary: Cookie` on HTML makes it effectively per-user and
 uncacheable. The front-end rule is simply that no header you do not control belongs in the key
+for a static asset: `Vary: Accept-Encoding` and nothing else. If a response genuinely differs per
+user, it is not a static asset and belongs on a different cache policy entirely.
 
 **Q: How do you sample RUM and traces without losing the sessions you care about?**
 **Short:** Head sampling decides at page load and keeps a whole session or none of it, which preserves complete traces at the cost of missing rare slow sessions unless you always keep errors.
@@ -807,6 +842,9 @@ Vitals beacons are ~250 bytes and usually run at 100 percent — 40,000 page vie
 Traces are the expensive signal, so sample at the **session** level: a 10 percent per-span sample
 gives you a tenth of every trace, which is useless, while a 10 percent session sample gives
 complete traces for a tenth of users. Always force-keep sessions that produced an error or a
+failing Core Web Vital, which is a decision you can only make once the session ends — so pair
+head sampling with an error-triggered override rather than choosing between them. Sample by a
+hash of the session id so the same session is kept consistently across every signal.
 
 **Q: What can and cannot a browser tracer instrument?**
 **Short:** A browser tracer sees document load timing, fetch and XHR, user interactions and long tasks, but cannot see inside cross-origin resources or below the network layer.
@@ -815,6 +853,9 @@ complete traces for a tenth of users. Always force-keep sessions that produced a
 DOM processing; fetch and interaction instrumentations cover the rest. It cannot read a
 cross-origin resource's detailed timings unless that server sends `Timing-Allow-Origin`, cannot
 observe anything the browser does not expose through Performance APIs, and cannot see requests
+made by a browser extension or inside a third-party iframe. Anything below the network layer —
+resolver behaviour, TCP retransmits, TLS negotiation detail — belongs to backend and synthetic
+monitoring, so do not design a browser tracer expecting to find it there.
 
 **Q: Why use `no-cache` rather than `no-store` on the entry HTML?**
 **Short:** no-cache still stores the response and revalidates it with an ETag, so an unchanged page costs only a 304 of headers, while no-store forbids storage and forces a full download every navigation.
@@ -823,6 +864,9 @@ The names are backwards from intuition: `no-cache` means "cache it, but ask me f
 browser sends `If-None-Match`, gets a 304 from a nearby PoP in about 12 ms, and reuses the stored
 4 KB body. `no-store` skips the store entirely, so every navigation pays a full body transfer and
 an origin round trip for a file that usually did not change. Reserve `no-store` for responses
+that must never touch disk — an authenticated HTML shell carrying user data on a shared machine
+is the honest case. For an anonymous marketing page, `no-store` is a self-inflicted TTFB tax on
+every navigation.
 
 **Q: What is the real cost of a feature flag, and when is a flag technical debt?**
 **Short:** Every live flag doubles a code path and ships both implementations to every user, so a flag with no removal date becomes permanent branching that nobody dares delete.
@@ -831,6 +875,8 @@ A flag guarding a 60 KB rewrite costs all users 60 KB until the losing branch is
 splitting the variants behind `import()` moves that cost to the users who get the variant.
 Combinatorially, 12 live flags is 4,096 theoretical states against maybe three you actually test.
 Give every flag a removal date at creation, alert at 30 days past it, and track "flags older than
+their removal date" as a number the team is accountable for, the same way it is accountable for
+failing tests. A flag that survives its own experiment is no longer a flag, it is a fork.
 
 **Q: What do preview deploys give you that a staging environment does not?**
 **Short:** A preview deploy publishes each branch to its own immutable URL through the same pipeline as production, so review happens against a real artifact instead of a screenshot or a shared box.
@@ -839,6 +885,8 @@ Every push gets a real CDN URL with the real build, so bundle size, Lighthouse r
 accessibility scans all measure what will ship, and two branches never fight over one staging
 box. Two things to get right: mark previews `X-Robots-Tag: noindex` and gate access if the app is
 not public, and never point 40 previews at production data — that is how test rows land in real
+orders. Give previews a seeded database and a short expiry, or the cost of keeping them alive
+quietly becomes a line item nobody owns.
 
 ---
 

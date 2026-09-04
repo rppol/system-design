@@ -675,6 +675,10 @@ in the console is the one-line diagnostic.
 one measured case 11.4 ms of layout plus 6.2 ms of paint against a 16.7 ms budget, landing at
 roughly 22 fps. `transform` changes a matrix on a texture that was painted once. The decisive
 consequence is that a blocked main thread stops the `left` animation dead but not the
+`transform` one: the compositor keeps ticking the matrix while JavaScript is busy, which is
+why a page can be visibly unresponsive and still animate smoothly. So animate `transform` and
+`opacity` by default, and where an element genuinely has to end up at a new layout position,
+set that position once and express the motion as a transform on top of it.
 
 **Q: What problem does FLIP solve, and how does it work?**
 **Short:** Measuring both positions once and animating the inverting transform lets a genuine layout change play back entirely on compositor properties, at two forced layouts instead of one per frame.
@@ -691,6 +695,9 @@ WCAG 2.2 covers it with 2.2.2 Pause, Stop, Hide at Level A — any auto-starting
 5 seconds needs a stop mechanism — and 2.3.3 at AAA. The correct implementation is to
 *replace* motion, not delete it: a 120 ms cross-fade still communicates that a panel arrived,
 without the vestibular load of a 600 px slide. Read it with `matchMedia` in JS and listen for
+`change`, since the user can flip the OS setting mid-session, and mirror the same rule in CSS
+with `@media (prefers-reduced-motion: reduce)`. Use `0.01ms` rather than `0` in the global
+reset so `transitionend` and `animationend` still fire and nothing waiting on them deadlocks.
 
 **Q: What does `will-change` actually cost?**
 **Short:** Layer promotion allocates roughly width times height times four bytes of GPU memory, so one full-screen layer on a 3x phone is about 13.6 MB and thirty of them get the tab killed.
@@ -699,6 +706,9 @@ It is a hint to prepare an element, usually by giving it its own compositor laye
 browser needs roughly 100 ms of warning for it to help at all. Apply it on a state that
 precedes the animation — `.card:hover { will-change: transform }` — and remove it when the
 animation ends. `transform: translateZ(0)` as a blanket hack is worse: it is permanent, and it
+holds the same GPU memory whether or not anything is animating, so a grid of 48 promoted cards
+costs you hundreds of megabytes at rest. Treat any `will-change` you cannot tie to a specific
+frame you fixed in a profile as a defect, and delete it.
 
 **Q: Why is `transition: all` a bad idea?**
 **Short:** Transitioning every property opts in changes you never intended, including ones a later dependency upgrade adds, so a class toggle can silently start animating layout with nothing in the stylesheet naming it.
@@ -709,12 +719,15 @@ property, so nobody connects the jank to a change made in a different file six m
 Name every transitioned property; a property added later is then simply not animated.
 
 **Q: Exactly which properties are compositor-only?**
-**Short:** Only two run compositor-only in every engine -- filter and backdrop-filter get a GPU pass, and every other property re-enters the main thread at paint or at layout.
+**Short:** Only `transform` and `opacity` run compositor-only in every engine -- filter and backdrop-filter get a GPU pass, and every other property re-enters the main thread at paint or at layout.
 
 `background-color`, `color`, `box-shadow` and `border-radius` are paint-only: cheaper than
 layout but still main-thread, and a full-bleed repaint is roughly 2.1 million pixels per frame.
 `width`, `height`, `top`, `left`, `margin` and `font-size` force layout. One caveat: animating
 a compositable property *alongside* a non-compositable one in the same rule drags the whole
+animation back onto the main thread, so `transition: transform 300ms, height 300ms` is a layout
+animation with extra steps. Split the two halves into separate rules, or drop the
+non-compositable one and reach the same visual result with a scale.
 
 **Q: What is the frame budget, and how do you tell a dropped frame from a slow one?**
 **Short:** The frame budget is the display refresh interval — 16.7 ms at 60 Hz, 8.3 ms at 120 Hz — and the browser needs 4 to 6 ms of that for its own work.
@@ -723,6 +736,8 @@ A **dropped** frame is work that overran the deadline, so the previous image is 
 twice; the Performance panel's frames track flags it red. A **slow** frame is composited and
 on time but its easing or duration makes the motion feel sluggish, and the frames track is all
 green. The first is a code fix and the second is a design fix; treating one as the other is
+how a team spends a week optimising an animation that was never dropping a frame. Read the
+frames track before you open the profiler, and only reach for paint flashing once it is red.
 
 **Q: When do you reach for the Web Animations API instead of CSS?**
 **Short:** Imperative control wins whenever an animation must be addressed while it is running — paused, seeked, reversed from its current position, retargeted, or layered on another.
@@ -731,6 +746,9 @@ The canonical case is a drawer the user can grab mid-slide. Reversing a CSS tran
 restarts from the declared endpoint at full duration, so a drawer caught 20% open takes the
 whole 280 ms to close at a visibly wrong speed; `anim.reverse()` reverses from `currentTime`
 and takes 56 ms. `composite: 'add'` is the other reason — a hover lift and a drag offset can
+both write `transform` without one clobbering the other, which no pair of CSS rules can do.
+Keep CSS for declarative, fire-and-forget state changes, and reach for WAAPI the moment an
+animation has to be addressed after it has started.
 
 **Q: What does `animation-fill-mode` control?**
 **Short:** Fill mode decides what the element looks like outside the animation's active window, and the default of none is why an element snaps back the instant its entry animation finishes.
@@ -739,6 +757,9 @@ and takes 56 ms. `composite: 'add'` is the other reason — a hover lift and a d
 during `animation-delay`; `both` does each. The trap is that `fill: 'forwards'` in WAAPI keeps
 the `Animation` object alive holding its end value, so a toast-heavy dashboard accumulated
 3,800 retained animations in one shift. Follow it with `commitStyles()` then `cancel()`, and
+the end value stays on the element as an inline style with nothing retained behind it. Audit
+`document.getAnimations().length` on any long-lived single-page app; a count that only ever
+grows is this bug and nothing else.
 
 **Q: How does the View Transitions API actually work?**
 **Short:** Snapshots of the old and new states become a pseudo-element tree that the browser cross-fades, so it animates two flat images rather than two live DOM trees.
@@ -747,6 +768,9 @@ the `Animation` object alive holding its end value, so a toast-heavy dashboard a
 `view-transition-name`, runs your callback, snapshots the new state, then builds
 `::view-transition-group`, `-image-pair`, `-old` and `-new` pseudo-elements you can style like
 any box. Rendering is suspended for the whole callback, so a slow synchronous render reads as
+a frozen page rather than a slow animation. Await your data *before* calling
+`startViewTransition`, keep the callback to the DOM mutation itself, and give a
+`view-transition-name` only to the handful of elements that actually move.
 
 **Q: What is different about cross-document view transitions?**
 **Short:** Both pages must opt in with the at-rule, because the browser has to decide whether to snapshot the outgoing document before it unloads it.
@@ -754,7 +778,10 @@ any box. Rendering is suspended for the whole callback, so a slow synchronous re
 `@view-transition { navigation: auto; }` goes in a shared stylesheet so it lands on every
 route — putting it only on the destination is the most common reason nothing happens.
 Same-origin navigations only. Same-document transitions use `startViewTransition()` instead
-and are the right tool inside a single-page app. Check Baseline before making the
+and are the right tool inside a single-page app. Check Baseline before making the effect
+load-bearing: a browser without support simply performs an ordinary navigation, so the design
+has to still read without the transition. Treat it as progressive enhancement and never let a
+route's correctness depend on the transition firing.
 
 **Q: Why did React 19.2 change the prefix `useId` generates?**
 **Short:** Generated ids had to become valid CSS identifiers, and the new `_r_` prefix makes an id usable directly as a view-transition-name.
@@ -763,6 +790,9 @@ The older prefix used characters that are illegal in a CSS ident, so
 `view-transition-name: ${useId()}` produced a declaration the parser dropped — no transition,
 no error, nothing in the console. Since every `view-transition-name` must be unique among
 rendered elements, per-item ids are exactly what a list needs, and `_r_` makes that a
+one-liner instead of a hand-rolled sanitizer. On an older React, sanitize the id yourself
+before using it in a CSS property rather than passing it through raw and wondering why nothing
+animates.
 
 **Q: What do scroll-driven animations replace, and why are they cheaper?**
 **Short:** Scroll progress drives the animation from the compositor, so the effect advances even while the main thread is blocked by a long task that would freeze a scroll listener.
@@ -770,7 +800,10 @@ rendered elements, per-item ids are exactly what a list needs, and `_r_` makes t
 `animation-timeline: scroll(root block)` maps 0% to 100% onto a scroll container's range;
 `animation-timeline: view()` tracks the element's own crossing of the scrollport, sliced by
 `animation-range`. The listener version fires several times per frame and typically calls
-`getBoundingClientRect()` then writes a style — a forced synchronous layout inside a
+`getBoundingClientRect()` then writes a style — a forced synchronous layout inside a handler
+that has to finish before the frame can composite. The declarative form has no handler at all,
+so a long task cannot desynchronise the effect from the scroll position. Keep the JavaScript
+version only where the effect needs state a timeline cannot express.
 
 **Q: How do you debug a janky animation in DevTools?**
 **Short:** Paint flashing and layer borders in the Rendering panel show whether an animation is repainting or promoted, and the Performance panel's frames track says whether frames were actually dropped.
@@ -795,6 +828,8 @@ Text re-wrapping from three lines to two cannot be interpolated by any matrix. T
 is fixable three ways: animate `translate` only and let the size snap; counter-scale the inner
 content with the reciprocal transform on a child; or hand the job to the View Transitions API,
 whose cross-fade between two snapshots absorbs the difference by design. FLIP also assumes the
+element survives the change: if the framework destroys and recreates the node, there is nothing
+left to animate, so match old to new by a stable key before you take the first measurement.
 
 ---
 

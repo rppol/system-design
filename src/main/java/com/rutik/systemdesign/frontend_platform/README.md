@@ -273,6 +273,147 @@ other.
 
 ---
 
+## Known Gaps & Planned Work
+
+Recorded 2026-09-04 after a section-wide gap review. Every item below was verified against
+the live files — the "zero mentions" claims are grep results across all 20 module pages, not
+impressions. Each entry is written to be briefable on its own, so a session can pick up any
+one line without reading the rest.
+
+### Planned case studies (5)
+
+The section ships **no standalone case studies** and defers to
+[`../react/case_studies/`](../react/case_studies/case_studies.md). All seven files there are
+React-shaped — component architecture, state, rendering strategy — so no *platform* case
+study exists anywhere in the repo. These five are the missing shape: the browser and the
+delivery pipeline as the system under design, with no framework in the problem statement.
+
+1. **`hold_a_core_web_vitals_win_across_four_teams`** — the org mechanics of *keeping* a
+   performance win, not getting one. Distinct from `web_performance_and_core_web_vitals`
+   §14, which is a single tuning pass and self-labels as a composite. Teaches: a legitimate
+   CrUX-versus-lab disagreement and how to adjudicate it; per-team budgets wired as a
+   Lighthouse CI ratchet; the quarter the regression came back through a marketing tag
+   nobody owned; negotiating a third-party byte allowance with the team that wants the tag;
+   and why grading at p75 rather than p50 changes which fix you pick.
+2. **`migrate_a_40_package_monorepo_to_vite_8`** — migration as a project with a schedule
+   and a rollback, not a config diff. Teaches: strangler sequencing with dual builds
+   running side by side; proving parity through bundle diff and chunk-hash stability; the
+   plugin-API gaps discovered in week three, after the decision was already made; CI cache
+   invalidation during cutover; the rollback plan and its trigger; and the one package that
+   never migrates and why that is an acceptable end state.
+   `modules_bundling_and_the_build_pipeline` teaches the destination and nothing about the
+   journey.
+3. **`design_a_client_observability_and_rum_pipeline`** — the whole telemetry system under
+   an explicit cost budget. Teaches: sampling strategy and the diagnostic cost of each
+   choice; PII scrubbing in breadcrumbs, URLs and request bodies; source-map upload keyed to
+   release tags; browser-to-backend trace propagation and the CORS preflight it adds;
+   alerting on a p75 Core Web Vital rather than an average; and cardinality control before
+   the bill arrives.
+4. **`govern_the_third_party_scripts_on_a_commercial_site`** — the tags nobody in
+   engineering owns. Teaches: inventorying scripts with no owner; attributing INP and byte
+   cost per tag so the conversation has numbers in it; the facade pattern and worker
+   sandboxing; CSP `connect-src` as the enforcement mechanism rather than a policy document;
+   a consent gate that actually gates rather than one that fires the tag and asks after; and
+   the conversation with marketing, which is the part that decides the outcome.
+5. **`remediate_to_wcag_2_2_aa_under_a_legal_deadline`** — triage against a date. Teaches:
+   turning 41 audit findings into a sequenced plan; the six criteria new in 2.2 encountered
+   in situ rather than as a table; a screen-reader test protocol spanning NVDA, JAWS and
+   VoiceOver; axe-in-CI as a ratchet rather than a gate; writing the VPAT/ACR; and the
+   roughly 30-40% of real barriers that no automated tool can see.
+
+### Planned modules (5, ranked)
+
+1. **`frontend_testing_and_ci`** — sibling of `linting_formatting_and_code_quality`.
+   **The section's largest structural hole.** This section's own `CLAUDE.md` names front-end
+   testing as one of the repo hard-zeros the section exists to close, and then never writes
+   it: section-wide grep gives Vitest **0**, "unit test" **0**, MSW **0**, "test pyramid"
+   **0**, "visual regression" **0**. `react/testing_and_frontend_ci` does not cover it —
+   that module is framework-scoped by construction. Cover: jsdom versus a real browser and
+   when the difference bites; Vitest browser mode; MSW at the network boundary instead of
+   module mocks; Playwright as a platform tool (traces, fixtures, sharding); a flake
+   taxonomy and a quarantine policy; the false-positive economics of visual regression; and
+   budget gates in CI.
+2. **`images_media_and_fonts`** — sibling of `web_performance_and_core_web_vitals`, which
+   currently rents the entire topic. Cover: `sizes`/`srcset` arithmetic and the specific
+   ways it goes wrong; art direction versus resolution switching; AVIF/WebP/JPEG-XL with
+   byte math rather than adjectives; how `loading`, `decoding` and `fetchpriority` interact;
+   video and HLS basics; variable fonts; subsetting and `unicode-range` (**0** hits
+   repo-wide); `size-adjust` and `ascent-override`; and the CLS that is attributable to
+   media specifically.
+3. **`internationalization_and_intl`** — sibling of `css_layout_and_the_cascade`, which owns
+   logical properties and RTL today and has nothing to hand off to. Near-total zero:
+   `Intl.` **2** hits, "i18n" **0**, "pluraliz" **0**, "hreflang" **0**. Cover: locale
+   negotiation; the `Intl` formatter family; ICU message format and why string concatenation
+   breaks under plurals and gender; per-locale bundle splitting — the bundling module's own
+   §14 uses a locale glob as its BROKEN example and never explains i18n; `lang`/`dir` and
+   bidi isolation; and currency and timezone traps.
+4. **`web_workers_and_client_threading`** — sibling of `the_event_loop_and_scheduling`.
+   Cover: worker lifecycle and its real cost; `postMessage` structured clone versus
+   transferables with measured copy cost; SharedArrayBuffer and Atomics under cross-origin
+   isolation (COOP/COEP is taught in the security module and currently has nowhere to land);
+   worker pools; OffscreenCanvas; and SharedWorker plus cross-tab leader election — which is
+   also the fix for the 30-open-sockets problem `realtime_in_the_browser` raises in its own
+   §10 and §12.
+5. **`client_storage_and_indexeddb`** — sibling of `pwa_service_workers_and_offline`. All
+   23 IndexedDB hits in the section sit inside the PWA module, and `the_dom_and_web_apis`
+   mentions it **zero** times. Cover: choosing among localStorage, IndexedDB, the Cache API
+   and OPFS; transaction and index semantics; quota estimation and eviction (Chromium at
+   roughly 60% of disk, WebKit's 7-day script-writable eviction); `navigator.storage.persist()`;
+   migrating a client schema across releases; and the structured-clone boundary.
+
+### Planned in-module topic gaps
+
+Every row was verified at zero or near-zero mentions section-wide.
+
+| Gap | Belongs in |
+|---|---|
+| FedCM | `auth_in_the_browser` |
+| Third-party-cookie deprecation status (Chrome's 2025 reversal to user choice) | `cors_cookies_and_the_same_origin_model` |
+| Storage Access API; Private Network Access | `cors_cookies_and_the_same_origin_model` |
+| DOM clobbering | `browser_security_and_the_client_threat_model` |
+| Speculation Rules API | `web_performance_and_core_web_vitals`, `http_in_the_browser_and_fetch` |
+| Early Hints (103) | `http_in_the_browser_and_fetch` |
+| Web Push / VAPID | `pwa_service_workers_and_offline` |
+| `:has()`, anchor positioning, native nesting, `@scope`, `@property` | `css_layout_and_the_cascade` |
+| bfcache | `browser_architecture_and_the_rendering_pipeline` |
+| Module federation, import maps, persistent build caching | `modules_bundling_and_the_build_pipeline` (Vite 8's own release notes name these) |
+| WebRTC data channels; BroadcastChannel mechanics | `realtime_in_the_browser` |
+| Node permission model (`--permission`), single-executable applications | `the_node_and_edge_runtimes` |
+| WASM boundary mechanics (named twice in the section, never taught) | `client_memory_and_performance_debugging` |
+| `isInputPending` | `the_event_loop_and_scheduling` |
+| Feature detection / progressive enhancement / Baseline-as-method | currently ownerless; "Baseline" is cited 24 times across 5 modules as a *fact* and never taught as a *method* |
+| Client-side routing and the Navigation API | homeless between this section and `react/meta_frameworks_and_routing` — needs an owner decision before anyone writes it |
+
+**Pair FedCM with the third-party-cookie row and fix them in one edit.** They are the two
+halves of the same story — why the platform is retiring ambient third-party credentials —
+and today neither module mentions either topic or points at the other.
+
+Storage Access API and Private Network Access were added to
+`cors_cookies_and_the_same_origin_model` §12 on 2026-09-04; both still deserve prose
+treatment in §6, which is why the row stays.
+
+### Planned section-level expansions
+
+| Module | Section | What is wrong |
+|---|---|---|
+| `css_layout_and_the_cascade` | §10 | only 2 pitfalls, and **neither is quantified** — unique in the section |
+| `javascript_language_semantics` | §10 | correctness demos where the template asks for production war stories |
+| `the_node_and_edge_runtimes` | §10 | only 2 pitfalls |
+| `the_dom_and_web_apis` | §6.10 | a persuasive essay with no numbers in it |
+| `browser_architecture_and_the_rendering_pipeline` | §9 | restates §6 rather than adding pitfalls |
+| `linting_formatting_and_code_quality` | §7 | anonymizes both incidents, where `web_performance_and_core_web_vitals` §7 names real companies — pick one convention |
+
+### Planned cross-links
+
+| From | To | Why |
+|---|---|---|
+| `the_dom_and_web_apis` | `pwa_service_workers_and_offline` | IndexedDB lives entirely in the PWA module |
+| `browser_architecture_and_the_rendering_pipeline` | `web_performance_and_core_web_vitals` | bfcache and font loading |
+| `cors_cookies_and_the_same_origin_model` | `auth_in_the_browser` (both directions) | third-party cookies and FedCM |
+| `accessibility_and_wcag` | `auth_in_the_browser` | added 2026-09-04 for SC 3.3.8; the reverse link is still missing |
+
+---
+
 ## 7. Build Manifest
 
 Per-file status tracker. **This is the resume point** — the first `pending` row is the next

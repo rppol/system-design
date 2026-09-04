@@ -729,6 +729,32 @@ proxy will happily reuse the entry, and the second origin receives an `Allow-Ori
 someone else. The symptom — intermittent CORS failures that vanish on a hard refresh — is
 distinctive once you have seen it.
 
+**Q: What does the Storage Access API do, and when do you actually need it?**
+**Short:** It lets an embedded cross-site frame ask the browser, on a user gesture, for access to its own unpartitioned cookies, which is the sanctioned escape hatch once third-party cookies are blocked or partitioned.
+
+Inside an iframe on someone else's site your cookies are either blocked or partitioned, so
+a widget that authenticated the user on its own origin sees an empty jar. The frame calls
+`document.hasStorageAccess()` to check, then `document.requestStorageAccess()` from inside a
+click handler; the browser may grant it silently if the user has already interacted with
+your site as a first party, or prompt. Two hard constraints: it must be called during user
+activation — a call on load is rejected outright — and the embedding page must permit it with
+`allow="storage-access"` on the iframe. Reach for it only for genuine cross-site embeds such
+as a hosted checkout or a support widget; if you control both ends, `CHIPS`
+(`Partitioned` cookies) is the simpler answer because it needs no prompt at all.
+
+**Q: What is Private Network Access, and how does it break a local development setup?**
+**Short:** It makes a page on a public origin preflight any request to a private or loopback address, so a hosted app calling a device on localhost fails until that device answers the preflight.
+
+The threat it closes is a public website quietly scanning `192.168.x.x` or hitting an
+unauthenticated router admin page using the visitor's browser as the pivot. The browser now
+sends a preflight carrying `Access-Control-Request-Private-Network: true` before any
+public-to-private request, and the local server must answer with
+`Access-Control-Allow-Private-Network: true` plus the ordinary CORS headers, over HTTPS or
+from a secure context. This bites two common setups: a hosted dashboard talking to a
+hardware agent on `localhost`, and a staging site pointing at a developer's LAN box. The fix
+belongs on the local server, not the page — and if you own the local agent, shipping it a
+certificate and answering the preflight is a smaller job than arguing with the browser.
+
 ---
 
 ## 13. Best Practices

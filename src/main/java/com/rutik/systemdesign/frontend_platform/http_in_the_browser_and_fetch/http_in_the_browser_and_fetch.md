@@ -620,7 +620,7 @@ requests it, because the two requests do not match in the cache. Always set `as`
 Server-side protocol depth is
 [`../../backend/http_protocols/http_protocols.md`](../../backend/http_protocols/http_protocols.md);
 resilience patterns beyond the browser are
-[`../../backend/resilience_patterns/resilience_patterns.md`](../../backend/resilience_patterns/resilience_patterns.md).
+[`../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md).
 
 ---
 
