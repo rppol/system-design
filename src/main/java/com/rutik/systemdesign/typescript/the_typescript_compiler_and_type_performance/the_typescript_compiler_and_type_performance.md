@@ -73,7 +73,7 @@ problem you fix in a line. The second is a type-design problem you find with a t
 6. **The editor and CI are different workloads** over the same program. One is latency on a
    live in-memory program; the other is throughput on a cold one.
 7. **TypeScript 7.0 changed the implementation, not the language.** Same syntax, same
-   semantics, same `tsconfig`, same diagnostics. A slow type is still slow, 8-12x less so.
+   semantics, same `tsconfig`, same diagnostics. A slow type is still slow, 7.7-11.9x less so.
 8. **Incrementality beats speed.** Re-checking nothing is faster than re-checking quickly.
 
 ---
@@ -173,7 +173,7 @@ xychart-beta
     bar [10.6, 15.7, 2.8, 1.47]
 ```
 
-Microsoft's published figures at GA: 8-12x faster full builds, memory down 6-26%. The tall
+Microsoft's published figures at GA: 7.7-11.9x faster full builds, memory down 6-26%. The tall
 bar is `tsc6`, the short one `tsc` 7.0 on the same repository and the same `tsconfig`.
 
 ### Union blowup: why one type multiplies
@@ -494,7 +494,7 @@ at 9m 20s. Four changes, in the order they were made and what each bought:
 4. The TypeScript 7.0 upgrade: **2m 10s to 95s** on a cold cache, and 22s warm.
 
 Note the ordering. The 7.0 upgrade was the smallest single win, and it would have looked like
-the biggest if it had been done first — 8-12x on a build that was 60% wasted files still
+the biggest if it had been done first — 7.7-11.9x on a build that was 60% wasted files still
 leaves the wasted files.
 
 ---
@@ -640,7 +640,7 @@ now produces no error. Nearly every project enables it because the failing code 
 cannot fix; compensate by checking your own emitted `.d.ts` in a separate job.
 
 **Q: What changed in TypeScript 7.0, and what did not?**
-**Short:** The compiler became a native Go binary delivering 8-12x faster full builds and 6-26% less memory, while the language, semantics and tsconfig stayed identical.
+**Short:** The compiler became a native Go binary delivering 7.7-11.9x faster full builds and 6-26% less memory, while the language, semantics and tsconfig stayed identical.
 
 Published GA figures from 2026-07-08: vscode 125.7s to 10.6s, sentry 139.8s to 15.7s,
 bluesky 24.3s to 2.8s, playwright 12.8s to 1.47s; editor single-file diagnostics 17.5s to
@@ -765,13 +765,15 @@ verifiable against 60,000 existing conformance tests, which is what made "same d
 same semantics" a checkable claim rather than a hope.
 
 **Q: What did TypeScript 6.0 remove versus merely deprecate?**
-**Short:** TS 6.0 removed classic resolution, outFile, the AMD/UMD/SystemJS formats, esModuleInterop false and baseUrl as a resolution root, while only deprecating target es5 and downlevelIteration.
+**Short:** It removed only classic resolution, outFile and the AMD/UMD/SystemJS formats; everything else it disapproves of, baseUrl roots and esModuleInterop false included, merely warns.
 
 Released 2026-03-23 as the last JavaScript-codebase compiler and the explicit deprecation
 bridge before the Go port. The distinction is the thing interviewers probe: deprecated
 options still work, removed options fail the build outright, so a migration plan needs both
-lists. Losing `baseUrl` as a resolution root is the one that bites most, since a bare
-`utils/date` specifier no longer resolves.
+lists. The deprecated list is the long one — `baseUrl` as a resolution root,
+`esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`, `target: "es5"`,
+`downlevelIteration` — which means a 5.x config usually still builds on 6.0 and the real risk
+is that nobody reads the warnings before they become errors.
 
 **Q: We run `tsc --noEmit` to make the build faster. Does skipping emit help?**
 **Short:** Emit is a small fraction of a typical build, so skipping it saves disk writes rather than the check time anyone is hoping to cut.

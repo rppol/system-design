@@ -99,9 +99,11 @@ control and shipped to the resolvers you do not.**
 | `nodenext` | The same, tracking newer Node behaviour | Yes, in ESM files | Yes | Libraries — the strictest realistic model |
 | `bundler` `[5.0]` | Vite, webpack, esbuild, Rollup | No | Yes | Apps behind a bundler |
 
-`classic` was **removed in TypeScript 6.0**, along with `--outFile`, the AMD/UMD/SystemJS
-module formats, `esModuleInterop: false` and `--baseUrl` as a resolution root. `target: es5`
-and `--downlevelIteration` were **deprecated in 6.0 but not removed** — they still work.
+`classic` was **removed in TypeScript 6.0**, along with `--outFile` and the AMD/UMD/SystemJS
+module formats — those three are hard errors. `--moduleResolution node` (`node10`) is a
+different case: it was **deprecated, not removed**, so it still resolves, with a warning, as do
+`esModuleInterop: false`, `--baseUrl` as a resolution root, `--alwaysStrict false`, `target: es5`
+and `--downlevelIteration`. Treat the warnings as a migration worklist, not as a broken build.
 
 **Pick by who resolves at runtime.** A library published to npm: `nodenext`, because your
 consumers include Node, and it is the only setting that will tell you about a missing
@@ -349,10 +351,12 @@ That is the library config: anything `nodenext` accepts, Node accepts. The appli
 differs in three keys — `"module": "preserve"`, `"moduleResolution": "bundler"`, and
 `"noEmit": true`, because Vite or esbuild produces the output.
 
-`--baseUrl` no longer works as a resolution root `[6.0]`: a bare `utils/date` will not find
-`src/utils/date.ts`. `paths` still works, resolved relative to the `tsconfig.json` that declares
-it. Bare aliases were always a lie to the runtime — `tsc` succeeded on a specifier Node could
-not resolve — which is the exact class of bug this module is about.
+`--baseUrl` as a resolution root is **deprecated** `[6.0]`: a bare `utils/date` still finds
+`src/utils/date.ts`, but every build says so, and a future release turns that warning into an
+error. Migrate now rather than on the upgrade — `paths` is the replacement, resolved relative to
+the `tsconfig.json` that declares it. Bare aliases were always a lie to the runtime — `tsc`
+succeeded on a specifier Node could not resolve — which is the exact class of bug this module
+is about, and the reason the deprecation exists.
 
 ### 6.5 The `exports` field, condition order first
 
@@ -766,18 +770,24 @@ and treat them as correctness settings rather than style.
 **Q: `moduleResolution: classic` is gone — what replaced it and what else went with it?**
 **Short:** Only the Node algorithm and the bundler model remain, because classic never matched any real runtime and quietly accepted specifiers nothing could resolve.
 
-TypeScript 6.0 removed `classic`, `--outFile`, the AMD/UMD/SystemJS formats, `esModuleInterop:
-false` and `--baseUrl` as a resolution root. It **deprecated** `target: es5` and
-`--downlevelIteration` without removing them. Losing `baseUrl` means a bare `utils/date` no
-longer finds `src/utils/date.ts`: use `paths` for type-only aliases, `imports` for runtime ones.
+TypeScript 6.0 removed exactly three things: `classic`, `--outFile` and the AMD/UMD/SystemJS
+formats. `--moduleResolution node` was only **deprecated**, alongside `esModuleInterop: false`,
+`--baseUrl` as a resolution root, `--alwaysStrict false`, `target: es5` and
+`--downlevelIteration` — all of those still build, with a warning. So `classic` has no successor
+because it never had a user: point `node10` configs at `node16`/`nodenext` if Node runs the
+output, `bundler` if a bundler does. Clear the `baseUrl` warning at the same time by moving bare
+aliases to `paths` for type-only aliases and `imports` for runtime ones.
 
-**Q: `esModuleInterop` cannot be turned off any more. What does that actually mean for a default import?**
-**Short:** Interop shims are now unconditional, so importing a CJS module's default gives you its module.exports wrapped rather than a raw namespace object.
+**Q: `esModuleInterop: false` is deprecated in 6.0. What does that actually mean for a default import?**
+**Short:** Setting it to false still compiles but warns, and the interop shim it disables is what makes a default import of a CJS module give you module.exports wrapped rather than a raw namespace object.
 
 `import express from "express"` works because the emit calls an interop helper that checks
 `__esModule` and wraps a plain `module.exports` as `{ default: … }`. Without it you needed
 `import * as express` and then could not call it, since a namespace object is not callable. TS
-6.0 removed the `false` setting, so this behaviour is now simply how the language emits.
+6.0 deprecated the `false` setting rather than removing it — along with
+`allowSyntheticDefaultImports: false` — so a config that still turns it off builds and warns.
+Take the warning as the deadline it is: turn both on, fix the `import * as` call sites the flip
+exposes, and stop treating interop as a per-project choice.
 
 **Q: What is a live binding, and where does the difference from CJS bite?**
 **Short:** Imported names stay bound to the exporting module's variable, so a later reassignment there is visible to every importer, where require copies the value once.

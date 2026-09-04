@@ -2,7 +2,7 @@
 
 Section root: `src/main/java/com/rutik/systemdesign/typescript/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
-Build manifest / status tracker: `README.md` §7 — check it before starting a new module.
+Build manifest / status tracker: `README.md` §8 — check it before starting a new module.
 
 ---
 
@@ -29,7 +29,7 @@ overlapping runtime semantics.
 
 ## PRIMARY TARGET VERSION — TypeScript 7.0
 
-GA **2026-07-08**. The compiler is a native Go binary (internally "Project Corsa"): 8-12x
+GA **2026-07-08**. The compiler is a native Go binary (internally "Project Corsa"): 7.7-11.9x
 faster full builds, memory down 6-26%, `--checkers` / `--builders` / `--singleThreaded`
 controlling parallelism. Releases now land **every 3-4 months**, so this pin goes stale
 several times a year — verify against the TypeScript devblog before writing anything
@@ -39,9 +39,16 @@ version-gated, never from memory.
 deprecation bridge. Get this distinction right, because it is the easiest thing in the
 section to state wrongly:
 
-- **Removed:** `--moduleResolution classic`, `--outFile`, AMD/UMD/SystemJS module formats,
-  `esModuleInterop: false`, `--baseUrl` as a resolution root, `--alwaysStrict false`
-- **Deprecated (not removed):** `target: es5`, `--downlevelIteration`
+- **Removed (hard error, the build stops):** `--moduleResolution classic`, `--outFile`,
+  AMD/UMD/SystemJS module emit
+- **Deprecated (warns, still compiles exactly as before):** `esModuleInterop: false` and
+  `allowSyntheticDefaultImports: false`, `--baseUrl` as a resolution root,
+  `--alwaysStrict false`, `--moduleResolution node` (i.e. `node10`), `target: es5`,
+  `--downlevelIteration`
+
+The deprecated list is the long one, and that is the part most sources get wrong: 6.0 is a
+bridge, so almost everything it disapproves of still builds. Only three things actually
+fail. Do not write "removed" for anything in the second list.
 
 **The practical TS 7.0 caveat.** There is no stable programmatic Compiler API until 7.1.
 typescript-eslint (8.69.0), ts-jest, ts-morph and framework template checkers still run on
@@ -114,10 +121,18 @@ justified at this depth.
 `game/build_tech.py` makes any such page a FATAL `--strict` error unless it is hand-listed
 in `PRODUCT_DEEP_DIVES` / `CONCEPT_DEEP_DIVES`.
 
-## Case Studies — 0
+## Case Studies — 0, and that is a GAP, not a policy
 
-Deliberate, following the `../python/` precedent for a pure-language section. Applied,
-end-to-end design work is in `../react/case_studies/`.
+There is no `typescript/case_studies/` yet. It is unwritten work, not an exclusion.
+
+Do not repeat the old justification ("a pure-language section, following the `../python/`
+precedent") — it was false in both halves. `../python/case_studies/` holds **six** studies
+plus an index, and `../go/case_studies/` holds six plus an index; both are pure-language
+sections, and their indexes frame the studies as language/runtime work that "stops at the
+process boundary". That is exactly the shape this section needs.
+
+The six proposed studies, with what each teaches that no module does, are recorded in
+`README.md` §"Known Gaps & Planned Work". Read that before starting one.
 
 ---
 
@@ -260,7 +275,7 @@ ASCII. Use `/visual-intuition-diagrams`; conventions (no tabs, no emojis, widest
    module page must carry every tier the module is in). **Do NOT put a block in the module
    page — content files hold only content.** Then run
    `python3 game/extract.py --write-paths` to regenerate the README's tier tables
-6. Flip the module's Status from `pending` to `done` in `README.md` §7, filling in the
+6. Flip the module's Status from `pending` to `done` in `README.md` §8, filling in the
    measured Q&A and line counts
 7. Update this file's Module List table and `README.md` §2 Module Table + §3 phase table
 8. Update root `README.md` phase table under the TypeScript section

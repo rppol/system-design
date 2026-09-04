@@ -476,7 +476,7 @@ owned by
 The lint rules that find the leaks — `no-unsafe-assignment`, `no-unsafe-member-access`,
 `no-unsafe-argument`, `no-unsafe-return` — are type-aware, so they need a program and cost
 roughly 4-8x an unaware run. On TypeScript 7.0 they still run on `tsc6`, since there is no
-stable Compiler API until 7.1, so lint does **not** get the Go compiler's 8-12x and becomes the
+stable Compiler API until 7.1, so lint does **not** get the Go compiler's 7.7-11.9x and becomes the
 longest CI job the week you upgrade. Bounding that cost belongs to
 [Linting, Formatting and Code Quality](../../frontend_platform/linting_formatting_and_code_quality/linting_formatting_and_code_quality.md).
 

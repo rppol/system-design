@@ -26,7 +26,7 @@ modules 2 through 15, pointed at the boundary where knowledge is created.
 
 The target is **TypeScript 7.0** (GA 2026-07-08). Nothing here is version-gated: every pattern below
 worked on 4.9, and every antipattern below was still shipping the week this was written. What 7.0
-changed is the price of getting it wrong — an 8-12x faster checker means a bad type costs 400ms of
+changed is the price of getting it wrong — an 7.7-11.9x faster checker means a bad type costs 400ms of
 editor latency instead of 3s, which is worse, because now nobody notices.
 
 ---

@@ -29,7 +29,7 @@ mode, mocking network traffic and the CI test pyramid belong to
 which owns those for the whole front-end track. Everything here assumes you already have
 a runner and asks only: what do you assert that a runner cannot?
 
-Target is TypeScript 7.0 with Vitest 4.1.
+Target is TypeScript 7.0 with Vitest 5.0.
 
 ---
 
@@ -594,7 +594,7 @@ built artifact, plus `attw`, sees it. See
 | typescript-eslint | Enforces `@ts-expect-error` over `@ts-ignore` | `ban-ts-comment` rule |
 | Zod | Schemas whose inferred types are worth pinning | `z.infer<typeof S>` |
 
-Versions verified 2026-09-02: Vitest 4.1.11, TypeScript 7.0, typescript-eslint 8.69.0
+Versions verified 2026-09-04: Vitest 5.0.0, TypeScript 7.0, typescript-eslint 8.69.0
 (which still runs on `tsc6` because TypeScript 7.0 has no stable Compiler API until 7.1),
 Zod 4.5.4. Related reading:
 [`../declaration_files_and_library_authoring/`](../declaration_files_and_library_authoring/declaration_files_and_library_authoring.md)

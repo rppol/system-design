@@ -659,8 +659,8 @@ both on). Neither variance annotations nor `const` type parameters have a flag â
 **Q: Why did my inference produce `string` when I passed the literal `"GET"`?**
 **Short:** An unconstrained type parameter widens a fresh literal candidate to its base primitive, because a bare `T` cannot hold a literal type meaningfully.
 
-`declare function tag<T>(v: T): T; tag("GET")` gives `string`. Widening is decided by the
-**parameter's constraint**, not by the argument, so it happens even for a `const` binding typed
+`declare function tag<T>(v: T): T; tag("GET")` gives `string`. Widening is decided by
+the **parameter's constraint**, not by the argument, so it happens even for a `const` binding typed
 `"GET"`. Add `extends string` and the literal survives; for arrays use a `const` type parameter
 `[5.0]`. Reaching for `as const` at every call site treats the symptom, not the signature.
 

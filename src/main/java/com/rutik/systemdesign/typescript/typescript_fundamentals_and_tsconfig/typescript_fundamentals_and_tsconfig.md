@@ -23,7 +23,7 @@ two different languages that happen to share a syntax.
 | Source mapping | `.js.map`, `.d.ts.map` | Only for debuggers |
 
 The target here is **TypeScript 7.0** (GA 2026-07-08), whose compiler is a native Go binary —
-8-12x faster full builds, 6-26% lower memory, `--checkers` / `--builders` / `--singleThreaded`
+7.7-11.9x faster full builds, 6-26% lower memory, `--checkers` / `--builders` / `--singleThreaded`
 controlling parallelism. **TypeScript 6.0** (2026-03-23) matters more for this module: it rewrote
 the *defaults*, so a `tsconfig.json` typed from 5.x muscle memory now mostly restates them.
 
@@ -290,8 +290,8 @@ flowchart LR
     classDef note fill:#2c313a,stroke:#e5c07b,color:#abb2bf
     old(["a tsconfig written<br/>from 5.x habit"])
     red("strict, module esnext,<br/>target, types, rootDir")
-    dead("moduleResolution classic,<br/>outFile, AMD, UMD,<br/>SystemJS, baseUrl root")
-    soft("target es5,<br/>downlevelIteration")
+    dead("moduleResolution classic,<br/>outFile, AMD,<br/>UMD, SystemJS")
+    soft("baseUrl root, esModuleInterop false,<br/>alwaysStrict false, moduleResolution node,<br/>target es5, downlevelIteration")
     r1(["redundant, delete<br/>the line"])
     r2(["removed in 6.0,<br/>hard error"])
     r3(["deprecated, still<br/>works, warns"])
@@ -308,8 +308,12 @@ flowchart LR
 `noUncheckedSideEffectImports: true` are now the defaults, and `target` **floats** to the latest
 stable ECMAScript edition instead of being pinned to `es3`/`es5` — `es2025` as of the 6.0
 release. `types: []` is the sharpest: `tsc` no longer auto-includes every `@types/*` package, so
-a project relying on ambient `describe`/`it` from `@types/jest` must name it. The removals are
-hard errors; the two deprecations still compile.
+a project relying on ambient `describe`/`it` from `@types/jest` must name it. Only three things
+are true removals and they are hard errors: `moduleResolution: "classic"`, `outFile`, and the
+AMD/UMD/SystemJS module formats. Everything else 6.0 disapproves of — `baseUrl` as a resolution
+root, `esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`, `target: "es5"`,
+`downlevelIteration` — is **deprecated**: it warns and compiles exactly as before. That asymmetry
+is the point of a bridge release, and it is the fact most write-ups state backwards.
 
 ### 6.3 `strict`, flag by flag
 
@@ -322,7 +326,7 @@ hard errors; the two deprecations still compile.
 | `noImplicitThis` | `this` of unknown type in a standalone function | Low; fixed with a `this` parameter |
 | `strictBindCallApply` | Wrong arguments through `bind`, `call`, `apply` | Very low |
 | `useUnknownInCatchVariables` | Treating a caught value as an `Error` | Low, but touches every `catch` block |
-| `alwaysStrict` | Emits `"use strict"` and parses in strict mode | None; `false` was removed in 6.0 |
+| `alwaysStrict` | Emits `"use strict"` and parses in strict mode | None; `false` is deprecated in 6.0 and warns |
 
 ```ts
 // strictNullChecks: null and undefined leave every other type
@@ -470,7 +474,8 @@ stays hidden until it reaches your call site, so a **library author** turns it o
 Every line is doing work. `strict`, `module`, `target` and `rootDir` are absent because 6.0
 already sets them the way this project wants, and `lib` is stated only to drop `dom` from a Node
 service. The same file written in 2024 carried 9 more redundant lines and 2 (`baseUrl`,
-`moduleResolution: "node"`) that no longer resolve.
+`moduleResolution: "node"`) that still build under 6.0 but warn on every run, and are scheduled
+to stop resolving.
 
 ### A monorepo base plus a leaf
 
@@ -701,12 +706,15 @@ depending on ambient `describe` or `it` must name the package. Deleting the redu
 makes the remaining options visibly intentional.
 
 **Q: Which options were removed in 6.0, and which were only deprecated?**
-**Short:** Removed are `moduleResolution classic`, `outFile`, AMD, UMD, SystemJS, `esModuleInterop: false` and `baseUrl` as a resolution root; `target: es5` and `downlevelIteration` are deprecated and still work.
+**Short:** Only `moduleResolution classic`, `outFile` and the AMD/UMD/SystemJS formats were removed; everything else 6.0 disapproves of is deprecated and still compiles with a warning.
 
 Confusing the two lists is the fastest way to give wrong migration advice. A removed option is a
 hard configuration error that stops the build; a deprecated one emits a warning and compiles
-exactly as before. Replace `baseUrl` with `paths` entries relative to the config file, and
-`outFile` with a bundler.
+exactly as before. The deprecated list is the long one: `baseUrl` as a resolution root,
+`esModuleInterop: false` and `allowSyntheticDefaultImports: false`, `alwaysStrict: false`,
+`moduleResolution: "node"` (`node10`), `target: "es5"` and `downlevelIteration`. Fix the
+three removals to unblock the build, then work the warnings down before 7.x turns them into
+errors — replace `baseUrl` with `paths` relative to the config file, and `outFile` with a bundler.
 
 **Q: What is `noUncheckedIndexedAccess` and why is it not in `strict`?**
 **Short:** It adds `| undefined` to every index and index-signature read, closing a real unsoundness that would have broken too much existing code to include by default.
@@ -803,10 +811,21 @@ waved through. The starting config:
 }
 ```
 
-`target: es5` was deprecated in 6.0 and was down-levelling every `async` function into a state
-machine nobody needed on Node 24. `baseUrl` as a resolution root was **removed** and broke the
-build outright. `strict: false` with `strictNullChecks: true` meant `noImplicitAny` had been off
-for four years, and `lib: ["es2020", "dom"]` let a backend package reference `window`.
+Nothing here failed the 6.0 build. That is what made it dangerous. `target: es5`,
+`moduleResolution: "node"` and `baseUrl` as a resolution root are all **deprecated, not removed**:
+each emitted a warning on every run, and every one of those warnings went into a job already
+marked `continue-on-error: true`. Nobody had read that log in two years, so a config the compiler
+had been complaining about since March looked, from the dashboard, entirely healthy. Meanwhile
+`target: es5` was down-levelling every `async` function into a state machine nobody needed on
+Node 24, `strict: false` with `strictNullChecks: true` meant `noImplicitAny` had been off for
+four years, and `lib: ["es2020", "dom"]` let a backend package reference `window`.
+
+The forcing function was the 7.0 upgrade, not a broken build. The team read the 6.0 warnings for
+the first time while scoping it, found `baseUrl` on the list, and had to decide whether to move
+115 bare `utils/*` specifiers to `paths` now or discover them the day a release turned the
+deprecation into an error. They moved first — a two-day mechanical change with the warnings as
+the worklist, done while the old behaviour still worked as a fallback. Doing it after the
+removal would have meant a red build with 115 unresolved-module errors and no way back.
 
 ```ts
 // BROKEN — found by noImplicitAny the moment it was enabled, in a settlement path

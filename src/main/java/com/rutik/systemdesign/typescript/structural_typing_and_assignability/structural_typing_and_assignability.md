@@ -23,7 +23,7 @@ Six rules sit around that core relation and generate most day-to-day surprises:
 | `satisfies` | Checks assignability without replacing the inferred type | 4.9 |
 
 The target is **TypeScript 7.0** (GA 2026-07-08), whose native Go compiler rewrote the checker
-but changed no assignability rule — the relation caches got 8-12x faster and the semantics are
+but changed no assignability rule — the relation caches got 7.7-11.9x faster and the semantics are
 identical to 6.0. Every example below type-checks under `strict`.
 
 ---

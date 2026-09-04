@@ -144,7 +144,7 @@ of using the type system; Principal is the judgment about what it costs — whic
 what build-time price, and what you tell a team *not* to reach for.
 
 <!-- study-path-table senior -->
-### Senior Path (15 modules)
+### Senior Path (10 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -153,28 +153,20 @@ what build-time price, and what you tell a team *not* to reach for.
 | 3 | [unions_narrowing_and_exhaustiveness](unions_narrowing_and_exhaustiveness/unions_narrowing_and_exhaustiveness.md) | module page only |
 | 4 | [generics_and_type_parameters](generics_and_type_parameters/generics_and_type_parameters.md) | module page only |
 | 5 | [conditional_and_mapped_types](conditional_and_mapped_types/conditional_and_mapped_types.md) | module page only |
-| 6 | [template_literal_types_and_type_level_programming](template_literal_types_and_type_level_programming/template_literal_types_and_type_level_programming.md) | module page only |
 | 7 | [classes_decorators_and_resource_management](classes_decorators_and_resource_management/classes_decorators_and_resource_management.md) | module page only |
 | 8 | [modules_resolution_and_package_exports](modules_resolution_and_package_exports/modules_resolution_and_package_exports.md) | module page only |
-| 9 | [declaration_files_and_library_authoring](declaration_files_and_library_authoring/declaration_files_and_library_authoring.md) | module page only |
 | 10 | [runtime_validation_and_parse_dont_validate](runtime_validation_and_parse_dont_validate/runtime_validation_and_parse_dont_validate.md) | module page only |
 | 11 | [typescript_at_runtime_node_deno_bun](typescript_at_runtime_node_deno_bun/typescript_at_runtime_node_deno_bun.md) | module page only |
-| 12 | [the_typescript_compiler_and_type_performance](the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md) | module page only |
-| 13 | [typescript_for_node_and_backend_services](typescript_for_node_and_backend_services/typescript_for_node_and_backend_services.md) | module page only |
-| 14 | [typescript_in_large_codebases](typescript_in_large_codebases/typescript_in_large_codebases.md) | module page only |
 | 15 | [testing_typed_code](testing_typed_code/testing_typed_code.md) | module page only |
 
-**Not in this path** (1 of 16, Full Path only): `typescript_patterns_and_antipatterns`
+**Not in this path** (6 of 16, Full Path only): `template_literal_types_and_type_level_programming`, `declaration_files_and_library_authoring`, `the_typescript_compiler_and_type_performance`, `typescript_for_node_and_backend_services`, `typescript_in_large_codebases`, `typescript_patterns_and_antipatterns`
 <!-- /study-path-table -->
 
 <!-- study-path-table principal -->
-### Principal Path (9 modules)
+### Principal Path (6 modules)
 
 | # | Module | Files |
 |---|--------|-------|
-| 2 | [structural_typing_and_assignability](structural_typing_and_assignability/structural_typing_and_assignability.md) | module page only |
-| 4 | [generics_and_type_parameters](generics_and_type_parameters/generics_and_type_parameters.md) | module page only |
-| 5 | [conditional_and_mapped_types](conditional_and_mapped_types/conditional_and_mapped_types.md) | module page only |
 | 8 | [modules_resolution_and_package_exports](modules_resolution_and_package_exports/modules_resolution_and_package_exports.md) | module page only |
 | 9 | [declaration_files_and_library_authoring](declaration_files_and_library_authoring/declaration_files_and_library_authoring.md) | module page only |
 | 12 | [the_typescript_compiler_and_type_performance](the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md) | module page only |
@@ -182,7 +174,7 @@ what build-time price, and what you tell a team *not* to reach for.
 | 14 | [typescript_in_large_codebases](typescript_in_large_codebases/typescript_in_large_codebases.md) | module page only |
 | 16 | [typescript_patterns_and_antipatterns](typescript_patterns_and_antipatterns/typescript_patterns_and_antipatterns.md) | module page only |
 
-**Not in this path** (7 of 16, Full Path only): `typescript_fundamentals_and_tsconfig`, `unions_narrowing_and_exhaustiveness`, `template_literal_types_and_type_level_programming`, `classes_decorators_and_resource_management`, `runtime_validation_and_parse_dont_validate`, `typescript_at_runtime_node_deno_bun`, `testing_typed_code`
+**Not in this path** (10 of 16, Full Path only): `typescript_fundamentals_and_tsconfig`, `structural_typing_and_assignability`, `unions_narrowing_and_exhaustiveness`, `generics_and_type_parameters`, `conditional_and_mapped_types`, `template_literal_types_and_type_level_programming`, `classes_decorators_and_resource_management`, `runtime_validation_and_parse_dont_validate`, `typescript_at_runtime_node_deno_bun`, `testing_typed_code`
 <!-- /study-path-table -->
 
 ---
@@ -190,14 +182,22 @@ what build-time price, and what you tell a team *not* to reach for.
 ## 4. Version Notes
 
 **Primary target: TypeScript 7.0**, GA **2026-07-08**. The compiler is now a native Go
-binary (internally "Project Corsa"): 8-12x faster full builds, memory down 6-26%, with
+binary (internally "Project Corsa"): 7.7-11.9x faster full builds, memory down 6-26%, with
 `--checkers` / `--builders` / `--singleThreaded` controlling parallelism.
 
 **TypeScript 6.0** (2026-03-23) was the last JavaScript-codebase release and an explicit
-deprecation bridge. It **removed** `--moduleResolution classic`, `--outFile`,
-AMD/UMD/SystemJS module formats and `esModuleInterop: false`; it **deprecated** `target: es5`
-and `--downlevelIteration`. That distinction is load-bearing — do not write "removed" for
-the latter two. New defaults: `strict: true`, `module: esnext`, `target` floating to the
+deprecation bridge, and the removed/deprecated split is load-bearing — most write-ups get
+it wrong by putting too much in the first list.
+
+- **Removed** (hard configuration error, the build stops): `--moduleResolution classic`,
+  `--outFile`, AMD/UMD/SystemJS module emit.
+- **Deprecated** (emits a warning, compiles exactly as before): `esModuleInterop: false`
+  and `allowSyntheticDefaultImports: false`, `--baseUrl` as a resolution root,
+  `--alwaysStrict false`, `--moduleResolution node` (`node10`), `target: es5`,
+  `--downlevelIteration`.
+
+Only three things actually fail a 6.0 build. Everything else on a 5.x config still
+compiles with a warning, which is the whole point of a bridge release. New defaults: `strict: true`, `module: esnext`, `target` floating to the
 current year (`es2025`), `types: []`, `rootDir: "."`, `noUncheckedSideEffectImports: true`.
 
 **The TS 7.0 caveat that matters most in practice:** there is no stable programmatic
@@ -222,7 +222,7 @@ against the TypeScript devblog rather than memory.
 **REPLACE, DO NOT ANNOTATE.** An answer names the current API, never "`foo()` is
 deprecated, use `bar()`". The three exceptions are in root `CLAUDE.md`.
 
-### Ecosystem pins — verified 2026-09-02
+### Ecosystem pins — verified 2026-09-04
 
 Re-check any of these against the project's own release page before writing a version
 number into prose.
@@ -235,7 +235,7 @@ number into prose.
 | `@standard-schema/spec` | **1.1.0** | a spec, not a runtime library — the `~standard` interface |
 | tRPC | **11.18.0** | accepts any Standard Schema validator natively |
 | typescript-eslint | **8.69.0** | does not yet support TS 7 / tsgo |
-| Vitest | **4.1.11** | 5.0 still RC |
+| Vitest | **5.0.0** | shipped 2026-09-03; 4.1.11 is the last 4.x |
 | pnpm / npm / Yarn Berry | **11.25.0** / **12.0.2** / **4.18.0** | pnpm 12 (Rust) went stable 2026-08-26 under `next-12` |
 | ts-node / tsup | **10.9.2** / **8.5.1** | both effectively unmaintained; prefer `tsx` (4.23.13) or native stripping |
 
@@ -247,7 +247,7 @@ Check `github.com/tc39/proposals` before repeating any of this.
 |----------|-------|------|
 | Temporal | **4**, shipped in ES2026 | MDN marks it "Limited availability — not Baseline" |
 | Decorators | **2.7** | Reached Stage 3 in 2022; TC39 later inserted 2.7 as an intermediate checkpoint and re-slotted existing proposals into it. Below Stage 3 today, but as a process change — not a rejection on the merits |
-| Pipeline operator | **2** | Hack-style (`%`) won over F#-style |
+| Pipeline operator | **2** | Hack-style won over F#-style, but the topic token is **not** final — the proposal says `%` "could instead be `^`, or many other tokens" |
 | Type Annotations | **1**, dormant | its own README says "not updated regularly" |
 | Records & Tuples | **withdrawn** | repo archived 2025-04-15 |
 
@@ -260,10 +260,20 @@ edition). Also Stage 4 in it: `JSON.parse` source-text access, Iterator Sequenci
 
 ## 5. Case Studies
 
-**None.** This is a pure-language section, following the
-[`../python/`](../python/README.md) precedent. Applied, end-to-end design work lives in
+**None yet — this is a gap, not a policy.** Six are planned and specified in
+[§7 Known Gaps & Planned Work](#7-known-gaps--planned-work); none has been written.
+
+An earlier version of this section justified the absence as "a pure-language section,
+following the `../python/` precedent". That was wrong on the facts:
+[`../python/case_studies/`](../python/case_studies/case_studies.md) holds six studies plus
+an index, and [`../go/case_studies/`](../go/case_studies/case_studies.md) holds six plus an
+index. Both are pure-language sections, and both frame their studies as language and runtime
+work that stops at the process boundary — which is exactly the shape this section needs.
+
+What *is* true is the boundary: applied, end-to-end **product** design lives in
 [`../react/case_studies/`](../react/case_studies/case_studies.md), where the client system
-is the thing being designed.
+is the thing being designed. A TypeScript case study designs a *type surface*, a migration,
+or a build, and stops there.
 
 ---
 
@@ -280,7 +290,79 @@ is the thing being designed.
 
 ---
 
-## 7. Build Manifest
+## 7. Known Gaps & Planned Work
+
+All 16 module pages are written. What is missing is listed here so the next person picks up
+a briefed unit of work rather than re-deriving the gap. Every entry is self-contained: the
+concern, and the reason it is not already covered by a module.
+
+### 7.1 Case studies — 6 planned, 0 written
+
+There is no `typescript/case_studies/` directory yet. Writing the first one also means
+creating `case_studies/case_studies.md` (the 5-section index the root `CLAUDE.md` requires:
+Quick Start, Full Learning Path, Cross-Cutting, Dependency Map, Interview Prep Shortcuts)
+and adding each file to the `<!-- study-paths -->` block in the same commit.
+
+Template: the 11-section principal case study, 900-1100 lines. Scope boundary: a TypeScript
+case study designs a type surface, a migration, or a build, and stops at the process
+boundary — product-shaped, end-to-end client design belongs to `../react/case_studies/`.
+
+| # | Proposed file | Concern | What no module teaches |
+|---|---------------|---------|------------------------|
+| 1 | `design_a_typed_sdk_for_a_public_api` | Shipping a type surface as a versioned product | The **sequencing**. It chains declaration emit to `exports` conditions to `tsd`/`attw`/`publint` to semver-of-types across three releases. Module 9 owns emit and module 8 owns resolution and module 15 owns type tests, and each one assumes the others already happened. |
+| 2 | `migrate_a_400k_line_javascript_monorepo` | Strictness and structure adopted at once, under feature pressure | That the prescriptions **conflict**. Modules 1, 14 and 12 each give an ordering and the three fight each other — `composite` forces `declaration: true` on files still under `allowJs`. Only a case study can pick one and pay for it. |
+| 3 | `design_the_type_layer_for_a_schema_driven_form_engine` | A runtime schema producing compile-time-typed values | The case where the honest answer is **codegen**, arrived at after building the type-level version and measuring it with `--extendedDiagnostics`. Modules 5 and 6 teach how far the type system goes; none shows someone deciding it went too far. |
+| 4 | `diagnose_a_fourteen_minute_type_check` | Attribution when causes compound | **Compounding.** Every example in module 12 has exactly one cause. This one has three plus a red herring, ordered by payoff and proven with `--generateTrace` rather than guessed. |
+| 5 | `design_an_end_to_end_contract_for_three_consumers` | Typed contracts when one consumer is not TypeScript | The non-TypeScript consumer. Module 13 §7 sketches this in eight lines of prose and never works it through. |
+| 6 | `design_a_typed_plugin_host` | The case where TypeScript is the wrong tool | The **negative result**, demonstrated. Module 16 §9 asserts it and never shows it. |
+
+### 7.2 Modules — 3 planned
+
+| Proposed module | Placement | Why it is missing, and what it covers |
+|-----------------|-----------|----------------------------------------|
+| `compiler_api_and_codemods` | Phase 3, beside `typescript_in_large_codebases` | Five §14 case studies resolve their migration with a codemod this section never teaches. Module 12 §6.5 explains the TS 7.1 Compiler-API gap, which makes the topic *topical* rather than evergreen — write it while that gap is live. Cover: AST vs symbol vs type; `ts-morph` vs the raw Compiler API vs jscodeshift; a rename-safe transform through `getReferencesAtPosition`; why these still run on `tsc6` today; how to test a codemod. |
+| `asynchrony_in_the_type_system` | Phase 2, after `classes_decorators_and_resource_management` | The pieces are scattered across modules 3, 4, 5 and 13, and nothing owns them. Cover: `Promise<T>` variance; `Awaited` vs `PromiseLike`; `Promise.all` tuple inference against `allSettled`'s discriminated union; typed `AbortSignal`; `AsyncGenerator<T, TReturn, TNext>`; `void`-returning callbacks and `no-misused-promises`; `await using` ordering. |
+| `typed_javascript_and_jsdoc` | Phase 1 or Phase 3 | Module 16 §9 twice recommends "JSDoc types with `checkJs`" and the section shows **not one line of JSDoc syntax**. Module 14 §6.6 treats `// @ts-check` as a migration step without teaching what goes inside it. |
+
+Adding any of these means a `STUDY_ORDER["typescript"]` entry in `game/app.js` at the right
+learning-path position, plus the `<!-- study-paths -->` line, plus `--write-paths`.
+
+### 7.3 Expansions — §7 "Real-World Examples" is the one uniformly thin heading
+
+Measured across all 16 module pages: §7 has a median of **27 lines** against §6's **245**,
+and **10 of 16 pages have no code block in §7 at all**. Thinnest first:
+
+| Module | §7 lines | Code in §7 |
+|--------|---------:|------------|
+| `typescript_for_node_and_backend_services` | 17 | no |
+| `classes_decorators_and_resource_management` | 18 | no |
+| `modules_resolution_and_package_exports` | 18 | no |
+| `the_typescript_compiler_and_type_performance` | 20 | no |
+| `testing_typed_code` | 22 | no |
+| `typescript_patterns_and_antipatterns` | 22 | no |
+
+`testing_typed_code` is the weakest page overall — it has both the smallest §6 (194 lines)
+and a prose-only §7. Start there.
+
+### 7.4 Cross-links — four one-directional seams
+
+These four modules link *out* and nothing links *back*. The inbound edit belongs to whoever
+owns the other section; this section cannot make it.
+
+| Other section's module | Should link back to |
+|------------------------|---------------------|
+| `../react/forms_and_validation/` | `runtime_validation_and_parse_dont_validate` |
+| `../backend/api_contracts_and_schema_governance/` | `typescript_for_node_and_backend_services` |
+| `../fastapi/pydantic_v2_deep_dive/` | `runtime_validation_and_parse_dont_validate` |
+| `../react/react_architecture_and_antipatterns/` | `typescript_patterns_and_antipatterns` |
+
+Separately: `runtime_validation_and_parse_dont_validate` is this section's trust-boundary
+module and **nothing anywhere in the repository links to it**. It is the page most likely to
+be wanted from another section and the least reachable.
+
+---
+
+## 8. Build Manifest
 
 Per-file status tracker. **This is the resume point** — the first `pending` row is the next
 unit of work. Flip `pending` to `done` in the same commit as the file, filling in the
@@ -291,22 +373,22 @@ carrying an authored `**Short:**` line), all 14 template sections.
 
 | # | File | Phase | Status | Q&As | Lines |
 |---|------|-------|--------|-----:|------:|
-| 1 | `typescript_fundamentals_and_tsconfig/typescript_fundamentals_and_tsconfig.md` | 1 | **done** | 16 | 850 |
+| 1 | `typescript_fundamentals_and_tsconfig/typescript_fundamentals_and_tsconfig.md` | 1 | **done** | 16 | 869 |
 | 2 | `structural_typing_and_assignability/structural_typing_and_assignability.md` | 1 | **done** | 18 | 850 |
 | 3 | `unions_narrowing_and_exhaustiveness/unions_narrowing_and_exhaustiveness.md` | 1 | **done** | 18 | 900 |
 | 4 | `generics_and_type_parameters/generics_and_type_parameters.md` | 1 | **done** | 18 | 889 |
 | 5 | `conditional_and_mapped_types/conditional_and_mapped_types.md` | 1 | **done** | 18 | 879 |
 | 6 | `template_literal_types_and_type_level_programming/template_literal_types_and_type_level_programming.md` | 1 | **done** | 16 | 880 |
 | 7 | `classes_decorators_and_resource_management/classes_decorators_and_resource_management.md` | 2 | **done** | 16 | 880 |
-| 8 | `modules_resolution_and_package_exports/modules_resolution_and_package_exports.md` | 2 | **done** | 18 | 880 |
+| 8 | `modules_resolution_and_package_exports/modules_resolution_and_package_exports.md` | 2 | **done** | 18 | 890 |
 | 9 | `declaration_files_and_library_authoring/declaration_files_and_library_authoring.md` | 2 | **done** | 18 | 876 |
-| 10 | `runtime_validation_and_parse_dont_validate/runtime_validation_and_parse_dont_validate.md` | 2 | **done** | 16 | 865 |
+| 10 | `runtime_validation_and_parse_dont_validate/runtime_validation_and_parse_dont_validate.md` | 2 | **done** | 16 | 870 |
 | 11 | `typescript_at_runtime_node_deno_bun/typescript_at_runtime_node_deno_bun.md` | 2 | **done** | 16 | 880 |
-| 12 | `the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md` | 3 | **done** | 18 | 877 |
+| 12 | `the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md` | 3 | **done** | 18 | 879 |
 | 13 | `typescript_for_node_and_backend_services/typescript_for_node_and_backend_services.md` | 3 | **done** | 16 | 893 |
 | 14 | `typescript_in_large_codebases/typescript_in_large_codebases.md` | 3 | **done** | 16 | 878 |
 | 15 | `testing_typed_code/testing_typed_code.md` | 4 | **done** | 16 | 851 |
-| 16 | `typescript_patterns_and_antipatterns/typescript_patterns_and_antipatterns.md` | 4 | **done** | 16 | 935 |
+| 16 | `typescript_patterns_and_antipatterns/typescript_patterns_and_antipatterns.md` | 4 | **done** | 16 | 889 |
 
 ### Conventions reminder (for future batch agents)
 
@@ -335,33 +417,33 @@ carrying an authored `**Short:**` line), all 14 template sections.
 typescript_fundamentals_and_tsconfig
   typescript_fundamentals_and_tsconfig.md  senior
 structural_typing_and_assignability
-  structural_typing_and_assignability.md  senior, principal
+  structural_typing_and_assignability.md  senior
 unions_narrowing_and_exhaustiveness
   unions_narrowing_and_exhaustiveness.md  senior
 testing_typed_code
   testing_typed_code.md  senior
 generics_and_type_parameters
-  generics_and_type_parameters.md  senior, principal
+  generics_and_type_parameters.md  senior
 conditional_and_mapped_types
-  conditional_and_mapped_types.md  senior, principal
+  conditional_and_mapped_types.md  senior
 modules_resolution_and_package_exports
   modules_resolution_and_package_exports.md  senior, principal
 runtime_validation_and_parse_dont_validate
   runtime_validation_and_parse_dont_validate.md  senior
 the_typescript_compiler_and_type_performance
-  the_typescript_compiler_and_type_performance.md  senior, principal
+  the_typescript_compiler_and_type_performance.md  principal
 declaration_files_and_library_authoring
-  declaration_files_and_library_authoring.md  senior, principal
+  declaration_files_and_library_authoring.md  principal
 typescript_at_runtime_node_deno_bun
   typescript_at_runtime_node_deno_bun.md  senior
 classes_decorators_and_resource_management
   classes_decorators_and_resource_management.md  senior
 template_literal_types_and_type_level_programming
-  template_literal_types_and_type_level_programming.md  senior
+  template_literal_types_and_type_level_programming.md  -
 typescript_for_node_and_backend_services
-  typescript_for_node_and_backend_services.md  senior, principal
+  typescript_for_node_and_backend_services.md  principal
 typescript_in_large_codebases
-  typescript_in_large_codebases.md  senior, principal
+  typescript_in_large_codebases.md  principal
 typescript_patterns_and_antipatterns
   typescript_patterns_and_antipatterns.md  principal
 -->
