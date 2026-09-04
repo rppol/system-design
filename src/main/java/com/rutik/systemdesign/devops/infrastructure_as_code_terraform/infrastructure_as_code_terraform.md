@@ -2,9 +2,8 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
-> **Version anchor (2026-08-25).** **Terraform 1.15.9** (2026-08-19) is the current stable
-> release; 1.14.x and 1.15.x are the supported lines and **1.16.0-rc2** is in release
-> candidate. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
+> **Version anchor (2026-09-04).** **Terraform 1.16.1** (2026-09-02) is the current stable
+> release; 1.16.0 shipped 2026-08-26, and 1.15.x and 1.16.x are the supported lines. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
 > recommendation — it is the release that made S3-native state locking GA, which is the
 > oldest version the backend block on this page will work on. The `hashicorp/aws ~> 6.57`
 > pin is current as of this date; providers move faster than the CLI, so re-check the pin

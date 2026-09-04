@@ -265,7 +265,7 @@ One thing this implementation omits deliberately worth naming: there is no **jit
 ## 7. Real-World Examples
 
 - **Container `ENTRYPOINT` scripts** render config from env vars (`envsubst`), wait for dependencies, then `exec "$@"` so the app inherits PID 1 and signals.
-- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail`. GitHub Actions runs an unspecified `run:` step as `bash -e {0}`, so `-e` is on but `pipefail` and `-u` are not; adding `shell: bash` upgrades it to `bash --noprofile --norc -eo pipefail {0}`. A masked pipeline failure under the default shell is a common cause of "green but broken" jobs.
+- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail`, because the runner's default shell does not give you those flags — see Q8 in section 12 for the exact invocations and why a masked pipeline failure is a common cause of "green but broken" jobs.
 - **Cloud bootstrap** via EC2 user-data / cloud-init runs shell to install agents and join a cluster; must be idempotent because re-runs happen.
 - **Kubernetes liveness/readiness `exec` probes** are commands (`sh -c 'pg_isready -h localhost'`); their exit code is the health signal.
 

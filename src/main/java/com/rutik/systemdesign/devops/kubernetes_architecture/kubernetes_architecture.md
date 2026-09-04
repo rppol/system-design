@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
-> **Version anchor (2026-08-25).** **Kubernetes v1.36 "Haru"** (2026-04-22) is current; **v1.35 "Timbernetes"** (2025-12-17) is the prior minor. `flowcontrol.apiserver.k8s.io/v1beta3` (API Priority and Fairness) **stopped being served in v1.32** — `flowcontrol.apiserver.k8s.io/v1` has been stable since v1.29, so every FlowSchema/PriorityLevelConfiguration example below uses `v1`. **etcd 3.7** is the current release line (3.7.0 shipped 2026); 3.5 and 3.6 remain in support, 3.4 reached end of support 2026-06-01. Every version-tagged claim on this page is checked against these anchors.
+> **Version anchor (2026-09-04).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current; **v1.36 "Haru"** (2026-04-22) is the prior minor. `flowcontrol.apiserver.k8s.io/v1beta3` (API Priority and Fairness) **stopped being served in v1.32** — `flowcontrol.apiserver.k8s.io/v1` has been stable since v1.29, so every FlowSchema/PriorityLevelConfiguration example below uses `v1`. **etcd 3.7** is the current release line (3.7.0 shipped 2026); 3.5 and 3.6 remain in support, 3.4 reached end of support 2026-06-01. Every version-tagged claim on this page is checked against these anchors.
 
 Kubernetes is the de-facto container orchestrator and the single most-tested DevOps interview topic. Its genius is one idea applied everywhere: **declare desired state; controllers continuously reconcile reality toward it.** Understanding the control plane (API server, etcd, scheduler, controller-manager) and node components (kubelet, kube-proxy) — and how they communicate only through the API server — explains nearly every Kubernetes behavior and failure mode.
 

@@ -7,7 +7,7 @@ A comprehensive, one-stop reference for mastering **DevOps, SRE, Cloud, and Plat
 > **Audited and migrated (2026-08-04).** The repo-wide factual audit is **complete for all 41
 > modules** (~1,560 claims verified, ~215 corrections — commits `7f98bf4`, `9462731`,
 > `ecd9414`), and every one of the section's **650 module Q&As carries an authored
-> `**Short:**` MCQ summary** (commit `6ce35a6`). The 13 case studies and 7 cross-cutting
+> `**Short:**` MCQ summary** (commit `6ce35a6`). The 15 case studies and 8 cross-cutting
 > primitives were audited too, and re-audited 2026-08-05. This section is the most
 > version-exposed in the repo: see `CLAUDE.md` -> "What the audit found" before writing here,
 > and audit a claim before writing a `**Short:**` line against it.
@@ -494,6 +494,97 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | [disaster_recovery_and_resilience](disaster_recovery_and_resilience/disaster_recovery_and_resilience.md) | [`backend/chaos_engineering`](../backend/chaos_engineering/chaos_engineering.md), [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md), [`database/replication_and_high_availability`](../database/replication_and_high_availability/replication_and_high_availability.md) |
 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | [`backend/backend_security_owasp`](../backend/backend_security_owasp/backend_security_owasp.md), [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) |
 | [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) | [kubernetes_security](kubernetes_security/kubernetes_security.md), [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) |
+
+---
+
+## Known Gaps & Planned Work
+
+Recorded 2026-09-04 from a verified gap review of all 51 files. Every entry below is
+briefable on its own — pick one, read the entry, start. Nothing here is a blocker for the
+section shipping; it is the ordered backlog of what would make it better.
+
+### A. Version-anchor backfill — 33 of 51 files lack the dated anchor `CLAUDE.md` mandates
+
+`CLAUDE.md` requires a `> **Version anchor (YYYY-MM-DD).**` blockquote on every
+version-exposed page. Eighteen files carry one; thirty-three do not. The seven below are
+the most version-exposed and should be done first, in this order.
+
+| # | File | Why it is urgent |
+|---|------|------------------|
+| 1 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | Covers SLSA, Sigstore (Fulcio/Rekor), cosign and GitHub OIDC attestations with **zero version pins on any tool**. Its own sibling `regulated_supply_chain.md:5` has an exemplary anchor — copy that pattern down into the parent. |
+| 2 | `helm_and_package_management/helm_and_package_management.md` | Asserts "Helm 4 is current" and the `--atomic` → `--rollback-on-failure` rename in six places, all unpinned. **Note while anchoring:** the rename is asymmetric — `--atomic` still works on `helm upgrade` with a deprecation warning, but the binding was *removed* from `helm install`, which now errors. The page reads as if both behave the same. |
+| 3 | `configuration_management/configuration_management.md:21-31` | The densest licence/ownership block in the section — Ansible/Red Hat, Puppet/Perforce plus the OpenVox fork, Chef/Progress plus Cinc, Salt/Broadcom. Ownership claims rot faster than APIs and there is no check date. |
+| 4 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md:51-56, 508, 566-568` | BUSL/MPL licensing, CDKTF archived, tfsec absorbed into Trivy. All three are the kind of claim a reader will act on. |
+| 5 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | Pins the Bicep resource version `Microsoft.ContainerService/managedClusters@2024-02-01` twice; near-certainly stale, and a stale ARM API version is a copy-paste failure, not a stylistic one. |
+| 6 | `containers_and_docker/containers_and_docker.md` | Pins `node:24-slim` and `gcr.io/distroless/nodejs24-debian13` in examples readers copy verbatim. |
+| 7 | `ci_cd_fundamentals/ci_cd_fundamentals.md` and `ci_cd_platforms/ci_cd_platforms.md` | GitHub Actions version pins throughout, none dated. |
+
+### B. Thin modules — 32 of 41 sit under the section's own 700-line bar (median 567)
+
+Ranked by interview frequency times the size of the gap, with the specific missing content
+named so each is briefable without re-reading the file.
+
+1. **`containers_and_docker` (446 lines — thinnest in the section, highest-frequency interview topic).** Missing Docker Compose entirely; `HEALTHCHECK`; Docker networking (bridge/host/none); an ENTRYPOINT-vs-CMD interaction table; rootless daemon beyond a tools row; BuildKit's LLB.
+2. **`kubernetes_workloads_and_objects` (544).** Missing init containers entirely; multi-container pod patterns; native sidecars (`restartPolicy: Always` on an init container); the pod phase/lifecycle state machine; `PodDisruptionBudget` YAML; the Downward API; `externalTrafficPolicy`; Job `parallelism`/`completions`/Indexed mode; the `Recreate` strategy; `postStart`.
+3. **`kubernetes_storage_and_state` (483).** CSI stays at concept level and never opens the sidecar architecture (external-provisioner/attacher/resizer/snapshotter/node-driver-registrar). Missing `fsGroup` volume ownership — the classic "mounted as root, app can't write" pitfall — plus `persistentVolumeClaimRetentionPolicy`, raw block volumes, PVC cloning, `CSIStorageCapacity` scheduling, and `subPath` gotchas.
+4. **`platform_engineering_and_idp` (548).** The **only module in its cluster with no worked-math section 6 at all**, plus the SPACE/DevEx gap (see D). Its Crossplane v2 and DORA claims are correct and current; add one sentence noting v1-style XRDs still work via the `LegacyCluster` scope default, which *does* support claims — the migration escape hatch a reader will hit on their first upgrade.
+5. **`devsecops_and_supply_chain_security` (466).** **Zero worked-arithmetic blocks anywhere.** Missing in-toto's layout/link model; `slsa-verifier` (never named, despite SLSA being the headline); reproducible-build mechanics. Dependency confusion sits in a Q&A rather than in section 10 where a pitfall belongs.
+6. **`helm_and_package_management` (482).** Missing `configMapGenerator`/`secretGenerator` content-hash suffixing — the most-used Kustomize feature — plus Helm hook YAML, chart signing/provenance, `helm test`, and Kustomize `replacements`.
+7. **`ci_cd_platforms` (512) and `ci_cd_fundamentals` (504).** Both missing concurrency groups / cancel-superseded-run, build-matrix strategy, test sharding, and monorepo path filtering. `ci_cd_platforms` additionally leans on "ephemeral runners" without ever covering runner sandboxing (gVisor/Kata/Firecracker).
+8. **`artifact_and_registry_management` (442).** Section 6 has one comment-only bash block. Dependency confusion gets two words in the module whose subject *is* registry supply chain. Missing `imagePullSecrets` mechanics and air-gapped mirroring.
+9. **`kubernetes_operators_and_crds` (506).** Missing garbage-collection propagation policies, conversion-webhook code, admission-webhook implementation, and server-side-apply field-manager conflicts.
+10. **`observability_tracing_and_otel` (572).** A 572-line parent under a 2,037-line child. The parent has no version anchor while the child has an excellent one — fix both together.
+
+Second tier, same treatment, lower priority:
+
+| Module | Lines | Missing |
+|--------|-------|---------|
+| `kubernetes_architecture` | 673 | Watch semantics (`resourceVersion`, bookmarks, `410 Gone`); built-in admission controllers; the API aggregation layer; etcd encryption-at-rest / KMS v2; static pods; audit logging |
+| `cloud_networking_and_cdn` | 738 | Origin shield; multi-CDN failover; CNAME flattening at the apex |
+| `cloud_fundamentals_and_aws` | 689 | IMDSv2; SCPs and permission boundaries; VPC Flow Logs |
+| `serverless_and_faas` | 617 | Function URLs; response streaming; Lambda extensions; Cloudflare Workers |
+| `deployment_strategies` | 559 | Shadow/dark traffic; ring rollout; session affinity during a canary |
+| `configuration_management` | 556 | Windows DSC / WinRM |
+| `gcp_and_azure_essentials` | 537 | The only cloud module with no worked arithmetic; no VPC Service Controls, Shared VPC, or Azure Policy vs RBAC |
+| `container_runtimes_and_oci` | 487 | containerd runtime-handler registration; CDI; user namespaces |
+| `version_control_and_git_workflows` | 494 | Commit signing — absent from the Git module |
+
+### C. Content gaps
+
+- **IPv6 and dual-stack are absent section-wide.** `networking_for_devops/networking_for_devops.md` has exactly one IPv6 mention (a table row near line 150) and every CIDR and subnetting example is IPv4-only. **`dual-stack` has zero occurrences in any of the 51 files**, including `kubernetes_networking`, where dual-stack Services (`ipFamilyPolicy`, `ipFamilies`) have been GA since 1.23. Two-module fix: address plan and subnetting in `networking_for_devops`, Service/Pod dual-stack in `kubernetes_networking`.
+- **VictoriaMetrics is missing from the module pages.** `observability_metrics_prometheus/observability_metrics_prometheus.md` around line 92 and its section 11 name Thanos, Cortex and Mimir and stop. VictoriaMetrics appears only inside two case studies. Add it to the section 4 comparison and to section 11.
+
+### D. Case studies
+
+- **Three sit below the 900-line principal floor:** `design_ml_platform_infrastructure` (720), `design_incident_response_system` (799), `design_log_aggregation_pipeline` (846).
+- **`design_multi_tenant_platform.md` has 1 inline `cross_cutting/` link against a 4+ bar.** Its cross-links are parked in a `## Cross-References` appendix after section 11 — a workaround, not compliance. Inline them where the primitive is actually used.
+- **Real, unacknowledged duplication: `design_ml_platform_infrastructure` vs `design_gpu_training_and_inference_cluster`.** Both cover self-service submission, GPU quota / fair-share / borrowing / preemption, MIG vs time-slicing, scale-to-zero serving, and Spot plus checkpointing — and **neither cross-references the other**. `gpu_training` is the deeper, more current treatment. **Re-scope rather than delete:** shrink `ml_platform` to pipelines, experiment tracking and model registry, and delegate GPU scheduling to `gpu_training` the same way it already delegates cluster tenancy to `design_kubernetes_platform`.
+- **Numeric inconsistency across two case studies describing what reads as the same org:** `design_observability_platform` says 20 TB/day with 90-day cold retention; `design_log_aggregation_pipeline` says 50 TB/day with 1-year retention. Reconcile or explicitly separate the two scenarios.
+- **`design_kubernetes_platform` Decision 1 re-derives** the namespace / vCluster / cluster-per-tenant comparison that `design_multi_tenant_platform` expands into a four-rung threat-modeled ladder. Make Decision 1 link forward instead of re-deriving, or the two will drift.
+
+### E. Proposed modules (6)
+
+Each is justified by a primitive the section already uses but no module owns.
+
+| # | Module | Placement | Justification |
+|---|--------|-----------|---------------|
+| 1 | `multi_cluster_and_fleet_management` | after `kubernetes_operators_and_crds` | Cluster API, Karmada / Open Cluster Management, fleet upgrade orchestration, placement policy. **Cluster API today appears only inside a case study** — a case study carrying a primitive no module owns. |
+| 2 | `runtime_security_and_ebpf_observability` | after `kubernetes_security` | Falco appears in one file only; Tetragon only inside the Cilium sub-file; **AppArmor is absent section-wide**. This section owns eBPF-for-networking and `backend/` owns eBPF-for-performance; **nobody owns eBPF-for-security**. |
+| 3 | `certificate_and_pki_lifecycle` | after `secrets_management` | cert-manager peaks at 4 mentions and is never explained. ACME and DNS-01, private CA hierarchy, mTLS rotation at fleet scale, and the expiry outage as an incident class. |
+| 4 | `continuous_profiling` | after `observability_tracing_and_otel` | **Zero hits section-wide** for Pyroscope, Parca or the phrase "continuous profiling". The OTel deep dive covers the Profiles *signal*; nothing covers the practice. |
+| 5 | `developer_experience_metrics` (or a large section-expansion of `platform_engineering_and_idp`) | with or inside `platform_engineering_and_idp` | **SPACE, DevEx and "four keys" have zero occurrences section-wide**; DORA stands alone. The section's own note that DORA's benchmark bands are unsourceable strengthens the case for teaching the frameworks rather than the numbers. |
+| 6 | `capacity_and_quota_management` | after `kubernetes_scheduling_and_autoscaling` | `ResourceQuota`, `LimitRange` and `PriorityClass` live almost entirely in two case studies. Add cloud service quotas, quota exhaustion as an incident class, headroom math, and preemption ordering. |
+
+**Already covered — checked, do not re-commission:** eBPF/Cilium dataplane, progressive delivery and feature flags, supply-chain attestation, database operators, cost attribution.
+
+### F. Open decision for the owner
+
+The Principal tier currently has **3 modules** (`cloud_cost_optimization_finops`,
+`platform_engineering_and_idp`, `ml_platform_and_gpu_infrastructure`). That cut omits
+`sre_principles_and_slos`, `disaster_recovery_and_resilience`, `kubernetes_architecture`
+and the multi-tenancy material — precisely the "which approach at what cost, what fails and
+how you would know" judgment content the tier is defined as. Widening it is a deliberate
+curation call, not a defect to fix automatically. **Needs an owner decision.**
 
 ---
 

@@ -112,11 +112,11 @@ Each added nine divides downtime by 10, which is why the cost of an SLA rises so
 
 | Family | Prefix | Use case | Example |
 |--------|--------|----------|---------|
-| General purpose | m, t | Balanced web/app servers | m7i.large, t3.micro (burstable) |
-| Compute optimized | c | CPU-bound (batch, gaming) | c7g.xlarge (Graviton) |
-| Memory optimized | r, x | In-memory DB, caches | r7g.2xlarge |
-| Storage optimized | i, d | High local IOPS | i4i.large (NVMe) |
-| Accelerated | p, g, inf | GPU/ML inference | p5.48xlarge (H100), inf2 |
+| General purpose | m, t | Balanced web/app servers | m8i.large (Intel Xeon 6), m9g.large (Graviton5), t3.micro (burstable) |
+| Compute optimized | c | CPU-bound (batch, gaming) | c8g.xlarge (Graviton4) |
+| Memory optimized | r, x | In-memory DB, caches | r8g.2xlarge (Graviton4) |
+| Storage optimized | i, d | High local IOPS | i8g.large (NVMe, Graviton4) |
+| Accelerated | p, g, inf | GPU/ML inference | p6-b200.48xlarge (NVIDIA B200), inf2 |
 
 ### S3 storage classes
 
@@ -356,7 +356,7 @@ resource "aws_autoscaling_group" "web" {
 ```hcl
 resource "aws_db_instance" "orders" {
   engine               = "postgres"
-  instance_class       = "db.r7g.large"
+  instance_class       = "db.r8g.large"
   allocated_storage    = 100
   multi_az             = true     # synchronous standby in another AZ -> ~60-120s failover
   backup_retention_period = 7     # automated daily snapshots + 5-min PITR
@@ -608,7 +608,7 @@ An explicit Deny in any evaluated policy always wins, overriding any Allow; if n
 
 **Q14: How do you choose an EC2 instance family for a given workload?**
 **Short:** Match the family to the bottleneck — compute-optimized for CPU-bound jobs, memory-optimized for in-memory databases, storage-optimized for local IOPS — but start on general purpose until profiling says otherwise.
-Match the family to the resource the workload is bound by: compute-optimized (c) for CPU-bound jobs, memory-optimized (r/x) for in-memory databases, and accelerated (p/g/inf) for GPU workloads. General purpose (m, t) covers balanced web/app servers — t3.micro is burstable for spiky-but-light traffic, while m7i.large suits steady balanced load. Storage-optimized (i, d) instances like i4i.large add local NVMe for high local IOPS workloads such as caches or scratch space. Graviton (ARM, e.g. c7g.xlarge) variants of most families give better price-performance for workloads that don't need x86-specific binaries. Default to general purpose until profiling shows you're actually CPU-, memory-, or IOPS-bound, then move to the matching specialized family.
+Match the family to the resource the workload is bound by: compute-optimized (c) for CPU-bound jobs, memory-optimized (r/x) for in-memory databases, and accelerated (p/g/inf) for GPU workloads. General purpose (m, t) covers balanced web/app servers — t3.micro is burstable for spiky-but-light traffic, while m8i.large (Intel Xeon 6) suits steady balanced load. Storage-optimized (i, d) instances like i8g.large add local NVMe for high local IOPS workloads such as caches or scratch space. Graviton (ARM) variants of most families give better price-performance for workloads that don't need x86-specific binaries — c8g/r8g/i8g on Graviton4, and m9g on Graviton5 (GA June 2026, with C9g/R9g following later in 2026). Default to general purpose until profiling shows you're actually CPU-, memory-, or IOPS-bound, then move to the matching specialized family.
 
 **Q15: When would you choose io2 Block Express over the default gp3 EBS volume?**
 **Short:** Choose io2 Block Express only when you need beyond gp3's 80,000 IOPS ceiling, sub-500-microsecond latency, 99.999% durability, or Multi-Attach — not merely for high IOPS.
@@ -667,7 +667,7 @@ resource "aws_lb" "app" {                  # ALB in public subnets, app stays pr
 
 resource "aws_db_instance" "orders" {      # managed, Multi-AZ, encrypted, private
   engine                  = "postgres"
-  instance_class          = "db.r7g.large"
+  instance_class          = "db.r8g.large"
   multi_az                = true
   publicly_accessible     = false
   storage_encrypted       = true

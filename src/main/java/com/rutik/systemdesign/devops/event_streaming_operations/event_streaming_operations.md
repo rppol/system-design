@@ -1,6 +1,6 @@
 # Event Streaming Operations
 
-> Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A target: 12
+> Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A floor: 15
 
 Operating Apache Kafka (and Kafka-compatible streaming) as platform infrastructure: the Strimzi operator on Kubernetes, partition and disk capacity sizing, consumer-lag monitoring, rebalancing without latency spikes, rack awareness for AZ-failure survival, and tiered storage for cost. This module owns the **run-it-at-scale** angle. For the *messaging concepts* themselves (delivery semantics, partitioning theory, log compaction, the dual-write/outbox pattern) cross-reference [`../../hld/`](../../hld/README.md) and the backend messaging material; for *application consumer/producer code patterns* see [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md). Here we focus on keeping the cluster alive, sized, and observable.
 

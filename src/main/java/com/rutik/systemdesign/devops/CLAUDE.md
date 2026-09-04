@@ -73,7 +73,27 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 | 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
 | 8 — Specialized Platforms & Performance | ml_platform_and_gpu_infrastructure, event_streaming_operations, performance_and_load_testing |
 
-**Deep-dive sub-files — 1.** `observability_tracing_and_otel/opentelemetry_deep_dive.md` (2,037 lines, 36 Q&As): the OTel project-level mechanism — the spec / API-SDK / Collector three-layer split, per-signal data models, W3C context-propagation byte layout, consistent probability sampling (`ot=th` / `rv`), OTLP wire behaviour, Collector internals, semantic-convention migration, and cost arithmetic. It has **no `STUDY_ORDER` entry** — a sub-file groups under its parent via `splitModulePath()` — and is wired into the Senior tier through the parent page's `<!-- study-paths -->` block.
+**Deep-dive sub-files — 10.** None has a `STUDY_ORDER` entry — a sub-file groups under its
+parent via `splitModulePath()` — and each is wired into its tiers through the parent
+module's line in the `<!-- study-paths -->` block in `README.md`, which already lists all ten.
+
+| Sub-file | Parent module |
+|----------|---------------|
+| `oci_image_formats_and_lazy_pulling.md` | `container_runtimes_and_oci` |
+| `cilium_and_ebpf_dataplane.md` | `kubernetes_networking` |
+| `device_scheduling_and_dra.md` | `kubernetes_scheduling_and_autoscaling` |
+| `workload_identity_and_federation.md` | `kubernetes_security` |
+| `environment_promotion.md` | `gitops_argocd_flux` |
+| `opentelemetry_deep_dive.md` | `observability_tracing_and_otel` |
+| `regulated_supply_chain.md` | `devsecops_and_supply_chain_security` |
+| `ai_workloads_and_agent_operations.md` | `platform_engineering_and_idp` |
+| `gpu_and_ai_finops.md` | `cloud_cost_optimization_finops` |
+| `gpu_scheduling_and_inference_ops.md` | `ml_platform_and_gpu_infrastructure` |
+
+`opentelemetry_deep_dive.md` (2,037 lines, 36 Q&As) is the largest: the OTel project-level
+mechanism — the spec / API-SDK / Collector three-layer split, per-signal data models, W3C
+context-propagation byte layout, consistent probability sampling (`ot=th` / `rv`), OTLP wire
+behaviour, Collector internals, semantic-convention migration, and cost arithmetic.
 
 **Q&A floor:** 15 per module (root CLAUDE.md hard floor). Deep modules aim higher (18+): kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos, ml_platform_and_gpu_infrastructure
 
@@ -81,13 +101,16 @@ Backfill status (2026-07-16): the floor backlog is fully cleared — every modul
 
 ---
 
-## Learning Paths (Full + Senior)
+## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 41 modules = "8-Phase Learning Path") plus
-one curated tier: **Senior** (22 modules). **This section has no Principal tier and needs
-none** — no module declares one, `check_wiring()` skips the tier when the markers declare
-zero modules for it, and adding a Principal heading with no members is a false alarm, not
-a gap to close. Membership is declared ONCE for the whole section, in the
+two curated tiers: **Senior** (22 modules) and **Principal** (3 modules —
+`cloud_cost_optimization_finops`, `platform_engineering_and_idp`,
+`ml_platform_and_gpu_infrastructure`, each with its deep-dive sub-file, plus the
+`design_gpu_training_and_inference_cluster` case study). The Principal cut is small on
+purpose but it **does ship** — do not delete the tier or its generated table. Whether it
+should be *wider* is an open owner decision, recorded under "Known Gaps & Planned Work"
+in `README.md`. Membership is declared ONCE for the whole section, in the
 `<!-- study-paths -->` block in THIS SECTION'S `README.md` — never in a module page; see the
 HARD RULE at the bottom of this file. The block lists every module, every file that module
 owns, and every case study, each tagged with the tiers it belongs to (`-` = Full path only);
@@ -95,26 +118,28 @@ listing a tier joins it, omitting the tier opts out, and the module page (`<modu
 carry every tier the module is in. Order is never declared — it comes from `STUDY_ORDER.devops` in `game/app.js`, so a tier is an ordered
 subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks
 the markers and emits the gitignored `questions/paths.json`, which the game fetches at
-boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` /
-`<!-- /study-path-table -->` and is **generated** — regenerate with
+boot. The Senior and Principal tables in `README.md` sit between
+`<!-- study-path-table senior -->` / `<!-- study-path-table principal -->` and their
+closing `<!-- /study-path-table -->` markers, and are **generated** — regenerate with
 `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
-`extract.py --strict` and the Pages deploy. The 13 case studies carry no tier markers, so
-the Case Studies tab shows all of them with no Level filter. The README also carries a
+`extract.py --strict` and the Pages deploy. Of the 15 case studies only
+`design_gpu_training_and_inference_cluster` carries a tier marker (`senior, principal`);
+the Case Studies tab shows all 15 with no Level filter. The README also carries a
 Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 13 Total
+## Case Studies — 15 Total
 
 `case_studies/` — all use the 11-section principal template.
 Reference: `../llm/case_studies/design_gpu_inference_platform.md`
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
-design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration, design_ml_platform_infrastructure
+design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration, design_ml_platform_infrastructure, design_multi_tenant_platform, design_gpu_training_and_inference_cluster
 
 ---
 
-## Cross-Cutting Shared Primitives — 7 Files
+## Cross-Cutting Shared Primitives — 8 Files
 
 `case_studies/cross_cutting/` — all use the 14-section template:
 
@@ -127,6 +152,7 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 | `supply_chain_security_pipeline.md` | Any CI/CD case study |
 | `multi_cluster_networking.md` | Any multi-region or multi-cluster case study |
 | `gpu_node_lifecycle.md` | Any ML platform or GPU infrastructure case study |
+| `dra_and_device_plugins.md` | Any case study allocating GPUs, FPGAs or SmartNICs in Kubernetes |
 
 ---
 

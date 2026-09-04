@@ -522,7 +522,9 @@ Guardrails must be enforced *before* an object is persisted, on every cluster, i
 
 ```yaml
 # Reject :latest tags and non-allowlisted registries; require team/cost-center labels.
-# Kyverno 1.17 deprecated kyverno.io/v1 ClusterPolicy (removal targets v1.20, Oct 2026).
+# Kyverno 1.17 shipped these CEL types at GA; 1.19 (2026-08-20) officially deprecated
+# kyverno.io/v1 ClusterPolicy/Policy and is the LAST release with full support for them,
+# with removal in v1.20.
 # The migration is NOT a rename: a ClusterPolicy bundled rules of every kind AND every
 # match target in one object, and matchConstraints is now policy-level — so this one
 # object becomes TWO, split by what they match.

@@ -1,6 +1,6 @@
 # Device Scheduling and Dynamic Resource Allocation
 
-> **Version anchor (2026-08-26).** **Kubernetes 1.36** (2026-04-22, latest patch 1.36.2 on 2026-06-09) is the current release; **1.35** (2025-12-17) is the prior minor. **DRA graduated to GA in 1.34** with the stable **`resource.k8s.io/v1`** API on by default, and the `DynamicResourceAllocation` gate was **locked to enabled in 1.35** (`LockToDefault: true`) — it can no longer be turned off. Sub-feature stability as of 1.36, read from `pkg/features/kube_features.go` on the `release-1.36` branch rather than from release prose: **`DRAAdminAccess` GA and locked** (removal scheduled for 1.39), **`DRAPrioritizedList` GA**, **`DRAPartitionableDevices` Beta on**, **`DRAConsumableCapacity` Beta on**, **`DRADeviceTaints` Beta on**, **`DRADeviceBindingConditions` Beta on**, **`DRAExtendedResource` Beta on**, and **`DRADeviceTaintRules` Beta but OFF by default** (it depends on an off-by-default beta API). The **device plugin API is not deprecated** — `nvidia.com/gpu: 1` still works in 1.36 and nothing has announced its removal.
+> **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (2026-08-26) is the current release; **1.36 "Haru"** (2026-04-22) is the prior minor. **DRA graduated to GA in 1.34** with the stable **`resource.k8s.io/v1`** API on by default, and the `DynamicResourceAllocation` gate was **locked to enabled in 1.35** (`LockToDefault: true`) — it can no longer be turned off. Sub-feature stability as of 1.37, read from `pkg/features/kube_features.go` on the `release-1.37` branch rather than from release prose: **`DRAAdminAccess` GA and locked since 1.36** (removal scheduled for 1.39), **`DRAPrioritizedList` GA since 1.36, locked in 1.37**, **`DRADeviceTaints` GA in 1.37**, **`DRADeviceTaintRules` GA and ON by default in 1.37** (it was Beta but off by default in 1.36), **`DRAExtendedResource` GA and locked in 1.37**, **`DRAResourceClaimDeviceStatus` GA and locked in 1.37**, while **`DRAPartitionableDevices`, `DRAConsumableCapacity` and `DRADeviceBindingConditions` are still Beta, on by default**. The **device plugin API is not deprecated** — `nvidia.com/gpu: 1` still works in 1.37 and nothing has announced its removal.
 
 This page sits under [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling.md). The parent owns *scheduling in general* — requests and limits, affinity, the three autoscalers, gang scheduling, PodDisruptionBudgets — and introduces DRA in one section because you cannot discuss GPU placement without it. This page owns the *device-allocation mechanism*: the four object kinds and who writes each, the exact API shapes that a summarised doc page will get wrong, the allocation-versus-binding split inside the scheduler, the sub-features that decide whether DRA is worth adopting at all, and the migration off integer counting. What the devices cost and how the fleet is operated belongs to [ml_platform_and_gpu_infrastructure](../ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md); node bring-up and GPU health belong to [gpu_node_lifecycle](../case_studies/cross_cutting/gpu_node_lifecycle.md).
 
@@ -50,7 +50,7 @@ The cost is a genuinely larger surface: four object kinds instead of one number,
 3. **A claim is allocated to a *set*, and constraints apply across the set.** `matchAttribute` on a claim's `constraints` is what makes "all four devices in the same NVLink domain" a schedulable requirement rather than a hope.
 4. **Lifetime is ownership.** A `ResourceClaimTemplate`-generated claim carries an `ownerReference` to the Pod and dies with it. A hand-written `ResourceClaim` does not, and outlives everything.
 5. **Reservation is explicit and bounded.** `status.reservedFor` lists the consumers permitted to use the allocation, capped at **256** entries. It is not a refcount you can ignore.
-6. **The migration path is a bridge, not a cliff.** `DRAExtendedResource` (Beta, on by default in 1.36) lets the scheduler satisfy a legacy `nvidia.com/gpu: 2` request out of DRA-published devices, so manifests migrate on their own schedule.
+6. **The migration path is a bridge, not a cliff.** `DRAExtendedResource` (GA and locked in 1.37; Beta and on by default in 1.36) lets the scheduler satisfy a legacy `nvidia.com/gpu: 2` request out of DRA-published devices, so manifests migrate on their own schedule.
 
 ---
 
@@ -80,7 +80,7 @@ A claim's `spec.devices.requests[]` entry sets **exactly one** of two fields —
 
 ### Sharing and partitioning
 
-| Strategy | Gate (1.36) | What it does |
+| Strategy | Gate (1.37) | What it does |
 |---|---|---|
 | **Partitionable devices** | `DRAPartitionableDevices` — Beta, on | The driver publishes overlapping devices (a full card *and* its MIG slices) plus the counter sets that make them mutually exclusive. The scheduler picks a valid non-overlapping combination, so partitioning becomes a scheduling decision instead of a node-drain-and-reconfigure ritual. |
 | **Consumable capacity** | `DRAConsumableCapacity` — Beta, on | A device advertises divisible capacity (memory, compute fraction) that several claims draw down concurrently. This is what makes genuine multi-tenant sharing of one card a first-class allocation rather than a lie told by time-slicing. |
@@ -88,12 +88,12 @@ A claim's `spec.devices.requests[]` entry sets **exactly one** of two fields —
 
 ### Fencing and lifecycle
 
-| Strategy | Gate (1.36) | What it does |
+| Strategy | Gate (1.37) | What it does |
 |---|---|---|
-| **Device taints and tolerations** | `DRADeviceTaints` — Beta, on | Taint an individual *device*, not the node. A card throwing ECC errors is fenced while its seven healthy siblings keep scheduling. `NoExecute` evicts Pods already holding it. |
-| **DeviceTaintRule** | `DRADeviceTaintRules` — Beta but **OFF by default** | Lets an admin or an external health controller taint devices declaratively, without the driver republishing slices. Off because it depends on an off-by-default beta API — you must enable it explicitly. |
+| **Device taints and tolerations** | `DRADeviceTaints` — GA in 1.37 | Taint an individual *device*, not the node. A card throwing ECC errors is fenced while its seven healthy siblings keep scheduling. `NoExecute` evicts Pods already holding it. |
+| **DeviceTaintRule** | `DRADeviceTaintRules` — GA and **on by default in 1.37** | Lets an admin or an external health controller taint devices declaratively, without the driver republishing slices. On a 1.36 cluster it is Beta and off by default, so it must be enabled explicitly there. |
 | **Binding conditions** | `DRADeviceBindingConditions` — Beta, on | Delays committing the Pod to the node until an external resource (a fabric-attached device, a composable-infrastructure allocation) reports ready, instead of binding and then failing to start. |
-| **Extended resource bridge** | `DRAExtendedResource` — Beta, on | A legacy `nvidia.com/gpu: 2` request is satisfied from DRA devices when the DeviceClass opts in. The migration lever. |
+| **Extended resource bridge** | `DRAExtendedResource` — GA in 1.37 | A legacy `nvidia.com/gpu: 2` request is satisfied from DRA devices when the DeviceClass opts in. The migration lever. |
 
 ---
 
@@ -178,13 +178,14 @@ Sub-feature maturity, because "DRA is GA" and "the feature you need is GA" are d
 
 ```mermaid
 timeline
-    title DRA feature-gate stages, read from release-1.36 source
+    title DRA feature-gate stages, read from release-1.37 source
     1.26 : DynamicResourceAllocation alpha
     1.32 : DynamicResourceAllocation beta : DRAAdminAccess alpha
     1.33 : PartitionableDevices alpha : DeviceTaints alpha : PrioritizedList alpha
     1.34 : Core GA, v1 API on : AdminAccess beta : PrioritizedList beta : ConsumableCapacity alpha : ExtendedResource alpha : BindingConditions alpha
     1.35 : Core gate locked on : DeviceTaintRules alpha
     1.36 : AdminAccess GA locked : PrioritizedList GA : Partitionable, Consumable, Taints, Binding, ExtendedResource all beta on
+    1.37 : DeviceTaints GA : DeviceTaintRules GA on : ExtendedResource GA locked : PrioritizedList locked : Partitionable, Consumable, Binding still beta on
 ```
 
 *Read this before promising a capability. The core has been GA since 1.34, but consumable capacity — the feature most people actually mean when they say "share a GPU" — only reached on-by-default Beta in 1.36.*
@@ -458,7 +459,7 @@ kubectl get resourceclaims -A -o json | jq -r '
 
 **2. Writing `deviceClassName` directly under the request.** The `resource.k8s.io/v1` `DeviceRequest` has exactly three fields: `name`, `exactly`, `firstAvailable`. A flat `deviceClassName` was valid in `v1beta1` and is rejected by `v1`. Every stale tutorial and most doc summarisers still emit the flat form, so this fails in the most demoralising way — copied from something that looks official.
 
-**3. Assuming "DRA is GA" means your feature is GA.** The core has been GA since 1.34, but in 1.36 partitionable devices, consumable capacity, device taints, binding conditions and the extended-resource bridge are all *Beta*, and `DRADeviceTaintRules` is Beta and **off by default**. A platform team that promised dynamic MIG on a 1.34 cluster promised an alpha feature.
+**3. Assuming "DRA is GA" means your feature is GA.** The core has been GA since 1.34, but even in 1.37 partitionable devices, consumable capacity and binding conditions are still *Beta* (device taints, `DRADeviceTaintRules` and the extended-resource bridge only reached GA in 1.37, and on 1.36 the taint rule is Beta and **off by default**). A platform team that promised dynamic MIG on a 1.34 cluster promised an alpha feature.
 
 **4. Kueue's topology-aware scheduling does not account for DRA devices.** Kueue's own documentation is explicit that DRA resources are not counted in TAS capacity calculations and that combining the two can produce incorrect topology assignments. Teams enable both because both sound like "topology" and get placements that violate the constraint they thought they had bought. Pick one per workload class until this converges.
 
@@ -481,7 +482,7 @@ kubectl get resourceclaims -A -o json | jq -r '
 | Volcano 1.15 | Batch scheduler | DRA queue quota in the capacity plugin | Replaces the default scheduler for its Pods |
 | `kubectl get resourceslices` | Inspection | Ground truth for what the driver published | Empty output means no driver, not no DRA |
 | CDI (Container Device Interface) | Runtime | The format `NodePrepareResources` returns | Applied by containerd/CRI-O before container start |
-| `DeviceTaintRule` | Fencing | Declarative device-level taints from a health controller | Beta but **off by default** in 1.36 |
+| `DeviceTaintRule` | Fencing | Declarative device-level taints from a health controller | GA and on by default in 1.37; Beta and **off by default** in 1.36 |
 
 ---
 
@@ -498,9 +499,9 @@ The device plugin API advertises a count in `node.status.allocatable`, so the on
 Only a claim generated from a `ResourceClaimTemplate` carries an `ownerReference` back to the Pod, so only that claim is garbage-collected when the Pod dies. A hand-written `ResourceClaim` referenced through `resourceClaimName` is an independent object: deleting the Pod removes the entry from `status.reservedFor` but leaves `status.allocation` intact, and the device stays spoken for. Nothing surfaces this — `kubectl get pods` is clean and the node still reports the device as existing, so the symptom is a slow, unexplained loss of capacity that gets blamed on the cloud provider. The standing detection is a claim with a non-nil `status.allocation` and an empty `status.reservedFor`; the standing fix is to default to `ResourceClaimTemplate` and treat a bare `ResourceClaim` as requiring a named owner for its deletion.
 
 **Q: Is the device plugin API deprecated now that DRA is GA?**
-**Short:** No. `nvidia.com/gpu: 1` still works in 1.36 and no removal has been announced; DRA is an additional model, not a replacement deadline.
+**Short:** No. `nvidia.com/gpu: 1` still works in 1.37 and no removal has been announced; DRA is an additional model, not a replacement deadline.
 
-DRA reached GA in 1.34 and its feature gate locked on in 1.35, but neither event deprecated the device plugin API, which continues to function normally. The `DRAExtendedResource` gate (Beta and on by default in 1.36) actually goes the other way: it lets the scheduler satisfy a legacy integer request out of DRA-published devices, so existing manifests keep working against a DRA driver without being rewritten. This matters because "GA" is routinely misread as "the old thing is going away," which turns an optional architectural improvement into a manufactured migration emergency. Migrate when you need heterogeneous selection, topology constraints or dynamic partitioning — not because of a deadline that does not exist.
+DRA reached GA in 1.34 and its feature gate locked on in 1.35, but neither event deprecated the device plugin API, which continues to function normally. The `DRAExtendedResource` gate (GA and locked in 1.37, Beta and on by default in 1.36) actually goes the other way: it lets the scheduler satisfy a legacy integer request out of DRA-published devices, so existing manifests keep working against a DRA driver without being rewritten. This matters because "GA" is routinely misread as "the old thing is going away," which turns an optional architectural improvement into a manufactured migration emergency. Migrate when you need heterogeneous selection, topology constraints or dynamic partitioning — not because of a deadline that does not exist.
 
 **Q: What is wrong with `requests: [{name: gpu, deviceClassName: gpu-80gb}]`?**
 **Short:** In `resource.k8s.io/v1` a DeviceRequest has only `name`, `exactly` and `firstAvailable` — `deviceClassName` must sit inside `exactly`.
@@ -525,7 +526,7 @@ Set `allocationMode: ExactCount` with `count: 8` on the request, then add `const
 **Q: DRA is GA. Can I rely on dynamic MIG partitioning in production?**
 **Short:** Only on 1.36 or later — partitionable devices reached on-by-default Beta in 1.36, several releases after the core went GA.
 
-"DRA is GA" refers to the `DynamicResourceAllocation` gate, which reached GA in 1.34 and locked on in 1.35. The sub-features shipped on their own schedules: reading the 1.36 source, `DRAAdminAccess` and `DRAPrioritizedList` are GA, while `DRAPartitionableDevices`, `DRAConsumableCapacity`, `DRADeviceTaints`, `DRADeviceBindingConditions` and `DRAExtendedResource` are all Beta-and-on, and `DRADeviceTaintRules` is Beta and **off by default** because it depends on an off-by-default beta API. Dynamic partitioning specifically — carving a card into MIG slices as a scheduling outcome instead of a node-drain — is `DRAPartitionableDevices`, which was alpha in 1.33 and only became on-by-default Beta in 1.36. Check the gate for the capability you are promising, not the headline for the feature family.
+"DRA is GA" refers to the `DynamicResourceAllocation` gate, which reached GA in 1.34 and locked on in 1.35. The sub-features shipped on their own schedules: reading the 1.37 source, `DRAAdminAccess`, `DRAPrioritizedList`, `DRADeviceTaints`, `DRADeviceTaintRules`, `DRAExtendedResource` and `DRAResourceClaimDeviceStatus` are GA, while `DRAPartitionableDevices`, `DRAConsumableCapacity` and `DRADeviceBindingConditions` are still Beta-and-on. On 1.36 that list is shorter still — device taints, the extended-resource bridge and binding conditions were all Beta, and `DRADeviceTaintRules` was Beta and **off by default** because it depends on an off-by-default beta API. Dynamic partitioning specifically — carving a card into MIG slices as a scheduling outcome instead of a node-drain — is `DRAPartitionableDevices`, which was alpha in 1.33 and only became on-by-default Beta in 1.36. Check the gate for the capability you are promising, not the headline for the feature family.
 
 **Q: What is `status.reservedFor`, and why is it capped?**
 **Short:** It lists the consumers permitted to use an allocated claim, capped at 256 entries — a hard limit, not a soft one.
@@ -540,7 +541,7 @@ Set `allocationMode: ExactCount` with `count: 8` on the request, then add `const
 **Q: How does DRA let you fence one bad GPU without draining the node?**
 **Short:** Device taints apply to an individual device rather than the node, so a failing card is fenced while its healthy siblings keep scheduling.
 
-With extended resources the granularity of fencing is the node: the count is per-node, so a single card throwing uncorrectable ECC errors means cordoning an eight-GPU machine and losing seven healthy cards. `DRADeviceTaints` (Beta and on by default in 1.36) puts the taint on the device in the `ResourceSlice`, and claims carry tolerations the same way Pods do for node taints, including `NoExecute` to evict a Pod already holding the device. The declarative half is `DeviceTaintRule`, which lets an admin or an external health controller taint a device without the driver republishing its slices — but that is gated behind `DRADeviceTaintRules`, which is Beta and **off by default**, so it must be enabled explicitly. Pair this with DCGM-driven health signals rather than kubelet readiness, since a GPU can fail while the node stays Ready.
+With extended resources the granularity of fencing is the node: the count is per-node, so a single card throwing uncorrectable ECC errors means cordoning an eight-GPU machine and losing seven healthy cards. `DRADeviceTaints` (GA in 1.37, Beta and on by default in 1.36) puts the taint on the device in the `ResourceSlice`, and claims carry tolerations the same way Pods do for node taints, including `NoExecute` to evict a Pod already holding the device. The declarative half is `DeviceTaintRule`, which lets an admin or an external health controller taint a device without the driver republishing its slices — but that is gated behind `DRADeviceTaintRules`, which only reached GA and on-by-default in 1.37 — on 1.36 it is Beta and **off by default**, so it must be enabled explicitly there. Pair this with DCGM-driven health signals rather than kubelet readiness, since a GPU can fail while the node stays Ready.
 
 **Q: What is admin access, and why is it namespace-restricted?**
 **Short:** `adminAccess: true` grants read-only inspection of a device already allocated to another workload, and is confined to explicitly labelled namespaces.
@@ -555,7 +556,7 @@ Kueue's documentation states this explicitly: DRA resources are not counted in t
 **Q: What is the `DRAExtendedResource` bridge, and when would you use it?**
 **Short:** It lets the scheduler satisfy a legacy `nvidia.com/gpu: 2` request out of DRA-published devices, so manifests migrate independently of the driver.
 
-`DRAExtendedResource` (alpha in 1.34, Beta and on by default in 1.36) maps an extended-resource request onto DRA devices when the `DeviceClass` opts in. That decouples two migrations that would otherwise have to happen together: you can switch the *node* to a DRA driver while thousands of existing Deployments still ask for `nvidia.com/gpu`, and rewrite them into claims at whatever pace the owning teams can manage. Without it, installing a DRA driver would be a hard cutover requiring every manifest in the cluster to change on the same day, which for most organisations means the migration never starts. Use it as the first step of a phased migration, and treat the bridge as transitional — new workloads should be authored as claims so the bridge is shrinking, not growing.
+`DRAExtendedResource` (alpha in 1.34, Beta and on by default in 1.36, GA and locked in 1.37) maps an extended-resource request onto DRA devices when the `DeviceClass` opts in. That decouples two migrations that would otherwise have to happen together: you can switch the *node* to a DRA driver while thousands of existing Deployments still ask for `nvidia.com/gpu`, and rewrite them into claims at whatever pace the owning teams can manage. Without it, installing a DRA driver would be a hard cutover requiring every manifest in the cluster to change on the same day, which for most organisations means the migration never starts. Use it as the first step of a phased migration, and treat the bridge as transitional — new workloads should be authored as claims so the bridge is shrinking, not growing.
 
 **Q: How is a DeviceClass different from a StorageClass, and how is it the same?**
 **Short:** Both are admin-authored, cluster-scoped categories that a namespaced claim references — but a DeviceClass selects with CEL over device attributes rather than naming a provisioner.

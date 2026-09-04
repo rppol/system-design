@@ -12,8 +12,8 @@
 > used deliberately: it is the generation most fleets are still depreciating, and it keeps the
 > MIG arithmetic in §6 concrete. Current-generation accelerator families are named in §11.
 
-> **Version anchor (2026-08-25).** **Kubernetes 1.36 "Haru"** (2026-04-22) is the current
-> release; **1.35** (2025-12-17) is the prior minor. **Dynamic Resource Allocation (DRA) went
+> **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (2026-08-26) is the current
+> release; **1.36 "Haru"** (2026-04-22) is the prior minor. **Dynamic Resource Allocation (DRA) went
 > GA in Kubernetes 1.34** with the stable `resource.k8s.io/v1` API enabled by default — a GPU
 > is now requested as a **`ResourceClaim` against a `DeviceClass`**, not as an integer count of
 > the `nvidia.com/gpu` extended resource, and the device-plugin path is the compatibility model

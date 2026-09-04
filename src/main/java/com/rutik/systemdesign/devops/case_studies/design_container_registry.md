@@ -508,8 +508,9 @@ The admission controller verifies at pod admit time. Here is the critical mistak
 
 ```yaml
 # Kyverno ImageValidatingPolicy — admission-time signature verification.
-# NOT kyverno.io/v1 ClusterPolicy: 1.17 deprecated it and split its rule kinds into
-# separate CEL types; removal targets v1.20 (Oct 2026).
+# NOT kyverno.io/v1 ClusterPolicy: 1.17 shipped these CEL types at GA, and 1.19
+# (2026-08-20) officially deprecated ClusterPolicy/Policy -- 1.19 is the LAST release
+# with full support for them; removal lands in v1.20.
 apiVersion: policies.kyverno.io/v1
 kind: ImageValidatingPolicy
 metadata:
@@ -695,7 +696,7 @@ Two non-negotiables: (1) GC is **two-phase** — mark everything across all tags
 ### Decision 7: Per-principal rate limiting vs global limits
 
 - **Alternatives**: Per-principal token buckets vs a single global rate cap.
-- **Rationale**: Per-principal (anonymous: 100 pulls/6h, authenticated: 5,000/6h, service-account: unlimited-but-metered) prevents one noisy tenant from starving others, mirroring Docker Hub's model.
+- **Rationale**: Per-principal (anonymous: 100 pulls/6h, authenticated: 5,000/6h, service-account: unlimited-but-metered) prevents one noisy tenant from starving others. The *shape* is Docker Hub's — per-principal buckets on a 6-hour window — but the values are ours: Docker Hub's own authenticated **free** tier was 200 pulls/6h (§6), an order of magnitude tighter than the 5,000/6h we budget for an internal platform whose users are paid-for tenants, not the open internet.
 - **Consequences**: Needs Redis-backed distributed counters; misconfigured CI hammering anonymous limits is a common support ticket (see §9).
 
 ### Comparison table
@@ -914,7 +915,7 @@ Because Trivy takes 20-40 s and pushes must complete in seconds; blocking would 
 With two-phase mark-and-sweep: first accumulate the full live set across all tags, all reachable manifests, and all referrers (signatures/SBOMs), then sweep only blobs absent from that complete set. The classic bug is marking per-tag in isolation and deleting a layer another image shares, or forgetting referrers and silently deleting a signature. A grace window (2 h) further protects blobs from an in-flight push racing the sweep, and a dry-run diff catches anomalies before any delete.
 
 **Q: How do you prevent one tenant from starving the registry with pull traffic?**
-Per-principal token-bucket rate limiting in Redis: anonymous (100/6h), authenticated (5,000/6h), service accounts (metered, high). This is exactly Docker Hub's model and prevents a runaway CI loop or a single noisy tenant from consuming all origin bandwidth. The limits live at the auth layer so they apply before any blob bytes move, and CI is configured to authenticate (never pull anonymously) and to use a regional cache.
+Per-principal token-bucket rate limiting in Redis: anonymous (100/6h), authenticated (5,000/6h), service accounts (metered, high). This borrows Docker Hub's per-principal, 6-hour-window shape rather than its numbers — Docker Hub's authenticated free tier was 200/6h — and prevents a runaway CI loop or a single noisy tenant from consuming all origin bandwidth. The limits live at the auth layer so they apply before any blob bytes move, and CI is configured to authenticate (never pull anonymously) and to use a regional cache.
 
 **Q: Why store blobs in S3 instead of a filesystem, and what's the cost?**
 S3 gives 11-nines durability, effectively infinite capacity, and lets registry API pods stay stateless (blobs aren't on node disks). The cost is higher per-GET latency than local disk, which you erase with a Redis manifest cache and a regional blob pull-through cache. A filesystem driver is faster cold but requires replicated block storage and couples capacity to nodes — awkward once a multi-terabyte hot working set has to be visible to every API replica.

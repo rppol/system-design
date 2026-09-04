@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
-> **Version anchor (2026-08-25).** **Kubernetes v1.36 "Haru"** (2026-04-22) is current. **User namespaces** (`hostUsers: false`) reached **stable/GA in v1.36** (beta and on-by-default since v1.33). `ValidatingAdmissionPolicy` has been **stable since v1.30**; `MutatingAdmissionPolicy` reached **stable and enabled-by-default in v1.36**, removing the feature gate. The OCI **image volume source** (mounting an OCI artifact as a read-only volume) reached **GA in v1.36** (alpha v1.31, beta v1.32). Every version-tagged claim on this page is checked against these anchors.
+> **Version anchor (2026-09-04).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current; **v1.36 "Haru"** (2026-04-22) is the prior minor. **User namespaces** (`hostUsers: false`) reached **stable/GA in v1.36** (beta and on-by-default since v1.33). `ValidatingAdmissionPolicy` has been **stable since v1.30**; `MutatingAdmissionPolicy` reached **stable and enabled-by-default in v1.36**, removing the feature gate. The OCI **image volume source** (mounting an OCI artifact as a read-only volume) reached **GA in v1.36** (alpha v1.31, beta v1.32). Every version-tagged claim on this page is checked against these anchors.
 
 A Kubernetes cluster is a large attack surface: an API server, thousands of credentials (ServiceAccount tokens), Secrets, a shared kernel across tenants, and a network where everything talks to everything by default. Securing it means defense in depth across four planes — **authentication/authorization (RBAC)**, **workload hardening (Pod Security, securityContext)**, **network segmentation (NetworkPolicy)**, and **secrets + admission control**. This is among the most-tested DevOps interview areas.
 

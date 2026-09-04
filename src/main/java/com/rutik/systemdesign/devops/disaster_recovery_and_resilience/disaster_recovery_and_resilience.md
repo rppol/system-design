@@ -408,6 +408,7 @@ resource "aws_route53_record" "primary" {
 | AWS Route53 health checks | DNS failover | n/a | 60–90s detection + TTL | 30s/10s intervals, failover routing |
 | S3 CRR + RTC | Object storage | <15 min p99.99 | n/a (always available) | Object lock for ransomware protection |
 | AWS Elastic Disaster Recovery (DRS) | Block/host | seconds (CDP) | minutes | Continuous block replication, pilot-light style |
+| Gremlin / Chaos Mesh / LitmusChaos / Chaos Monkey | Fault injection | n/a | validates the RTO you claim | Prove the failover path works before an outage does — see [chaos_engineering](../../backend/chaos_engineering/chaos_engineering.md) and [AWS Fault Injection Service](../sre_principles_and_slos/sre_principles_and_slos.md) for managed game days |
 
 GCP equivalents: Cloud SQL cross-region replicas, Spanner multi-region (RPO 0), Cloud DNS routing policies. Azure: Azure Site Recovery, SQL auto-failover groups, Cosmos DB multi-region writes, Traffic Manager / Front Door for DNS failover.
 

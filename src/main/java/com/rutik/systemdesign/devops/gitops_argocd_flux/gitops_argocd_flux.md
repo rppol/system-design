@@ -2,7 +2,7 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
-> **Version anchor (2026-08-25).** **Argo CD v3.5.1** (2026-08-12); **Flux v2.9.4** (2026-08-07); **Argo Rollouts v1.9.1** (2026-07-17); **Gateway API v1.6.1** (2026-07-16), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate — `goTemplate: true` remains opt-in.
+> **Version anchor (2026-09-04).** **Argo CD v3.5.2** (2026-08-27); **Flux v2.9.5** (2026-08-31); **Argo Rollouts v1.10.0** (2026-08-27); **Gateway API v1.6.2** (2026-09-03), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate — `goTemplate: true` remains opt-in.
 
 GitOps makes **Git the single source of truth for the desired state of your infrastructure**, and an in-cluster agent continuously reconciles reality to match it. Instead of a pipeline pushing `kubectl apply` with cluster credentials, an operator (ArgoCD or Flux) *pulls* from Git, detects drift, and self-heals. The result: every change is a reviewed, audited Git commit; rollback is `git revert`; and the cluster can never silently diverge from what's declared.
 

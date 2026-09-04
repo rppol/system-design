@@ -2,7 +2,7 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
-Incident management is the **structured, repeatable process for responding to and learning from outages** — so that under the stress of a production fire, the team has clear roles, defined severities, working communication, and a path to resolution instead of chaos. On-call is the **human readiness layer** that makes someone responsible for responding 24/7, sustainably. The two metrics that quantify how well you do this are **MTTD** (mean time to detect) and **MTTR** (mean time to resolve), and the cultural practice that keeps you improving is the **blameless postmortem**.
+Incident management is the **structured, repeatable process for responding to and learning from outages** — so that under the stress of a production fire, the team has clear roles, defined severities, working communication, and a path to resolution instead of chaos. On-call is the **human readiness layer** that makes someone responsible for responding 24/7, sustainably. The two metrics that quantify how well you do this are **MTTD** (mean time to detect) and **MTTR** (mean time to resolve), and the cultural practice that keeps you improving is the **blameless postmortem**. This module owns the *process*: roles, severities, comms, escalation, postmortems, rotation health. The *technical* diagnosis of a live latency or saturation incident — which signal to read first, which hypothesis to test next — belongs to [`../../backend/performance_incident_playbook/`](../../backend/performance_incident_playbook/performance_incident_playbook.md), which delegates the process half back here.
 
 ---
 

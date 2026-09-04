@@ -1,10 +1,10 @@
 # DevOps Case Studies — Learning Path
 
-13 principal-grade case studies + 7 cross-cutting infrastructure deep-dives.
+15 principal-grade case studies + 8 cross-cutting infrastructure deep-dives.
 
 Each case study follows the 11-section principal template (reference: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)): requirements clarification, scale estimation, Mermaid architecture diagrams, executable-shaped YAML/HCL/Bash/Go, real-world implementations at named companies, an operational playbook (eval/observability/runbooks), quantified war stories, capacity planning, and 10+ design-rationale interview Q&As. Each cross-cutting file runs roughly 460–610 lines covering one infrastructure primitive that recurs across many platforms.
 
-> **Build status**: complete. All 13 case studies and 7 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
+> **Build status**: complete. All 15 case studies and 8 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
 
 ---
 
@@ -15,6 +15,12 @@ Each case study follows the 11-section principal template (reference: [`../../ll
 | 1 | [design_kubernetes_platform.md](./design_kubernetes_platform.md) | The substrate everything else runs on — multi-cluster, multi-tenant K8s platform. Covers control-plane scaling, tenant isolation, autoscaling, and the operator pattern end-to-end. |
 | 2 | [design_ci_cd_platform.md](./design_ci_cd_platform.md) | How change reaches production safely at scale — ephemeral runners, artifact caching, pipeline isolation. The delivery backbone every org needs. |
 | 3 | [design_observability_platform.md](./design_observability_platform.md) | You cannot operate what you cannot see — metrics + logs + traces at scale (Prometheus/Thanos + Loki + Tempo), with cardinality control and retention tiers. |
+
+Read [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) immediately after
+the first: it expands the one decision `design_kubernetes_platform` compresses into a single
+tradeoff table — namespace vs node-pool vs virtual cluster vs dedicated cluster — into a
+threat-modeled ladder, and it is the answer most "how do you isolate tenants?" interviews
+are actually probing for.
 
 ---
 
@@ -29,6 +35,7 @@ Case studies are grouped by the primary engineering concern they teach, not by p
 | [design_kubernetes_platform.md](./design_kubernetes_platform.md) | Multi-tenant cluster operation | Control-plane scaling, namespace/tenant isolation, admission policy, Karpenter node autoscaling, operator-based self-service |
 | [design_autoscaling_platform.md](./design_autoscaling_platform.md) | Cost-aware elasticity | HPA/VPA/KEDA event-driven scaling, Karpenter consolidation, scale-to-zero, the requests/limits/QoS tradeoff at scale |
 | [design_internal_developer_platform.md](./design_internal_developer_platform.md) | Developer self-service | Backstage golden paths, Crossplane infra abstraction, paved-road vs flexibility tradeoff |
+| [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) | Tenant isolation as a ladder | Namespace / node-pool / vCluster / cluster-per-tenant as four rungs with nameable guarantees and nameable costs; NetworkPolicy, Pod Security Admission, gVisor and Kata as the rung-by-rung enforcement; routing each tenant to the cheapest rung its threat model allows |
 
 ### Phase B — Delivery & Change Management
 
@@ -59,17 +66,19 @@ Case studies are grouped by the primary engineering concern they teach, not by p
 | File | Primary Engineering Concern | What It Teaches |
 |------|-----------------------------|-----------------|
 | [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) | GPU economics & ML self-service | Multi-tenant GPU scheduling (Kueue gang/quota/borrowing), MIG vs time-slicing, Karpenter Spot/On-Demand pools, KServe scale-to-zero, raising fleet utilization from 22% to 65% |
+| [design_gpu_training_and_inference_cluster.md](./design_gpu_training_and_inference_cluster.md) | Training and serving are two systems | Why one GPU cluster is really two workload shapes with opposite failure modes; DRA-based allocation, gang scheduling with Kueue/Volcano, NCCL topology, Spot plus checkpointing, vLLM/KServe serving, and cost argued in GPU-hours rather than borrowed dollar figures |
 
 ---
 
 ## Cross-Cutting Infrastructure Files
 
-These seven files live in `cross_cutting/` and are referenced by multiple case studies. Read each alongside the phase where it becomes relevant.
+These eight files live in `cross_cutting/` and are referenced by multiple case studies. Read each alongside the phase where it becomes relevant.
 
 | When to Read | File | What It Covers |
 |--------------|------|----------------|
 | Phase A | [kubernetes_production_hardening.md](./cross_cutting/kubernetes_production_hardening.md) | Resource limits/QoS, PodDisruptionBudgets, probe design, security context, multi-tenant isolation |
 | Phase E | [gpu_node_lifecycle.md](./cross_cutting/gpu_node_lifecycle.md) | GPU node bring-up (driver/toolkit/device-plugin), readiness gating via startup taints, DCGM health fencing, Spot interruption + checkpoint, graceful drain, decommission |
+| Phase E | [dra_and_device_plugins.md](./cross_cutting/dra_and_device_plugins.md) | How a GPU/FPGA/SmartNIC becomes schedulable at all: the device-plugin gRPC contract, the wall it hits (an opaque integer count), and Dynamic Resource Allocation's typed device catalogue — the layer directly beneath `gpu_node_lifecycle.md` |
 | Phase A | [multi_cluster_networking.md](./cross_cutting/multi_cluster_networking.md) | Cluster mesh, cross-cluster service discovery, global load balancing, failover routing |
 | Phase B | [terraform_state_at_scale.md](./cross_cutting/terraform_state_at_scale.md) | Remote state, locking, workspace strategy, state splitting, blast-radius containment |
 | Phase B | [supply_chain_security_pipeline.md](./cross_cutting/supply_chain_security_pipeline.md) | Build → SBOM → scan → sign → attest → admission gate end-to-end; SLSA Build-track provenance |
@@ -104,6 +113,8 @@ flowchart LR
     INCIDENT(design_incident_response_system)
     MIGRATION(design_zero_downtime_infra_migration)
     MLPLATFORM(design_ml_platform_infrastructure)
+    TENANT(design_multi_tenant_platform)
+    GPUCLUSTER(design_gpu_training_and_inference_cluster)
 
     K8S -->|"cost-aware<br/>elasticity"| AUTO
     K8S -->|"self-service<br/>abstraction"| IDP
@@ -114,11 +125,13 @@ flowchart LR
     OBS -->|"alerting and SLO<br/>consumption"| INCIDENT
     DR -->|"traffic-shifting<br/>+ cutover"| MIGRATION
     AUTO -->|"GPU scheduling +<br/>Spot autoscaling"| MLPLATFORM
+    K8S -->|"isolation ladder<br/>expanded"| TENANT
+    MLPLATFORM -->|"deeper, more current<br/>GPU treatment"| GPUCLUSTER
 
     class K8S,CICD,OBS base
     class DR frozen
-    class AUTO,IDP,GITOPS,REGISTRY,LOGS,INCIDENT,MIGRATION train
-    class MLPLATFORM mathOp
+    class AUTO,IDP,GITOPS,REGISTRY,LOGS,INCIDENT,MIGRATION,TENANT train
+    class MLPLATFORM,GPUCLUSTER mathOp
 ```
 
 Gold marks the foundation platforms (Kubernetes, CI/CD, observability) that everything else is built on; purple is the replica/cold-standby DR path; green is a capability layered on top of a foundation; orange is the GPU-scheduling leaf that inherits autoscaling — the same platform-then-capability shape repeats across all four clusters.
@@ -141,4 +154,7 @@ Gold marks the foundation platforms (Kubernetes, CI/CD, observability) that ever
 | "Secure the software supply chain" | [cross_cutting/supply_chain_security_pipeline.md](./cross_cutting/supply_chain_security_pipeline.md) |
 | "Design incident response / on-call" | [design_incident_response_system.md](./design_incident_response_system.md) |
 | "Design an ML platform / GPU infrastructure" | [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) + [cross_cutting/gpu_node_lifecycle.md](./cross_cutting/gpu_node_lifecycle.md) |
-| "How do you schedule/share GPUs on Kubernetes?" | [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) |
+| "How do you schedule/share GPUs on Kubernetes?" | [design_gpu_training_and_inference_cluster.md](./design_gpu_training_and_inference_cluster.md) + [cross_cutting/dra_and_device_plugins.md](./cross_cutting/dra_and_device_plugins.md) |
+| "Design a GPU training and inference cluster" | [design_gpu_training_and_inference_cluster.md](./design_gpu_training_and_inference_cluster.md) |
+| "How do you isolate tenants on a shared cluster?" | [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) |
+| "When would you give a tenant their own cluster?" | [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) |

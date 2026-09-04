@@ -316,10 +316,14 @@ spec:
                 type: "RuntimeDefault" } } } }
 ```
 
-Kyverno 1.17 deprecated `kyverno.io/v1 ClusterPolicy` (removal targets v1.20, Oct 2026)
-and split its rule kinds into separate CEL types under `policies.kyverno.io/v1`:
-`ValidatingPolicy`, `MutatingPolicy`, `GeneratingPolicy`, `ImageValidatingPolicy` and
-`DeletingPolicy`. A mutation is now a CEL `ApplyConfiguration` expression rather than a
+Kyverno 1.17 shipped the CEL policy types at GA, splitting a ClusterPolicy's rule kinds
+into separate types under `policies.kyverno.io/v1`: `ValidatingPolicy`, `MutatingPolicy`,
+`GeneratingPolicy`, `ImageValidatingPolicy` and `DeletingPolicy`. **Kyverno 1.19
+(2026-08-20) is where `kyverno.io/v1` `ClusterPolicy`/`Policy` are officially deprecated,
+and it is the last release with full support for them** — 1.19 reached feature parity
+between the CEL types and the legacy ones, and removal lands in v1.20. If you are running
+1.19 today you are on the final supported release for the old types, so treat the
+migration as scheduled work, not a someday item. A mutation is now a CEL `ApplyConfiguration` expression rather than a
 strategic-merge patch — more verbose, but one expression language across every policy
 type instead of a per-rule DSL.
 
