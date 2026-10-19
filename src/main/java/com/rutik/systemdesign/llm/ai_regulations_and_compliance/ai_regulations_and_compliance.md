@@ -48,6 +48,8 @@ incomplete — it also *added* an obligation and *narrowly relaxed* another:
   and the grace covers Art. 50(2) only — not the rest of Art. 50. So "Art. 50 did not move" is the
   right headline and the wrong compliance answer if your system predates August 2026.
 
+For the operational controls that turn these regulations into release and audit steps, see [AI Governance and Model Risk Operations](../../mlops/ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md).
+
 ---
 
 ## 2. Intuition

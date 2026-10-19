@@ -6,6 +6,8 @@ Inference engines are specialized software systems optimized for running LLM inf
 
 The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA's highly-optimized offering; llama.cpp enables CPU and consumer GPU inference; SGLang introduces structural caching; Ollama makes local deployment trivial. Each engine makes different trade-offs between ease of use, performance, hardware requirements, and supported models.
 
+For upgrading, tuning, and benchmarking these engines in production, see [Inference Engine Operations and Benchmarking](../../mlops/inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md).
+
 ---
 
 ## 2. Intuition

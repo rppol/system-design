@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 290 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 291 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -56,6 +56,12 @@ Reach for it when an async service shows latency no CPU profile explains, which 
 Prometheus decides when an alert fires; this decides what a human is told. Grouping collapses the two hundred alerts one outage produces into a single notification, inhibition suppresses the downstream symptoms while a parent alert is firing, silences mute known noise for a window, and a routing tree matches alert labels to receivers such as a pager, a chat channel or a webhook, with repeat intervals and escalation built in.
 
 Reach for it as soon as you have alerting rules at all, because ungrouped alerts are how an on-call rotation learns to ignore its pager. It holds only alert state rather than your metrics, so it is cheap to run, but run several instances gossiping to each other: they deduplicate between themselves, and a single instance is a single point of failure for every notification you depend on.
+
+### AMD Device Metrics Exporter
+**Short:** AMD's Prometheus exporter for Instinct and Radeon GPU metrics such as activity, health and profiler counters; the AMD GPU Operator can deploy it.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/metrics-and-monitoring @1, gpu/gpu-profiling-and-debugging @2
 
 ### AMD uProf
 **Short:** AMD's micro-architecture profiler for Ryzen/EPYC: hardware counters, cache and pipeline analysis.

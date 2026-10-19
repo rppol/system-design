@@ -61,6 +61,8 @@ Server](../../technologies/nvidia_triton_inference_server/nvidia_triton_inferenc
 and [Inference Engines](../../llm/inference_engines/inference_engines.md). What is left, and
 what this page is, is the framework's implementation.
 
+Loading weights onto serving replicas and cutting replica cold start is covered in [Model Storage, Loading and Cold Start](../../mlops/model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md).
+
 ---
 
 ## 2. Intuition

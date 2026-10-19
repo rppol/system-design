@@ -16,6 +16,8 @@ A request/response web service is built around a cheap, fast unit of work: accep
 
 A useful mental split: `llm/` and `devops/` answer "how does the model produce tokens, and where does it run" — this module answers "how does an HTTP client safely get those tokens, and what happens when 10,000 clients want them at once."
 
+For choosing where a model runs (managed API, serverless GPU, Kubernetes, or edge) and the serving pattern behind this HTTP boundary, see [Deployment Targets and Serving Patterns](../../mlops/deployment_targets_and_serving_patterns/deployment_targets_and_serving_patterns.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

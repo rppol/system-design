@@ -50,6 +50,8 @@ and **NIM** as a *product* (the parent module names it only in passing as a pack
 layer). Everything else here — TensorRT-LLM, GenAI-Perf, KServe v2 — the parent module
 already teaches; this file extends those threads into the distributed-serving problem.
 
+For choosing a serving platform (KServe, Ray Serve, Triton, and others), see [Model Serving Platforms](../../mlops/model_serving_platforms/model_serving_platforms.md), and for disaggregated prefill and decode across engines, see [Distributed Inference and Disaggregation](../../mlops/distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md), both in `mlops/`.
+
 ---
 
 ## 2. Intuition

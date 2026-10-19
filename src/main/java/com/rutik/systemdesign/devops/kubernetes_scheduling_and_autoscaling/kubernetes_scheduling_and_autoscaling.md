@@ -23,6 +23,8 @@ Scheduling decides *where* a Pod runs; autoscaling decides *how many* Pods and *
 - **Cluster Autoscaler / Karpenter** — adds/removes *nodes* when Pods can't schedule / nodes are underused.
 - **KEDA** — event-driven scaling (queue depth, Kafka lag, cron) including scale-to-zero.
 
+Autoscaling and capacity planning for inference servers are covered in [Inference Autoscaling and Capacity Planning](../../mlops/inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md).
+
 ---
 
 ## 2. Intuition

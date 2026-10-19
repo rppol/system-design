@@ -35,6 +35,8 @@ malicious release out of circulation within hours instead of days. None of these
 switches a team gets by installing a tool; each is a policy choice that has to be turned on and
 understood by whoever owns the pipeline.
 
+For the same controls applied to model weights, datasets, and ML dependencies, see [ML Supply Chain Security](../../mlops/ml_supply_chain_security/ml_supply_chain_security.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

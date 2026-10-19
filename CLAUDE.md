@@ -16,6 +16,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **Python** | Pure Python senior-engineer guide — 24 modules, 6 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
 | **FastAPI** | FastAPI + ASGI production guide — 21 modules, 8 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 47 modules, 27 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
+| **MLOps** | MLOps & ML Infra: every artifact an AI feature ships (weights, adapters, prompts, MCP servers, vector indexes, eval sets, decision schemas) as a versioned, gated, rolled-out release input, plus the serving, GPU compute and operations platform that runs them. Link-only to `ml/`, `llm/`, `devops/`; owns KServe, llm-d, Kueue, Volcano and KAI Scheduler - 32 modules, 8 case studies, 4 deep-dive sub-files, 1 cross-cutting file | [mlops/CLAUDE.md](src/main/java/com/rutik/systemdesign/mlops/CLAUDE.md) |
 | **LLM** | LLM engineering guide — 54 modules, 30 case studies, 88 deep-dive sub-files (78 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 15 case studies, 10 deep-dive sub-files | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 8 case studies, 4 deep-dive sub-files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
@@ -44,6 +45,7 @@ src/main/java/com/rutik/systemdesign/
 ├── fastapi/      ← FastAPI + ASGI guide + CLAUDE.md
 ├── go/          ← Pure Go guide + CLAUDE.md
 ├── ml/               ← Machine Learning guide + CLAUDE.md
+├── mlops/            ← MLOps & ML Infra guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
 ├── cuda/             ← GPGPU / CUDA programming guide + CLAUDE.md
@@ -64,7 +66,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 21, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 22, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -84,7 +86,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 20 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 21 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -106,7 +108,7 @@ question there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start) (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every non-book Q&A in
 the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: traffic-edge -->
 
-The 97 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 99 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Traffic & resilience** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -313,6 +313,8 @@ It exists because model traffic breaks the assumptions ordinary gateways are bui
 
 Reach for it when you already run Envoy Gateway and want one front door across several model providers with usage accounting, failover and per-tenant token budgets, rather than each application holding its own provider keys. It reached 1.0 in June 2026 with backing from Bloomberg, Tetrate and Nutanix, and it is additive, so adopting it does not change the data plane you are already running.
 
+Release v1.2.0 (2026-10-07) renamed the project Agent Router, an Agentic AI Foundation project, and moved the repository to `theagentrouter/agent-router`. The `aigateway.envoyproxy.io` API group, the CRDs, the Helm charts, the container images and the `aigw` CLI kept their names.
+
 ### Envoy dynamic modules
 **Short:** Envoy extension mechanism loading a native shared object, with an official Rust SDK, instead of a sandboxed Wasm module.
 **Kind:** api
@@ -404,6 +406,12 @@ Reach for it in plain Java where you want composable resilience without a framew
 It is initialised once against a Redis connection and then attached as a route dependency with a permitted count and a window, and the counting is done by a Lua script on Redis so the increment and the expiry are one atomic operation and every application instance shares a single counter. The identifier defaults to client host plus path and is overridable, which is how you limit by authenticated user or API key rather than by address, necessary as soon as clients sit behind a NAT or a proxy.
 
 Reach for it when a FastAPI service needs per-route limits enforced consistently across replicas without introducing a gateway. Two consequences follow from the design: Redis becomes a hard dependency of every request on a limited route, so decide deliberately whether an outage should fail open or closed, and the whole thing is async, so it belongs in an ASGI deployment only. Fleet-wide policy across many services still belongs at the ingress.
+
+### Gateway API Inference Extension
+**Short:** Kubernetes SIG project that adds the InferencePool API so a Gateway API gateway routes requests to model-server pods by load, KV-cache state and model.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, inference/model-server @2, platform-delivery/kubernetes-and-orchestration @2
 
 ### GatewayFilter
 **Short:** Spring Cloud Gateway filter with ordered pre/post hooks around the proxied call: rate limits, rewrites, breakers.
@@ -520,6 +528,12 @@ Reach for it when a mesh has enough services that nobody holds the call graph in
 Deployment mode is the first architectural decision. The traditional mode keeps configuration in PostgreSQL, DB-less mode loads a declarative YAML file at boot so the gateway is immutable and reproducible, and hybrid mode splits a control plane from data-plane nodes that keep serving if the control plane is down. Plugins run in ordered phases around the proxied call, and beyond the bundled set they can be written in Lua or, through external plugin servers, in other languages.
 
 Reach for it when you want a self-hosted gateway with a large plugin catalogue and no vendor runtime in the path. The recurring operational realities are that rate-limit and other counters are per node unless pointed at Redis, that a long plugin chain is latency paid on every request, and that plugin ordering has to be reasoned about explicitly. A managed gateway removes that work, and a service mesh is the better answer for east-west rather than edge policy.
+
+### Kong AI Gateway
+**Short:** Kong Gateway's AI plugin set for multi-provider LLM routing, token-based rate limiting, semantic caching, prompt guarding and sanitization.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, llm-apps/llm-gateway-and-routing @1, caching/semantic-and-llm-cache @3
 
 ### Kubernetes DNS
 **Short:** In-cluster DNS (CoreDNS) resolving Service names to ClusterIPs, the default service-discovery mechanism.

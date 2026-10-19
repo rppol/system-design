@@ -51,6 +51,8 @@ Reliability is not additive across steps, it is *multiplicative*. That single fa
 
 Each extra attempt adds a *zero* to the failure probability, and that zero is then raised to the power `n`. Nothing else in the reliability toolkit has this leverage, which is why retry is the first mechanism you add and circuit breakers exist only to stop retry from becoming a weapon.
 
+For incident response and reliability practice across AI systems in production, see [AI Incident Response and Reliability](../../mlops/ai_incident_response_and_reliability/ai_incident_response_and_reliability.md).
+
 ---
 
 ## 2. Intuition

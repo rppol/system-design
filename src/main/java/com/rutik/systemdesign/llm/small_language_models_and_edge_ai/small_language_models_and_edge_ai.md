@@ -24,6 +24,8 @@ On-device inference delivers three structural advantages over cloud API calls: o
 
 Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robots, and embedded systems — any environment where cloud connectivity is unreliable, regulated, or economically prohibitive.
 
+For delivering, updating, and rolling back models on devices the platform team does not own, see [Edge and On-Device Deployment](../../mlops/edge_and_on_device_deployment/edge_and_on_device_deployment.md).
+
 ---
 
 ## 2. Intuition

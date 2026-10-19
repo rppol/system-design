@@ -31,6 +31,8 @@ The consequence is that almost every default is wrong for one of them:
 
 The rest of this page is what you do about that.
 
+Multi-GPU inference parallelism and prefill/decode disaggregation are covered in [Distributed Inference and Disaggregation](../../mlops/distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md).
+
 ---
 
 ## 2. Intuition

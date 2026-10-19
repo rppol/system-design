@@ -29,6 +29,8 @@ The payoff is that the scheduler contains **no vendor-specific code**. It reads 
 
 The cost is a genuinely larger surface: four object kinds instead of one number, a driver DaemonSet per vendor, and an allocation lifecycle with its own leak mode (§10). DRA earns that cost when devices are heterogeneous, shareable, or topologically constrained. It does not earn it when the whole story is "one whole card per Pod, all cards identical."
 
+Per-team GPU quotas, queues, and gang scheduling are covered in [GPU Cluster Scheduling and Quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
+
 ---
 
 ## 2. Intuition

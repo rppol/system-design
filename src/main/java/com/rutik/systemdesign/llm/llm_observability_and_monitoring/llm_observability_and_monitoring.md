@@ -10,6 +10,8 @@ The core challenge is that LLM output quality is subjective, context-dependent, 
 
 Production LLM systems generate enormous volumes of telemetry. A chatbot handling 50K conversations per day at an average of 8 turns each produces 400K LLM calls daily. At ~500 tokens per call (input + output), that is 200M tokens per day -- each call generating structured trace data, token counts, latency measurements, and potentially quality scores. Managing this data pipeline is itself a significant engineering challenge.
 
+For turning this telemetry into quality and drift alerts in production, see [Production Quality Monitoring and Drift](../../mlops/production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md).
+
 ---
 
 ## 2. Intuition

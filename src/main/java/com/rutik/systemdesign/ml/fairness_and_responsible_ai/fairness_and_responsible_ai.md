@@ -27,6 +27,8 @@ The field organizes itself around three families of formal definition (Barocas, 
 
 Three consequences follow from treating fairness as a first-class engineering concern rather than an afterthought. **Legal** — disparate-impact liability under Title VII, ECOA, the Fair Housing Act, and the EU AI Act's high-risk tier attaches to *outcomes*, regardless of whether the model ever saw the protected attribute directly. **Harm** — allocative harm (who gets the loan, the interview, the diagnosis) and representational harm (stereotyping, erasure) fall on real people, not abstract metrics. **Product quality** — a model that is unfair to a subgroup is frequently also miscalibrated for that subgroup, meaning its probability estimates are simply wrong there; fixing the fairness gap often fixes a genuine modeling defect, not just a compliance one.
 
+The operational side, model inventories, risk tiers, approvals and audit evidence, is covered in [AI Governance and Model Risk Operations](../../mlops/ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md).
+
 ---
 
 ## 2. Intuition

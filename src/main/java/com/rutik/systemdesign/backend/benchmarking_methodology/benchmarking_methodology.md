@@ -38,6 +38,8 @@ For the *detection* problem — catching a regression in CI over hundreds of noi
 see [`performance_regression_detection.md`](../performance_regression_detection/performance_regression_detection.md),
 which builds directly on everything here.
 
+For benchmarking inference engines and qualifying an engine upgrade before release, see [Inference Engine Operations and Benchmarking](../../mlops/inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

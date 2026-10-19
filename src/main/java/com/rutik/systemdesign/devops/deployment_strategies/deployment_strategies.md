@@ -18,6 +18,8 @@ Deployment strategies control *how traffic moves from the old version to the new
 
 **Progressive delivery** = canary/blue-green *automated by metrics*: a controller (Argo Rollouts, Flagger) shifts traffic in steps, queries success metrics (error rate, latency) against thresholds, and promotes or rolls back without a human.
 
+Releases of model, prompt, and adapter changes are covered in [AI Release Engineering](../../mlops/ai_release_engineering/ai_release_engineering.md).
+
 ---
 
 ## 2. Intuition

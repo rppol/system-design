@@ -33,6 +33,8 @@ Four metric types: **Counter** (monotonic, only goes up — request counts, erro
 
 Prometheus is intentionally **not** a long-term, globally-aggregated, infinitely-scalable store. Single-node retention is bounded by local disk (commonly 15d–90d), and there is no native cross-cluster aggregation or HA dedup. That gap is filled by **Thanos**, **Cortex**, and **Grafana Mimir** — systems that sit alongside Prometheus to provide long-term object-storage retention, global query views, and horizontal scale.
 
+GPU metrics from DCGM and GPU fleet health checks are covered in [GPU Observability and Fleet Health](../../mlops/gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md).
+
 ---
 
 ## 2. Intuition

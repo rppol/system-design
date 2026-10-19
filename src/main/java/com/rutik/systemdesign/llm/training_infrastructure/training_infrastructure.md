@@ -8,6 +8,8 @@ A single H100 GPU can train roughly 1B tokens/day on a 7B model. Training LLaMA 
 
 Modern training infrastructure centers on three forms of parallelism: splitting the model across devices (model parallelism), splitting the data across devices (data parallelism), and overlapping computation with communication. Getting this right is the difference between a run stuck in the teens and one at the 40-60% MFU (Model FLOP Utilization) band that well-tuned large pretraining runs actually reach — Meta reported 38-43% BF16 MFU across the Llama 3 405B pre-training stages.
 
+For running training jobs on a shared fleet day to day (checkpoints, failures, and preemption), see [Training Infrastructure Operations](../../mlops/training_infrastructure_operations/training_infrastructure_operations.md).
+
 ---
 
 ## 2. Intuition

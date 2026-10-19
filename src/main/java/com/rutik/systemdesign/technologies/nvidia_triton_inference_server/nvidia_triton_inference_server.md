@@ -24,6 +24,8 @@ They share only a name. This module is exclusively about the inference server. W
 
 So the mental hierarchy is: **NIM (turnkey product) → Triton (the serving engine) → TensorRT-LLM / ONNX / PyTorch / Python (the backends Triton drives).**
 
+For how Triton compares with KServe and other model serving platforms, see [Model Serving Platforms](../../mlops/model_serving_platforms/model_serving_platforms.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

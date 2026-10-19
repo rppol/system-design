@@ -30,6 +30,8 @@ Airflow was built at Airbnb in 2014, entered the Apache incubator in 2016, and b
 
 The mental model below holds across both versions; what moved in 3.0 is the *worker-to-DB boundary* and the *data-linking primitive*. Everything about DAGs, idempotency, data intervals, and the reconciliation loop is unchanged.
 
+For how Airflow compares with ML-specific pipeline orchestrators for training and evaluation workflows, see [ML Pipelines and Orchestration](../../mlops/ml_pipelines_and_orchestration/ml_pipelines_and_orchestration.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

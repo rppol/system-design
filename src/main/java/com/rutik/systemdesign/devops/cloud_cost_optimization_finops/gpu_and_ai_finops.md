@@ -24,6 +24,8 @@ Ordinary cloud FinOps assumes the resource is divisible, the waste is visible, a
 
 The single organising number is **cost per unit of useful work** — per token, per training step, per inference — because it is the only metric that improves when you make the workload more efficient rather than when you simply buy less.
 
+Cost per token and per request as a product metric is covered in [AI Cost Engineering and Unit Economics](../../mlops/ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md).
+
 ---
 
 ## 2. Intuition

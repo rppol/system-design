@@ -20,6 +20,8 @@ This flips traditional CI/CD's deploy step. In **push-based** CD, the pipeline h
 
 The two leading tools: **ArgoCD** (UI-centric, `Application` CRD, app-of-apps, strong visualization) and **Flux** (CLI/CRD-centric, GitOps Toolkit controllers, tight Kustomize/Helm integration).
 
+Canary rollout and rollback of model servers are covered in [Progressive Delivery for Model Servers](../../mlops/progressive_delivery_for_model_servers/progressive_delivery_for_model_servers.md).
+
 ---
 
 ## 2. Intuition

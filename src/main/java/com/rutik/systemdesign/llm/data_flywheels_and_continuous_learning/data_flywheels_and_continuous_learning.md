@@ -17,6 +17,8 @@ The key components of a data flywheel for LLM applications are:
 
 The data flywheel is the primary long-term competitive moat for LLM applications. A competitor can replicate your architecture in weeks; they cannot replicate two years of production feedback.
 
+For the policy that decides when new flywheel data triggers a retrain or refresh, see [Continuous Training and Refresh Policy](../../mlops/continuous_training_and_refresh_policy/continuous_training_and_refresh_policy.md).
+
 ---
 
 ## 2. Intuition

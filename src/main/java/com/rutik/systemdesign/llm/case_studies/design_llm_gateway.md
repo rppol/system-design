@@ -5,6 +5,8 @@
 
 **Key insight for this design**: Semantic caching is the highest-leverage optimization — unlike HTTP caching (exact URL match), semantic caching matches similar-meaning requests, potentially saving 20-40% of API costs for applications with repetitive query patterns. The routing logic (which model for which request) determines quality/cost balance.
 
+For running the gateway as a production service with its own config, release process, and on-call, see [AI Gateway Operations](../../mlops/ai_gateway_operations/ai_gateway_operations.md).
+
 ---
 
 ## 1. Requirements Clarification

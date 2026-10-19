@@ -13,6 +13,8 @@
 
 **Why this system exists:** Without a platform, every ML team copies a Terraform module, hand-builds GPU AMIs, fights driver mismatches, over-allocates whole GPUs to tiny models, and runs at ~20% utilization — multiplying the single largest line item in the cloud bill across N teams. The platform centralizes the hard 20% so the other 80% (modeling) can move fast.
 
+The serving platforms that run on this infrastructure, such as KServe, are compared in [Model Serving Platforms](../../mlops/model_serving_platforms/model_serving_platforms.md).
+
 ---
 
 ## 1. Requirements Clarification

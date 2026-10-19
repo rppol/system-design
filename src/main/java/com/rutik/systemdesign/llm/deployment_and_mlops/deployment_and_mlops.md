@@ -6,6 +6,8 @@ Deploying LLMs in production requires solving problems that don't exist with tra
 
 LLM MLOps encompasses model serving infrastructure, cost management, monitoring for quality regressions, model routing, A/B testing, and the "data flywheel" — using production data to continuously improve the model. It's where the boundary between software engineering and ML engineering blurs most heavily.
 
+The lifecycle of models, prompts, indexes, and agents as versioned production artifacts is covered in the MLOps section, starting at [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
+
 ---
 
 ## 2. Intuition

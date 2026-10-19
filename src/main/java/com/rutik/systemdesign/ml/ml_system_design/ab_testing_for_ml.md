@@ -7,6 +7,8 @@ Unlike offline evaluation (which measures performance on a historical test set),
 
 A/B testing for ML models involves additional considerations beyond standard product A/B tests: the randomization unit must match the model's personalization scope; model deployment must be clean (no model contamination across groups); and the metrics hierarchy must account for both ML metrics and business metrics.
 
+How an A/B test fits into the release process for models, prompts and indexes is covered in [AI Release Engineering](../../mlops/ai_release_engineering/ai_release_engineering.md).
+
 ---
 
 ## 2. Intuition

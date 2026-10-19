@@ -2,12 +2,18 @@
 
 <!-- tech-bank tier: inference -->
 
-The 93 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 118 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Inference & optimization** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
 
 Record format and the full rules: [tech_bank.md](tech_bank.md).
+
+### AIBrix
+**Short:** vLLM-project control plane on Kubernetes with LLM-aware gateway routing, a ModelAdapter CRD for LoRA, LLM-specific autoscalers and StormService for disaggregated serving.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/kubernetes-and-orchestration @2, model-training/fine-tuning-and-peft @3
 
 ### Anthropic API
 **Short:** Hosted endpoint for Claude models with native tool use, streaming and cache_control prompt caching.
@@ -49,6 +55,12 @@ It is the ahead-of-time half of the PyTorch 2 compiler stack: where `torch.compi
 
 Reach for it when a warm-up cliff or a Python runtime is unacceptable — a latency SLO, a C++ service, an edge target. The trap is that everything `torch.export` refuses, AOTInductor never sees: get the model correct and fast under `torch.compile` first, because an export failure is much harder to diagnose than a graph break.
 
+### Apple Foundation Models
+**Short:** Apple framework, from iOS 26, that gives apps on-device access to the language model behind Apple Intelligence, with guided generation and tool calling.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1
+
 ### AutoAWQ
 **Short:** Toolkit that applies AWQ 4-bit activation-aware weight quantization to Hugging Face LLMs.
 **Kind:** tech
@@ -89,6 +101,12 @@ The unit of use is a deployment: you place a named deployment of a model version
 
 The reason to choose it over the vendor's own endpoint is the surrounding platform: directory-based identity and managed identities instead of API keys, private endpoints so traffic never crosses the public internet, customer-managed keys, and configurable content filtering. The costs are that model availability lags by region, that quota is a real operational obstacle, and that the API version is an explicit parameter you must track.
 
+### Baseten
+**Short:** Managed inference platform that deploys models on autoscaled GPUs, packaged with its open-source Truss format.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/cloud-platform-and-cost @2
+
 ### BentoML
 **Short:** Python-native model serving framework that packages models into containerized inference services.
 **Kind:** tech
@@ -108,6 +126,12 @@ Reach for it when packaging and shipping the model is the hard part and the mode
 Quantization happens at load time: pass a `BitsAndBytesConfig` to `from_pretrained` and weights are stored as NF4, FP4 or INT8 while activations stay in a higher compute dtype, each tile dequantized on the fly for its matmul. That is what makes QLoRA work — a frozen 4-bit base model fits on a single consumer GPU while the trainable LoRA adapters stay in bf16.
 
 Reach for it when memory is the binding constraint and you want a one-line change. It buys footprint rather than speed, since dequantizing costs work on every matmul, so an inference-oriented format such as AWQ, GPTQ or FP8 inside a serving engine will out-throughput it.
+
+### Chrome built-in AI
+**Short:** Chrome web APIs, such as the Prompt, Summarizer and Translator APIs, that run a browser-managed on-device model after a one-time download.
+**Kind:** tech
+**Lang:** js
+**Roles:** inference/model-format-and-edge @1
 
 ### Core ML
 **Short:** Apple's on-device inference framework and .mlpackage model format, running models on the Neural Engine and GPU.
@@ -208,6 +232,18 @@ Backends cover XNNPACK for CPU, Core ML and Metal on Apple hardware, Vulkan, and
 Its EXL2 weight format allows a different bit width per layer, so you can target an average bits-per-weight budget and spend the bits where the model is most sensitive, which is how it fits a larger model into a fixed amount of VRAM at better quality than a uniform quantization would. The kernels are written for single consumer cards; it is a library rather than a server, and TabbyAPI is the companion project that puts an OpenAI-shaped API in front of it.
 
 Reach for it when the goal is the most tokens per second out of one desktop GPU. For multi-GPU serving with many concurrent users a throughput-oriented engine with continuous batching and paged attention is the better fit, and for CPU or Apple Silicon the GGUF ecosystem is where the support is.
+
+### fastsafetensors
+**Short:** IBM's safetensors loader that reads weight files in parallel batches and can use GPUDirect Storage to cut model load time.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/model-format-and-edge @1
+
+### Firebase AI Logic
+**Short:** Firebase client SDKs that call Gemini models from mobile and web apps, with an experimental hybrid mode that prefers an on-device model and falls back to the cloud.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1, inference/model-server @2
 
 ### FlashInfer
 **Short:** IO-aware attention kernel library for LLM serving; the attention backend inside vLLM and SGLang.
@@ -325,6 +361,12 @@ You submit an `InferenceService` custom resource naming a model's storage URI an
 
 Runtimes cover the usual frameworks plus dedicated LLM serving, and ModelMesh handles the many-small-models case by multiplexing them across a shared pool instead of one pod each. Reach for it when you already run Kubernetes and want a control plane around model servers rather than another model server; a single model behind a plain Deployment does not need this much machinery.
 
+### KServe ModelMesh
+**Short:** KServe's multi-model serving layer that loads and evicts many models across a shared pod pool on demand; its GitHub repositories are archived.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/kubernetes-and-orchestration @3
+
 ### LayerSkip
 **Short:** Training recipe combining layer dropout with an early-exit head so a model can speculatively decode against itself.
 **Kind:** concept
@@ -335,6 +377,12 @@ The recipe changes training so a model can check itself. Layer dropout is applie
 
 The appeal over ordinary speculative decoding is that there is no second model and no extra memory: one set of weights serves both roles, which matters when the deployment is memory-bound. The cost is that the model must be trained or fine-tuned this way, so it cannot be applied to an arbitrary checkpoint, and the accuracy of the early exit is what decides how many drafted tokens survive verification.
 
+### LiteRT
+**Short:** Google's on-device runtime, formerly TensorFlow Lite, that runs .tflite models through CPU, GPU and NPU delegates on mobile, desktop and microcontrollers.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1
+
 ### LLaMA 3.2 1B
 **Short:** Meta's 1B-parameter small language model, sized for on-device and edge inference.
 **Kind:** model
@@ -344,6 +392,12 @@ The appeal over ordinary speculative decoding is that there is no second model a
 The small models in this generation were not trained from scratch at that size: they were produced by pruning a larger sibling and then recovering quality through knowledge distillation from bigger models in the same family, which is why they hold up better than the parameter count suggests. The architecture is the usual decoder with grouped-query attention and a long context window, and the tokenizer and chat template are shared with the rest of the family.
 
 Reach for it for on-device assistants, summarization and rewriting, tool routing, and as a draft model for speculative decoding against a larger sibling, since the shared tokenizer makes that pairing straightforward. Quantized to four bits it fits in a phone's memory. It is released under the Llama community licence rather than a standard open-source one, and at this size expect competent instruction following alongside weak multi-step reasoning and thin factual recall.
+
+### llama-server
+**Short:** The OpenAI-compatible HTTP server in llama.cpp that serves GGUF models with parallel slots, continuous batching and per-request LoRA adapter scales.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** inference/inference-engine @1, inference/model-format-and-edge @2
 
 ### llama.cpp
 **Short:** Minimal-dependency C++ LLM runtime for GGUF-quantized models on CPU, Metal or CUDA; rich sampler chain.
@@ -385,6 +439,12 @@ Work is expressed as a recipe of modifiers, covering GPTQ, AWQ, SmoothQuant, pla
 
 It is the vLLM project's own quantization path, which is the main reason to prefer it: the formats it emits are the ones that engine has fast kernels for, including weight-only INT4, INT8 and FP8 with static or dynamic activation scales, and 2:4 sparsity. Pick the scheme by hardware rather than by reputation, since FP8 needs Hopper or later while INT8 works across a much wider range of cards.
 
+### llm-d
+**Short:** Kubernetes-native distributed LLM serving stack: a KV-cache and load-aware inference scheduler, prefill/decode disaggregation and vLLM images; a CNCF Sandbox project.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, traffic-edge/proxy-and-load-balancer @2, platform-delivery/kubernetes-and-orchestration @2, caching/semantic-and-llm-cache @3
+
 ### LM Studio
 **Short:** Desktop app for downloading and chatting with local GGUF models, exposing an OpenAI-compatible local server.
 **Kind:** tech
@@ -394,6 +454,12 @@ It is the vLLM project's own quantization path, which is the main reason to pref
 It bundles the pieces a local model needs behind a desktop interface: a browser over Hub repositories that flags which quantizations fit the machine's memory, a downloader, a chat window exposing the sampling parameters and system prompt, and a local server speaking the OpenAI chat and completions API on a port. Underneath are llama.cpp and, on Apple silicon, MLX, with a GPU-offload control deciding how many layers leave the CPU.
 
 Reach for it to try models without assembling a toolchain, and as a stand-in endpoint while developing against a hosted provider, since pointing an existing client at localhost is usually a one-line change. It is a desktop application rather than a serving stack: single machine, closed source, and without the batching a multi-user deployment needs, which is where a headless daemon or a real engine takes over.
+
+### LoRAX
+**Short:** Predibase's multi-LoRA inference server that hot-loads many fine-tuned adapters onto one shared base model; the repository is archived.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/inference-engine @1, model-training/fine-tuning-and-peft @3
 
 ### MediaPipe LLM
 **Short:** Google's MediaPipe LLM Inference API running small TFLite/LiteRT models fully on-device on Android, iOS and web.
@@ -414,6 +480,12 @@ Reach for it when a mobile or web application needs generation with no server an
 It bolts several extra prediction heads onto an existing model so a single forward pass proposes tokens for the next few positions at once, then tree attention verifies many candidate continuations together instead of one sequence at a time. Because the heads live on the base model there is no second model to load, schedule or keep in sync - the usual operational cost of draft-and-verify speculative decoding disappears.
 
 The price is training: the heads are fitted to one specific base model, so every checkpoint you serve needs its own. Reach for it when a single model dominates your traffic and decode latency is the bottleneck; prefer a draft model when the served checkpoint changes often. Unrelated to the `Medusa` Cassandra backup tool, which shares only the name.
+
+### ML Kit GenAI
+**Short:** Android ML Kit APIs for summarization, proofreading, rewriting and image description that run Gemini Nano on device through AICore.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1
 
 ### MLC-LLM
 **Short:** Compiles and runs LLMs on phones, browsers and laptops by generating device-specific kernels via TVM.
@@ -444,6 +516,12 @@ Its honest limit is that dependency capture pins the Python distributions it saw
 cannot see CUDA, system libraries or the base image, so pair the directory with a pinned
 container digest rather than treating it as a complete environment.
 
+### MLServer
+**Short:** Seldon's Python inference server that speaks the Open Inference Protocol over REST and gRPC; the server inside Seldon Core 2 and a KServe serving runtime.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/model-server @1
+
 ### Model Navigator
 **Short:** NVIDIA tool converting a PyTorch/TF/ONNX model to optimized formats such as TensorRT and verifying accuracy.
 **Kind:** tech
@@ -453,6 +531,12 @@ container digest rather than treating it as a complete environment.
 Rather than making you pick a conversion path, it takes a model and a dataloader and tries the paths in parallel, across TorchScript, ONNX at several opset levels and TensorRT at several precisions, then verifies each result against the source within a tolerance you set and profiles the ones that survive. What comes back is a package of working formats with their measured latency and throughput, and the failures reported with a reason rather than silently dropped.
 
 That is the value: the usual manual loop of export, hit an unsupported operator, adjust, re-export, then discover the fast variant is numerically wrong, is automated. Reach for it when preparing a model for Triton or TensorRT deployment. It is a build-time tool tied to the NVIDIA stack, and the artifacts it produces, rather than the tool itself, are what you deploy.
+
+### Model Streamer
+**Short:** Run:ai's open-source loader that streams safetensors weights from local disk, S3, GCS or Azure Blob into GPU memory with concurrent reads; vLLM can load through it.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/model-server @1, data-stores/object-and-file-storage @2
 
 ### Model-control sidecars
 **Short:** A sidecar or init job calling Triton's model-control API, so which models a replica loads is decoupled from its image.
@@ -474,6 +558,12 @@ It searches the configuration space empirically. For a model in a repository it 
 
 Reach for it before deciding capacity, because the answers are not guessable: more instances per GPU help until memory or SM contention reverses it, and a longer queue delay raises throughput while pushing out the tail. Give it a load profile that resembles production, since a sweep run at the wrong concurrency cheerfully optimizes for traffic you do not have.
 
+### ModelPack
+**Short:** Open specification of OCI artifact media types for model weights, config and metadata, so OCI registries can store, version and distribute models.
+**Kind:** spec
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1, platform-delivery/container-and-image @2
+
 ### NNCF
 **Short:** Intel's compression framework for OpenVINO: post-training and accuracy-aware quantization, pruning, weight compression.
 **Kind:** tech
@@ -493,6 +583,18 @@ Beyond quantization it covers structured pruning, filter sparsity and quantizati
 The unit is a fixed-function matrix and vector engine with its own local memory, sitting on the same die as the CPU and GPU and sharing system memory. Its design point is sustained efficiency rather than peak throughput: it runs quantized integer models at a fraction of the power the GPU would draw, and without contending for the GPU that the display and other applications need. Work reaches it through a vendor runtime and a compiled model rather than through a general kernel language.
 
 Reach for it for continuously running on-device inference, such as background transcription, camera effects, wake-word detection and always-on vision, where battery and thermals are the real constraint. The limits follow from the design: the operator set is narrow so an unsupported layer pushes its subgraph back to CPU, the model usually has to be quantized to integer precision, and the toolchain is vendor-specific rather than portable.
+
+### NVIDIA Dynamo
+**Short:** NVIDIA's open-source distributed inference framework that adds KV-aware routing, prefill/decode disaggregation and NIXL transfers on top of vLLM, SGLang or TensorRT-LLM.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, gpu/multi-gpu-and-collectives @2, caching/semantic-and-llm-cache @3
+
+### NVIDIA NIM
+**Short:** NVIDIA's prebuilt inference microservice containers that bundle a model, a tuned engine and an OpenAI-compatible API; production use needs an NVIDIA AI Enterprise licence.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/container-and-image @2
 
 ### NVIDIA Triton
 **Short:** NVIDIA's multi-framework model server: dynamic batching, model ensembles, versioning and TensorRT backends.
@@ -544,6 +646,12 @@ ONNX Runtime loads a model in the ONNX graph format, applies graph-level optimiz
 
 It also ships post-training quantization tooling for int8 dynamic and static quantization of those graphs. Reach for it for CPU and edge inference and for fleets with mixed hardware; for maximum throughput on data-centre GPUs a specialized engine wins. The usual friction is export: an unsupported or custom operator fails at conversion, before you ever get to run it.
 
+### ONNX Runtime GenAI
+**Short:** Library that runs the generation loop on ONNX Runtime, with sampling, KV-cache management and execution providers such as CUDA, DirectML and QNN.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1, inference/inference-engine @2
+
 ### ONNX Runtime Mobile
 **Short:** Trimmed ONNX Runtime build for iOS and Android: reduced binary size running prepacked ORT-format models.
 **Kind:** tech
@@ -581,6 +689,12 @@ Prompt caching applies automatically to a repeated prefix above a minimum length
 **Roles:** inference/model-server @1, platform-delivery/cloud-platform-and-cost @2
 
 You upload a JSONL file whose every line carries a `custom_id` and the same request body you would send to the synchronous endpoint, create a batch over that file, poll its status, then download an output file whose lines carry the matching `custom_id` -- order is not guaranteed, so join on the id rather than on position. The bargain is a 24-hour completion window in exchange for half the per-token price and a separate, far larger rate-limit pool, so a big offline job stops competing with live traffic for quota. That fits embedding backfills, dataset labelling, offline evaluation and bulk summarisation, and fits nothing a user is waiting on. Failures are per line rather than per job, so plan to read the error file and resubmit a subset instead of treating a batch as all-or-nothing.
+
+### OpenAI Decisions API
+**Short:** OpenAI's typed decision endpoint, POST /v1/decisions, that returns a label and a probability distribution over allowed answers instead of generated text.
+**Kind:** model
+**Lang:** *
+**Roles:** inference/model-server @1, ml-lifecycle/evaluation-and-benchmarks @2
 
 ### OpenVINO
 **Short:** Intel toolkit converting and optimizing models for Intel CPUs, iGPUs and NPUs, including INT8 quantization.
@@ -652,6 +766,12 @@ At this size it fits comfortably on a single modern GPU, and quantized to four b
 
 The MIT licence and the size make it a practical self-hosted default when a small model is not enough and a frontier model is either unaffordable or not permitted to leave the network. Pair it with retrieval for anything fact-dependent, and evaluate on your own task: benchmark scores for this family run ahead of general-purpose behaviour, so the gap between a leaderboard and your workload is wider than usual.
 
+### Qualcomm QNN
+**Short:** Qualcomm AI Engine Direct SDK that compiles and runs models on Snapdragon Hexagon NPUs, GPUs and CPUs; also exposed as an ONNX Runtime execution provider.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** inference/model-format-and-edge @1, inference/compiler-and-runtime-optimization @2
+
 ### Qwen2.5
 **Short:** Alibaba's open-weight model family; licence varies by size, and the 0.5B-3B members are common on-device choices.
 **Kind:** model
@@ -691,6 +811,12 @@ Reach for it when long contexts and constant memory matter more than peak qualit
 The layout is deliberately dull: a length prefix, a JSON header mapping each tensor name to its dtype, shape and byte range, then the raw tensor data. Loading memory-maps the file and constructs tensors as views over those ranges, so nothing is deserialized and nothing is copied, and pages fault in as they are touched, which is also what makes lazy loading of individual tensors possible. Parsing the header cannot execute anything, because it is data and the format has no callbacks.
 
 That last property is why it became the default. A `.pt` or `.bin` file is a Python pickle, and unpickling runs code by design, so downloading a checkpoint from an untrusted source was arbitrary code execution. Prefer it for anything you publish or consume, and convert legacy checkpoints once rather than loading pickles repeatedly in production.
+
+### SageMaker inference components
+**Short:** SageMaker endpoint feature that places several models or LoRA adapters on one endpoint, each with its own accelerator, CPU and memory reservation and scaling.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/cloud-platform-and-cost @2
 
 ### Seldon Core
 **Short:** Kubernetes-native model serving: inference graphs of models and transformers as CRDs, with drift/outlier sidecars.
@@ -749,6 +875,12 @@ It reaches roughly half the weights removed on large models with modest quality 
 Work is described by a recipe, a YAML file of modifiers and the epochs they apply over, covering gradual magnitude pruning to a target sparsity, quantization-aware training and distillation from a dense teacher, applied to an existing training loop by wrapping the optimizer so the model code does not change. Sparse transfer is the shortcut it is built around: start from an already-sparsified checkpoint of the same architecture and fine-tune on your data with the sparsity pattern held fixed, avoiding a repeat of the expensive pruning search.
 
 It was the front end for producing models for DeepSparse, and that pairing is the context to read it in, because unstructured sparsity paid off there specifically since the runtime exploited it. Neural Magic's work has since moved to vLLM and llm-compressor, so treat this as the older toolchain and check what your serving stack can actually accelerate before pruning for speed.
+
+### tensorizer
+**Short:** CoreWeave library that serializes PyTorch modules and tensors to one file and streams them from HTTP, S3 or local disk into GPU memory.
+**Kind:** tech
+**Lang:** python
+**Roles:** inference/model-format-and-edge @1, data-stores/object-and-file-storage @3
 
 ### TensorRT
 **Short:** NVIDIA inference optimizer and runtime: layer fusion, kernel auto-tuning, FP16/INT8 calibration, serialized engines.
@@ -882,6 +1014,12 @@ The handler is where custom preprocessing and batching logic lives, which makes 
 
 FP8 is not merely a cast, because the format has too little dynamic range to hold activations and gradients directly. The library keeps per-tensor scaling factors, tracks a history of observed amax values and applies a delayed-scaling recipe, using E4M3 where precision matters and E5M2 where the wider exponent range does. It packages that behind drop-in modules such as `te.Linear`, `te.LayerNorm` and `te.TransformerLayer` plus an `fp8_autocast` context, so an existing PyTorch model can adopt it without a rewrite, and it brings fused attention kernels along with it. Reach for it on Hopper or Blackwell hardware where the low-precision tensor cores exist, since on older GPUs there is nothing to gain; NeMo and Megatron-LM already integrate it if you are training at that scale.
 
+### TypeSafe
+**Short:** Vendor of the hosted System One API, POST /v1/systemone, which serves Jev decision models that return probabilities over allowed answers instead of text.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, ml-lifecycle/evaluation-and-benchmarks @2
+
 ### vLLM
 **Short:** Self-hosted LLM serving engine: PagedAttention KV cache, continuous batching, prefix caching, LoRA serving.
 **Kind:** tech
@@ -891,6 +1029,12 @@ FP8 is not merely a cast, because the format has too little dynamic range to hol
 Its central idea is PagedAttention: the KV cache is held in fixed-size blocks and paged like virtual memory instead of one contiguous reservation per sequence, which removes the fragmentation that forced conservative batch sizes and lets sequences share blocks for a common prefix. Continuous batching then admits and retires requests at each decode step rather than waiting for a whole batch to finish, so a short request queued behind a long one is not stuck for its duration.
 
 In practice it serves an OpenAI-compatible endpoint, does automatic prefix caching so a large shared system prompt is computed once, serves many LoRA adapters off one base model, and supports tensor and pipeline parallelism alongside quantized weights and KV cache. Reach for it when self-hosted throughput is the goal; a single-user local setup is better served by something lighter, and heavily latency-tuned proprietary stacks can still win on single-stream latency.
+
+### vLLM production-stack
+**Short:** vLLM's reference Kubernetes deployment: a Helm chart with a prefix-aware request router, vLLM engine pods and LMCache KV-cache offload.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-server @1, platform-delivery/kubernetes-and-orchestration @2, caching/semantic-and-llm-cache @3
 
 ### vLLM SamplingParams
 **Short:** vLLM's decoding config: temperature, top_p/top_k/min_p, repetition and presence penalties, seed.
@@ -907,6 +1051,12 @@ In practice it serves an OpenAI-compatible endpoint, does automatic prefix cachi
 The score is weight magnitude multiplied by the norm of the corresponding input activation, collected from a small calibration set, so a small weight fed by a large activation is kept while a large weight that never sees much signal is not. The comparison is made per output row rather than across the whole layer, which keeps pruning balanced across neurons, and no weight is updated afterwards: the survivors are exactly the original values.
 
 That is the appeal against Hessian-based methods, since it needs one forward pass, no matrix inverse and no weight update, and runs in minutes on a model that would otherwise take hours, at comparable quality around half sparsity. As with any unstructured pruning, zeros do not make a GPU faster on their own, so target the 2:4 pattern or a sparsity-aware runtime when speed rather than a research result is the goal.
+
+### WebLLM
+**Short:** In-browser LLM engine that runs MLC-compiled models on WebGPU behind an OpenAI-style JavaScript API, with no inference server.
+**Kind:** tech
+**Lang:** js
+**Roles:** inference/model-format-and-edge @1
 
 ### XLA
 **Short:** Google's linear-algebra graph compiler; fuses and lowers ML graphs to TPU, GPU and CPU code.

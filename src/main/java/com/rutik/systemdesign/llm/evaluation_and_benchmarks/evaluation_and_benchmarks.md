@@ -6,6 +6,8 @@ Evaluating LLMs is one of the hardest problems in AI. Unlike classification mode
 
 Understanding evaluation is critical for both building systems (how do you know your RAG pipeline improved?) and system design interviews (how do you measure production quality?).
 
+For using eval sets as pass or fail gates in a release pipeline, see [Evaluation Gates and Eval Sets](../../mlops/evaluation_gates_and_eval_sets/evaluation_gates_and_eval_sets.md).
+
 ---
 
 ## 2. Intuition

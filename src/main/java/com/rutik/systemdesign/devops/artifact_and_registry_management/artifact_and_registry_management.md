@@ -18,6 +18,8 @@ An **artifact** is the immutable, versioned output of a build. A **repository/re
 
 Two overlapping product categories: **universal artifact managers** (JFrog Artifactory, Sonatype Nexus) that handle many package types, and **container registries** (AWS ECR, Google Artifact Registry, Harbor, GHCR) specialized for OCI images (which now also store Helm charts and other OCI artifacts).
 
+Versioning and lineage for model weights, datasets, and prompts are covered in [Artifact Versioning and Lineage](../../mlops/artifact_versioning_and_lineage/artifact_versioning_and_lineage.md), and model registries and model packaging in [Model Registry and Packaging](../../mlops/model_registry_and_packaging/model_registry_and_packaging.md).
+
 ---
 
 ## 2. Intuition

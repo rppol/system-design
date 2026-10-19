@@ -10,6 +10,8 @@ This module teaches multi-GPU programming from the **kernel/systems-programming 
 
 The natural entry point from single-GPU CUDA is [`streams_events_and_concurrency`](../streams_events_and_concurrency/streams_events_and_concurrency.md): everything you learned there about overlapping a `cudaMemcpy` with a kernel on *one* device generalizes directly to overlapping a NCCL collective with compute across *several* devices — the same asynchronous, stream-ordered mental model, just with a second GPU's stream on the other end of the copy. Deployment questions this module deliberately stays out of — provisioning a multi-node GPU cluster, InfiniBand fabric operations, Kubernetes GPU scheduling — belong to [`devops/ml_platform_and_gpu_infrastructure`](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).
 
+For operating the cluster network and storage that NCCL traffic and checkpoints run over, see [AI Networking and Storage Fabric](../../mlops/ai_networking_and_storage_fabric/ai_networking_and_storage_fabric.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

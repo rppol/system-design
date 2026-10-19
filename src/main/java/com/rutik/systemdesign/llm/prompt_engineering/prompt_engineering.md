@@ -8,6 +8,8 @@ While fine-tuning changes the model's weights, prompt engineering changes what t
 
 As LLMs become more capable and aligned, prompt engineering has evolved from hacks (repeating instructions, using magic words) to principled techniques like chain-of-thought, structured outputs, and meta-prompting.
 
+For versioning, testing, and releasing prompts in production, see [Prompt Lifecycle and Versioning](../../mlops/prompt_lifecycle_and_versioning/prompt_lifecycle_and_versioning.md).
+
 ---
 
 ## 2. Intuition

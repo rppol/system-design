@@ -19,6 +19,8 @@
 
 Vector databases store and query high-dimensional vector embeddings — dense numerical representations of text, images, audio, and other data produced by machine learning models. They enable semantic similarity search: finding items that are conceptually similar even when they share no keywords. This is the core technology behind RAG (Retrieval-Augmented Generation), semantic search, recommendation systems, and image search.
 
+For versioning, rebuilding, and releasing the index that a vector database serves, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

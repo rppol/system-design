@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: apis-frameworks -->
 
-The 491 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 492 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **APIs & app frameworks** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -3254,6 +3254,12 @@ operation on a deep graph.
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/design-patterns-and-principles @1, runtime-systems/runtime-internals-and-types @3
+
+### oasdiff
+**Short:** CLI and Go library that diffs two OpenAPI specs and reports breaking changes, used as a CI gate on API contracts.
+**Kind:** tech
+**Lang:** go
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1, platform-delivery/ci-cd-and-release @3
 
 ### ObjectProvider<T>
 **Short:** Spring injection point for lazy, optional or multi-bean lookup; resolves dependencies on demand, not at wiring time.

@@ -28,6 +28,8 @@ inconsistent; they are not used as numbers anywhere in this module.
 The central promise of MoE: several times (Mixtral 3.6x) to ~18x (DeepSeek-V3) more total
 parameters at roughly the same inference FLOP cost as a dense model of active-parameter size. More parameters = more capacity to store knowledge; same active compute = similar latency and throughput.
 
+For serving MoE models across many GPUs with expert parallelism, see [Distributed Inference and Disaggregation](../../mlops/distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md).
+
 ---
 
 ## 2. Intuition

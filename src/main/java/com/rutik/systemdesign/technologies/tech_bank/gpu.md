@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: gpu -->
 
-The 207 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 217 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **GPU & parallel** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -24,6 +24,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 It offers several selectable compilation flows rather than one, including a generic flow that defers final code generation to run time, so a single binary can adapt to whatever accelerator it finds instead of being built ahead of time for a fixed target list. That is the practical difference from a vendor toolchain plus per-target plugins.
 
 Both older names still turn up in build scripts, distribution packages and papers, and all three refer to this one project. Being community-led, it can lag a vendor's own toolchain on the newest hardware features, so benchmark on every target rather than assuming portability is free.
+
+### Amazon EFA
+**Short:** AWS Elastic Fabric Adapter, an EC2 network interface for OS-bypass traffic over the SRD protocol, used by NCCL through libfabric.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1, platform-delivery/cloud-platform-and-cost @3
 
 ### AMX
 **Short:** Intel Advanced Matrix Extensions: tile-based BF16 and INT8 matrix instructions on Sapphire Rapids and later Xeon.
@@ -68,6 +74,12 @@ The `apex.amp` mixed-precision layer, with its O0 through O3 opt levels, is depr
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, runtime-systems/concurrency-and-async @3
+
+### aws-ofi-nccl
+**Short:** AWS NCCL network plugin that maps NCCL collectives onto libfabric so they run over Elastic Fabric Adapter.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1
 
 ### ballot_sync
 **Short:** CUDA warp-vote intrinsic returning the mask of lanes whose predicate is true; base of warp-level patterns.
@@ -735,6 +747,12 @@ Under Multi-Instance GPU a physical card is partitioned into isolated instances 
 
 The practical consequence is that capacity decisions taken from that dashboard are wrong in both directions, since a saturated card can look idle and a full one can look like it has headroom. Handle it by labelling metrics with the instance id and profile, aggregating across instances explicitly, and checking which fields the driver actually populates. Running GPUs whole avoids the problem entirely when per-slice accounting is not needed.
 
+### DeepEP
+**Short:** DeepSeek's library of expert-parallel all-to-all dispatch and combine kernels for MoE training and inference over NVLink and RDMA.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1
+
 ### deviceQuery
 **Short:** CUDA sample binary that prints every cudaDeviceProp field, the fastest sanity check of a machine's GPU limits.
 **Kind:** tech
@@ -825,6 +843,18 @@ The GPU exposes a window of its memory through a PCIe base-address register, and
 
 It is what lets multi-node NCCL and MPI collectives reach line rate, and topology decides whether you get it: the GPU and the NIC should sit under the same PCIe switch or root complex, which is why dense nodes are built with a NIC per GPU pair. Check the paths with `nvidia-smi topo -m`, because when a transfer has to cross sockets it silently falls back to the host path and only the throughput tells you.
 
+### GPUDirect Storage
+**Short:** NVIDIA cuFile data path that DMAs data between NVMe or network storage and GPU memory without a bounce buffer in host memory.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1, runtime-systems/io-networking-and-syscalls @2
+
+### GPUDirect-TCPX
+**Short:** Google Cloud GPU networking for A3 VMs that moves data between GPU memory and the NIC over TCP without host-memory copies; TCPXO is the A3 Mega variant.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1
+
 ### hipify-clang
 **Short:** AMD tool that translates CUDA source to HIP by parsing the real AST, more accurate than the text-pattern hipify-perl.
 **Kind:** tech
@@ -857,6 +887,12 @@ That is also its limit. Anything hidden behind a macro, a template parameter or 
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1, gpu/kernel-programming @2
 
+### InfiniBand
+**Short:** Lossless, credit-based RDMA network fabric standard used for GPU cluster scale-out networks.
+**Kind:** spec
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1, runtime-systems/io-networking-and-syscalls @2
+
 ### Intel oneAPI
 **Short:** Intel's SYCL toolchain and library stack: icpx/dpcpp compilers plus oneMKL and oneDNN math and DNN libraries.
 **Kind:** tech
@@ -866,6 +902,12 @@ That is also its limit. Anything hidden behind a macro, a template parameter or 
 The toolkit is the `icx` and `icpx` compilers plus a set of libraries with one interface across devices: oneMKL for BLAS, FFT and solvers, oneDNN for deep-learning primitives, oneTBB for host threading, oneCCL for collectives and oneDAL for classical analytics. VTune and Advisor come with it for hotspot, roofline and offload analysis, and the same library call dispatches to the CPU's AVX-512 and AMX paths or to an Intel GPU depending on the queue it is submitted to.
 
 Reach for it when the hardware is Intel and one source should span CPU, integrated GPU and discrete GPU. Outside that case the libraries are the more common entry point than the compiler, since PyTorch and OpenVINO call oneDNN and oneMKL underneath whether or not you ever write a line of SYCL yourself.
+
+### Intel XPU Manager
+**Short:** Intel tool for monitoring, diagnosing and managing Intel data center GPUs, with the xpumd daemon, health checks and Prometheus metrics.
+**Kind:** tech
+**Lang:** *
+**Roles:** gpu/gpu-profiling-and-debugging @1, observability/metrics-and-monitoring @2
 
 ### kernel<<<grid, block, shmem, stream>>>()
 **Short:** CUDA triple-chevron launch syntax choosing grid, block, dynamic shared memory and stream; also launches child kernels.
@@ -1036,6 +1078,12 @@ Run it before you profile a slow distributed training job. In a few minutes it s
 It opens the report files the command-line kernel profiler writes, which is the normal workflow on a cluster: collect headless on the GPU node, copy the report to a laptop, explore it there. The interface groups a kernel's counters into sections, covering speed of light against the roofline, memory workload with its transaction and sector breakdown, scheduler and warp-stall statistics, and occupancy with its limiting factor, each metric carrying a description and a rule-based hint.
 
 Two things are hard to get from the command line. Source view interleaves CUDA, PTX and SASS with per-line stall attribution when the binary was built with `-lineinfo`, and baseline comparison diffs two reports so an optimization's effect on every counter is visible at once. Reach for it after the CLI has told you which kernel is worth studying, not as the way to find that kernel.
+
+### NIXL
+**Short:** NVIDIA Inference Xfer Library that moves KV cache and tensors between GPUs, hosts and storage over UCX, libfabric, GDS and object-store backends.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** gpu/multi-gpu-and-collectives @1, caching/semantic-and-llm-cache @2
 
 ### NPP
 **Short:** NVIDIA Performance Primitives: GPU image and signal routines for resize, colour conversion and JPEG decode.
@@ -1395,6 +1443,12 @@ The signature of the problem it solves is an OOM whose own message says there is
 
 The trap is why this is an environment variable rather than a function call: **the allocator reads it once at first CUDA initialization**, so setting it after your first `.cuda()` does nothing at all and looks exactly like the setting not working. Export it before the process starts. Two caveats on `expandable_segments`: it can interact badly with a library that takes raw pointers into PyTorch memory and assumes a stable mapping, and it changes what a memory snapshot looks like, so profile with the setting you intend to ship.
 
+### RoCEv2
+**Short:** RDMA over Converged Ethernet version 2, which carries RDMA in routable UDP/IP packets and needs PFC and ECN tuning to avoid loss.
+**Kind:** spec
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1, runtime-systems/io-networking-and-syscalls @2
+
 ### ROCm
 **Short:** AMD's GPU compute stack: HIP runtime plus rocBLAS/MIOpen/rocProf, mirroring the CUDA library and tooling roles.
 **Kind:** tech
@@ -1576,6 +1630,12 @@ The skill is the reading order. A sawtooth returning to the same floor every ste
 It takes a comma-separated list of artifact names. `TORCH_LOGS="recompiles"` prints the exact guard that failed on every recompilation, which is the one that finds a recompile storm; `graph_breaks` names the bytecode that ended a graph; `output_code` dumps the Triton or C++ Inductor generated; and a `+` prefix such as `+dynamo` turns a component up to very verbose. `TORCH_COMPILE_DEBUG=1` is the heavier sibling that dumps the intermediate FX graphs as well.
 
 Reach for it the moment a compiled model is slower than you expected, because none of the three `torch.compile` failure modes announces itself: a graph break is not an error and warns nothing, a recompilation looks like normal warm-up, and hitting `recompile_limit` silently reverts the frame to eager forever. The programmatic counterparts are `torch._dynamo.utils.compile_times()` and `torch._dynamo.explain(fn)(*args)`, which are what you assert on in CI rather than reading logs by eye.
+
+### Ultra Ethernet
+**Short:** Ultra Ethernet Consortium specification for an Ethernet transport built for AI and HPC, with its own congestion control and in-network collectives.
+**Kind:** spec
+**Lang:** *
+**Roles:** gpu/multi-gpu-and-collectives @1, runtime-systems/io-networking-and-syscalls @2
 
 ### vendor ICDs
 **Short:** OpenCL's Installable Client Driver mechanism: each vendor ships an ICD, host code enumerates all at runtime.

@@ -16,6 +16,8 @@ Key components:
 - **CI/CD for ML** — automated code, data, and model quality gates before any model reaches production
 - **Monitoring and feedback** — drift detection, performance degradation alerts, retraining triggers
 
+The cross-artifact lifecycle for models, prompts, indexes and agents is covered in [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
+
 ---
 
 ## 2. Intuition

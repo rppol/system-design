@@ -24,6 +24,8 @@ The **Incident Command System (ICS)**, borrowed from emergency services, defines
 
 The whole system is judged by **MTTD/MTTR** (lower is better — fast detection and resolution) and by whether postmortem action items actually get done (preventing recurrence). **Runbooks** — step-by-step diagnosis/mitigation guides linked from every alert — are the single highest-leverage artifact for cutting MTTR.
 
+Incidents in AI systems, including quality regressions with no change in error rate, are covered in [AI Incident Response and Reliability](../../mlops/ai_incident_response_and_reliability/ai_incident_response_and_reliability.md).
+
 ---
 
 ## 2. Intuition

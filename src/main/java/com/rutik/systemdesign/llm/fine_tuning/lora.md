@@ -5,6 +5,8 @@ LoRA (Low-Rank Adaptation, Hu et al. 2021) is a [parameter-efficient fine-tuning
 
 For a 7B model where a typical attention weight matrix is 4096×4096, the full update is 16.7M parameters. LoRA at rank 16 decomposes this into a 16×4096 + 4096×16 = 131K parameter update — 128× fewer parameters for one weight matrix. Across all target modules, LoRA adds ~0.1-1% of the total model parameters as trainable.
 
+For serving many adapters on one base model and managing their versions, see [LoRA Adapter Serving and Lifecycle](../../mlops/lora_adapter_serving_and_lifecycle/lora_adapter_serving_and_lifecycle.md).
+
 ---
 
 ## 2. Intuition

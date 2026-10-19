@@ -18,6 +18,8 @@ Kubernetes storage separates *requesting* storage from *providing* it:
 
 **Access modes** govern sharing: `ReadWriteOnce` (RWO — one node), `ReadWriteMany` (RWX — many nodes, needs a shared FS like EFS/NFS), `ReadOnlyMany` (ROX).
 
+Storage and loading of model weights, and the cold start they add to a new replica, are covered in [Model Storage, Loading and Cold Start](../../mlops/model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md).
+
 ---
 
 ## 2. Intuition

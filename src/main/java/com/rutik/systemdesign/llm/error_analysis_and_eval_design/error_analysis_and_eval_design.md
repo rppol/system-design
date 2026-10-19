@@ -36,6 +36,8 @@ of the time on requests like "schedule a tour two weeks from now"; three failure
 for over 60% of all problems, and the targeted fix took date handling from 33% to 95% success. No
 public benchmark contains that finding, because no public benchmark contains apartment tours.
 
+For versioning the labeled examples this process produces and using them as release gates, see [Dataset and Label Versioning](../../mlops/dataset_and_label_versioning/dataset_and_label_versioning.md) and [Evaluation Gates and Eval Sets](../../mlops/evaluation_gates_and_eval_sets/evaluation_gates_and_eval_sets.md).
+
 ---
 
 ## 2. Intuition

@@ -91,6 +91,8 @@ in Python, and the standalone nGraph API) was **removed in `[2024.0]`**. If you 
 `InferenceEngine::Core` in a tutorial, it is pre-2024 and won't compile against a
 current runtime.
 
+For choosing a serving platform (KServe, Ray Serve, Triton, and others) and composing it with an engine such as OpenVINO, see [Model Serving Platforms](../../mlops/model_serving_platforms/model_serving_platforms.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

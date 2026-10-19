@@ -14,6 +14,8 @@ Then there is the term nobody budgets: **variability**. Kingman's approximation,
 
 **Little's Law appears elsewhere in this repo framed as load-generator sizing** — how many virtual users a k6 or Gatling run needs to sustain an arrival rate, and why a closed model under-applies load. That framing is worked in [Load and Performance Testing §5](../load_and_performance_testing/load_and_performance_testing.md) and [DevOps Performance and Load Testing §5](../../devops/performance_and_load_testing/performance_and_load_testing.md). This module points the same equation the other way: at the server, deciding instance counts, thread pools, connection pools, queue bounds and autoscaling signals.
 
+For applying these capacity models to GPU inference replicas and their autoscaling signals, see [Inference Autoscaling and Capacity Planning](../../mlops/inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

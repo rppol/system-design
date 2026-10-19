@@ -18,6 +18,8 @@ Serverless is a spectrum: FaaS (Lambda) at one end, serverless containers (Farga
 
 Concrete Lambda limits: 15-minute max timeout, 128 MB-10 GB memory (CPU scales with memory), 6 MB synchronous payload, 250 MB unzipped deployment (or 10 GB container image), 1000 default concurrent executions per account (soft limit).
 
+Serverless GPU and the other targets for model serving are compared in [Deployment Targets and Serving Patterns](../../mlops/deployment_targets_and_serving_patterns/deployment_targets_and_serving_patterns.md).
+
 ---
 
 ## 2. Intuition

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 220 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 230 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -56,6 +56,12 @@ Reach for it when one library must span several model types and both white-box a
 The benchmark measures whether an agent carries a harmful task through, not merely whether it says something objectionable. Each behaviour ships with synthetic tools the model can call, and grading separates two signals: whether the model refused, and whether the tool-call trajectory actually completed the task. That split matters because a model can refuse in prose while still executing the steps, or comply verbally and fail at the mechanics.
 
 Use it when you ship tool-using agents and want evidence about the agentic surface rather than chat-only safety, including how much refusal survives a jailbreak template wrapped around the request. It is synthetic by construction, so it says nothing about your own tools or the injection paths in your retrieval corpus, and those need probes you write yourself.
+
+### AI Incident Database
+**Short:** Public indexed collection of reported real-world AI system failures and harms, used as input to pre-mortems and risk reviews.
+**Kind:** dataset
+**Lang:** *
+**Roles:** security/ai-safety-and-guardrails @1, observability/alerting-and-incident-response @3
 
 ### Ansible Vault
 **Short:** Ansible's built-in encryption for secrets kept in playbooks and vars files, decrypted at run time.
@@ -455,6 +461,12 @@ The package splits deliberately into two layers: a small recipes layer — Ferne
 
 Stay in the recipes layer unless you know precisely which primitive you need, and never assemble your own encrypt-then-MAC construction when an AEAD mode exists.
 
+### CycloneDX
+**Short:** OWASP bill-of-materials standard that covers software, services, ML models and datasets, published as Ecma ECMA-424.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1, security/privacy-and-compliance @3
+
 ### Deletion ledgers
 **Short:** A durable record of deletion requests, used to fan a right-to-erasure out across every store that holds the data.
 **Kind:** concept
@@ -570,6 +582,12 @@ Reach for it as the detection layer for behaviour no image scan can predict, sin
 **Kind:** api
 **Lang:** python
 **Roles:** security/authentication-and-identity @1, apis-frameworks/web-framework-and-http-client @2
+
+### fickling
+**Short:** Trail of Bits pickle decompiler and static analyzer that flags unsafe imports and calls in pickle files such as PyTorch checkpoints.
+**Kind:** tech
+**Lang:** python
+**Roles:** security/supply-chain-and-runtime-security @1
 
 ### FindByIndexNameSessionRepository
 **Short:** Spring Session interface indexing sessions by principal, powering max-sessions limits and logout-everywhere.
@@ -810,6 +828,18 @@ Reach for it the moment there is more than one account, because the alternative 
 OpenPages is a governance, risk and compliance system of record first, and an AI tool second: risk registers, control libraries, policy management, issue and remediation workflow, and a subscription library of regulatory content that maps obligations onto those controls. The AI governance module reuses that machinery for models — a model becomes another governed object with an owner, an approval workflow, periodic review and evidence attached to it — which is why it appears in banks and insurers, where model risk management was already a regulated discipline before anything was called AI.
 
 Reach for it when AI governance has to land inside an enterprise GRC programme that already exists, so regulators see one register rather than a separate ML spreadsheet. It is not an ML testing tool and will not compute a fairness metric for you; it stores the result and the sign-off. The cost is the usual GRC cost: a heavyweight platform, a configuration project, and a workflow that only produces assurance if engineers actually feed it.
+
+### IBM watsonx.governance
+**Short:** IBM's AI governance product for model inventory, risk assessment, policy enforcement and lifecycle monitoring of models and agents.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, ml-lifecycle/drift-and-production-monitoring @2
+
+### in-toto
+**Short:** Framework and attestation format for signed statements about each software supply-chain step; the envelope that SLSA provenance uses.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1
 
 ### InetAddressFilter
 **Short:** Spring Boot 4.1 filter blocking outbound requests to private or link-local addresses, mitigating SSRF.
@@ -1071,6 +1101,12 @@ SEAL implements two schemes with different arithmetic. BFV works on exact intege
 
 Reach for it when a computation must run somewhere you do not trust with the plaintext and the function is a shallow arithmetic circuit. State the costs plainly: ciphertexts are orders of magnitude larger than plaintexts, operations are far slower than cleartext arithmetic, comparisons and branching are not natural operations, and SEAL does not implement bootstrapping, so unbounded depth is out of scope and OpenFHE is the library that covers it.
 
+### MITRE ATLAS
+**Short:** MITRE knowledge base of adversary tactics and techniques against AI systems, modeled on ATT&CK, used to name attacks in threat models and postmortems.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/ai-safety-and-guardrails @1
+
 ### mkcert
 **Short:** CLI that installs a local CA and issues trusted development TLS certificates so localhost can run real HTTPS/HTTP2.
 **Kind:** tech
@@ -1090,6 +1126,12 @@ Reach for it to make local development match production transport instead of deb
 The benchmark asks whether a system responds safely to prompts across a set of hazard categories, and the design detail that makes it usable is the split between a public practice set and a held-out official set, so a vendor can iterate without the graded prompts leaking into training. Responses are graded by an ensemble of evaluator models rather than a single judge, and results are reported as a grade relative to reference systems instead of a bare percentage that means nothing on its own.
 
 Reach for it when you need a third-party comparable safety result for a chat-facing system, such as a procurement conversation, a vendor comparison or a public claim. Its limits follow from being a standardised benchmark: it measures conversational hazards against a fixed taxonomy, not agent tool misuse, not your application's own abuse cases, and not a determined multi-turn attacker.
+
+### model-transparency
+**Short:** OpenSSF Model Signing library and CLI that signs a digest manifest of every model file with Sigstore, keys or certificates and verifies it before load.
+**Kind:** tech
+**Lang:** python
+**Roles:** security/supply-chain-and-runtime-security @1
 
 ### ModelScan
 **Short:** Scanner that inspects serialized model files for unsafe deserialization and code-execution payloads.
@@ -1737,6 +1779,12 @@ costs are structural: the vault is an availability and latency dependency for an
 needs the real value, and adopting it means finding and migrating every existing copy, which
 is usually the hard part.
 
+### SLSA
+**Short:** OpenSSF Supply-chain Levels for Software Artifacts: build levels plus a provenance format that records how an artifact was built.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1
+
 ### SmoothLLM
 **Short:** Randomized-smoothing jailbreak defence: perturb a prompt many times and aggregate to break adversarial suffixes.
 **Kind:** concept
@@ -1766,6 +1814,12 @@ It runs as a CLI in CI, an IDE plugin and a git integration, and can break a bui
 SOPS encrypts the values in a structured file and leaves the keys and document shape in plaintext, so `git diff` still shows which setting changed and code review still works while the secret itself stays unreadable. Each file's data key is wrapped with a KMS key, an `age` or PGP key, or Vault transit, and `.sops.yaml` maps path patterns to recipients — so CI, staging and production can each decrypt with their own identity, and removing one recipient means re-encrypting rather than rotating every secret everywhere.
 
 That is what makes it fit GitOps: the whole desired state including secrets lives in the repository, and the cluster decrypts through a Flux or Argo CD integration or the SOPS operator at apply time. The residual risk is unchanged by the encryption — whoever can use the wrapping key can read every secret it wraps, so the access policy on that key is the real control, not the file.
+
+### SPDX
+**Short:** Linux Foundation SBOM standard, ISO/IEC 5962, whose 3.0 model adds AI and Dataset profiles for describing models and training data.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1, security/privacy-and-compliance @3
 
 ### Spring Authorization Server
 **Short:** Spring's own OAuth2/OIDC authorization server for issuing and introspecting tokens inside your stack.
@@ -2036,6 +2090,12 @@ Reach for it when a repository has years of history and the question is which le
 **Kind:** api
 **Lang:** *
 **Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @2
+
+### ValidMind
+**Short:** Model risk management platform that automates model validation tests and validation documentation for regulated model governance.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, ml-lifecycle/evaluation-and-benchmarks @2
 
 ### Vault Agent
 **Short:** Client-side Vault daemon that authenticates for your app, caches tokens and leases, and renders secrets into files.

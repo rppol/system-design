@@ -8,6 +8,8 @@ The four primary compression families are quantization, pruning, knowledge disti
 
 Practical impact: for well-behaved CNN and tabular models, INT8 PTQ with per-channel weight scales plus modest structured pruning commonly reaches a ~70% size reduction for roughly a point of accuracy or less. That is a rule of thumb, not a guarantee — depthwise-separable architectures are the standard counterexample (see the MobileNet numbers in Section 4), and for those, QAT or distillation is needed to recover accuracy.
 
+Shipping compressed models to phones, browsers and edge devices is covered in [Edge and On-Device Deployment](../../mlops/edge_and_on_device_deployment/edge_and_on_device_deployment.md).
+
 ---
 
 ## 2. Intuition

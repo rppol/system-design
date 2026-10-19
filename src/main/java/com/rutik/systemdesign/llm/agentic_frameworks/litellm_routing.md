@@ -8,6 +8,8 @@ LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 
 
 In agent stacks, LiteLLM occupies the "API gateway" role — sitting between your agents and the provider APIs, abstracting provider details, enforcing budgets, providing reliability. Many production agent deployments use LiteLLM Proxy as a hard requirement before deploying to multiple teams.
 
+For running a gateway such as LiteLLM as a production service with its own config, release process, and on-call, see [AI Gateway Operations](../../mlops/ai_gateway_operations/ai_gateway_operations.md).
+
 ---
 
 ## 2. Intuition

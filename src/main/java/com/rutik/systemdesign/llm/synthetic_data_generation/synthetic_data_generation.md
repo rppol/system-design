@@ -8,6 +8,8 @@ This field addresses a fundamental bottleneck: human annotation is slow, expensi
 
 The LIMA paper (2023) demonstrated a counterintuitive insight: **1000 carefully curated, diverse examples outperformed 52,000 lower-quality examples**. Quality over quantity is the governing principle.
 
+For versioning synthetic datasets alongside human-labeled data, see [Dataset and Label Versioning](../../mlops/dataset_and_label_versioning/dataset_and_label_versioning.md).
+
 ---
 
 ## 2. Intuition

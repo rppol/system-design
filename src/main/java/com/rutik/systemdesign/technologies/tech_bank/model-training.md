@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: model-training -->
 
-The 162 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 165 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Model training** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -388,6 +388,12 @@ Keras is the layers-and-training API most people learn deep learning through: st
 
 Reach for it when you want a standard architecture trained with minimal ceremony, or when a team needs readable model code more than it needs control. The abstraction gets in the way as soon as the training step is unusual -- multiple optimizers, adversarial objectives, custom gradient manipulation -- and the literature, pretrained weights and inference stacks are written against PyTorch, which is where most new work starts.
 
+### Kubeflow Trainer
+**Short:** Kubeflow's training API on Kubernetes: a TrainJob runs on a TrainingRuntime built on JobSet, with runtimes for PyTorch, DeepSpeed, JAX, MLX and XGBoost.
+**Kind:** tech
+**Lang:** *
+**Roles:** model-training/distributed-training @1, platform-delivery/kubernetes-and-orchestration @2
+
 ### LabelSpreading
 **Short:** scikit-learn graph-based semi-supervised learner that propagates a few labels across a kNN or RBF similarity graph.
 **Kind:** api
@@ -747,6 +753,12 @@ Around that core sit the layers, losses and optimizers in `torch.nn` and `torch.
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2
+
+### PyTorch Distributed Checkpoint
+**Short:** PyTorch module torch.distributed.checkpoint that saves and loads sharded state from many ranks in parallel, reshards on load and offers async_save.
+**Kind:** api
+**Lang:** python
+**Roles:** model-training/distributed-training @1
 
 ### PyTorch FSDP
 **Short:** PyTorch fully sharded data parallel: parameters, gradients and optimizer state split across ranks to fit big models.
@@ -1250,6 +1262,12 @@ Three things it breaks, and the first two are silent. Dropout must produce the s
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, runtime-systems/concurrency-and-async @3
 
+### torchdata
+**Short:** PyTorch data-loading library whose StatefulDataLoader saves and restores loader position, so a resumed training job continues from the exact batch.
+**Kind:** tech
+**Lang:** python
+**Roles:** model-training/deep-learning-framework @1
+
 ### torchinfo
 **Short:** Prints a Keras-style summary of a PyTorch model: per-layer output shapes, parameter counts and memory estimate.
 **Kind:** tech
@@ -1376,7 +1394,7 @@ It applies the same patching approach -- hand-written Triton kernels, a manual b
 
 Reach for it to actually try reinforcement learning with a verifiable reward on hardware you already own, which until recently meant a cluster. The constraints follow from the approach: one GPU, a supported model family, LoRA rather than full-parameter training, and small group sizes. A serious post-training run belongs on a framework built for multi-node RL.
 
-### veRL
+### verl
 **Short:** Production RL post-training framework with a hybrid FSDP/Megatron trainer and vLLM rollouts; used for DAPO.
 **Kind:** tech
 **Lang:** python

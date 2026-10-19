@@ -12,6 +12,8 @@ The three phases are:
 
 ML pipelines add requirements not present in BI pipelines: point-in-time correctness (no future leakage), data versioning (DVC, Apache Iceberg, Delta Lake), schema registries (Avro/Protobuf), and statistical validation gates (Great Expectations).
 
+Versioning the datasets and labels these pipelines produce, and pinning them to training runs, is covered in [Dataset and Label Versioning](../../mlops/dataset_and_label_versioning/dataset_and_label_versioning.md).
+
 ---
 
 ## 2. Intuition

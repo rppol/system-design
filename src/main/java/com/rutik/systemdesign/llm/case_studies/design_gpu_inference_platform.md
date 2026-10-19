@@ -5,6 +5,8 @@
 
 **Key insight for this design**: GPU memory (HBM) is the scarce resource that governs everything. Every architectural decision — PagedAttention, LoRA multiplexing, heterogeneous GPU fleets, autoscaling on token throughput instead of RPS — exists to maximize useful tokens generated per GB of HBM per dollar per second. An inference platform that does not obsess over HBM utilization will be out-competed on price within two quarters.
 
+For loading, versioning, and retiring the LoRA adapters this platform multiplexes, see [LoRA Adapter Serving and Lifecycle](../../mlops/lora_adapter_serving_and_lifecycle/lora_adapter_serving_and_lifecycle.md).
+
 ---
 
 ## 1. Requirements Clarification

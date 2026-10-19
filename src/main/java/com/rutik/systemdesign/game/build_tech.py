@@ -1128,6 +1128,7 @@ PRODUCT_DEEP_DIVES = {
     "llm/vllm_deep_dive/vllm_deep_dive.md",
     "ml/mlflow_deep_dive/mlflow_deep_dive.md",
     "ml/pytorch_deep_dive/pytorch_deep_dive.md",
+    "mlops/model_serving_platforms/kserve_deep_dive.md",
 }
 # Matches the same filename pattern but teaches a CONCEPT, not a product. Listed so the
 # guard stays silent about them and loud about anything new.

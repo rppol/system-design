@@ -10,6 +10,8 @@ deployment). Target state: 1 week from idea to production for standard use cases
 must support PyTorch, TensorFlow, scikit-learn, and XGBoost models without requiring engineers to
 understand Kubernetes internals.
 
+Layer-by-layer build-vs-buy choices for this kind of platform are covered in [ML Platform Architecture and Build vs Buy](../../mlops/ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).
+
 ### Functional Requirements
 - Feature store: offline (petabyte-scale batch) + online (< 5ms serving)
 - Experiment tracking: log metrics, parameters, artifacts; compare runs; reproducibility

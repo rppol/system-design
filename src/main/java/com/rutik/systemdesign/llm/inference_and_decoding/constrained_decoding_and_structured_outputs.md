@@ -40,6 +40,8 @@ At `p = 0.90` you burn 11% extra GPU spend on average *and* still hand 1 documen
 
 The engineering substance is in *how* the valid-token set is computed fast enough: a naive grammar check across a 128K-token vocabulary per step would dwarf the model's own forward pass. The solutions — DFA compilation over the token vocabulary (Outlines), adaptive token-mask caches with pushdown automata (XGrammar), token-trie lexers (llguidance) — are what this file covers.
 
+For a model served behind a typed-decision endpoint that returns a label and probabilities instead of text, and released as a versioned artifact, see [Decision Models](../../mlops/decision_models/decision_models.md).
+
 ---
 
 ## 2. Intuition

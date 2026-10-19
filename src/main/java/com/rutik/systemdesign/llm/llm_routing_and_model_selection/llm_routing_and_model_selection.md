@@ -15,6 +15,8 @@ Routing approaches fall into four main families:
 - **Cascade routing**: send to the cheapest model first; escalate only if the response confidence is insufficient
 - **Semantic routing**: embed the query, find the nearest cluster in embedding space, and route based on a cluster-to-model mapping
 
+For running the router as part of a gateway service in production, see [AI Gateway Operations](../../mlops/ai_gateway_operations/ai_gateway_operations.md).
+
 ---
 
 ## 2. Intuition

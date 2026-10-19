@@ -57,6 +57,8 @@ and [NVIDIA Triton Inference Server](../../technologies/nvidia_triton_inference_
 This page is MLflow's *implementation*: the process, the schema, the file format, the failure
 modes, and the version cliffs.
 
+Tool-neutral coverage of lineage and of registry and packaging lives in [Artifact Versioning and Lineage](../../mlops/artifact_versioning_and_lineage/artifact_versioning_and_lineage.md) and [Model Registry and Packaging](../../mlops/model_registry_and_packaging/model_registry_and_packaging.md).
+
 ---
 
 ## 2. Intuition

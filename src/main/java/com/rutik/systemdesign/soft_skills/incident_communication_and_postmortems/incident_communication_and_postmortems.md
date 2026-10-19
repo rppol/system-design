@@ -23,6 +23,8 @@ are worth reading directly: John Allspaw's 2012 Etsy post "Blameless PostMortems
 Culture," Sidney Dekker's book *Just Culture: Balancing Safety and Accountability*, and the
 "Postmortem Culture" chapter of Google's *Site Reliability Engineering* book.
 
+For detecting, triaging, and rolling back incidents in AI systems, see [AI Incident Response and Reliability](../../mlops/ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

@@ -11,6 +11,8 @@ The central tension in GPU ML workloads is compute-bound vs memory-bound:
 
 Understanding which regime a given operation is in determines the correct optimization strategy. Profiling tools (torch.profiler, NVIDIA Nsight Systems) make this measurement concrete.
 
+Fleet-level GPU metrics, health checks and failure handling are covered in [GPU Observability and Fleet Health](../../mlops/gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md).
+
 ---
 
 ## 2. Intuition

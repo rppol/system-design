@@ -36,7 +36,12 @@ add `technologies/rabbitmq`; Elasticsearch is owned by
 `technologies/pytorch`; OpenTelemetry is owned by
 [`devops/observability_tracing_and_otel/opentelemetry_deep_dive.md`](../devops/observability_tracing_and_otel/opentelemetry_deep_dive.md)
 — a deep-dive SUB-FILE, not a module, because the parent module is already named for it —
-so do not add `technologies/opentelemetry`. This section is for technologies that don't
+so do not add `technologies/opentelemetry`. KServe, llm-d, Kueue, Volcano and KAI Scheduler are owned by
+[`mlops/`](../mlops/README.md) (KServe as
+[`mlops/model_serving_platforms/kserve_deep_dive.md`](../mlops/model_serving_platforms/kserve_deep_dive.md)),
+so do not add `technologies/kserve` or a module for any of the others. Triton and OpenVINO
+predate `mlops/` and stay here as a recorded exception; `mlops/model_serving_platforms`
+links to them. This section is for technologies that don't
 already have a canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 

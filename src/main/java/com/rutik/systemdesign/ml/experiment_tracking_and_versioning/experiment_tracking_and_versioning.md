@@ -15,6 +15,8 @@ The four axes of ML reproducibility:
 
 A fully reproducible experiment is one where, given the git SHA + data ref + hardware type, any engineer can run the exact same training job and get metrics within floating-point variance of the original.
 
+Lineage across every artifact type, from data and code to models, prompts and indexes, is covered in [Artifact Versioning and Lineage](../../mlops/artifact_versioning_and_lineage/artifact_versioning_and_lineage.md).
+
 ---
 
 ## 2. Intuition

@@ -20,6 +20,8 @@ In most real projects the bottleneck is not the model — it is labeled data. Ex
 
 Both fit a broader shift the field calls **data-centric AI**: holding the model fixed and systematically improving the data — its labels, coverage, and quality — is frequently the highest-ROI lever, more so than another architecture tweak. For a senior engineer, knowing how to bootstrap a dataset from 200 labels to a production model is as important as knowing the model itself.
 
+Versioning the label sets and labeling-function outputs these methods produce is covered in [Dataset and Label Versioning](../../mlops/dataset_and_label_versioning/dataset_and_label_versioning.md).
+
 ---
 
 ## 2. Intuition

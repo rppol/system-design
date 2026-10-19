@@ -14,6 +14,8 @@ The reason is structural, not incidental, and it lives in the format. An OCI lay
 
 **Lazy pulling** is the family of techniques that fixes this by making layers seekable — either by choosing a seekable compression format, or by shipping a separate index that says where each file lives inside the blob — so the snapshotter can mount the filesystem immediately and fetch chunks on demand.
 
+Packaging model weights as OCI artifacts is covered in [Model Registry and Packaging](../../mlops/model_registry_and_packaging/model_registry_and_packaging.md).
+
 ---
 
 ## 2. Intuition

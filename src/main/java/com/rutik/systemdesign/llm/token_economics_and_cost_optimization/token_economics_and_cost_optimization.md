@@ -95,6 +95,8 @@ for a smaller one on some fraction of traffic.
 verbosity would become invisible — you could not tell that "explain in detail" is a 4x cost decision.
 Splitting the rate is what makes `max_tokens` a budget lever rather than a quality knob.
 
+For cost attribution and unit economics across the whole AI platform, see [AI Cost Engineering and Unit Economics](../../mlops/ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md).
+
 ---
 
 ## 2. Intuition

@@ -10,6 +10,8 @@
 
 **Key insight**: Almost every vLLM optimization (PagedAttention, continuous batching, prefix caching, chunked prefill, speculative decoding) attacks the same root problem: GPU memory bandwidth is the bottleneck during autoregressive decoding, not compute. Every feature is about keeping data on-chip longer, transferring less, or batching more requests to amortize the transfer cost.
 
+For upgrading, tuning, and benchmarking vLLM in production, see [Inference Engine Operations and Benchmarking](../../mlops/inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md).
+
 ---
 
 ## Table of Contents

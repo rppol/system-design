@@ -21,7 +21,7 @@ const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
-  llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
+  llm: "LLM Engineering", ml: "Machine Learning", mlops: "MLOps & ML Infra", python: "Python", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
   typescript: "TypeScript", frontend_platform: "Frontend Platform", react: "React",
 };
@@ -47,6 +47,7 @@ const SECTION_IDENTITY = {
   spring:          { accent: "#45cfa2", glyph: "S" },     // 160  mint
   fastapi:         { accent: "#3ec5c4", glyph: "F" },     // 182  teal
   backend:         { accent: "#47b2dc", glyph: "≋" },     // 202  cyan
+  mlops:           { accent: "#40c0d8", glyph: "⟳" },     // OKLCH 213
   devops:          { accent: "#5aa4f2", glyph: "∞" },     // 222  sky
   hld:             { accent: "#7b8ff2", glyph: "◇" },     // 244  indigo
   llm:             { accent: "#a67cf2", glyph: "Ψ" },     // 270  violet
@@ -125,6 +126,7 @@ const ACRONYMS = new Map(Object.entries({
   javascript: "JavaScript", devops: "DevOps", github: "GitHub", openai: "OpenAI",
   pytorch: "PyTorch", tensorflow: "TensorFlow", numpy: "NumPy", k8s: "K8s",
   rabbitmq: "RabbitMQ", amqp: "AMQP",
+  ai: "AI", lora: "LoRA", kserve: "KServe",
   opentelemetry: "OpenTelemetry",
 }));
 // Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
@@ -145,7 +147,7 @@ function titleize(s) {
     if (hit) return hit;
     if (at > 0 && TITLE_STOPWORDS.has(lower)) return lower;
     return w.charAt(0).toUpperCase() + w.slice(1);
-  }).replace(/\bTCP IP\b/g, "TCP/IP").replace(/\bCI CD\b/g, "CI/CD");
+  }).replace(/\bTCP IP\b/g, "TCP/IP").replace(/\bCI CD\b/g, "CI/CD").replace(/\bon Device\b/g, "On-Device");
 }
 
 // [SD] A module's own content page, derived from its id. Since 2026-07-30 every module
@@ -403,6 +405,14 @@ const STUDY_ORDER = {
     "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
     "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/meta_learning_and_few_shot","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/privacy_preserving_ml","ml/interpretability_and_explainability","ml/fairness_and_responsible_ai","ml/uncertainty_quantification_and_conformal_prediction",
     "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
+  ],
+  mlops: [
+    "mlops/mlops_foundations_and_the_ai_lifecycle","mlops/artifact_versioning_and_lineage","mlops/dataset_and_label_versioning","mlops/prompt_lifecycle_and_versioning","mlops/model_registry_and_packaging","mlops/rag_and_vector_index_lifecycle","mlops/agent_tool_and_mcp_server_lifecycle",
+    "mlops/ml_pipelines_and_orchestration","mlops/evaluation_gates_and_eval_sets","mlops/continuous_training_and_refresh_policy","mlops/ai_release_engineering",
+    "mlops/deployment_targets_and_serving_patterns","mlops/model_serving_platforms","mlops/inference_engine_operations_and_benchmarking","mlops/distributed_inference_and_disaggregation","mlops/lora_adapter_serving_and_lifecycle","mlops/model_storage_loading_and_cold_start","mlops/inference_autoscaling_and_capacity_planning","mlops/progressive_delivery_for_model_servers","mlops/edge_and_on_device_deployment",
+    "mlops/gpu_cluster_scheduling_and_quotas","mlops/ai_networking_and_storage_fabric","mlops/training_infrastructure_operations","mlops/gpu_observability_and_fleet_health",
+    "mlops/ai_gateway_operations","mlops/decision_models","mlops/production_quality_monitoring_and_drift","mlops/ai_incident_response_and_reliability",
+    "mlops/ai_governance_and_model_risk_operations","mlops/ml_supply_chain_security","mlops/ai_cost_engineering_and_unit_economics","mlops/ml_platform_architecture_and_build_vs_buy",
   ],
   python: [
     "python/data_model_and_objects","python/core_language_idioms","python/the_import_system","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/dataclasses_enums_and_data_modeling","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",

@@ -8,6 +8,8 @@ Similarity search (also called vector search or nearest neighbor search) is the 
 
 Together, embeddings + similarity search power the retrieval component in [RAG systems](../rag_fundamentals/rag_fundamentals.md), semantic deduplication, zero-shot classification, recommendation systems, and more.
 
+For re-embedding and rebuilding a production index when the embedding model changes, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
+
 ---
 
 ## 2. Intuition

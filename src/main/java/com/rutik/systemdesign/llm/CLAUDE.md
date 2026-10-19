@@ -179,6 +179,7 @@ Principal case studies must cross-reference at least 4 of these files via relati
 | `evaluation_and_benchmarks/` | `../../ml/model_evaluation_and_selection/` — calibration, ROC/PR, cross-validation |
 | `deployment_and_mlops/` | `../../devops/ml_platform_and_gpu_infrastructure/` — GPU infra; `../../ml/mlops_and_ci_cd/` |
 | `embeddings_and_similarity_search/` | `../../database/vector_databases/` — pgvector, HNSW at DB level |
+| `deployment_and_mlops/`, `prompt_management_and_promptops/`, `inference_engines/`, `llm_ops_platforms/` | `../../mlops/`: the release lifecycle for prompts, adapters, indexes and MCP servers, serving platforms (KServe, llm-d), engine benchmarking and upgrade qualification, AI gateway operations. This section keeps the technique; `mlops/` links here and does not re-teach it (see `../mlops/CLAUDE.md` "Non-overlap boundary") |
 | `faiss_deep_dive/` | `../../database/vector_databases/` — the operated-product side of the same algorithms; `../../ml/natural_language_processing/text_representation_and_retrieval.md` — a worked `build_faiss_index()` inside a retrieval stack |
 
 ---

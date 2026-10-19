@@ -50,6 +50,8 @@ The operational primitives:
 - **Load balancing** — L4 (transport, IP:port) vs L7 (application, HTTP-aware); health checks decide what's "in rotation".
 - **TLS / mTLS** — encryption and identity; termination point matters for cost, latency, and security.
 
+RDMA fabrics and the storage paths that feed GPU training and inference are covered in [AI Networking and Storage Fabric](../../mlops/ai_networking_and_storage_fabric/ai_networking_and_storage_fabric.md).
+
 ---
 
 ## 2. Intuition

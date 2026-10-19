@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: llm-apps -->
 
-The 249 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 252 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **LLM apps & agents** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -606,6 +606,12 @@ Reach for it for wide, independent investigation and for long jobs whose interme
 It works in explicit plan and act modes, and every file edit and terminal command is surfaced as a diff or a command for approval before it runs, with auto-approval opt-in per action type. You supply your own API key, so any provider works including a local model, and it consumes MCP servers for extra capability.
 
 Reach for it when you want a capable agent inside your editor and would rather pay per token than per seat, or when policy requires seeing every change before it lands. The costs follow from the design: approval per step is safe and slow, and because it re-reads context aggressively, token spend is high and visible. Subscription products bundle inference and hide both.
+
+### Cloudflare AI Gateway
+**Short:** Cloudflare's managed edge proxy for LLM APIs with caching, rate limiting, retries, provider fallback, logging and cost analytics.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/llm-gateway-and-routing @1, traffic-edge/api-gateway @2, caching/semantic-and-llm-cache @3
 
 ### Codeium
 **Short:** AI code completion and chat assistant embedded in the IDE, free for individual use.
@@ -1406,6 +1412,12 @@ Read it when writing a server or client from scratch, or when debugging behaviou
 It connects to a server the way a host would, then exposes the protocol as subcommands: enumerate tools, resources and prompts, call a tool with JSON arguments, read a resource. Because it is scriptable, it slots into a test suite or a deployment check where an interactive UI cannot.
 
 Reach for it to verify a server outside the agent loop, which is the single most useful debugging move -- it separates is the server broken from is the model choosing badly. Its limits are the same as any command-line client: no view of the raw message exchange, and no signal at all about whether tool descriptions are good enough for a model to act on.
+
+### mcp-publisher
+**Short:** CLI from the official MCP Registry project that writes a server.json, authenticates the publisher and publishes an MCP server entry to the registry.
+**Kind:** tech
+**Lang:** go
+**Roles:** llm-apps/tool-use-and-mcp @1
 
 ### mcp-server-fetch
 **Short:** Reference MCP server that fetches a URL and converts the page to Markdown for a model to read.
@@ -2297,6 +2309,12 @@ Reach for it for any TypeScript full-stack chat or agent interface, which is whe
 It is a managed runtime for agents you wrote yourself: package an agent built with any of the common frameworks or plain Python, deploy it, and the platform runs it behind an endpoint with autoscaling, managed sessions, a memory service that extracts and retrieves user facts across sessions, tracing into the cloud's observability stack, and hooks into the evaluation service.
 
 Reach for it when the agent already lives on Google Cloud and sessions, memory and tracing are the parts you would otherwise build. The costs are coupling and fit: identity, networking and quotas are all platform-shaped, and for a simple stateless agent a container on a serverless runtime with your own session store is cheaper and easier to move.
+
+### vLLM Semantic Router
+**Short:** vLLM-project router that picks a model per request from signals such as intent, complexity and safety classifiers, using priority-ordered decisions and plugins.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/llm-gateway-and-routing @1
 
 ### XGrammar
 **Short:** Fast CFG-constrained decoding engine; the default structured-output backend in vLLM, SGLang and TensorRT-LLM.

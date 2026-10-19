@@ -13,6 +13,8 @@ Core topics:
 - **Hyperparameter tuning**: GridSearchCV, RandomizedSearchCV, Bayesian optimization (Optuna)
 - **Statistical model comparison**: determining whether one model is significantly better than another
 
+Turning these evaluations into release gates with versioned eval sets is covered in [Evaluation Gates and Eval Sets](../../mlops/evaluation_gates_and_eval_sets/evaluation_gates_and_eval_sets.md).
+
 ---
 
 ## 2. Intuition

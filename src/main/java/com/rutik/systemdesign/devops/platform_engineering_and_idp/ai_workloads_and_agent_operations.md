@@ -25,6 +25,8 @@ The platform response is not a new category of control. It is **applying existin
 
 **The single load-bearing principle:** an agent gets **its own identity**, never a human's. The moment an agent runs with a person's token, every audit trail becomes a lie, every permission becomes that person's full permission set, and revocation means disabling a human.
 
+Versioning, testing, and release of agent tools and MCP servers are covered in [Agent, Tool and MCP Server Lifecycle](../../mlops/agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md).
+
 ---
 
 ## 2. Intuition

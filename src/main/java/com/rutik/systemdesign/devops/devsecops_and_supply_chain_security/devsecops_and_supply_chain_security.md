@@ -12,6 +12,8 @@ The practical surface area covers four pillars. **Code-level scanning**: SAST (s
 
 This module assumes you already understand pod-level controls (see [`kubernetes_security`](../kubernetes_security/kubernetes_security.md)) and secret storage (see [`secrets_management`](../secrets_management/secrets_management.md)). Here the focus is the pipeline: shift-left scanning, signing with Sigstore keyless flows, the SLSA Build track (L1-L3), and the verification chain that ends at an admission controller.
 
+Signing, provenance, and scanning for model weights, datasets, and ML dependencies are covered in [ML Supply Chain Security](../../mlops/ml_supply_chain_security/ml_supply_chain_security.md).
+
 ---
 
 ## 2. Intuition

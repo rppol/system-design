@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: platform-delivery -->
 
-The 205 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 228 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Deploy & cloud** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -45,6 +45,12 @@ Azure runs and upgrades the Kubernetes control plane — API server, etcd, sched
 
 Reach for it when you are already on Azure and want real Kubernetes rather than a proprietary container service. It removes the control-plane ops, not the need to understand Kubernetes itself.
 
+### AMD GPU Operator
+**Short:** Operator that installs and manages AMD Instinct GPU software on Kubernetes: driver, device plugin, metrics exporter, test runner and DRA driver.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, gpu/gpu-portability-and-precision @3
+
 ### Ansible
 **Short:** Agentless configuration management and orchestration driven by YAML playbooks over SSH.
 **Kind:** tech
@@ -64,6 +70,24 @@ Reach for it for ad hoc fleet operations, configuring machines that already exis
 The component that runs playbooks is the automation controller, sold as Ansible Tower before it was folded into the platform, with AWX as its upstream project. Beyond running playbooks it is the governance layer: credentials are stored encrypted and attached to a job template so an operator can run a play against production without ever seeing the key, surveys turn variables into a form, workflow templates chain job templates with success and failure branches and approval nodes, and every run is recorded per host with its full output.
 
 Reach for it when automation is delegated, whether to a support team running a runbook they did not write or an application team given a self-service action, and when who ran what against which hosts must be auditable. It is a substantial service to operate or a subscription to buy, and it constrains playbooks to its project and inventory model. A small team already running playbooks from a reviewed CI pipeline gets much of the same control for far less.
+
+### Anyscale
+**Short:** Managed Ray platform from Ray's creators that runs Ray clusters, jobs and services in your cloud account or theirs.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/cloud-platform-and-cost @1, data-movement/batch-and-distributed-compute @2
+
+### Apache YuniKorn
+**Short:** Apache batch scheduler for Kubernetes with hierarchical queues, fair sharing and placeholder-based gang scheduling.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, data-movement/task-queue-and-jobs @2
+
+### Apple Background Assets
+**Short:** Apple framework that downloads app content outside the app binary, including Apple-hosted or self-hosted managed asset packs; used to deliver on-device model files.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/ci-cd-and-release @1, inference/model-format-and-edge @2
 
 ### ApplicationSets
 **Short:** Argo CD controller and CRD that templates one Application definition across many clusters, environments or repo paths.
@@ -1051,6 +1075,12 @@ Artifact Registry is the successor to Container Registry and handles more than i
 
 Reach for it for anything running on Google Cloud, where per-repository IAM, regional locality with GKE and Cloud Run, and the Binary Authorization gate are the reasons to prefer it over a generic registry. It is provider-specific, and the remote-repository and scanning features carry charges on top of storage and egress, so a small project publishing public images may be better served by GHCR.
 
+### GrowthBook
+**Short:** Open-source feature flag and experimentation platform that analyzes A/B tests in your own data warehouse with Bayesian or frequentist statistics.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/ci-cd-and-release @1, ml-lifecycle/evaluation-and-benchmarks @2
+
 ### Harbor
 **Short:** Self-hosted OCI registry adding vulnerability scanning, signing policy, RBAC and cross-registry replication.
 **Kind:** tech
@@ -1125,6 +1155,12 @@ Reach for it in an organization with several clouds and a finance function whose
 
 It parses a Terraform plan, matches the resources against cloud price lists, and prints the monthly cost of the change -- previous total, new total, and the diff -- for every resource whose price it can determine. In CI it posts that breakdown as a pull-request comment, so cost review happens where the change is reviewed rather than on a bill six weeks later, and a policy can fail the build when the diff exceeds a threshold. The honest limitation is usage-based pricing: data transfer, S3 requests and Lambda invocations have no cost until you declare expected usage in a usage file, so an estimate is a floor for anything not billed purely by the hour. Reach for it the moment infrastructure changes are made by people who never see the bill.
 
+### Intel Device Plugins Operator
+**Short:** Operator that deploys Intel's Kubernetes device plugins for GPUs and accelerators such as QAT, SGX, DSA and IAA through custom resources.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/kubernetes-and-orchestration @1
+
 ### Jenkins
 **Short:** Self-hosted, plugin-extensible CI/CD server running declarative or scripted pipelines on dynamic agents.
 **Kind:** tech
@@ -1132,6 +1168,12 @@ It parses a Terraform plan, matches the resources against cloud price lists, and
 **Roles:** platform-delivery/ci-cd-and-release @1
 
 A pipeline is code, a `Jenkinsfile` in the repository written declaratively or as scripted Groovy, and the controller schedules its stages onto agents that can be long-lived machines or containers provisioned per build by the Kubernetes plugin. Its reach comes from the plugin ecosystem, where essentially every tool, cloud and protocol has an integration, and from the fact that it runs entirely on infrastructure you own, which is often the deciding factor in regulated or air-gapped environments. That same ecosystem is the liability, since plugins are the main source of security advisories and upgrade breakage and the controller becomes a stateful pet nobody wants to touch. For a new project a hosted YAML-configured CI is usually less work; Jenkins earns its place where self-hosting or an unusual integration is mandatory.
+
+### JobSet
+**Short:** Kubernetes SIG API that runs a group of Jobs as one unit with shared failure and success policies, used for multi-slice and driver-worker training.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, model-training/distributed-training @2
 
 ### k9s
 **Short:** Terminal UI for Kubernetes: browse and edit resources, tail logs and exec into pods far faster than typing kubectl.
@@ -1142,6 +1184,12 @@ A pipeline is code, a `Jenkinsfile` in the repository written declaratively or a
 k9s renders the cluster as a live terminal UI: a resource view refreshes continuously, a colon command jumps to any resource kind, a slash filters, and single keys perform the common operations of logs, describe, edit, port-forward, shell into a container, delete and scale. It reads your kubeconfig and honours context switching, and RBAC constrains it exactly as it constrains `kubectl`, since it is making the same API calls. Plugins bind arbitrary commands to keys, and skins and aliases are configurable.
 
 Reach for it for interactive investigation, where its advantage over `kubectl` is that state updates in front of you instead of requiring another command, whether watching a rollout, following a pod through its restarts, or comparing containers' logs. Keep it out of automation and out of production change management, because it puts destructive actions one keystroke away in whichever context happens to be current; scripts and reviewed manifests should still do the writing.
+
+### KAI Scheduler
+**Short:** NVIDIA's open-source Kubernetes GPU scheduler with hierarchical queues, fractional GPU sharing and gang scheduling; a CNCF Sandbox project and the core of Run:ai.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, data-movement/task-queue-and-jobs @2, gpu/multi-gpu-and-collectives @3
 
 ### Karpenter
 **Short:** Kubernetes node autoscaler that provisions just-in-time, right-sized, Spot-aware instances for pending pods.
@@ -1173,6 +1221,12 @@ KEDA adds a `ScaledObject` that reads an external signal — Kafka consumer lag,
 
 Use it for queue and event workers, where CPU is a poor proxy for demand: a consumer sitting 200k messages behind can look completely idle. Scale-to-zero costs a cold start on the next message, so it fits batch and asynchronous work far better than a latency-sensitive request path.
 
+### KitOps
+**Short:** CNCF tool that packages model weights, datasets, code and config into one OCI artifact, a ModelKit, described by a Kitfile and handled with the kit CLI.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/container-and-image @1, ml-lifecycle/experiment-tracking-and-tuning @2
+
 ### Knative
 **Short:** Kubernetes add-on giving serverless request-driven autoscaling to zero plus an eventing mesh.
 **Kind:** tech
@@ -1192,6 +1246,12 @@ Reach for it when you want Cloud Run-style semantics on your own cluster, on a c
 kopf is a Python framework in which an operator is a module of decorated functions: handlers for a custom resource's create, update and resume events, a field-level handler for a specific path, plus timers and daemons for periodic or long-running work. The framework runs the watch loop, retries a handler that raises with backoff, records progress and errors as status and Kubernetes events, and manages finalizers so deletion handlers actually run.
 
 Reach for it when the operator's logic is glue around Python libraries, such as a cloud SDK, a data tool or a machine-learning stack, and rewriting those in Go would be the bulk of the work. The tradeoffs are performance and idiom: the Python watch client is heavier than an informer-backed Go controller at high object counts, and the event-handler style makes it easy to write logic that assumes an event rather than reconciling from observed state. controller-runtime with Kubebuilder is the mainstream path for anything long-lived.
+
+### Kraken
+**Short:** Uber's open-source peer-to-peer Docker registry that spreads large image layers and blobs across hosts by having nodes seed to each other.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/container-and-image @1, data-stores/object-and-file-storage @3
 
 ### kube-proxy
 **Short:** Kubernetes node agent that programs iptables/IPVS rules so Service virtual IPs load-balance to pod endpoints.
@@ -1293,6 +1353,12 @@ What it buys is that failure recovery and deployment mechanics stop being script
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/ci-cd-and-release @2
 
+### Kubernetes DRA
+**Short:** Kubernetes Dynamic Resource Allocation: pods request devices through ResourceClaims that drivers satisfy from published ResourceSlices, not count-only device plugins.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, gpu/multi-gpu-and-collectives @3
+
 ### Kubernetes grpc probe
 **Short:** Native liveness and readiness probe type calling grpc.health.v1.Health/Check directly, GA since Kubernetes 1.27.
 **Kind:** api
@@ -1353,6 +1419,12 @@ SDKs hold a streaming connection to the flag service, so a change takes effect i
 
 The discipline it demands is flag hygiene. Every live flag is a branch in production, and combinations of stale flags produce states nobody has tested, so removing a flag once its rollout is finished is part of the work, not an optional cleanup.
 
+### LeaderWorkerSet
+**Short:** Kubernetes SIG API that deploys a leader pod and N worker pods as one replica, for multi-node inference with group restart and group rolling updates.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, inference/model-server @2
+
 ### Lens
 **Short:** Desktop IDE for Kubernetes clusters: browse resources, stream logs, exec into pods and view live metrics.
 **Kind:** tech
@@ -1401,6 +1473,12 @@ You write a Python function, decorate it with the container image, GPU type, tim
 
 That pricing shape fits spiky work: a fine-tune that needs an H100 for two hours, a batch inference sweep over a dataset, an endpoint with bursty traffic. It fits steady work badly — once a GPU is busy most of the day, a reserved or committed instance is cheaper than per-second serverless — and cold starts matter, because pulling and loading tens of gigabytes of weights is time your first request pays for unless you keep containers warm.
 
+### Multus
+**Short:** Kubernetes CNI meta-plugin that attaches extra network interfaces to a pod, used to give GPU pods dedicated RDMA NICs.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, runtime-systems/io-networking-and-syscalls @3
+
 ### NCC
 **Short:** Google Cloud Network Connectivity Center - a hub-and-spoke control point for connecting many VPCs and on-prem sites.
 **Kind:** tech
@@ -1437,6 +1515,12 @@ The plugin runs as a DaemonSet on GPU nodes and implements the Kubernetes device
 
 That indivisibility is the thing to plan around. Time-slicing configures the plugin to advertise several replicas of one physical GPU, letting small inference pods share a card at the cost of context switching and no memory isolation between them, while MIG partitions a supported card into hardware-isolated instances advertised as separate resources. It is one component of the node stack alongside the driver, toolkit and monitoring, which is why most clusters install the GPU Operator rather than this alone.
 
+### NVIDIA DRA Driver
+**Short:** Kubernetes DRA driver that publishes NVIDIA GPUs and MIG devices as ResourceSlice objects for claim-based allocation; maintained under kubernetes-sigs.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, gpu/multi-gpu-and-collectives @3
+
 ### NVIDIA GPU Operator
 **Short:** Kubernetes operator installing the whole GPU node stack: driver, container toolkit, device plugin, DCGM, MIG.
 **Kind:** tech
@@ -1446,6 +1530,24 @@ That indivisibility is the thing to plan around. Time-slicing configures the plu
 The operator installs and manages every layer a GPU node needs, so nodes can start as plain machines: a driver container that builds or loads the kernel modules, the container toolkit so the runtime can inject devices and libraries, the device plugin that advertises the GPU resource, DCGM and its exporter for per-GPU metrics, node feature discovery to label hardware, a MIG manager, and a validator that gates node readiness until the whole stack works. A single cluster policy custom resource configures the set.
 
 Reach for it on any cluster with GPU nodes, because keeping driver, toolkit and CUDA versions consistent across a fleet by baking images is the alternative and it does not scale. The costs are that a driver upgrade becomes a node-draining rolling operation, that failures are opaque when a kernel version and driver disagree, and that its preference for managing the driver itself conflicts with distributions or clouds shipping drivers in the node image, in which case you disable that component and let it manage the rest.
+
+### NVIDIA MIG Manager
+**Short:** GPU Operator component that applies a MIG partition layout to a node's GPUs from a node label and reports progress in a state label.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, gpu/multi-gpu-and-collectives @2
+
+### NVIDIA Network Operator
+**Short:** NVIDIA operator that installs NIC drivers, RDMA device plugins and secondary pod networking on Kubernetes through one NicClusterPolicy resource.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, gpu/multi-gpu-and-collectives @2
+
+### NVIDIA Run:ai
+**Short:** NVIDIA's commercial GPU orchestration platform on Kubernetes with projects, departments, quotas and utilization reporting, built on KAI Scheduler.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
 
 ### OCI registries
 **Short:** Registries speaking the OCI distribution spec, storing container images and increasingly Helm charts and artifacts.
@@ -1547,6 +1649,12 @@ OperatorHub.io is a community catalogue where each entry is an operator packaged
 
 Use it to find whether a maintained operator already exists for something you were about to run by hand, and read the capability level before believing it will handle day-two operations. Two caveats: a listing is not vetting, so check who publishes an entry and how recently it was updated, and an operator asks for substantial cluster permissions, frequently cluster-wide, which deserves review before installation. Artifact Hub indexes the same bundles alongside Helm charts and other package types.
 
+### oras
+**Short:** CNCF CLI and library that pushes, pulls and copies arbitrary artifacts to OCI registries, including referrers such as signatures and SBOMs.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/container-and-image @1
+
 ### Organizations Tag Policy
 **Short:** AWS Organizations policy standardizing resource tag keys and values so cost attribution can be enforced.
 **Kind:** tech
@@ -1566,6 +1674,12 @@ Reach for it because tag-based cost allocation dies of case sensitivity, where t
 Packer builds machine images from a declarative HCL template with three parts: a source describing the base image and where to build, whether an instance for an AMI, a VM for an OVA or a container; provisioners that run shell scripts, Ansible, Chef or Puppet against the booted machine; and post-processors that tag, upload or convert the result. It launches a temporary instance, provisions it, snapshots it and tears the instance down, and one template can produce the equivalent image for several platforms in parallel.
 
 Reach for it to move configuration work from boot time to build time, since an image with the agent, hardening and runtime already baked in boots in seconds and is identical everywhere, which is what makes autoscaling and immutable infrastructure work. The costs are a build pipeline of its own, image sprawl and the cleanup policy nobody writes, and a slower feedback loop than editing a file on a running host. For containers a Dockerfile does the same job, and Packer is only relevant for VM images.
+
+### Play Asset Delivery
+**Short:** Google Play feature that ships large app assets as packs delivered at install time, as fast-follow or on demand; used to deliver on-device model files.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/ci-cd-and-release @1, inference/model-format-and-edge @2
 
 ### Podman
 **Short:** Daemonless, rootless OCI container engine and image builder with a Docker-compatible CLI.
@@ -1749,6 +1863,24 @@ The build command starts the original image, exercises it through its own probes
 
 Reach for it when you cannot rebuild an image properly, such as a vendor image or a legacy application whose dependencies nobody can enumerate. The risk is inherent in the method: anything exercised only on a code path the probe never hit is deleted, so a rarely used feature fails in production with a missing-file error long after the build. Test the slimmed image against a real suite, and prefer a multi-stage build onto a distroless base whenever you control the Dockerfile.
 
+### Slinky
+**Short:** SchedMD project that integrates Slurm with Kubernetes; its slurm-operator runs Slurm clusters as Kubernetes resources.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, model-training/distributed-training @3
+
+### Slinky slurm-operator
+**Short:** Kubernetes operator from the Slinky project that runs Slurm daemons as Kubernetes workloads, with NodeSet resources managing the slurmd pods.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, model-training/distributed-training @3
+
+### Slurm
+**Short:** SchedMD's open-source HPC workload manager that queues and allocates jobs across cluster nodes with fairshare, QOS, backfill and preemption.
+**Kind:** tech
+**Lang:** *
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, model-training/distributed-training @2
+
 ### SnapStart
 **Short:** AWS Lambda feature snapshotting an initialized environment and restoring it, removing cold-start init.
 **Kind:** tech
@@ -1788,6 +1920,12 @@ Reach for it for anything interruptible and replaceable, such as stateless capac
 A Spot Fleet request asks for a target capacity, expressed in instances or in vCPU or memory units, together with a set of launch specifications describing acceptable instance types, sizes and subnets, and the fleet then chooses where to place capacity according to an allocation strategy. That strategy is the decision that matters, because capacity-optimized strategies pick pools with the deepest spare capacity and lower the interruption rate far more than chasing the lowest price does. A fleet can mix Spot and On-Demand so a baseline stays guaranteed, and it replaces interrupted instances automatically.
 
 Reach for it for large interruptible fleets such as batch, rendering or CI runners, where diversification across pools is the whole point. Note that AWS now steers most use cases toward EC2 Fleet and toward Auto Scaling groups with a mixed-instances policy, which subsume the same capability with better integration, and that on Kubernetes Karpenter makes the equivalent decisions directly from pending pods.
+
+### SR-IOV Network Device Plugin
+**Short:** Kubernetes device plugin that advertises a NIC's SR-IOV virtual functions as allocatable resources, so each pod gets its own VF.
+**Kind:** tech
+**Lang:** go
+**Roles:** platform-delivery/kubernetes-and-orchestration @1, runtime-systems/io-networking-and-syscalls @3
 
 ### stakater/Reloader
 **Short:** Kubernetes controller that triggers a rolling restart when a mounted ConfigMap or Secret changes.

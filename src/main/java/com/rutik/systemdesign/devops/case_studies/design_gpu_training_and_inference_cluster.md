@@ -24,6 +24,8 @@ Three facts shape every answer:
 2. **Capacity is not elastic.** You cannot autoscale into a GPU family that has no capacity in your region. Capacity Blocks and long-term commitments exist because the on-demand pool for current-generation accelerators is not something you can rely on at 3am.
 3. **Idle GPU time is the entire cost story.** A cluster at 30% utilisation costs the same as one at 90% and delivers a third as much. Every design decision here is ultimately about the denominator.
 
+Per-team GPU quotas, queues, and gang scheduling are covered in [GPU Cluster Scheduling and Quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
+
 ---
 
 ## 1. Requirements Clarification

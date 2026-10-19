@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: caching -->
 
-The 61 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 62 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Caching** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -302,6 +302,12 @@ That is the whole proposition, and it is a good one when the workload really is 
 Decorating a method with `functools.lru_cache` puts `self` in the cache key, so the cache is shared across all instances and holds a strong reference to every object it has ever seen: the instance can never be collected and a long-lived process leaks. `methodtools.lru_cache` gives each instance its own cache, stored on the instance and referenced weakly, so entries die when the object does. It works on properties and classmethods too.
 
 Reach for it when memoizing per-instance computed state on objects that come and go -- request-scoped services, model wrappers, parsed configuration. The plain alternatives are `functools.cached_property`, which caches one value with no bound and no TTL, or an explicit dict on the instance, which is a few lines and makes the lifetime obvious. Choose the library when you want LRU bounds and decorator syntax without writing that plumbing.
+
+### Mooncake
+**Short:** Moonshot AI's KV-cache-centric serving stack for Kimi: a Transfer Engine for RDMA tensor moves and a distributed KV-cache store used by vLLM and SGLang.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** caching/semantic-and-llm-cache @1, inference/inference-engine @2, gpu/multi-gpu-and-collectives @3
 
 ### OpenAI Prompt Caching
 **Short:** OpenAI's automatic reuse of a repeated prompt prefix across requests, cutting input token cost and time to first token.

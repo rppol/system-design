@@ -7,6 +7,8 @@ MCP security is the discipline of preventing malicious behavior in a system wher
 
 The 2025 spec revisions added significant security improvements: an authorization framework for HTTP transports based on the **OAuth 2.1 IETF draft** with **mandatory PKCE** (RFC 7636, `S256` method), authorization-server discovery via **OAuth 2.0 Protected Resource Metadata (RFC 9728)**, mandatory **Resource Indicators (RFC 8707)** so a token is audience-bound to one MCP server, an explicit ban on token passthrough, and a dedicated Security Best Practices page. Note that authorization is OPTIONAL in MCP and applies to HTTP transports only — stdio servers are told to take credentials from the environment instead. This deep-dive covers the major threat classes (tool description injection, prompt shadowing, confused deputy, token theft) and mitigations (server allowlisting, content sandboxing, scope-limited tokens, OAuth flows). For the broader LLM attack surface beyond MCP, see [LLM Security](../llm_security/llm_security.md).
 
+For provenance, signing, and admission of MCP servers as part of the ML supply chain, see [ML Supply Chain Security](../../mlops/ml_supply_chain_security/ml_supply_chain_security.md).
+
 ---
 
 ## 2. Intuition

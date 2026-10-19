@@ -8,6 +8,8 @@ The intuition: instead of asking an LLM to "remember" an answer from training (w
 
 RAG is now the dominant architecture for enterprise LLM applications: customer support, internal knowledge bases, documentation Q&A, research assistants. It enables LLMs to answer questions accurately over millions of private documents without expensive fine-tuning.
 
+For running a RAG index in production (versioning, rebuilds, and rollback), see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
+
 ---
 
 ## 2. Intuition

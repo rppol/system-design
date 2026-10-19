@@ -28,6 +28,8 @@ The 6-step ML design interview framework provides a structured approach to scopi
 5. Serving and inference architecture — online/offline inference, latency budget
 6. Monitoring and iteration — data drift, model degradation, retraining triggers
 
+The lifecycle that runs the system after launch, versioning, release, serving and monitoring, is covered in [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
+
 ---
 
 ## 2. Intuition

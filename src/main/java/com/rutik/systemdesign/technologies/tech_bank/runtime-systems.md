@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: runtime-systems -->
 
-The 454 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 455 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Runtime & OS** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -2225,6 +2225,12 @@ variables are integer only, so continuous quantities must be scaled.
 Before this change, a `StopIteration` raised anywhere inside a generator body was indistinguishable from the generator returning normally, including one that escaped from a nested `next` call. The consuming loop simply stopped, quietly and successfully, so a bug deep inside a pipeline truncated the data with no error anywhere. The rule makes the machinery catch such an exception and re-raise it as a `RuntimeError` chained to the original.
 
 It arrived behind a future import in Python 3.5 and became unconditional in 3.7, and the same reasoning was applied to asynchronous generators. The practical consequence is that a bare `next(iterator)` inside a generator must be given a default or have its exception caught explicitly. That migration was mildly annoying and removed an entire class of incident where a consumer silently received a short result.
+
+### perftest
+**Short:** linux-rdma suite of RDMA micro-benchmarks, such as ib_write_bw and ib_read_lat, for measuring InfiniBand and RoCE bandwidth and latency.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/io-networking-and-syscalls @1, gpu/multi-gpu-and-collectives @2
 
 ### pgrep
 **Short:** Linux CLI that finds process IDs by name, user or other attributes for scripting and quick lookups.

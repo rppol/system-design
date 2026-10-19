@@ -21,6 +21,8 @@ The error budget is the keystone: it turns "how reliable should we be?" from an 
 
 Other SRE pillars: **eliminating toil through automation**, **blameless postmortems** (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)), **capacity planning** based on demand forecasts and headroom, **release engineering** (canaries, progressive rollout), and **monitoring on the four golden signals** (latency, traffic, errors, saturation).
 
+SLOs and reliability practice for AI systems are covered in [AI Incident Response and Reliability](../../mlops/ai_incident_response_and_reliability/ai_incident_response_and_reliability.md).
+
 ---
 
 ## 2. Intuition

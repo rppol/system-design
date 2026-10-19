@@ -14,6 +14,8 @@ LLMOps platforms provide the operational infrastructure needed to develop, evalu
 
 The three categories form a feedback loop: experiment tracking informs what to train, evaluation determines what is safe to deploy, and observability reveals what is actually happening in production — feeding new failure cases back into evaluation datasets.
 
+For the lifecycle these platforms support, from data to retirement, see [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
+
 ---
 
 ## 2. Intuition

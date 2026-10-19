@@ -20,6 +20,8 @@ Uncertainty quantification (UQ) provides that measure. Two ideas anchor the modu
 
 The senior takeaway: softmax probabilities are not uncertainty; deep networks are overconfident by default; and conformal prediction is the cheapest way to attach a real, distribution-free guarantee to a model you already have.
 
+Serving a model that returns a label with a probability distribution over the allowed answers is covered in [Decision Models](../../mlops/decision_models/decision_models.md).
+
 ---
 
 ## 2. Intuition

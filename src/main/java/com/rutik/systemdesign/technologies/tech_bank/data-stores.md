@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-stores -->
 
-The 120 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 125 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Databases** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -49,6 +49,12 @@ botocore builds and signs AWS requests and parses responses, but sends them over
 
 Reach for it when an asyncio service makes many AWS calls — S3 uploads, SQS polling, DynamoDB reads — and pushing them onto a thread pool has become the bottleneck. The cost is coupling: it pins to particular botocore versions and can lag new SDK releases, so upgrades are less free than with boto3. For a handful of calls, running boto3 in an executor is simpler and perfectly adequate.
 
+### Amazon FSx for Lustre
+**Short:** AWS managed Lustre parallel file system with throughput provisioned per TiB, often linked to S3 and used for training data and checkpoints.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @3
+
 ### Amazon Neptune
 **Short:** AWS managed property-graph and RDF database queried with Gremlin, openCypher or SPARQL.
 **Kind:** tech
@@ -58,6 +64,12 @@ Reach for it when an asyncio service makes many AWS calls — S3 uploads, SQS po
 Neptune is AWS's managed graph database. One cluster stores both a property graph, queried with Gremlin or openCypher, and RDF triples queried with SPARQL, on a shared storage layer replicated across availability zones with a single writer and read replicas you can add for query throughput.
 
 Reach for it when the questions are about relationships several hops deep — fraud rings, identity resolution, entitlement chains, recommendation neighbourhoods, knowledge graphs backing retrieval — where the equivalent SQL is a stack of self-joins that degrades with each hop. Pick one model and language per graph up front, since they are not interchangeable, and note there is no self-hosted Neptune, so this is an AWS commitment.
+
+### Amazon S3 Express One Zone
+**Short:** Single-Availability-Zone S3 storage class that uses directory buckets for single-digit-millisecond access and high request rates.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @3
 
 ### Apache AGE
 **Short:** PostgreSQL extension adding property-graph storage and openCypher queries alongside normal relational tables.
@@ -234,6 +246,12 @@ The tradeoffs are all on the write side: inserts want to arrive in large batches
 Google's managed instances of MySQL, PostgreSQL and SQL Server: you choose a machine type and disk, and the service handles patching, backups, point-in-time recovery from the transaction log, read replicas and optional high availability with a synchronous standby in a second zone. Connections normally go through the Auth Proxy or a connector library, which handles IAM authentication and TLS so the instance needs no public address.
 
 Reach for it when a Google Cloud workload wants a standard engine without operating it, and note the ceiling: it is one primary instance, so scale-out means read replicas or application-level sharding, not the storage-layer trick Aurora plays. AlloyDB is Google's higher tier for PostgreSQL, and Spanner is the differently shaped option when a single writer genuinely is not enough.
+
+### Cloud Storage FUSE
+**Short:** Google's FUSE adapter that mounts a Cloud Storage bucket as a file system, with file, stat and list caches; it is not POSIX compliant.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1
 
 ### CockroachDB
 **Short:** Postgres-compatible distributed SQL database giving serializable ACID across geo-replicated Raft ranges.
@@ -1098,6 +1116,12 @@ It is the fork's copy of the familiar command-line client, so the interface is t
 
 Because the protocol is unchanged, the Redis client works against a Valkey server and vice versa, so the choice is mostly about which package your image already has. The same discipline applies as always: `MONITOR` streams every command the server executes and costs real throughput, and any command that touches many keys stalls every other client, because the command loop still runs them one at a time.
 
+### VAST Data
+**Short:** All-flash shared storage platform that serves the same data over NFS, SMB and S3, used for AI datasets and checkpoints.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1
+
 ### Voldemort
 **Short:** LinkedIn's Dynamo-style distributed key-value store: masterless, eventually consistent, tunable quorum reads and writes.
 **Kind:** tech
@@ -1133,6 +1157,12 @@ Reach for it when queries mix exact terms — a product code, a person's name, a
 **Kind:** api
 **Lang:** *
 **Roles:** data-stores/vector-store @1, applied-ml/vision-speech-and-multimodal @2, search-retrieval/rag-and-document-processing @3
+
+### WEKA
+**Short:** Parallel file system on NVMe flash for shared datasets and checkpoints, with POSIX, NFS, SMB and S3 access.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1
 
 ### WiredTiger
 **Short:** MongoDB's default storage engine: B+tree (optionally LSM) pages with document-level concurrency and compression.

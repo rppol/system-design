@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: devtools -->
 
-The 300 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 303 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Build & test tooling** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -72,6 +72,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 It patches the request method inside `aiohttp.ClientSession`, so a URL you registered returns a canned status, headers and body without a socket ever opening. Registrations match on method plus an exact URL or a regex, several responses can be queued for the same URL so a retry loop sees a failure then a success, and every intercepted call is recorded for assertions on what was actually sent.
 
 Use it for unit tests of code that calls an aiohttp client directly. Because the patch sits below your session configuration, it never exercises timeouts, connector limits or the DNS path, so keep at least one test against a real local server. On httpx, `respx` is the direct equivalent.
+
+### AIPerf
+**Short:** NVIDIA load generator for generative AI endpoints, successor to GenAI-Perf, that measures latency, throughput and goodput against SLO thresholds.
+**Kind:** tech
+**Lang:** python
+**Roles:** devtools/testing-and-mocking @1, inference/model-server @2, observability/profiling-and-performance @3
 
 ### ansible-lint
 **Short:** Linter for Ansible playbooks and roles catching non-idempotent tasks and config-management anti-patterns.
@@ -928,6 +934,12 @@ An agent on each host or as a Kubernetes DaemonSet executes attacks selected fro
 
 Scenarios chain attacks with escalating magnitude and check a health signal between steps, and results are recorded for audit. Reach for it when chaos engineering has to be a governed practice across many teams. It is commercial and agent-based; Chaos Toolkit or LitmusChaos cover the same ground for free if you can operate them yourself.
 
+### GuideLLM
+**Short:** vLLM-project load generator that benchmarks OpenAI-compatible LLM servers across rate profiles and reports TTFT, inter-token latency and throughput.
+**Kind:** tech
+**Lang:** python
+**Roles:** devtools/testing-and-mocking @1, inference/model-server @2, observability/profiling-and-performance @3
+
 ### hatch
 **Short:** Modern Python project manager: PEP 517 builds, environment management, scripts and publishing from pyproject.toml.
 **Kind:** tech
@@ -1484,6 +1496,12 @@ The consequence of the CRD shape is that a chaos experiment is a manifest under 
 `llc` is where LLVM IR becomes machine code: it reads a textual `.ll` or bitcode `.bc` file, runs the target-independent and target-specific codegen pipeline — instruction selection, register allocation, scheduling — and emits assembly or an object file for the triple you name with `-march` and `-mcpu`. Optimization level is `-O0` through `-O3`, separate from whatever the front end already applied.
 
 You rarely see it in a normal build, because `clang` drives the whole pipeline. It matters when you are inspecting or debugging codegen: `-print-after-all` shows the IR after each pass, and comparing `llc` output across `-mcpu` values is the direct way to check whether a loop actually vectorized. Pair it with `opt`, which runs the middle-end passes.
+
+### LLMPerf
+**Short:** Ray-project tool that load-tests LLM APIs and reports TTFT, inter-token latency and throughput; the repository is archived.
+**Kind:** tech
+**Lang:** python
+**Roles:** devtools/testing-and-mocking @1, observability/profiling-and-performance @3
 
 ### LLVM opt
 **Short:** LLVM's IR tool: run individual optimization passes over .ll/.bc and inspect what each transformation does.

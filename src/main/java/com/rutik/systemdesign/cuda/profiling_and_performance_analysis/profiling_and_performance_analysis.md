@@ -24,6 +24,8 @@ file [`nsight_profiling_workflow.md`](../case_studies/cross_cutting/nsight_profi
 is the reusable worked-example version of this same loop that every case study in this
 section cites instead of re-deriving it.
 
+For fleet-wide GPU telemetry, health checks, and failure handling beyond a single profiling session, see [GPU Observability and Fleet Health](../../mlops/gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

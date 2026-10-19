@@ -13,6 +13,8 @@ Key responsibilities of a serving system:
 - Return predictions with acceptable latency (P99 under SLA)
 - Expose health, readiness, and metrics endpoints
 
+Choosing a deployment target and serving pattern for a model is covered in [Deployment Targets and Serving Patterns](../../mlops/deployment_targets_and_serving_patterns/deployment_targets_and_serving_patterns.md).
+
 ---
 
 ## 2. Intuition

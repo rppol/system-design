@@ -8,6 +8,8 @@ Advanced RAG encompasses techniques that go beyond the basic pipeline: query tra
 
 These techniques push RAG from a simple lookup system to a reasoning system that can answer complex questions that require synthesis, comparison, and multi-step inference.
 
+For versioning, rebuilding, and rolling out the vector index behind these techniques, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
+
 ---
 
 ## 2. Intuition

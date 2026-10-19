@@ -17,6 +17,8 @@ without a management layer is now considered an engineering anti-pattern.
 causes parsing failures downstream, or switching model targets are changes that need tracked,
 tested, and reversible deployment — not ad-hoc edits in a config file.
 
+For how prompt versions move through the same release and rollback steps as other AI artifacts, see [Prompt Lifecycle and Versioning](../../mlops/prompt_lifecycle_and_versioning/prompt_lifecycle_and_versioning.md).
+
 ---
 
 ## 2. Intuition

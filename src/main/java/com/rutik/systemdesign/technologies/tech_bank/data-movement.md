@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 152 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 156 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -667,6 +667,12 @@ The workflow engine executes BPMN 2.0 process definitions - and CMMN cases and D
 
 Reach for it for long-running, human-in-the-loop or approval-shaped processes; it is the wrong tool for high-throughput stateless message processing, where every step costs database writes. Note the name collision: in RxJava, `Flowable` is the backpressure-aware stream type, the counterpart of `Observable` that lets a slow consumer signal demand upstream.
 
+### Flyte
+**Short:** Kubernetes-native workflow orchestrator created at Lyft, with strongly typed Python tasks, versioned registration, caching and map tasks.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-movement/workflow-and-durable-execution @1, ml-lifecycle/ml-platform-and-pipelines @2
+
 ### Google Cloud Composer
 **Short:** Google Cloud's managed Apache Airflow: hosted scheduler, workers and web UI for DAG orchestration.
 **Kind:** tech
@@ -816,6 +822,12 @@ It fits naturally over a change stream, where the usual job is joining a change-
 Data is organized as append-only streams, usually one per aggregate, and an append carries an expected version so two concurrent writers cannot both succeed -- that check is the concurrency control an event-sourced aggregate needs. Everything also lands in a global ordered stream, and catch-up subscriptions read from a stored position and then follow live, which is how projections are built and rebuilt after a change. Persistent subscriptions add competing consumers with per-event acknowledgement and a parked-message queue.
 
 Reach for it when the event log is the source of truth and you want stream-level concurrency, subscriptions and retention policy as database features rather than as code over a relational table plus a broker. The costs are another stateful system to operate and queries that must go through projected read models. Postgres with an events table and an outbox is the pragmatic alternative when event sourcing is only one part of the system.
+
+### lakeFS
+**Short:** Treeverse's version-control layer over object storage with Git-like branches, commits, merges and hooks, exposed through an S3-compatible gateway.
+**Kind:** tech
+**Lang:** go
+**Roles:** data-movement/data-quality-and-lineage @1, data-stores/object-and-file-storage @2
 
 ### Marquez
 **Short:** Open-source metadata and lineage server, the reference implementation of the vendor-neutral OpenLineage standard.
@@ -1058,6 +1070,18 @@ It replaces the v1 Python script, whose download endpoint was removed in 4.3, so
 Two primitives carry most of the weight: `@ray.remote` on a function gives a stateless task scheduled anywhere in the cluster, and on a class gives a long-lived stateful actor with its own process. A distributed object store moves large objects by reference with zero-copy reads inside a node, so passing a big array between tasks does not mean serializing it repeatedly. The libraries - Train, Tune, Serve, Data - are all built on those primitives.
 
 Reach for it when Python work must span machines, or when the unit of work is a stateful worker that `multiprocessing` cannot express - which is also why it ends up as the placement and coordination layer under multi-node vLLM and Ray-based RLHF trainers. The costs are a cluster to operate and an object store whose memory pressure and disk spilling are the usual first production surprise.
+
+### Ray Data
+**Short:** Ray library for streaming distributed data processing and batch inference, running map stages over actor pools on CPUs and GPUs.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-movement/batch-and-distributed-compute @1, inference/model-server @3
+
+### Ray Data LLM
+**Short:** Ray Data module, ray.data.llm, that runs batch LLM inference by streaming a dataset through vLLM or SGLang engine actors built with build_processor.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-movement/batch-and-distributed-compute @1, inference/inference-engine @2
 
 ### React UI
 **Short:** Airflow 3.0's rewritten React front end: the DAG, task and asset browsing UI replacing the legacy Flask pages.

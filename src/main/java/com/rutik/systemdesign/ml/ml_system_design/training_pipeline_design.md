@@ -7,6 +7,8 @@ A complete training pipeline includes: data validation, data versioning, feature
 
 The pipeline must be idempotent (re-running produces the same output given the same inputs), reproducible (any historical run can be replayed), and observable (every run produces logs and metrics that can be inspected post-hoc).
 
+Orchestrators and the operation of these pipelines in production are covered in [ML Pipelines and Orchestration](../../mlops/ml_pipelines_and_orchestration/ml_pipelines_and_orchestration.md).
+
 ---
 
 ## 2. Intuition

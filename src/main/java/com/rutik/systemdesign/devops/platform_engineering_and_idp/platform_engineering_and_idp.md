@@ -14,6 +14,8 @@ The reference open-source backbone is **Backstage** (created at Spotify, donated
 
 Platform success is measured with **DORA metrics** (deployment frequency, change lead time, change fail rate, failed deployment recovery time) and organized via **Team Topologies** (stream-aligned, platform, enabling, and complicated-subsystem teams). This module cross-references [`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md) (the delivery mechanism behind golden paths) and [`infrastructure_as_code_terraform`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (the alternative provisioning model to Crossplane).
 
+The architecture of an ML platform and the build-or-buy choice are covered in [ML Platform Architecture and Build vs Buy](../../mlops/ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).
+
 ---
 
 ## 2. Intuition

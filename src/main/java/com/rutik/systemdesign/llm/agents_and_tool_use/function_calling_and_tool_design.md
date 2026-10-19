@@ -5,6 +5,8 @@ Function calling (also called tool use) is the mechanism by which LLMs communica
 
 Every major provider implements this differently in detail, but the underlying protocol is the same: tool spec in, structured call out, result injection in, final answer out.
 
+For versioning, releasing, and retiring tools and MCP servers after they are designed, see [Agent, Tool and MCP Server Lifecycle](../../mlops/agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md).
+
 ---
 
 ## 2. Intuition

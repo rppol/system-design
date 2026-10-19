@@ -8,6 +8,8 @@ Drift detection is the specific practice of statistically comparing current prod
 
 Without monitoring, a model can silently underperform for weeks before a downstream business metric (revenue, churn, fraud loss) reveals the problem — at which point the damage is already done.
 
+Retraining triggers and refresh schedules are covered in [Continuous Training and Refresh Policy](../../mlops/continuous_training_and_refresh_policy/continuous_training_and_refresh_policy.md), and quality monitoring for generative systems in [Production Quality Monitoring and Drift](../../mlops/production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md).
+
 ---
 
 ## 2. Intuition

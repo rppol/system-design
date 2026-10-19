@@ -13,6 +13,8 @@ Modern large model training combines all three: data parallelism across nodes, t
 
 The primary communication primitive underlying distributed training is **AllReduce**: every GPU sends its gradient tensor, the reduce operation (sum) is applied across all GPUs, and every GPU receives the result. NCCL (NVIDIA Collective Communications Library) implements AllReduce efficiently over NVLink and InfiniBand.
 
+Running the clusters behind these jobs (checkpoint storage, failure recovery, node health and goodput) is covered in [Training Infrastructure Operations](../../mlops/training_infrastructure_operations/training_infrastructure_operations.md).
+
 ---
 
 ## 2. Intuition

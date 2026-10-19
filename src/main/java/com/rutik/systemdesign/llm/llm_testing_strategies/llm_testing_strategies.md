@@ -10,6 +10,8 @@ LLM testing requires a different philosophy: instead of verifying exact outputs,
 
 **Why LLM testing matters in production**: LLM applications degrade silently. A model upgrade, prompt change, or context shift can reduce answer quality without any exception being raised. Without a testing and evaluation pipeline, teams discover quality regressions only through user complaints — often weeks after the regression was introduced. Systematic evaluation catches regressions before they reach users.
 
+For wiring these tests into release gates, see [Evaluation Gates and Eval Sets](../../mlops/evaluation_gates_and_eval_sets/evaluation_gates_and_eval_sets.md).
+
 ---
 
 ## 2. Intuition

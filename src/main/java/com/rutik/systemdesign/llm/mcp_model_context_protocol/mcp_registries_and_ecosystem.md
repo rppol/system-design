@@ -7,6 +7,8 @@ The MCP ecosystem has grown from a handful of reference servers (filesystem, git
 
 For developers building agent systems, the ecosystem question is two-sided: which existing servers to use (saves you from writing wrappers around every API), and how to publish your own server (so others can use it — see [MCP Server Building](mcp_server_building.md)). Understanding the registry landscape and conventions is key to both.
 
+For versioning, releasing, and retiring MCP servers in production, see [Agent, Tool and MCP Server Lifecycle](../../mlops/agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md).
+
 ---
 
 ## 2. Intuition

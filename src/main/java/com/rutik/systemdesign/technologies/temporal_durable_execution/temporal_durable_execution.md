@@ -68,6 +68,8 @@ And the name confusion that is *not* a homonym: **Cadence**. Temporal is a 2019 
 
 Server, all SDKs, the CLI and the Web UI are **MIT**. There has been no relicensing event, no BSL, no SSPL — a genuine differentiator in 2026's infrastructure market, and worth stating in an adoption review because it means self-hosting forever is a supported path, not a loophole. **Temporal Cloud** is the vendor's commercial hosted offering built on the same open-source server (§6.20); it is how the company makes money, and the reason the open-source project is not crippled.
 
+For how Temporal compares with ML-specific pipeline orchestrators for training and evaluation workflows, see [ML Pipelines and Orchestration](../../mlops/ml_pipelines_and_orchestration/ml_pipelines_and_orchestration.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

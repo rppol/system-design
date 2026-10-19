@@ -42,6 +42,8 @@ area of the repo and the material is deliberately split:
 Everything below assumes you have read the streaming file's §6.6, because this module's job is to
 take that one well-behaved endpoint and make a fleet of them survivable.
 
+For choosing the deployment target and serving pattern that sits behind these endpoints, see [Deployment Targets and Serving Patterns](../../mlops/deployment_targets_and_serving_patterns/deployment_targets_and_serving_patterns.md) in `mlops/`.
+
 ---
 
 ## 2. Intuition

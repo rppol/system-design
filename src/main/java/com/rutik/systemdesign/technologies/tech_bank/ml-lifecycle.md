@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: ml-lifecycle -->
 
-The 177 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 184 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **MLOps & evaluation** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1175,6 +1175,12 @@ Every model, dataset and Space is a Git repository with large files in LFS, whic
 
 It is where LoRA adapters, fine-tuned checkpoints and evaluation datasets are published and versioned, and the safetensors format is preferred there because it loads without executing pickled Python. In production, pin a revision and mirror the artifacts into your own storage: a container that downloads weights from the public internet at startup has made someone else's availability your availability.
 
+### huggingface_hub
+**Short:** Python client for the Hugging Face Hub that downloads and uploads models and datasets, with snapshot_download pinned to a commit revision.
+**Kind:** tech
+**Lang:** python
+**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, inference/model-format-and-edge @3
+
 ### HumanEval
 **Short:** Benchmark of 164 hand-written Python programming problems with unit tests; the classic code-generation metric.
 **Kind:** dataset
@@ -1267,6 +1273,12 @@ no volume of extra data rescues a taxonomy two careful raters read differently. 
 Kubeflow is a family of Kubernetes operators rather than one product. Pipelines compiles a Python-defined DAG into a workflow whose steps run as pods; the Training Operator turns a distributed PyTorch or TensorFlow job into a single custom resource that creates the worker pods and handles their rendezvous; Katib runs hyperparameter searches as jobs; notebooks are provisioned per user. Because everything is a custom resource, ML workloads schedule through the same quotas, node selectors and GPU allocation as the rest of the cluster.
 
 Adopt it when you already operate Kubernetes and want ML work to live there too. If you do not, the operational surface is large and a managed platform will cost less of your time than running this one.
+
+### Kubeflow Hub
+**Short:** Kubeflow's self-hosted model registry, formerly Kubeflow Model Registry, with catalogs for models, MCP servers and agents.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, llm-apps/tool-use-and-mcp @3
 
 ### Kubeflow Pipelines
 **Short:** Kubernetes-native ML pipeline orchestrator: containerized DAG steps for training and batch inference.
@@ -1445,6 +1457,12 @@ preparation pipeline before the first experiment.
 You write a flow as a Python class whose steps are methods; anything you assign to `self` becomes a versioned artifact, so every run is inspectable afterwards and a failed run can be resumed from the step that broke instead of from the top. Decorators move a single step onto a bigger machine, a container image or a Kubernetes or Batch backend without changing the code.
 
 Reach for it when data scientists need reproducible, scalable pipelines without learning the infrastructure underneath. It is a framework for data and ML workflows, not a general scheduler for services, and it assumes a cloud account it can store artifacts and run steps in.
+
+### Microsoft Foundry
+**Short:** Azure's managed AI platform, formerly Azure AI Foundry, for deploying models, building agents and connecting tools, with Global, Data Zone and regional deployments.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, inference/model-server @2, platform-delivery/cloud-platform-and-cost @2
 
 ### Microsoft NNI
 **Short:** Archived Microsoft toolkit for hyperparameter tuning and neural architecture search: ASHA, PBT, DARTS, ENAS.
@@ -1939,6 +1957,12 @@ trec_eval, which remains the reference implementation.
 
 A trial is a training function that reports metrics back; Tune places trials across a Ray cluster and a scheduler decides their fate, with ASHA and HyperBand killing weak trials early so compute flows to promising configurations, and Population Based Training mutating hyperparameters mid-run instead of restarting from scratch. Early stopping is where the win comes from, since a search that abandons bad trials after a few epochs explores far more of the space for the same GPU-hours. Search strategies come from plugged-in libraries such as Optuna, HyperOpt and BayesOpt, and results log to MLflow, Weights and Biases or TensorBoard. The Ray dependency is worth it when tuning spans machines; on a single box Optuna alone is simpler.
 
+### Red Hat OpenShift AI
+**Short:** Red Hat's supported AI platform on OpenShift that packages open-source components such as Kubeflow, KServe, vLLM and llm-d.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, platform-delivery/kubernetes-and-orchestration @2
+
 ### RedPajama-v2
 **Short:** Together AI's open 30T-token web corpus with quality signals, used for LLM pre-training.
 **Kind:** dataset
@@ -2089,6 +2113,12 @@ production, and when an auditor will later ask who approved what. It is tightly 
 rest of SageMaker, which is fine if you are already there and awkward if models are trained
 elsewhere. For one model deployed from one pipeline, a versioned artifact path plus a metadata
 file is enough.
+
+### SageMaker Pipelines
+**Short:** Amazon SageMaker's managed ML workflow service that runs DAGs of processing, training and model registration steps with step caching.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, data-movement/workflow-and-durable-execution @2
 
 ### Scale AI
 **Short:** Managed data-annotation vendor supplying human labels and preference data at scale.
@@ -2649,6 +2679,12 @@ Vertex's serving path, so it is the wrong choice when models deploy elsewhere. F
 model shipped by one pipeline, a versioned artifact in Cloud Storage plus its metrics file is
 enough registry.
 
+### Vertex AI Pipelines
+**Short:** Google Cloud's serverless runner for Kubeflow Pipelines and TFX pipelines, executing the same compiled pipeline YAML as open-source KFP.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, data-movement/workflow-and-durable-execution @2
+
 ### Vertex AI Training
 **Short:** Google Cloud's managed training service: submit custom or distributed training jobs on managed CPU/GPU/TPU pools.
 **Kind:** tech
@@ -2846,6 +2882,12 @@ rather than how to draw something -- the learning curve in particular answers wh
 data or a different model is the right next move, which no single accuracy number can. It is a
 matplotlib layer, so a heavily customized figure means dropping to matplotlib anyway, and
 scikit-learn's own display classes now cover several of the simpler plots.
+
+### ZenML
+**Short:** Python MLOps framework that defines pipelines once and runs them on a configurable stack of orchestrator, artifact store and tracker, with step caching.
+**Kind:** tech
+**Lang:** python
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, data-movement/workflow-and-durable-execution @2
 
 ### τ²-bench
 **Short:** Agent benchmark for policy-following dialogue: dual control with an LM user simulator, scored by pass^k at k=1-4.

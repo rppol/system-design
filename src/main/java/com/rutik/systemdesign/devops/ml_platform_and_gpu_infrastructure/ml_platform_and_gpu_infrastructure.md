@@ -40,6 +40,8 @@ The platform must solve four problems the default Kubernetes install does not:
 
 On top of that substrate sit the workload orchestrators — **Kubeflow** (Pipelines, Trainer, Katib), **KServe** for serving, **Ray** (distributed Python: Ray Train, Ray Serve, Ray Tune), and **Volcano** / **Kueue** (batch gang-scheduling) — which translate "train this model on 16 GPUs" into Pods the scheduler can place.
 
+The lifecycle of the data, models, prompts, and eval sets that run on this platform is covered in [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
+
 ---
 
 ## 2. Intuition

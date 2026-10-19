@@ -5,6 +5,8 @@
 
 **Key insight for this design**: The data pipeline is the quality bottleneck, not the training loop. A fine-tune on garbage data produces a garbage model regardless of hyperparameters. The platform must invest heavily in data validation (format correctness, quality scoring, PII detection, deduplication) before a single GPU cycle is spent. Second, LoRA is the default -- full fine-tuning is the exception for <5% of jobs, reserved for users who demonstrate they have enough data (>100K examples) and budget (>$10K per run).
 
+For serving and versioning the adapters this platform produces, see [LoRA Adapter Serving and Lifecycle](../../mlops/lora_adapter_serving_and_lifecycle/lora_adapter_serving_and_lifecycle.md).
+
 ---
 
 ## 1. Requirements Clarification

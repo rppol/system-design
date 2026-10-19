@@ -12,6 +12,8 @@ The dominant engine is the Open Policy Agent (OPA) with its Rego language, which
 
 This module covers writing and testing Rego, the Gatekeeper and Kyverno enforcement models, Conftest in CI, mapping policies to the CIS Kubernetes Benchmark (~120 controls) and to SOC2/PCI-DSS/HIPAA controls, the admission-time vs CI-time tradeoff, and the human side: exceptions, waivers, and policy testing. It builds on the pod-security controls in [kubernetes_security](../kubernetes_security/kubernetes_security.md) and the IaC workflows in [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md).
 
+Model risk controls, approvals, and audit evidence for AI systems are covered in [AI Governance and Model Risk Operations](../../mlops/ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md).
+
 ---
 
 ## 2. Intuition

@@ -18,6 +18,8 @@ $2.50/1M input rate (more once the avoided output tokens are counted, since a se
 model call entirely).
 Full pricing math lives in [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md).
 
+For running caches, quotas, and routing as one gateway service in production, see [AI Gateway Operations](../../mlops/ai_gateway_operations/ai_gateway_operations.md).
+
 ---
 
 ## 2. Intuition

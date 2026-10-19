@@ -18,6 +18,8 @@ The OWASP Top 10 for LLM Applications (v2.0, published 2025 and still the curren
 
 This module focuses on **system-level threats and defenses** — protecting the infrastructure, data, and users of LLM applications. It is distinct from [Safety & Alignment](../safety_and_alignment/safety_and_alignment.md), which covers model behavior concerns such as jailbreaks, hallucinations, and bias.
 
+For the security of weights, datasets, dependencies, and MCP servers before they reach a served model, see [ML Supply Chain Security](../../mlops/ml_supply_chain_security/ml_supply_chain_security.md).
+
 ---
 
 ## 2. Intuition

@@ -166,6 +166,8 @@ The `llm/` section covers: transformers, fine-tuning LLMs, RAG, agents, LLM infe
 
 Overlap zone (cover in both with cross-references): distributed training, model serving, monitoring/drift, evaluation metrics.
 
+The `mlops/` section owns the cross-artifact lifecycle for classic and generative models alike: release bundles, artifact lineage, eval gates, refresh policy, progressive delivery for model servers, serving platforms, GPU scheduling and AI operations. This section keeps classic MLOps maturity levels, the KFP SDK, retraining triggers, drift statistics and experiment tracking, and links to `../mlops/` for the lifecycle (see `../mlops/CLAUDE.md` "Non-overlap boundary").
+
 ---
 
 ## Content Rules (ML-specific)

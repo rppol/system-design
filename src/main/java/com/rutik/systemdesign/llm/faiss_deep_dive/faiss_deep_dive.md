@@ -98,6 +98,8 @@ Do not describe any of these as "FAISS supports X" without the version:
 | `faiss-gpu-cuvs` pip wheel packaging | `[1.14.3]` |
 | mmap I/O for Flat and static Vamana/SVS; **EDEN** quantizer; RISC-V RVV kernels | `[1.15.0]` |
 
+For building, snapshotting, rebuilding, and rolling back FAISS and other vector indexes in production, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
+
 ---
 
 ## 2. Intuition

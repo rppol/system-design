@@ -164,6 +164,7 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 | `observability_tracing_and_otel/` | `../../backend/observability_and_monitoring/` — Micrometer, MDC; `../../spring/observability_and_tracing/` |
 | `event_streaming_operations/` | `../../backend/kafka_deep_dive/` — Kafka internals; `../../backend/event_driven_fundamentals/` |
 | `ml_platform_and_gpu_infrastructure/` | `../../ml/gpu_and_hardware_optimization/` — CUDA profiling; `../../ml/mlops_and_ci_cd/` |
+| `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `deployment_strategies/` | `../../mlops/`: GPU schedulers and quota policy (Kueue, Volcano, KAI Scheduler), model-server progressive delivery, inference autoscaling, GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing mechanism and the generic deployment strategies |
 
 ---
 
